@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,6 +22,31 @@ type fakeStorage struct {
 	createCalls   [][]byte
 	appendCalls   [][]byte
 	appendFunc    func(context.Context, []byte) (bool, error)
+}
+
+type poisonedSnapshotStorage struct {
+	base         osSessionStorage
+	createCalls  int
+	appendCalls  int
+	failAppendAt int
+	appendErr    error
+}
+
+func (storage *poisonedSnapshotStorage) read(path string) ([]byte, error) {
+	return storage.base.read(path)
+}
+
+func (storage *poisonedSnapshotStorage) create(path string, data []byte) (bool, error) {
+	storage.createCalls++
+	return storage.base.create(path, data)
+}
+
+func (storage *poisonedSnapshotStorage) append(ctx context.Context, path string, data []byte) (bool, error) {
+	storage.appendCalls++
+	if storage.appendCalls == storage.failAppendAt {
+		return true, storage.appendErr
+	}
+	return storage.base.append(ctx, path, data)
 }
 
 func (storage *fakeStorage) read(string) ([]byte, error) {
@@ -155,6 +181,75 @@ func TestAppendWriteSyncOrCloseFailurePoisonsWithoutAdvancingLeaf(t *testing.T) 
 				t.Fatal("poisoned writer attempted another storage append")
 			}
 		})
+	}
+}
+
+func TestPoisonedSessionForkAndExtractFailClosedBeforeTargetCreate(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "poisoned-source.jsonl")
+	diskFailure := errors.New("sync outcome unknown")
+	storage := &poisonedSnapshotStorage{failAppendAt: 2, appendErr: diskFailure}
+	session, err := createWithStorage(storage, sourcePath, CreateOptions{
+		ID: "poisoned-source", WorkingDir: directory,
+		Now:        sequenceClock(time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)),
+		NewEntryID: sequenceIDs("root", "uncertain"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	root, err := session.Append(context.Background(), mustUserMessage(t, "durable root", time.UnixMilli(1)), AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = session.Append(context.Background(), mustUserMessage(t, "uncertain tail", time.UnixMilli(2)), AppendOptions{})
+	if !errors.Is(err, ErrCommitUnknown) || !errors.Is(err, diskFailure) || !session.Poisoned() {
+		t.Fatalf("poisoning append = %v, poisoned=%t", err, session.Poisoned())
+	}
+	sourceBefore, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createCalls := storage.createCalls
+	tests := []struct {
+		name string
+		path string
+		call func() (*Session, error)
+	}{
+		{
+			name: "fork", path: filepath.Join(directory, "fork-target.jsonl"),
+			call: func() (*Session, error) {
+				return session.Fork(context.Background(), ExtractOptions{TargetPath: filepath.Join(directory, "fork-target.jsonl"), ID: "fork-target", WorkingDir: directory})
+			},
+		},
+		{
+			name: "extract", path: filepath.Join(directory, "extract-target.jsonl"),
+			call: func() (*Session, error) {
+				return session.ExtractBranch(context.Background(), root.ID(), ExtractOptions{TargetPath: filepath.Join(directory, "extract-target.jsonl"), ID: "extract-target", WorkingDir: directory})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := tt.call()
+			if target != nil || !errors.Is(err, ErrPoisoned) {
+				t.Fatalf("snapshot result = (%v, %v), want nil ErrPoisoned", target, err)
+			}
+			if storage.createCalls != createCalls {
+				t.Fatalf("poisoned snapshot reached target create: calls=%d, want %d", storage.createCalls, createCalls)
+			}
+			if _, err := os.Stat(tt.path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("poisoned snapshot created target: %v", err)
+			}
+		})
+	}
+	sourceAfter, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sourceBefore, sourceAfter) {
+		t.Fatal("poisoned Fork/Extract changed source bytes")
 	}
 }
 

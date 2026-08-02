@@ -182,6 +182,8 @@ entry，保证行为可复现且不重写历史。
   `Session.Fork` 在 append gate 下取一致 snapshot，外部 path 使用严格解析的 `ForkFrom`；
   新 header 使用新的 ID/cwd/timestamp，`parentSession` 指向 source，source bytes 永不改写；
 - create publication、取消和 writer claim 继续沿用 v0.1 的 data-safety contract。
+- poisoned active source 禁止 Fork/Extract；commit-unknown 后必须 close/reopen/reconcile，
+  不能从落后于 uncertain disk tail 的内存 entries 导出目标。
 
 明确延期：`branch_summary`、compaction summary、label/custom/model/thinking entry 的创建和
 compaction-aware context。这些 wire entry 可作为未知 entry 保留和走 tree，但没有完整可投影

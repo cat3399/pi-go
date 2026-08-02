@@ -191,6 +191,13 @@ func (s *Session) snapshotForExport(ctx context.Context, leafID *string) (export
 	if s.closed {
 		return exportSnapshot{}, ErrClosed
 	}
+	// A commit-unknown append may be present on disk even though entries and
+	// leaf intentionally did not advance. Exporting this in-memory view would
+	// silently omit an uncertain durable tail, so the writer remains fully
+	// quarantined until the caller closes and explicitly reopens/reconciles it.
+	if s.poisoned {
+		return exportSnapshot{}, ErrPoisoned
+	}
 	var entries []Entry
 	if leafID != nil {
 		index, ok := s.byID[*leafID]

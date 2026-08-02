@@ -69,7 +69,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-SESSION-008` | B-SESSION-008 | `packages/coding-agent/test/session-manager/migration.test.ts` 的 v1->v2/idempotent cases | `deferred` | v0.1 v3 reader/writer通过后重评 |
 | `T-SESSION-009` | B-SESSION-005/006 | `packages/coding-agent/docs/session-format.md` tree contract 与 `SessionManager._buildIndex/buildSessionPath` physical-tail behavior | `strengthened` | branch-tail/forest root 接受；forward/broken/cycle 拒绝；Open→Append 原 byte prefix 不变 |
 | `T-SESSION-010` | B-SESSION-010/011 | `packages/coding-agent/test/session-manager/tree-traversal.test.ts` branch/reset/tree/path/context cases | `deferred` | active slice：selection+append serialization、forest reopen、tree snapshot、race 与 graph property fuzz 已提交；M-SESSION/v0.2 独立复审通过后再分类最终状态 |
-| `T-SESSION-011` | B-SESSION-012 | `tree-traversal.test.ts::createBranchedSession` 与 `custom-session-id.test.ts::forkFrom` | `deferred` | active slice：atomic no-replace、active-source snapshot、external strict open、source-byte preservation、cancel/publication fault 与 race 已提交；M-SESSION/v0.2 独立复审通过后再分类最终状态 |
+| `T-SESSION-011` | B-SESSION-012 | `tree-traversal.test.ts::createBranchedSession` 与 `custom-session-id.test.ts::forkFrom` | `deferred` | active slice：atomic no-replace、active-source snapshot、commit-unknown poison quarantine、external strict open、source-byte preservation、cancel/publication fault 与 race 已提交；M-SESSION/v0.2 独立复审通过后再分类最终状态 |
 
 ## M-TOOL
 
