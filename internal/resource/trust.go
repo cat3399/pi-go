@@ -236,7 +236,14 @@ func (s *TrustStore) SetMany(ctx context.Context, changes []TrustUpdate) error {
 	var out bytes.Buffer
 	out.WriteString("{\n")
 	for i, key := range keys {
-		fmt.Fprintf(&out, "  %q: %s", key, root[key])
+		encodedKey, err := json.Marshal(key)
+		if err != nil {
+			return fmt.Errorf("%w: encode trust path", ErrTrustStore)
+		}
+		out.WriteString("  ")
+		out.Write(encodedKey)
+		out.WriteString(": ")
+		out.Write(root[key])
 		if i+1 < len(keys) {
 			out.WriteByte(',')
 		}

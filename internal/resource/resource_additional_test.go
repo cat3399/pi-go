@@ -1,7 +1,9 @@
 package resource
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -753,6 +755,57 @@ func TestTrustSerializedSizeLimitPreservesOldStateAndReopens(t *testing.T) {
 	}
 	if err := reopened.Set(context.Background(), filepath.Join(cwd, "extra"), false); err != nil {
 		t.Fatalf("lock not released after overflow: %v", err)
+	}
+}
+
+func TestTrustControlCharacterKeyRoundTripPreservesRawAndBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, agent, cwd := newService(t)
+	futurePath := filepath.Join(filepath.Dir(cwd), "future")
+	cwdJSON, err := json.Marshal(cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureJSON, err := json.Marshal(futurePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(agent, "trust.json"), "{\n  "+string(cwdJSON)+": true,\n  "+string(futureJSON)+": {\"version\": 2}\n}\n")
+	controlPath := filepath.Join(filepath.Dir(cwd), "control\x01segment")
+	no := false
+	if err := s.Trust().SetMany(context.Background(), []TrustUpdate{{Path: controlPath, Decision: &no}}); err != nil {
+		t.Fatalf("SetMany(control path) = %v", err)
+	}
+	committed, err := os.ReadFile(s.Trust().Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(committed) || bytes.Contains(committed, []byte(`\x01`)) || !bytes.Contains(committed, []byte(`\u0001`)) || !bytes.Contains(committed, []byte(`{"version": 2}`)) {
+		t.Fatalf("encoded trust store = %q", committed)
+	}
+	reopened, err := NewTrustStore(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trusted, known, err := reopened.Get(context.Background(), cwd); err != nil || !known || !trusted {
+		t.Fatalf("existing decision after control key = %t,%t,%v", trusted, known, err)
+	}
+	if trusted, known, err := reopened.Get(context.Background(), controlPath); err != nil || !known || trusted {
+		t.Fatalf("control-key decision after reopen = %t,%t,%v", trusted, known, err)
+	}
+	reopened.max = int64(len(committed))
+	if err := reopened.SetMany(context.Background(), []TrustUpdate{{Path: controlPath, Decision: &no}}); err != nil {
+		t.Fatalf("exact SetMany boundary = %v", err)
+	}
+	extra := filepath.Join(filepath.Dir(cwd), "control\nextra")
+	if err := reopened.SetMany(context.Background(), []TrustUpdate{{Path: extra, Decision: &no}}); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("control-key overflow = %v", err)
+	}
+	after, err := os.ReadFile(reopened.Path())
+	if err != nil || string(after) != string(committed) {
+		t.Fatalf("overflow replaced committed store = %q, %v", after, err)
 	}
 }
 
