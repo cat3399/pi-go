@@ -256,9 +256,9 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 			},
 		},
 		{
-			name: "overlapping blocks",
+			name: "duplicate content index",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), textStart(t, 1)}
+				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), textStart(t, 0)}
 			},
 		},
 		{
@@ -346,6 +346,35 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 				t.Fatalf("Result() error = %v, want persisted protocol error", err)
 			}
 		})
+	}
+}
+
+func TestStreamCollectorAcceptsInterleavedToolCalls(t *testing.T) {
+	t.Parallel()
+	collector := &llm.StreamCollector{}
+	first := mustToolCall(t, "call-a", "echo", []byte(`{"a":1}`))
+	second := mustToolCall(t, "call-b", "echo", []byte(`{"b":2}`))
+	events := []llm.StreamEvent{
+		llm.NewStartEvent(),
+		toolCallStart(t, 0, "call-a", "echo"), toolCallStart(t, 1, "call-b", "echo"),
+		toolCallDelta(t, 1, []byte(`{"b":2}`)), toolCallDelta(t, 0, []byte(`{"a":1}`)),
+		toolCallEnd(t, 1, second), toolCallEnd(t, 0, first), done(t, llm.FinishToolUse, time.Time{}),
+	}
+	for _, event := range events {
+		if err := collector.Accept(event); err != nil {
+			t.Fatalf("Accept(%T): %v", event, err)
+		}
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := collector.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := terminal.Blocks()
+	if len(blocks) != 2 || blocks[0].(llm.ToolCallBlock).ID() != "call-a" || blocks[1].(llm.ToolCallBlock).ID() != "call-b" {
+		t.Fatalf("blocks=%#v", blocks)
 	}
 }
 

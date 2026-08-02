@@ -418,13 +418,13 @@ func assertCoreIntegrationSession(t *testing.T, transcript *session.Session) {
 	if len(blocks) != 4 {
 		t.Fatalf("tool assistant blocks = %#v", blocks)
 	}
-	reasoning, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !ok || reasoning.ItemID != "rs_integrated" || reasoning.EncryptedContent != "integrated-cipher" {
-		t.Fatalf("durable reasoning = (%#v, %t)", reasoning, ok)
+	reasoning, ok := blocks[0].(llm.ThinkingBlock).ThinkingSignature()
+	if !ok || reasoning != `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher"}` {
+		t.Fatalf("durable reasoning signature = (%q, %t)", reasoning, ok)
 	}
-	textReplay, ok := blocks[1].(llm.TextBlock).TextReplay()
-	if !ok || textReplay.MessageID != "msg_integrated" || textReplay.Phase != "commentary" {
-		t.Fatalf("durable text replay = (%#v, %t)", textReplay, ok)
+	textSignature, ok := blocks[1].(llm.TextBlock).TextSignature()
+	if !ok || textSignature != `{"v":1,"id":"msg_integrated","phase":"commentary"}` {
+		t.Fatalf("durable text signature = (%q, %t)", textSignature, ok)
 	}
 	firstResult := messages[2].(llm.ToolResultMessage)
 	secondResult := messages[3].(llm.ToolResultMessage)

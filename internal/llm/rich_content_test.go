@@ -26,10 +26,10 @@ func TestRichContentCopiesAndValidatesBoundaries(t *testing.T) {
 	if _, err := llm.NewImageURLBlock("image/png", "file:///secret"); !errors.Is(err, llm.ErrInvalidRichContent) {
 		t.Fatalf("url error=%v", err)
 	}
-	if _, err := llm.NewThinkingBlock("", nil); !errors.Is(err, llm.ErrInvalidRichContent) {
+	if _, err := llm.NewThinkingBlock(""); !errors.Is(err, llm.ErrInvalidRichContent) {
 		t.Fatalf("empty thinking=%v", err)
 	}
-	thinking, err := llm.NewThinkingBlock("", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "opaque"})
+	thinking, err := llm.NewThinkingBlockWithSignature("", "opaque-adapter-signature", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +39,23 @@ func TestRichContentCopiesAndValidatesBoundaries(t *testing.T) {
 	}
 	if err := llm.ValidateAssistantTerminal(message); err != nil {
 		t.Fatal(err)
+	}
+	if signature, ok := thinking.ThinkingSignature(); !ok || signature != "opaque-adapter-signature" || !thinking.Redacted() {
+		t.Fatalf("thinking metadata = (%q, %t, redacted=%t)", signature, ok, thinking.Redacted())
+	}
+	text, err := llm.NewTextBlockWithSignature("answer", `{"future":"provider-owned"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signature, ok := text.TextSignature(); !ok || signature != `{"future":"provider-owned"}` {
+		t.Fatalf("text signature = (%q, %t)", signature, ok)
+	}
+	call, err := llm.NewToolCallBlockWithThoughtSignature("call-1", "echo", []byte(`{}`), "opaque-tool-signature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signature, ok := call.ThoughtSignature(); !ok || signature != "opaque-tool-signature" {
+		t.Fatalf("thought signature = (%q, %t)", signature, ok)
 	}
 }
 
@@ -54,6 +71,6 @@ func FuzzRichContentAdmissionNeverAliasesOrPanics(f *testing.F) {
 			}
 			_ = image.Data()
 		}
-		_, _ = llm.NewThinkingBlock("", &llm.OpenAIResponsesReasoning{ItemID: id, EncryptedContent: encrypted})
+		_, _ = llm.NewThinkingBlockWithSignature("", id+encrypted, true)
 	})
 }

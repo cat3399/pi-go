@@ -244,9 +244,10 @@ func appendResponsesAssistantBlocks(input []any, messageIndex int, blocks []llm.
 			input = appendResponsesAssistantTextAt(input, messageIndex, textBlockIndex, block, policy.sameModel)
 			textBlockIndex++
 		case llm.ThinkingBlock:
-			replay, ok := block.OpenAIResponsesReplay()
-			if !ok || !policy.sameModel {
-				if replay.Redacted || strings.TrimSpace(block.Thinking()) == "" {
+			signature, hasSignature := block.ThinkingSignature()
+			reasoning, validSignature := decodeResponsesReasoningSignature(signature)
+			if !hasSignature || !validSignature || !policy.sameModel {
+				if block.Redacted() || strings.TrimSpace(block.Thinking()) == "" {
 					continue
 				}
 				text, err := llm.NewTextBlock(block.Thinking())
@@ -256,17 +257,6 @@ func appendResponsesAssistantBlocks(input []any, messageIndex int, blocks []llm.
 				input = appendResponsesAssistantTextAt(input, messageIndex, textBlockIndex, text, false)
 				textBlockIndex++
 				continue
-			}
-			reasoning := responsesReasoningInput{Type: "reasoning", ID: replay.ItemID, EncryptedContent: replay.EncryptedContent}
-			plaintext := replay.PlaintextContent != ""
-			if plaintext {
-				reasoning.EncryptedContent = ""
-				reasoning.Content = replay.PlaintextContent
-				if reasoning.Content == "" {
-					reasoning.Content = block.Thinking()
-				}
-			} else if block.Thinking() != "" {
-				reasoning.Summary = []responsesReasoningSummary{{Type: "summary_text", Text: block.Thinking()}}
 			}
 			input = append(input, reasoning)
 		case llm.ToolCallBlock:
@@ -459,9 +449,11 @@ func appendResponsesAssistantTextAt(input []any, messageIndex, blockIndex int, b
 		Status: "completed",
 		ID:     id,
 	}
-	if replay, ok := block.TextReplay(); ok && allowReplay {
-		message.ID = replay.MessageID
-		message.Phase = replay.Phase
+	if signature, ok := block.TextSignature(); ok && allowReplay {
+		if replay, valid := decodeResponsesTextSignature(signature); valid {
+			message.ID = replay.ID
+			message.Phase = replay.Phase
+		}
 	}
 	return append(input, message)
 }

@@ -72,7 +72,32 @@ type OpenAIResponsesCompat struct {
 	SupportsExplicitPromptCacheMode *bool
 }
 
-type ModelCompat struct{ OpenAIResponses *OpenAIResponsesCompat }
+// OpenAICompletionsCompat mirrors pi's explicit compatibility contract for
+// OpenAI-compatible Chat Completions endpoints. It remains model data: Agent
+// never reads these dialect details.
+type OpenAICompletionsCompat struct {
+	SupportsStore                               *bool
+	SupportsDeveloperRole                       *bool
+	SupportsReasoningEffort                     *bool
+	SupportsUsageInStreaming                    *bool
+	SupportsFinishReason                        *bool
+	MaxTokensField                              *string
+	RequiresToolResultName                      *bool
+	RequiresAssistantAfterToolResult            *bool
+	RequiresThinkingAsText                      *bool
+	RequiresReasoningContentOnAssistantMessages *bool
+	ThinkingFormat                              *string
+	SupportsOpenAIGrammarTools                  *bool
+	SupportsStrictMode                          *bool
+	SendSessionAffinityHeaders                  *bool
+	SessionAffinityFormat                       *string
+	SupportsLongCacheRetention                  *bool
+}
+
+type ModelCompat struct {
+	OpenAIResponses   *OpenAIResponsesCompat
+	OpenAICompletions *OpenAICompletionsCompat
+}
 
 // ModelSpec is pi's generic model contract in Go form. Compatibility is an
 // adapter-owned, JSON-like value: the loop never reads vendor-specific keys.
@@ -169,6 +194,21 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 	for name, value := range spec.Headers {
 		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("%w: invalid model header", ErrInvalidModel)
+		}
+	}
+	if compat := spec.Compat.OpenAICompletions; compat != nil {
+		if compat.MaxTokensField != nil && *compat.MaxTokensField != "max_completion_tokens" && *compat.MaxTokensField != "max_tokens" {
+			return fmt.Errorf("%w: invalid Chat Completions max tokens field", ErrInvalidModel)
+		}
+		if compat.ThinkingFormat != nil {
+			switch *compat.ThinkingFormat {
+			case "openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling":
+			default:
+				return fmt.Errorf("%w: invalid Chat Completions thinking format", ErrInvalidModel)
+			}
+		}
+		if compat.SessionAffinityFormat != nil && *compat.SessionAffinityFormat != "openai" && *compat.SessionAffinityFormat != "openai-nosession" && *compat.SessionAffinityFormat != "openrouter" {
+			return fmt.Errorf("%w: invalid Chat Completions session affinity format", ErrInvalidModel)
 		}
 	}
 	return nil
@@ -381,6 +421,18 @@ func cloneModelCompat(value ModelCompat) ModelCompat {
 			SupportsExplicitPromptCacheMode: cloneBool(value.OpenAIResponses.SupportsExplicitPromptCacheMode),
 		}
 	}
+	if value.OpenAICompletions != nil {
+		copy.OpenAICompletions = &OpenAICompletionsCompat{
+			SupportsStore: cloneBool(value.OpenAICompletions.SupportsStore), SupportsDeveloperRole: cloneBool(value.OpenAICompletions.SupportsDeveloperRole),
+			SupportsReasoningEffort: cloneBool(value.OpenAICompletions.SupportsReasoningEffort), SupportsUsageInStreaming: cloneBool(value.OpenAICompletions.SupportsUsageInStreaming),
+			SupportsFinishReason: cloneBool(value.OpenAICompletions.SupportsFinishReason), MaxTokensField: cloneString(value.OpenAICompletions.MaxTokensField),
+			RequiresToolResultName: cloneBool(value.OpenAICompletions.RequiresToolResultName), RequiresAssistantAfterToolResult: cloneBool(value.OpenAICompletions.RequiresAssistantAfterToolResult),
+			RequiresThinkingAsText: cloneBool(value.OpenAICompletions.RequiresThinkingAsText), RequiresReasoningContentOnAssistantMessages: cloneBool(value.OpenAICompletions.RequiresReasoningContentOnAssistantMessages),
+			ThinkingFormat: cloneString(value.OpenAICompletions.ThinkingFormat), SupportsOpenAIGrammarTools: cloneBool(value.OpenAICompletions.SupportsOpenAIGrammarTools),
+			SupportsStrictMode: cloneBool(value.OpenAICompletions.SupportsStrictMode), SendSessionAffinityHeaders: cloneBool(value.OpenAICompletions.SendSessionAffinityHeaders),
+			SessionAffinityFormat: cloneString(value.OpenAICompletions.SessionAffinityFormat), SupportsLongCacheRetention: cloneBool(value.OpenAICompletions.SupportsLongCacheRetention),
+		}
+	}
 	return copy
 }
 func cloneString(value *string) *string {
@@ -413,10 +465,33 @@ type Request struct {
 	messages          []llm.ConversationMessage
 	tools             []ToolDefinition
 	parallelToolCalls bool
+	toolChoice        *ToolChoice
 	thinkingLevel     ThinkingLevel
 	metadata          map[string]any
 	stream            StreamOptions
 	replayTarget      llm.AssistantProvenance
+}
+
+// ToolChoice is a portable coordinator policy. Providers map it to their own
+// wire dialect; a named tool means that function is required.
+type ToolChoice struct{ Mode, Name string }
+
+func (c ToolChoice) validate() error {
+	if c.Name != "" {
+		if c.Mode != "" && c.Mode != "required" {
+			return fmt.Errorf("%w: named tool choice cannot use mode %q", ErrInvalidRequest, c.Mode)
+		}
+		if _, err := NewToolDefinition(c.Name, "tool choice", false, []byte(`{"type":"object"}`)); err != nil {
+			return fmt.Errorf("%w: invalid named tool choice", ErrInvalidRequest)
+		}
+		return nil
+	}
+	switch c.Mode {
+	case "", "auto", "none", "required":
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid tool choice mode %q", ErrInvalidRequest, c.Mode)
+	}
 }
 
 // RequestOptions contains provider capabilities that must be chosen by the
@@ -425,6 +500,7 @@ type Request struct {
 type RequestOptions struct {
 	Tools                  []ToolDefinition
 	AllowParallelToolCalls bool
+	ToolChoice             *ToolChoice
 	ThinkingLevel          ThinkingLevel
 	// Metadata carries portable per-request annotations. Adapters may consume
 	// keys they recognize; AgentLoop never branches on them.
@@ -481,6 +557,10 @@ func NewRequestWithOptions(
 		stream:            StreamOptions{APIKey: options.Stream.APIKey, Headers: cloneStrings(options.Stream.Headers), MaxTokens: options.Stream.MaxTokens, SessionID: options.Stream.SessionID},
 		replayTarget:      llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	}
+	if options.ToolChoice != nil {
+		copy := *options.ToolChoice
+		request.toolChoice = &copy
+	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
 	}
@@ -522,6 +602,23 @@ func (r Request) validate() error {
 			return fmt.Errorf("%w: duplicate tool name %q", ErrInvalidRequest, definition.Name())
 		}
 		seenTools[definition.Name()] = struct{}{}
+	}
+	if r.toolChoice != nil {
+		if err := r.toolChoice.validate(); err != nil {
+			return err
+		}
+		if r.toolChoice.Name != "" {
+			found := false
+			for _, tool := range r.tools {
+				if tool.Name() == r.toolChoice.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("%w: tool choice %q is not registered", ErrInvalidRequest, r.toolChoice.Name)
+			}
+		}
 	}
 	return nil
 }
@@ -687,7 +784,13 @@ func (r Request) Tools() []ToolDefinition {
 	return append([]ToolDefinition(nil), r.tools...)
 }
 
-func (r Request) ParallelToolCalls() bool      { return r.parallelToolCalls }
+func (r Request) ParallelToolCalls() bool { return r.parallelToolCalls }
+func (r Request) ToolChoice() (ToolChoice, bool) {
+	if r.toolChoice == nil {
+		return ToolChoice{}, false
+	}
+	return *r.toolChoice, true
+}
 func (r Request) ThinkingLevel() ThinkingLevel { return r.thinkingLevel }
 func (r Request) Metadata() map[string]any     { return cloneAny(r.metadata) }
 func (r Request) StreamOptions() StreamOptions {

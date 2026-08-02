@@ -60,6 +60,33 @@ func TestRuntimeModelsJSONCOverlayAndCustomModel(t *testing.T) {
 	}
 }
 
+func TestRuntimeAdmitsChatCompletionsCompatWithoutResponsesFallback(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{"api":"openai-completions","compat":{"supportsUsageInStreaming":false,"maxTokensField":"max_tokens","thinkingFormat":"openai"},"models":[{"id":"chat"}]}}}`, "", false)
+	selection, err := r.Resolve(Selection{Provider: "openai", Model: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ValidateRoute(selection.Model); err != nil {
+		t.Fatalf("ValidateRoute: %v", err)
+	}
+	compat := selection.Model.Compat.OpenAICompletions
+	if selection.Model.API != "openai-completions" || compat == nil || compat.SupportsUsageInStreaming == nil || *compat.SupportsUsageInStreaming || compat.MaxTokensField == nil || *compat.MaxTokensField != "max_tokens" {
+		t.Fatalf("model=%#v", selection.Model)
+	}
+}
+
+func TestRuntimeMergesProviderAndModelCompatFieldwise(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{"api":"openai-completions","compat":{"supportsUsageInStreaming":false,"maxTokensField":"max_tokens"},"models":[{"id":"chat","compat":{"supportsUsageInStreaming":true}}]}}}`, "", false)
+	selection, err := r.Resolve(Selection{Provider: "openai", Model: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compat := selection.Model.Compat.OpenAICompletions
+	if compat == nil || compat.SupportsUsageInStreaming == nil || !*compat.SupportsUsageInStreaming || compat.MaxTokensField == nil || *compat.MaxTokensField != "max_tokens" {
+		t.Fatalf("merged compat=%#v", compat)
+	}
+}
+
 func TestRuntimeModelOverrideDoesNotEraseBuiltinMetadata(t *testing.T) {
 	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{"headers":{"X-Base":"one"},"modelOverrides":{"gpt-5.5":{"name":"renamed","reasoning":true,"headers":{"x-base":"two"}}}}}}`, "", false)
 	got, err := r.Resolve(Selection{Model: "gpt-5.5"})

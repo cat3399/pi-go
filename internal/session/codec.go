@@ -444,8 +444,8 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if !exists {
 		return nil, nil, fmt.Errorf("assistant message is missing content")
 	}
-	allowResponsesReplay := hasResponsesReplayProvenance(provenance) && stopReason != "error" && stopReason != "aborted"
-	blocks, diagnostics, err := decodeBlocks(entryID, content, true, allowResponsesReplay)
+	allowSignatures := stopReason != "error" && stopReason != "aborted"
+	blocks, diagnostics, err := decodeBlocks(entryID, content, true, allowSignatures)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -453,8 +453,8 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if err != nil {
 		return nil, nil, err
 	}
-	replay, unsafeReplay := decodeResponsesMetadata(object, allowResponsesReplay)
-	if unsafeReplay {
+	response, unsafeResponse := decodeResponseMetadata(object)
+	if unsafeResponse {
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: -1})
 	}
 
@@ -466,9 +466,9 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		var message llm.AssistantTerminal
 		if hasThinking(blocks) {
-			message, err = llm.NewAssistantRichMessageWithReplay(blocks, finish, usage, timestamp, provenance, replay)
+			message, err = llm.NewAssistantRichMessageWithMetadata(blocks, finish, usage, timestamp, provenance, response)
 		} else {
-			message, err = llm.NewAssistantTextMessageWithReplay(textBlocks(blocks), finish, usage, timestamp, provenance, replay)
+			message, err = llm.NewAssistantTextMessageWithMetadata(textBlocks(blocks), finish, usage, timestamp, provenance, response)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -478,7 +478,7 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		return message, diagnostics, nil
 	case "toolUse":
-		message, err := llm.NewAssistantToolUseMessageWithReplay(blocks, usage, timestamp, provenance, replay)
+		message, err := llm.NewAssistantToolUseMessageWithMetadata(blocks, usage, timestamp, provenance, response)
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 			return nil, diagnostics, nil
@@ -521,30 +521,24 @@ func decodeLLMAssistantProvenance(object map[string]json.RawMessage) (*llm.Assis
 	return &llm.AssistantProvenance{Provider: provider, API: api, Model: model}, nil
 }
 
-// hasResponsesReplayProvenance establishes the currently supported producer
-// and wire dialect. Model remains part of the provenance and is matched exactly
-// by the provider request adapter before any opaque handle is replayed.
-func hasResponsesReplayProvenance(provenance *llm.AssistantProvenance) bool {
-	return provenance != nil && provenance.Provider == "openai" && provenance.API == "openai-responses"
-}
-
-func decodeResponsesMetadata(object map[string]json.RawMessage, allowReplay bool) (*llm.OpenAIResponsesResponse, bool) {
+func decodeResponseMetadata(object map[string]json.RawMessage) (*llm.AssistantResponseMetadata, bool) {
 	rawID, hasID := object["responseId"]
+	rawModel, hasModel := object["responseModel"]
 	rawStop, hasStop := object["rawStopReason"]
-	if !hasID && !hasStop {
+	if !hasID && !hasModel && !hasStop {
 		return nil, false
 	}
-	if !allowReplay {
+	var value llm.AssistantResponseMetadata
+	if hasID && !decodeJSONString(rawID, &value.ResponseID) {
 		return nil, true
 	}
-	var value llm.OpenAIResponsesResponse
-	if hasID && !decodeJSONString(rawID, &value.ResponseID) {
+	if hasModel && !decodeJSONString(rawModel, &value.ResponseModel) {
 		return nil, true
 	}
 	if hasStop && !decodeJSONString(rawStop, &value.RawStopReason) {
 		return nil, true
 	}
-	if !utf8.ValidString(value.ResponseID) || !utf8.ValidString(value.RawStopReason) || len(value.ResponseID) > 256 || len(value.RawStopReason) > 128 {
+	if !utf8.ValidString(value.ResponseID) || !utf8.ValidString(value.ResponseModel) || !utf8.ValidString(value.RawStopReason) || len(value.ResponseID) > 256 || len(value.ResponseModel) > 512 || len(value.RawStopReason) > 128 {
 		return nil, true
 	}
 	return &value, false
@@ -597,7 +591,7 @@ func toolResultDetails(object map[string]json.RawMessage) json.RawMessage {
 	return append(json.RawMessage(nil), raw...)
 }
 
-func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesReplay bool) ([]llm.AssistantBlock, []Diagnostic, error) {
+func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowSignatures bool) ([]llm.AssistantBlock, []Diagnostic, error) {
 	var encoded []json.RawMessage
 	if err := json.Unmarshal(raw, &encoded); err != nil {
 		return nil, nil, fmt.Errorf("message content must be an array")
@@ -619,14 +613,14 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesRepl
 			if err != nil {
 				return nil, nil, fmt.Errorf("content block %d has invalid text", index)
 			}
-			replay, hasMetadata, trusted := decodeTextReplay(object, allowResponsesReplay)
+			signature, hasMetadata, trusted := decodeOpaqueSignature(object, "textSignature", allowSignatures)
 			if hasMetadata && !trusted {
 				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})
 			}
-			if replay == nil && hasMetadata && !trusted && strings.TrimSpace(text) == "" {
+			if hasMetadata && !trusted && strings.TrimSpace(text) == "" {
 				continue
 			}
-			block, err := llm.NewTextBlockWithReplay(text, replay)
+			block, err := llm.NewTextBlockWithSignature(text, signature)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -636,14 +630,17 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesRepl
 			if err != nil {
 				return nil, nil, fmt.Errorf("content block %d has invalid thinking", index)
 			}
-			replay, hasMetadata, trusted, redacted := decodeReasoningReplay(object, allowResponsesReplay)
+			signature, hasMetadata, trusted := decodeOpaqueSignature(object, "thinkingSignature", allowSignatures)
+			redacted, redactedMetadata, redactedTrusted := decodeRedacted(object, allowSignatures)
+			hasMetadata = hasMetadata || redactedMetadata
+			trusted = trusted && redactedTrusted
 			if hasMetadata && !trusted {
 				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})
 			}
-			if replay == nil && hasMetadata && (redacted || strings.TrimSpace(thinking) == "") {
+			if signature == "" && hasMetadata && (redacted || strings.TrimSpace(thinking) == "") {
 				continue
 			}
-			block, err := llm.NewThinkingBlock(thinking, replay)
+			block, err := llm.NewThinkingBlockWithSignature(thinking, signature, redacted)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -677,7 +674,11 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesRepl
 				}
 				arguments = lexicalJSON
 			}
-			block, err := llm.NewToolCallBlock(id, name, arguments)
+			thoughtSignature, hasMetadata, trusted := decodeOpaqueSignature(object, "thoughtSignature", allowSignatures)
+			if hasMetadata && !trusted {
+				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})
+			}
+			block, err := llm.NewToolCallBlockWithThoughtSignature(id, name, arguments, thoughtSignature)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -706,139 +707,36 @@ func hasToolCall(blocks []llm.AssistantBlock) bool {
 	return false
 }
 
-// decodeTextReplay separates durable metadata presence from trusted projection.
-// Invalid or future metadata is reported to the caller but never makes Open
-// fail; the entry's raw bytes remain the source of truth for later readers.
-func decodeTextReplay(object map[string]json.RawMessage, allowReplay bool) (*llm.TextReplay, bool, bool) {
-	raw, ok := object["textSignature"]
+// Session storage treats content signatures as provider-owned opaque strings.
+// Shape validation belongs to the adapter that replays a matching message.
+func decodeOpaqueSignature(object map[string]json.RawMessage, field string, allow bool) (string, bool, bool) {
+	raw, ok := object[field]
 	if !ok {
-		return nil, false, true
+		return "", false, true
 	}
-	if !allowReplay {
-		return nil, true, false
+	if !allow {
+		return "", true, false
 	}
-	var encoded string
-	if !decodeJSONString(raw, &encoded) {
-		return nil, true, false
+	var signature string
+	if !decodeJSONString(raw, &signature) || !utf8.ValidString(signature) || len(signature) > 2<<20 {
+		return "", true, false
 	}
-	trimmed := strings.TrimSpace(encoded)
-	if !strings.HasPrefix(trimmed, "{") {
-		return validatedTextReplay(llm.TextReplay{MessageID: encoded})
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(encoded), &fields); err != nil {
-		return nil, true, false
-	}
-	if _, hasVersion := fields["v"]; hasVersion {
-		for name := range fields {
-			if name != "v" && name != "id" && name != "phase" {
-				return nil, true, false
-			}
-		}
-		var version int
-		var id, phase string
-		if json.Unmarshal(fields["v"], &version) != nil || version != 1 || !decodeJSONString(fields["id"], &id) {
-			return nil, true, false
-		}
-		if rawPhase, ok := fields["phase"]; ok && !decodeJSONString(rawPhase, &phase) {
-			return nil, true, false
-		}
-		return validatedTextReplay(llm.TextReplay{MessageID: id, Phase: phase})
-	}
-	// pi-go briefly emitted Go field names before adopting the coding-agent v3
-	// envelope. Accept only that exact legacy shape under Responses provenance.
-	for name := range fields {
-		if name != "MessageID" && name != "Phase" {
-			return nil, true, false
-		}
-	}
-	var id, phase string
-	if !decodeJSONString(fields["MessageID"], &id) {
-		return nil, true, false
-	}
-	if rawPhase, ok := fields["Phase"]; ok && !decodeJSONString(rawPhase, &phase) {
-		return nil, true, false
-	}
-	return validatedTextReplay(llm.TextReplay{MessageID: id, Phase: phase})
+	return signature, true, true
 }
 
-func validatedTextReplay(value llm.TextReplay) (*llm.TextReplay, bool, bool) {
-	if _, err := llm.NewTextBlockWithReplay("", &value); err != nil {
-		return nil, true, false
-	}
-	return &value, true, true
-}
-
-// decodeReasoningReplay follows the same fail-open storage policy as text
-// replay. The final bool is the conservative redaction state used when an
-// untrusted opaque block must be omitted from the provider projection.
-func decodeReasoningReplay(object map[string]json.RawMessage, allowReplay bool) (*llm.OpenAIResponsesReasoning, bool, bool, bool) {
-	raw, ok := object["thinkingSignature"]
-	redacted, redactedPresent, redactedValid := false, false, true
-	if rawRedacted, exists := object["redacted"]; exists {
-		redactedPresent = true
-		if !decodeJSONBool(rawRedacted, &redacted) {
-			redacted, redactedValid = true, false
-		}
-	}
+func decodeRedacted(object map[string]json.RawMessage, allow bool) (bool, bool, bool) {
+	raw, ok := object["redacted"]
 	if !ok {
-		if redactedPresent && (redacted || !redactedValid) {
-			return nil, true, false, true
-		}
-		return nil, false, true, false
+		return false, false, true
 	}
-	if !allowReplay || !redactedValid {
-		return nil, true, false, redacted
+	if !allow {
+		return true, true, false
 	}
-	var encoded string
-	if !decodeJSONString(raw, &encoded) {
-		return nil, true, false, redacted
+	var redacted bool
+	if !decodeJSONBool(raw, &redacted) {
+		return true, true, false
 	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal([]byte(encoded), &fields) != nil {
-		return nil, true, false, redacted
-	}
-	var value llm.OpenAIResponsesReasoning
-	if rawID, legacy := fields["ItemID"]; legacy {
-		for name := range fields {
-			if name != "ItemID" && name != "EncryptedContent" && name != "Redacted" {
-				return nil, true, false, redacted
-			}
-		}
-		if !decodeJSONString(rawID, &value.ItemID) {
-			return nil, true, false, redacted
-		}
-		if encrypted, exists := fields["EncryptedContent"]; exists && !decodeJSONString(encrypted, &value.EncryptedContent) {
-			return nil, true, false, redacted
-		}
-		if legacyRedacted, exists := fields["Redacted"]; exists {
-			if !decodeJSONBool(legacyRedacted, &value.Redacted) {
-				return nil, true, false, redacted
-			}
-		}
-	} else {
-		for name := range fields {
-			switch name {
-			case "type", "id", "encrypted_content", "summary", "content", "status":
-			default:
-				return nil, true, false, redacted
-			}
-		}
-		var typeName string
-		if !decodeJSONString(fields["type"], &typeName) || typeName != "reasoning" || !decodeJSONString(fields["id"], &value.ItemID) {
-			return nil, true, false, redacted
-		}
-		if encrypted, exists := fields["encrypted_content"]; exists && !decodeJSONString(encrypted, &value.EncryptedContent) {
-			return nil, true, false, redacted
-		}
-	}
-	if redactedPresent {
-		value.Redacted = redacted
-	}
-	if _, err := llm.NewThinkingBlock("", &value); err != nil {
-		return nil, true, false, redacted
-	}
-	return &value, true, true, value.Redacted
+	return redacted, true, true
 }
 
 func decodeJSONString(raw json.RawMessage, value *string) bool {

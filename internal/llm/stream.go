@@ -107,9 +107,9 @@ func (e TextDeltaEvent) Delta() string {
 }
 
 type TextEndEvent struct {
-	contentIndex int
-	content      string
-	replay       *TextReplay
+	contentIndex  int
+	content       string
+	textSignature string
 }
 
 // Thinking events mirror text events but retain their opaque replay handle at
@@ -172,14 +172,10 @@ func (e ThinkingEndEvent) ContentIndex() int      { return e.contentIndex }
 func (e ThinkingEndEvent) Content() ThinkingBlock { return e.content }
 
 func NewTextEndEvent(contentIndex int, content string) (TextEndEvent, error) {
-	return NewTextEndEventWithReplay(contentIndex, content, nil)
+	return NewTextEndEventWithSignature(contentIndex, content, "")
 }
-func NewTextEndEventWithReplay(contentIndex int, content string, replay *TextReplay) (TextEndEvent, error) {
-	event := TextEndEvent{contentIndex: contentIndex, content: content}
-	if replay != nil {
-		copy := *replay
-		event.replay = &copy
-	}
+func NewTextEndEventWithSignature(contentIndex int, content, signature string) (TextEndEvent, error) {
+	event := TextEndEvent{contentIndex: contentIndex, content: content, textSignature: signature}
 	if err := event.validate(); err != nil {
 		return TextEndEvent{}, err
 	}
@@ -195,10 +191,8 @@ func (e TextEndEvent) validate() error {
 	if !utf8.ValidString(e.content) {
 		return fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidStreamEvent)
 	}
-	if e.replay != nil {
-		if err := e.replay.validate(); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidStreamEvent, err)
-		}
+	if err := validateOpaqueSignature(e.textSignature); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidStreamEvent, err)
 	}
 	return nil
 }
@@ -210,11 +204,8 @@ func (e TextEndEvent) ContentIndex() int {
 func (e TextEndEvent) Content() string {
 	return e.content
 }
-func (e TextEndEvent) TextReplay() (TextReplay, bool) {
-	if e.replay == nil {
-		return TextReplay{}, false
-	}
-	return *e.replay, true
+func (e TextEndEvent) TextSignature() (string, bool) {
+	return e.textSignature, e.textSignature != ""
 }
 
 type ToolCallStartEvent struct {
@@ -328,24 +319,21 @@ type DoneEvent struct {
 	reason     FinishReason
 	usage      Usage
 	timestamp  time.Time
-	responses  *OpenAIResponsesResponse
+	response   *AssistantResponseMetadata
 	provenance *AssistantProvenance
 }
 
-func NewDoneEventWithResponsesReplay(reason FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (DoneEvent, error) {
-	return NewDoneEventWithReplay(reason, usage, timestamp, nil, replay)
-}
-func NewDoneEventWithReplay(reason FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (DoneEvent, error) {
+func NewDoneEventWithMetadata(reason FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (DoneEvent, error) {
 	event, err := NewDoneEvent(reason, usage, timestamp)
 	if err != nil {
 		return DoneEvent{}, err
 	}
-	if replay != nil {
-		copy := *replay
+	if response != nil {
+		copy := *response
 		if err := copy.validate(); err != nil {
 			return DoneEvent{}, err
 		}
-		event.responses = &copy
+		event.response = &copy
 	}
 	if provenance != nil {
 		copy := *provenance
@@ -385,11 +373,11 @@ func (e DoneEvent) Usage() Usage {
 func (e DoneEvent) Timestamp() time.Time {
 	return e.timestamp
 }
-func (e DoneEvent) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
-	if e.responses == nil {
-		return OpenAIResponsesResponse{}, false
+func (e DoneEvent) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if e.response == nil {
+		return AssistantResponseMetadata{}, false
 	}
-	return *e.responses, true
+	return *e.response, true
 }
 func (e DoneEvent) AssistantProvenance() (AssistantProvenance, bool) {
 	if e.provenance == nil {
@@ -668,18 +656,19 @@ const (
 // intentionally synchronous; provider goroutines may produce events but do not
 // share or mutate collector state.
 type StreamCollector struct {
-	phase          streamPhase
-	blocks         []AssistantBlock
-	current        strings.Builder
-	activeKind     AssistantBlockKind
-	currentIndex   int
-	nextIndex      int
-	toolCallID     string
-	toolName       string
-	toolArguments  []byte
-	thinkingReplay *OpenAIResponsesReasoning
-	terminal       AssistantTerminal
-	failure        error
+	phase     streamPhase
+	blocks    map[int]AssistantBlock
+	slots     map[int]*collectorSlot
+	nextIndex int
+	terminal  AssistantTerminal
+	failure   error
+}
+
+type collectorSlot struct {
+	kind      AssistantBlockKind
+	text      strings.Builder
+	id, name  string
+	arguments []byte
 }
 
 func (c *StreamCollector) Accept(event StreamEvent) error {
@@ -707,139 +696,115 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 			return c.fail(nil, "start arrived after stream activity")
 		}
 		c.phase = streamActive
+		c.blocks = make(map[int]AssistantBlock)
+		c.slots = make(map[int]*collectorSlot)
 		return nil
 
 	case TextStartEvent:
 		if c.phase != streamActive {
 			return c.fail(nil, "text_start arrived before start")
 		}
-		if c.activeKind != 0 {
-			return c.fail(nil, "text_start arrived before content index %d ended", c.currentIndex)
-		}
 		if event.contentIndex != c.nextIndex {
 			return c.fail(nil, "text_start index %d, want %d", event.contentIndex, c.nextIndex)
 		}
-		c.activeKind = AssistantBlockText
-		c.currentIndex = event.contentIndex
-		c.current.Reset()
+		c.openSlot(event.contentIndex, AssistantBlockText, "", "")
 		return nil
 
 	case TextDeltaEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockText {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockText {
 			return c.fail(nil, "text_delta arrived without an open text block")
 		}
-		if event.contentIndex != c.currentIndex {
-			return c.fail(nil, "text_delta index %d, want %d", event.contentIndex, c.currentIndex)
-		}
-		_, _ = c.current.WriteString(event.delta)
+		_, _ = slot.text.WriteString(event.delta)
 		return nil
 
 	case TextEndEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockText {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockText {
 			return c.fail(nil, "text_end arrived without an open text block")
 		}
-		if event.contentIndex != c.currentIndex {
-			return c.fail(nil, "text_end index %d, want %d", event.contentIndex, c.currentIndex)
-		}
-		if event.content != c.current.String() {
+		if event.content != slot.text.String() {
 			return c.fail(nil, "text_end content does not match accumulated deltas")
 		}
-		var replayPointer *TextReplay
-		if replay, ok := event.TextReplay(); ok {
-			replayPointer = &replay
-		}
-		block, err := NewTextBlockWithReplay(event.content, replayPointer)
+		signature, _ := event.TextSignature()
+		block, err := NewTextBlockWithSignature(event.content, signature)
 		if err != nil {
 			return c.fail(err, "text_end produced invalid text")
 		}
-		c.blocks = append(c.blocks, block)
-		c.finishActiveBlock()
+		c.closeSlot(event.contentIndex, block)
 		return nil
 
 	case ThinkingStartEvent:
-		if c.phase != streamActive || c.activeKind != 0 || event.contentIndex != c.nextIndex {
+		if c.phase != streamActive || event.contentIndex != c.nextIndex {
 			return c.fail(nil, "thinking_start arrived out of order")
 		}
-		c.activeKind = AssistantBlockThinking
-		c.currentIndex = event.contentIndex
-		c.current.Reset()
-		c.thinkingReplay = nil
+		c.openSlot(event.contentIndex, AssistantBlockThinking, "", "")
 		return nil
 	case ThinkingDeltaEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockThinking || event.contentIndex != c.currentIndex {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockThinking {
 			return c.fail(nil, "thinking_delta arrived without open thinking")
 		}
-		_, _ = c.current.WriteString(event.delta)
+		_, _ = slot.text.WriteString(event.delta)
 		return nil
 	case ThinkingEndEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockThinking || event.contentIndex != c.currentIndex {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockThinking {
 			return c.fail(nil, "thinking_end arrived without open thinking")
 		}
-		if event.content.Thinking() != c.current.String() {
+		if event.content.Thinking() != slot.text.String() {
 			return c.fail(nil, "thinking_end content does not match accumulated deltas")
 		}
-		c.blocks = append(c.blocks, event.content)
-		c.finishActiveBlock()
+		c.closeSlot(event.contentIndex, event.content)
 		return nil
 
 	case ToolCallStartEvent:
 		if c.phase != streamActive {
 			return c.fail(nil, "toolcall_start arrived before start")
 		}
-		if c.activeKind != 0 {
-			return c.fail(nil, "toolcall_start arrived before content index %d ended", c.currentIndex)
-		}
 		if event.contentIndex != c.nextIndex {
 			return c.fail(nil, "toolcall_start index %d, want %d", event.contentIndex, c.nextIndex)
 		}
-		c.activeKind = AssistantBlockToolCall
-		c.currentIndex = event.contentIndex
-		c.toolCallID = event.id
-		c.toolName = event.name
-		c.toolArguments = nil
+		c.openSlot(event.contentIndex, AssistantBlockToolCall, event.id, event.name)
 		return nil
 
 	case ToolCallDeltaEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockToolCall {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockToolCall {
 			return c.fail(nil, "toolcall_delta arrived without an open tool call block")
 		}
-		if event.contentIndex != c.currentIndex {
-			return c.fail(nil, "toolcall_delta index %d, want %d", event.contentIndex, c.currentIndex)
-		}
-		c.toolArguments = append(c.toolArguments, event.delta...)
+		slot.arguments = append(slot.arguments, event.delta...)
 		return nil
 
 	case ToolCallEndEvent:
-		if c.phase != streamActive || c.activeKind != AssistantBlockToolCall {
+		slot, ok := c.slot(event.contentIndex)
+		if c.phase != streamActive || !ok || slot.kind != AssistantBlockToolCall {
 			return c.fail(nil, "toolcall_end arrived without an open tool call block")
 		}
-		if event.contentIndex != c.currentIndex {
-			return c.fail(nil, "toolcall_end index %d, want %d", event.contentIndex, c.currentIndex)
-		}
-		if event.toolCall.ID() != c.toolCallID || event.toolCall.Name() != c.toolName {
+		if event.toolCall.ID() != slot.id || event.toolCall.Name() != slot.name {
 			return c.fail(nil, "toolcall_end identity does not match toolcall_start")
 		}
-		if !bytes.Equal(event.toolCall.ArgumentsJSON(), c.toolArguments) {
+		if !bytes.Equal(event.toolCall.ArgumentsJSON(), slot.arguments) {
 			return c.fail(nil, "toolcall_end arguments do not match accumulated deltas")
 		}
-		c.blocks = append(c.blocks, event.toolCall)
-		c.finishActiveBlock()
+		c.closeSlot(event.contentIndex, event.toolCall)
 		return nil
 
 	case DoneEvent:
 		if c.phase != streamActive {
 			return c.fail(nil, "done arrived before start")
 		}
-		if c.activeKind != 0 {
-			return c.fail(nil, "done arrived before block end for content index %d", c.currentIndex)
+		if len(c.slots) != 0 {
+			return c.fail(nil, "done arrived before all content blocks ended")
 		}
+		blocks := c.orderedBlocks()
 		var message AssistantTerminal
 		var err error
 		switch event.reason {
 		case FinishStop, FinishLength:
-			text := make([]TextBlock, len(c.blocks))
+			text := make([]TextBlock, len(blocks))
 			hasThinking := false
-			for index, block := range c.blocks {
+			for index, block := range blocks {
 				var ok bool
 				text[index], ok = block.(TextBlock)
 				if _, thinking := block.(ThinkingBlock); thinking {
@@ -850,10 +815,10 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 					return c.fail(nil, "%s terminal contains a tool call", event.reason)
 				}
 			}
-			replay, _ := event.OpenAIResponsesMetadata()
-			var replayPointer *OpenAIResponsesResponse
-			if _, ok := event.OpenAIResponsesMetadata(); ok {
-				replayPointer = &replay
+			response, _ := event.ResponseMetadata()
+			var responsePointer *AssistantResponseMetadata
+			if _, ok := event.ResponseMetadata(); ok {
+				responsePointer = &response
 			}
 			provenance, _ := event.AssistantProvenance()
 			var provenancePointer *AssistantProvenance
@@ -861,22 +826,22 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 				provenancePointer = &provenance
 			}
 			if hasThinking {
-				message, err = NewAssistantRichMessageWithReplay(c.blocks, event.reason, event.usage, event.timestamp, provenancePointer, replayPointer)
+				message, err = NewAssistantRichMessageWithMetadata(blocks, event.reason, event.usage, event.timestamp, provenancePointer, responsePointer)
 			} else {
-				message, err = NewAssistantTextMessageWithReplay(text, event.reason, event.usage, event.timestamp, provenancePointer, replayPointer)
+				message, err = NewAssistantTextMessageWithMetadata(text, event.reason, event.usage, event.timestamp, provenancePointer, responsePointer)
 			}
 		case FinishToolUse:
-			replay, _ := event.OpenAIResponsesMetadata()
-			var replayPointer *OpenAIResponsesResponse
-			if _, ok := event.OpenAIResponsesMetadata(); ok {
-				replayPointer = &replay
+			response, _ := event.ResponseMetadata()
+			var responsePointer *AssistantResponseMetadata
+			if _, ok := event.ResponseMetadata(); ok {
+				responsePointer = &response
 			}
 			provenance, _ := event.AssistantProvenance()
 			var provenancePointer *AssistantProvenance
 			if _, ok := event.AssistantProvenance(); ok {
 				provenancePointer = &provenance
 			}
-			message, err = NewAssistantToolUseMessageWithReplay(c.blocks, event.usage, event.timestamp, provenancePointer, replayPointer)
+			message, err = NewAssistantToolUseMessageWithMetadata(blocks, event.usage, event.timestamp, provenancePointer, responsePointer)
 		}
 		if err != nil {
 			return c.fail(err, "done is not a valid terminal")
@@ -892,14 +857,18 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		if c.phase != streamNew && c.phase != streamActive {
 			return c.fail(nil, "error arrived in invalid stream phase")
 		}
-		content := make([]TextBlock, 0, len(c.blocks)+1)
-		for _, block := range c.blocks {
+		content := make([]TextBlock, 0, len(c.blocks)+len(c.slots))
+		for _, block := range c.orderedBlocks() {
 			if text, ok := block.(TextBlock); ok {
 				content = append(content, text)
 			}
 		}
-		if c.activeKind == AssistantBlockText {
-			block, err := NewTextBlock(c.current.String())
+		for _, index := range c.openIndices() {
+			slot := c.slots[index]
+			if slot.kind != AssistantBlockText {
+				continue
+			}
+			block, err := NewTextBlock(slot.text.String())
 			if err != nil {
 				return c.fail(err, "partial failure content is invalid")
 			}
@@ -961,17 +930,18 @@ func (c *StreamCollector) Snapshot() (StreamSnapshot, error) {
 	}
 
 	snapshot := StreamSnapshot{
-		blocks: append([]AssistantBlock(nil), c.blocks...),
+		blocks: c.orderedBlocks(),
 		finish: FinishPending,
 	}
-	if c.activeKind != 0 {
+	if indices := c.openIndices(); len(indices) != 0 {
+		slot := c.slots[indices[0]]
 		snapshot.active = &StreamActiveBlock{
-			kind:         c.activeKind,
-			contentIndex: c.currentIndex,
-			text:         c.current.String(),
-			toolCallID:   c.toolCallID,
-			toolName:     c.toolName,
-			arguments:    bytes.Clone(c.toolArguments),
+			kind:         slot.kind,
+			contentIndex: indices[0],
+			text:         slot.text.String(),
+			toolCallID:   slot.id,
+			toolName:     slot.name,
+			arguments:    bytes.Clone(slot.arguments),
 		}
 	}
 	return snapshot, nil
@@ -994,14 +964,41 @@ func (c *StreamCollector) fail(cause error, format string, args ...any) error {
 	return err
 }
 
-func (c *StreamCollector) finishActiveBlock() {
-	c.activeKind = 0
-	c.currentIndex = 0
+func (c *StreamCollector) openSlot(index int, kind AssistantBlockKind, id, name string) {
+	if c.slots == nil {
+		c.slots = make(map[int]*collectorSlot)
+	}
+	c.slots[index] = &collectorSlot{kind: kind, id: id, name: name}
 	c.nextIndex++
-	c.current.Reset()
-	c.toolCallID = ""
-	c.toolName = ""
-	c.toolArguments = nil
+}
+func (c *StreamCollector) slot(index int) (*collectorSlot, bool) {
+	slot, ok := c.slots[index]
+	return slot, ok
+}
+func (c *StreamCollector) closeSlot(index int, block AssistantBlock) {
+	if c.blocks == nil {
+		c.blocks = make(map[int]AssistantBlock)
+	}
+	c.blocks[index] = block
+	delete(c.slots, index)
+}
+func (c *StreamCollector) orderedBlocks() []AssistantBlock {
+	result := make([]AssistantBlock, 0, len(c.blocks))
+	for i := 0; i < c.nextIndex; i++ {
+		if block, ok := c.blocks[i]; ok {
+			result = append(result, block)
+		}
+	}
+	return result
+}
+func (c *StreamCollector) openIndices() []int {
+	result := make([]int, 0, len(c.slots))
+	for i := 0; i < c.nextIndex; i++ {
+		if _, ok := c.slots[i]; ok {
+			result = append(result, i)
+		}
+	}
+	return result
 }
 
 func validateStreamEvent(event StreamEvent) error {

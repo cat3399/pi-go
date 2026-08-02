@@ -68,8 +68,8 @@ func (r FinishReason) String() string {
 
 // TextBlock is immutable text content. Empty text is valid.
 type TextBlock struct {
-	text   string
-	replay *TextReplay
+	text          string
+	textSignature string
 }
 
 func (TextBlock) assistantBlock() {}
@@ -90,10 +90,8 @@ func (b TextBlock) validate() error {
 	if !utf8.ValidString(b.text) {
 		return fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidText)
 	}
-	if b.replay != nil {
-		if err := b.replay.validate(); err != nil {
-			return err
-		}
+	if err := validateOpaqueSignature(b.textSignature); err != nil {
+		return err
 	}
 	return nil
 }
@@ -159,24 +157,21 @@ type AssistantTextMessage struct {
 	finish     FinishReason
 	usage      Usage
 	timestamp  time.Time
-	responses  *OpenAIResponsesResponse
+	response   *AssistantResponseMetadata
 	provenance *AssistantProvenance
 }
 
-func NewAssistantTextMessageWithResponsesReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
-	return NewAssistantTextMessageWithReplay(content, finish, usage, timestamp, nil, replay)
-}
-func NewAssistantTextMessageWithReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
+func NewAssistantTextMessageWithMetadata(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantTextMessage, error) {
 	m, err := NewAssistantTextMessage(content, finish, usage, timestamp)
 	if err != nil {
 		return AssistantTextMessage{}, err
 	}
-	if replay != nil {
-		copy := *replay
+	if response != nil {
+		copy := *response
 		if err := copy.validate(); err != nil {
 			return AssistantTextMessage{}, err
 		}
-		m.responses = &copy
+		m.response = &copy
 	}
 	if provenance != nil {
 		copy := *provenance
@@ -231,8 +226,8 @@ func (m AssistantTextMessage) validate() error {
 			return err
 		}
 	}
-	if m.responses != nil {
-		if err := m.responses.validate(); err != nil {
+	if m.response != nil {
+		if err := m.response.validate(); err != nil {
 			return err
 		}
 	}
@@ -249,11 +244,11 @@ func (m AssistantTextMessage) AssistantProvenance() (AssistantProvenance, bool) 
 	}
 	return *m.provenance, true
 }
-func (m AssistantTextMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
-	if m.responses == nil {
-		return OpenAIResponsesResponse{}, false
+func (m AssistantTextMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if m.response == nil {
+		return AssistantResponseMetadata{}, false
 	}
-	return *m.responses, true
+	return *m.response, true
 }
 
 func (AssistantTextMessage) Role() Role {

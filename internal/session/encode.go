@@ -40,26 +40,26 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
 			return nil, err
 		}
-		replay, _ := message.OpenAIResponsesMetadata()
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &replay)
+		response, _ := message.ResponseMetadata()
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
 	case llm.AssistantToolUseMessage:
 		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
 			return nil, err
 		}
-		replay, ok := message.OpenAIResponsesMetadata()
+		response, ok := message.ResponseMetadata()
 		if !ok {
-			replay = llm.OpenAIResponsesResponse{}
+			response = llm.AssistantResponseMetadata{}
 		}
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &replay)
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
 	case llm.AssistantRichMessage:
 		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
 			return nil, err
 		}
-		replay, ok := message.OpenAIResponsesMetadata()
+		response, ok := message.ResponseMetadata()
 		if !ok {
-			replay = llm.OpenAIResponsesResponse{}
+			response = llm.AssistantResponseMetadata{}
 		}
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &replay)
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
 	case llm.AssistantFailureMessage:
 		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), message.ErrorMessage(), message.Timestamp().UnixMilli(), options.Assistant, nil)
 	case llm.ToolResultMessage:
@@ -140,7 +140,7 @@ func encodeAssistant(
 	usage llm.Usage,
 	errorMessage string,
 	timestamp int64,
-	identity AssistantProvenance, replay *llm.OpenAIResponsesResponse,
+	identity AssistantProvenance, response *llm.AssistantResponseMetadata,
 ) (json.RawMessage, error) {
 	if err := validateAssistantProvenance(identity); err != nil {
 		return nil, err
@@ -150,8 +150,8 @@ func encodeAssistant(
 		switch block := block.(type) {
 		case llm.TextBlock:
 			wire := textBlockWire{Type: "text", Text: block.Text()}
-			if replay, ok := block.TextReplay(); ok && errorMessage == "" {
-				wire.TextSignature = encodeTextReplay(replay)
+			if signature, ok := block.TextSignature(); ok && errorMessage == "" {
+				wire.TextSignature = signature
 			}
 			raw, err := json.Marshal(wire)
 			if err != nil {
@@ -165,11 +165,8 @@ func encodeAssistant(
 			}
 			content = append(content, raw)
 		case llm.ThinkingBlock:
-			wire := thinkingBlockWire{Type: "thinking", Thinking: block.Thinking()}
-			if replay, ok := block.OpenAIResponsesReplay(); ok {
-				wire.ThinkingSignature = encodeReasoningReplay(replay)
-				wire.Redacted = replay.Redacted
-			}
+			wire := thinkingBlockWire{Type: "thinking", Thinking: block.Thinking(), Redacted: block.Redacted()}
+			wire.ThinkingSignature, _ = block.ThinkingSignature()
 			raw, err := json.Marshal(wire)
 			if err != nil {
 				return nil, err
@@ -218,16 +215,27 @@ func encodeAssistant(
 			return nil, err
 		}
 	}
-	if replay != nil && (replay.ResponseID != "" || replay.RawStopReason != "") {
-		encoded = append(encoded, `,"responseId":`...)
-		encoded, err = appendJSONValue(encoded, replay.ResponseID)
-		if err != nil {
-			return nil, err
+	if response != nil && (response.ResponseID != "" || response.ResponseModel != "" || response.RawStopReason != "") {
+		if response.ResponseID != "" {
+			encoded = append(encoded, `,"responseId":`...)
+			encoded, err = appendJSONValue(encoded, response.ResponseID)
+			if err != nil {
+				return nil, err
+			}
 		}
-		encoded = append(encoded, `,"rawStopReason":`...)
-		encoded, err = appendJSONValue(encoded, replay.RawStopReason)
-		if err != nil {
-			return nil, err
+		if response.ResponseModel != "" {
+			encoded = append(encoded, `,"responseModel":`...)
+			encoded, err = appendJSONValue(encoded, response.ResponseModel)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if response.RawStopReason != "" {
+			encoded = append(encoded, `,"rawStopReason":`...)
+			encoded, err = appendJSONValue(encoded, response.RawStopReason)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	encoded = append(encoded, `,"timestamp":`...)
@@ -239,8 +247,8 @@ func encodeTextBlocks(blocks []llm.TextBlock) ([]json.RawMessage, error) {
 	content := make([]json.RawMessage, 0, len(blocks))
 	for _, block := range blocks {
 		wire := textBlockWire{Type: "text", Text: block.Text()}
-		if replay, ok := block.TextReplay(); ok {
-			wire.TextSignature = encodeTextReplay(replay)
+		if signature, ok := block.TextSignature(); ok {
+			wire.TextSignature = signature
 		}
 		raw, err := json.Marshal(wire)
 		if err != nil {
@@ -303,23 +311,6 @@ func encodeImageBlock(block llm.ImageBlock) (json.RawMessage, error) {
 	}
 	return json.Marshal(wire)
 }
-func encodeTextReplay(value llm.TextReplay) string {
-	raw, _ := json.Marshal(struct {
-		Version int    `json:"v"`
-		ID      string `json:"id"`
-		Phase   string `json:"phase,omitempty"`
-	}{Version: 1, ID: value.MessageID, Phase: value.Phase})
-	return string(raw)
-}
-func encodeReasoningReplay(value llm.OpenAIResponsesReasoning) string {
-	raw, _ := json.Marshal(struct {
-		Type             string `json:"type"`
-		ID               string `json:"id"`
-		EncryptedContent string `json:"encrypted_content,omitempty"`
-	}{Type: "reasoning", ID: value.ItemID, EncryptedContent: value.EncryptedContent})
-	return string(raw)
-}
-
 func encodeToolCallBlock(block llm.ToolCallBlock) (json.RawMessage, error) {
 	arguments := block.ArgumentsJSON()
 	if !json.Valid(arguments) {
@@ -348,6 +339,13 @@ func encodeToolCallBlock(block llm.ToolCallBlock) (json.RawMessage, error) {
 	encoded, err = appendJSONValue(encoded, string(arguments))
 	if err != nil {
 		return nil, err
+	}
+	if signature, ok := block.ThoughtSignature(); ok {
+		encoded = append(encoded, `,"thoughtSignature":`...)
+		encoded, err = appendJSONValue(encoded, signature)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return append(encoded, '}'), nil
 }

@@ -16,18 +16,18 @@ import (
 
 const testHeader = `{"type":"session","version":3,"id":"session-1","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace"}`
 
-func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) {
+func TestOpenPreservesProviderOpaqueSignatures(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		provider   string
-		api        string
-		model      string
-		content    string
-		wantKinds  []llm.AssistantBlockKind
-		wantTexts  []string
-		wantUnsafe []int
+		name           string
+		provider       string
+		api            string
+		model          string
+		content        string
+		wantKinds      []llm.AssistantBlockKind
+		wantTexts      []string
+		wantSignatures []string
 	}{
 		{
 			name:     "anthropic visible and redacted thinking",
@@ -37,9 +37,9 @@ func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) 
 			content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"anthropic-opaque-secret"},` +
 				`{"type":"thinking","thinking":"","thinkingSignature":"anthropic-redacted-secret","redacted":true},` +
 				`{"type":"text","text":"answer"}]`,
-			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
-			wantTexts:  []string{"visible plan", "answer"},
-			wantUnsafe: []int{0, 1},
+			wantKinds:      []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockThinking, llm.AssistantBlockText},
+			wantTexts:      []string{"visible plan", "", "answer"},
+			wantSignatures: []string{"anthropic-opaque-secret", "anthropic-redacted-secret", ""},
 		},
 		{
 			name:     "google signed empty and visible parts",
@@ -50,9 +50,9 @@ func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) 
 				`{"type":"thinking","thinking":"visible thought","thinkingSignature":"Z29vZ2xlLXZpc2libGU="},` +
 				`{"type":"text","text":"","textSignature":"Z29vZ2xlLWVtcHR5LXRleHQ="},` +
 				`{"type":"text","text":"answer","textSignature":"Z29vZ2xlLXRleHQ="}]`,
-			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
-			wantTexts:  []string{"visible thought", "answer"},
-			wantUnsafe: []int{0, 1, 2, 3},
+			wantKinds:      []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockThinking, llm.AssistantBlockText, llm.AssistantBlockText},
+			wantTexts:      []string{"", "visible thought", "", "answer"},
+			wantSignatures: []string{"Z29vZ2xlLW9wYXF1ZQ==", "Z29vZ2xlLXZpc2libGU=", "Z29vZ2xlLWVtcHR5LXRleHQ=", "Z29vZ2xlLXRleHQ="},
 		},
 		{
 			name:     "foreign provider cannot borrow Responses API provenance",
@@ -61,9 +61,9 @@ func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) 
 			model:    "claude-test",
 			content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_foreign\",\"encrypted_content\":\"must-not-project\"}"},` +
 				`{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_foreign\",\"phase\":\"final_answer\"}"}]`,
-			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
-			wantTexts:  []string{"visible plan", "answer"},
-			wantUnsafe: []int{0, 1},
+			wantKinds:      []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
+			wantTexts:      []string{"visible plan", "answer"},
+			wantSignatures: []string{`{"type":"reasoning","id":"rs_foreign","encrypted_content":"must-not-project"}`, `{"v":1,"id":"msg_foreign","phase":"final_answer"}`},
 		},
 	}
 
@@ -86,10 +86,10 @@ func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) 
 				t.Fatalf("messages = %#v", messages)
 			}
 			metadataCarrier := messages[0].(interface {
-				OpenAIResponsesMetadata() (llm.OpenAIResponsesResponse, bool)
+				ResponseMetadata() (llm.AssistantResponseMetadata, bool)
 			})
-			if replay, ok := metadataCarrier.OpenAIResponsesMetadata(); ok {
-				t.Fatalf("untrusted response metadata projected: %#v", replay)
+			if response, ok := metadataCarrier.ResponseMetadata(); ok {
+				t.Fatalf("unexpected response metadata: %#v", response)
 			}
 			blocks := assistantBlocks(messages[0])
 			if len(blocks) != len(tt.wantKinds) {
@@ -104,51 +104,48 @@ func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) 
 					if block.Thinking() != tt.wantTexts[index] {
 						t.Fatalf("thinking %d = %q", index, block.Thinking())
 					}
-					if replay, ok := block.OpenAIResponsesReplay(); ok {
-						t.Fatalf("foreign reasoning projected as Responses replay: %#v", replay)
+					signature, _ := block.ThinkingSignature()
+					if signature != tt.wantSignatures[index] {
+						t.Fatalf("thinking signature %d = %q, want %q", index, signature, tt.wantSignatures[index])
 					}
 				case llm.TextBlock:
 					if block.Text() != tt.wantTexts[index] {
 						t.Fatalf("text %d = %q", index, block.Text())
 					}
-					if replay, ok := block.TextReplay(); ok {
-						t.Fatalf("foreign text projected as Responses replay: %#v", replay)
+					signature, _ := block.TextSignature()
+					if signature != tt.wantSignatures[index] {
+						t.Fatalf("text signature %d = %q, want %q", index, signature, tt.wantSignatures[index])
 					}
 				}
 			}
-			diagnostics := transcript.Context().Diagnostics()
-			if len(diagnostics) != len(tt.wantUnsafe) {
+			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
 				t.Fatalf("diagnostics = %#v", diagnostics)
-			}
-			for index, contentIndex := range tt.wantUnsafe {
-				if diagnostics[index] != (Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: "entry-1", ContentIndex: contentIndex}) {
-					t.Fatalf("diagnostic %d = %#v", index, diagnostics[index])
-				}
 			}
 		})
 	}
 }
 
-func TestOpenResponsesReplayMetadataFailsSafe(t *testing.T) {
+func TestOpenOpaqueMetadataFailsSafe(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		content       string
-		extra         string
-		wantBlockKind llm.AssistantBlockKind
-		wantBlocks    int
+		name           string
+		content        string
+		extra          string
+		wantBlockKind  llm.AssistantBlockKind
+		wantSignature  string
+		wantDiagnostic bool
 	}{
-		{name: "future text envelope version", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":2,\"id\":\"msg_future\",\"phase\":\"final_answer\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
-		{name: "future signed empty text", content: `[{"type":"text","text":"","textSignature":"{\"v\":2,\"id\":\"msg_future\"}"}]`, wantBlocks: 0},
-		{name: "future text envelope field", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
-		{name: "unknown text phase", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"phase\":\"future_phase\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
-		{name: "malformed text envelope", content: `[{"type":"text","text":"answer","textSignature":"{"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
-		{name: "non string text envelope", content: `[{"type":"text","text":"answer","textSignature":{"v":1,"id":"msg_object"}}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
-		{name: "malformed readable reasoning", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"opaque-not-json"}]`, wantBlockKind: llm.AssistantBlockThinking, wantBlocks: 1},
-		{name: "future readable reasoning envelope", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockThinking, wantBlocks: 1},
-		{name: "unsupported opaque only reasoning", content: `[{"type":"thinking","thinking":"","thinkingSignature":"{\"type\":\"future_reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\"}"}]`, wantBlocks: 0},
-		{name: "malformed response metadata", content: `[{"type":"text","text":"answer"}]`, extra: `,"responseId":{"future":true}`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "future text envelope version", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":2,\"id\":\"msg_future\",\"phase\":\"final_answer\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantSignature: `{"v":2,"id":"msg_future","phase":"final_answer"}`},
+		{name: "future signed empty text", content: `[{"type":"text","text":"","textSignature":"{\"v\":2,\"id\":\"msg_future\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantSignature: `{"v":2,"id":"msg_future"}`},
+		{name: "future text envelope field", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockText, wantSignature: `{"v":1,"id":"msg_future","future":true}`},
+		{name: "unknown text phase", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"phase\":\"future_phase\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantSignature: `{"v":1,"id":"msg_future","phase":"future_phase"}`},
+		{name: "malformed text envelope", content: `[{"type":"text","text":"answer","textSignature":"{"}]`, wantBlockKind: llm.AssistantBlockText, wantSignature: "{"},
+		{name: "non string text envelope", content: `[{"type":"text","text":"answer","textSignature":{"v":1,"id":"msg_object"}}]`, wantBlockKind: llm.AssistantBlockText, wantDiagnostic: true},
+		{name: "opaque readable reasoning", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"opaque-not-json"}]`, wantBlockKind: llm.AssistantBlockThinking, wantSignature: "opaque-not-json"},
+		{name: "future readable reasoning envelope", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockThinking, wantSignature: `{"type":"reasoning","id":"rs_future","encrypted_content":"must-not-project","future":true}`},
+		{name: "future opaque only reasoning", content: `[{"type":"thinking","thinking":"","thinkingSignature":"{\"type\":\"future_reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\"}"}]`, wantBlockKind: llm.AssistantBlockThinking, wantSignature: `{"type":"future_reasoning","id":"rs_future","encrypted_content":"must-not-project"}`},
+		{name: "malformed response metadata", content: `[{"type":"text","text":"answer"}]`, extra: `,"responseId":{"future":true}`, wantBlockKind: llm.AssistantBlockText, wantDiagnostic: true},
 	}
 
 	for _, tt := range tests {
@@ -170,32 +167,34 @@ func TestOpenResponsesReplayMetadataFailsSafe(t *testing.T) {
 				t.Fatalf("messages = %#v", messages)
 			}
 			metadataCarrier := messages[0].(interface {
-				OpenAIResponsesMetadata() (llm.OpenAIResponsesResponse, bool)
+				ResponseMetadata() (llm.AssistantResponseMetadata, bool)
 			})
-			if replay, ok := metadataCarrier.OpenAIResponsesMetadata(); ok {
-				t.Fatalf("untrusted response metadata projected: %#v", replay)
+			if response, ok := metadataCarrier.ResponseMetadata(); ok {
+				t.Fatalf("unexpected response metadata: %#v", response)
 			}
 			blocks := assistantBlocks(messages[0])
-			if len(blocks) != tt.wantBlocks {
-				t.Fatalf("blocks = %#v, want %d", blocks, tt.wantBlocks)
+			if len(blocks) != 1 {
+				t.Fatalf("blocks = %#v, want 1", blocks)
 			}
-			if tt.wantBlocks == 1 {
-				if blocks[0].Kind() != tt.wantBlockKind {
-					t.Fatalf("block kind = %v, want %v", blocks[0].Kind(), tt.wantBlockKind)
-				}
-				switch block := blocks[0].(type) {
-				case llm.TextBlock:
-					if replay, ok := block.TextReplay(); ok {
-						t.Fatalf("untrusted text replay projected: %#v", replay)
-					}
-				case llm.ThinkingBlock:
-					if replay, ok := block.OpenAIResponsesReplay(); ok {
-						t.Fatalf("untrusted reasoning replay projected: %#v", replay)
-					}
-				}
+			if blocks[0].Kind() != tt.wantBlockKind {
+				t.Fatalf("block kind = %v, want %v", blocks[0].Kind(), tt.wantBlockKind)
 			}
-			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticUnsafeContentOmitted {
+			var signature string
+			switch block := blocks[0].(type) {
+			case llm.TextBlock:
+				signature, _ = block.TextSignature()
+			case llm.ThinkingBlock:
+				signature, _ = block.ThinkingSignature()
+			}
+			if signature != tt.wantSignature {
+				t.Fatalf("signature = %q, want %q", signature, tt.wantSignature)
+			}
+			diagnostics := transcript.Context().Diagnostics()
+			if tt.wantDiagnostic && (len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticUnsafeContentOmitted) {
 				t.Fatalf("diagnostics = %#v, want one safe-omission diagnostic", diagnostics)
+			}
+			if !tt.wantDiagnostic && len(diagnostics) != 0 {
+				t.Fatalf("diagnostics = %#v, want none", diagnostics)
 			}
 		})
 	}
@@ -219,17 +218,17 @@ func TestOpenProjectsCurrentResponsesReplayEnvelope(t *testing.T) {
 
 	message := transcript.Context().Messages()[0].(llm.AssistantRichMessage)
 	blocks := message.Blocks()
-	reasoning, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !ok || reasoning.ItemID != "rs_current" || reasoning.EncryptedContent != "cipher" {
-		t.Fatalf("reasoning replay = (%#v, %t)", reasoning, ok)
+	reasoning, ok := blocks[0].(llm.ThinkingBlock).ThinkingSignature()
+	if !ok || reasoning != `{"type":"reasoning","id":"rs_current","summary":[{"type":"summary_text","text":"plan"}],"status":"completed","encrypted_content":"cipher"}` {
+		t.Fatalf("reasoning signature = (%q, %t)", reasoning, ok)
 	}
-	textReplay, ok := blocks[1].(llm.TextBlock).TextReplay()
-	if !ok || textReplay != (llm.TextReplay{MessageID: "msg_current", Phase: "final_answer"}) {
-		t.Fatalf("text replay = (%#v, %t)", textReplay, ok)
+	textSignature, ok := blocks[1].(llm.TextBlock).TextSignature()
+	if !ok || textSignature != `{"v":1,"id":"msg_current","phase":"final_answer"}` {
+		t.Fatalf("text signature = (%q, %t)", textSignature, ok)
 	}
-	response, ok := message.OpenAIResponsesMetadata()
-	if !ok || response != (llm.OpenAIResponsesResponse{ResponseID: "resp_current", RawStopReason: "completed"}) {
-		t.Fatalf("response replay = (%#v, %t)", response, ok)
+	response, ok := message.ResponseMetadata()
+	if !ok || response != (llm.AssistantResponseMetadata{ResponseID: "resp_current", RawStopReason: "completed"}) {
+		t.Fatalf("response metadata = (%#v, %t)", response, ok)
 	}
 	if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
 		t.Fatalf("diagnostics = %#v", diagnostics)
@@ -256,7 +255,7 @@ func TestOpaqueAndFutureReplayMetadataSurvivesForkAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = source.Close() })
-	assertUnsignedReplayProjection(t, source.Context(), 2)
+	assertOpaqueSignatureProjection(t, source.Context())
 
 	targetPath := filepath.Join(directory, "fork.jsonl")
 	target, err := source.Fork(stdcontext.Background(), ExtractOptions{TargetPath: targetPath, ID: "fork", WorkingDir: directory})
@@ -269,7 +268,7 @@ func TestOpaqueAndFutureReplayMetadataSurvivesForkAndReopen(t *testing.T) {
 			t.Fatalf("fork entry %d changed opaque/future metadata", index)
 		}
 	}
-	assertUnsignedReplayProjection(t, target.Context(), 2)
+	assertOpaqueSignatureProjection(t, target.Context())
 	if err := target.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +283,7 @@ func TestOpaqueAndFutureReplayMetadataSurvivesForkAndReopen(t *testing.T) {
 			t.Fatalf("reopened fork entry %d changed opaque/future metadata", index)
 		}
 	}
-	assertUnsignedReplayProjection(t, reopened.Context(), 2)
+	assertOpaqueSignatureProjection(t, reopened.Context())
 }
 
 func TestOpenAppendPreservesUnknownRawPrefixAndProjectsKnownContent(t *testing.T) {
@@ -657,28 +656,22 @@ func assistantBlocks(message llm.ConversationMessage) []llm.AssistantBlock {
 	}
 }
 
-func assertUnsignedReplayProjection(t *testing.T, context Context, wantDiagnostics int) {
+func assertOpaqueSignatureProjection(t *testing.T, context Context) {
 	t.Helper()
 	messages := context.Messages()
 	if len(messages) != 2 {
 		t.Fatalf("messages = %#v, want two assistants", messages)
 	}
-	for messageIndex, message := range messages {
-		for blockIndex, block := range assistantBlocks(message) {
-			switch block := block.(type) {
-			case llm.TextBlock:
-				if replay, ok := block.TextReplay(); ok {
-					t.Fatalf("message %d block %d projected untrusted text replay %#v", messageIndex, blockIndex, replay)
-				}
-			case llm.ThinkingBlock:
-				if replay, ok := block.OpenAIResponsesReplay(); ok {
-					t.Fatalf("message %d block %d projected untrusted reasoning replay %#v", messageIndex, blockIndex, replay)
-				}
-			}
-		}
+	thinking := assistantBlocks(messages[0])[0].(llm.ThinkingBlock)
+	if signature, ok := thinking.ThinkingSignature(); !ok || signature != "anthropic-durable-secret" {
+		t.Fatalf("thinking signature = (%q, %t)", signature, ok)
 	}
-	if diagnostics := context.Diagnostics(); len(diagnostics) != wantDiagnostics {
-		t.Fatalf("diagnostics = %#v, want %d", diagnostics, wantDiagnostics)
+	text := assistantBlocks(messages[1])[0].(llm.TextBlock)
+	if signature, ok := text.TextSignature(); !ok || signature != `{"v":9,"id":"msg_future","phase":"future_phase"}` {
+		t.Fatalf("text signature = (%q, %t)", signature, ok)
+	}
+	if diagnostics := context.Diagnostics(); len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v, want none", diagnostics)
 	}
 }
 

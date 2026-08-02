@@ -615,12 +615,11 @@ func (s *openAIResponsesStream) flushResponsesDeferredEvents() error {
 		if reasoning == nil {
 			return errors.New("missing deferred reasoning item")
 		}
-		replay := &llm.OpenAIResponsesReasoning{
-			ItemID:           reasoning.itemID,
-			EncryptedContent: reasoning.encryptedContent,
-			PlaintextContent: reasoning.plaintextContent,
+		signature, err := encodeResponsesReasoningSignature(reasoning.itemID, reasoning.encryptedContent, reasoning.plaintextContent, reasoning.text)
+		if err != nil {
+			return err
 		}
-		block, err := llm.NewThinkingBlock(reasoning.text, replay)
+		block, err := llm.NewThinkingBlockWithSignature(reasoning.text, signature, false)
 		if err != nil {
 			return err
 		}

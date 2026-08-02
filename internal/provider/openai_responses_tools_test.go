@@ -18,6 +18,69 @@ import (
 
 const onePixelPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
+type responsesTextSignatureTest struct {
+	Version int    `json:"v"`
+	ID      string `json:"id"`
+	Phase   string `json:"phase,omitempty"`
+}
+
+func responsesReasoningBlock(t *testing.T, text, id, encryptedContent, plaintextContent string, redacted bool) llm.ThinkingBlock {
+	t.Helper()
+	raw, err := json.Marshal(struct {
+		Type             string `json:"type"`
+		ID               string `json:"id"`
+		EncryptedContent string `json:"encrypted_content,omitempty"`
+		Content          string `json:"content,omitempty"`
+	}{Type: "reasoning", ID: id, EncryptedContent: encryptedContent, Content: plaintextContent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := llm.NewThinkingBlockWithSignature(text, string(raw), redacted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return block
+}
+
+func responsesTextBlock(t *testing.T, text, id, phase string) llm.TextBlock {
+	t.Helper()
+	raw, err := json.Marshal(responsesTextSignatureTest{Version: 1, ID: id, Phase: phase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := llm.NewTextBlockWithSignature(text, string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return block
+}
+
+func responsesTextSignatureForTest(t *testing.T, block llm.TextBlock) responsesTextSignatureTest {
+	t.Helper()
+	signature, ok := block.TextSignature()
+	if !ok {
+		t.Fatal("missing text signature")
+	}
+	var value responsesTextSignatureTest
+	if err := json.Unmarshal([]byte(signature), &value); err != nil {
+		t.Fatalf("decode text signature: %v", err)
+	}
+	return value
+}
+
+func responsesReasoningSignatureForTest(t *testing.T, block llm.ThinkingBlock) map[string]any {
+	t.Helper()
+	signature, ok := block.ThinkingSignature()
+	if !ok {
+		t.Fatal("missing reasoning signature")
+	}
+	var value map[string]any
+	if err := json.Unmarshal([]byte(signature), &value); err != nil {
+		t.Fatalf("decode reasoning signature: %v", err)
+	}
+	return value
+}
+
 func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
@@ -85,7 +148,7 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mixed, err := llm.NewAssistantToolUseMessageWithReplay([]llm.AssistantBlock{text, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
+	mixed, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{text, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,15 +192,12 @@ func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, err := llm.NewThinkingBlock("brief plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "opaque-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reasoning := responsesReasoningBlock(t, "brief plan", "rs_1", "opaque-secret", "", false)
 	call, err := llm.NewToolCallBlock("call_1|fc_1", "bash", []byte(`{"command":"true"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessageWithReplay([]llm.AssistantBlock{reasoning, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
+	assistant, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{reasoning, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,13 +256,13 @@ func TestOpenAIResponsesPreservesMessagePhaseAndIDForSameModelReplay(t *testing.
 	if len(blocks) != 2 {
 		t.Fatalf("blocks = %#v", blocks)
 	}
-	for index, want := range []llm.TextReplay{
-		{MessageID: "msg_commentary", Phase: "commentary"},
-		{MessageID: "msg_final", Phase: "final_answer"},
+	for index, want := range []responsesTextSignatureTest{
+		{Version: 1, ID: "msg_commentary", Phase: "commentary"},
+		{Version: 1, ID: "msg_final", Phase: "final_answer"},
 	} {
-		got, exists := blocks[index].TextReplay()
-		if !exists || got != want {
-			t.Fatalf("block %d replay = (%#v, %t), want %#v", index, got, exists, want)
+		got := responsesTextSignatureForTest(t, blocks[index])
+		if got != want {
+			t.Fatalf("block %d signature = %#v, want %#v", index, got, want)
 		}
 	}
 
@@ -246,12 +306,12 @@ func TestOpenAIResponsesPreservesMessagePhaseAndIDForSameModelReplay(t *testing.
 		t.Fatal(err)
 	}
 	input := payload["input"].([]any)
-	for index, want := range []llm.TextReplay{
-		{MessageID: "msg_commentary", Phase: "commentary"},
-		{MessageID: "msg_final", Phase: "final_answer"},
+	for index, want := range []responsesTextSignatureTest{
+		{Version: 1, ID: "msg_commentary", Phase: "commentary"},
+		{Version: 1, ID: "msg_final", Phase: "final_answer"},
 	} {
 		wire := input[index+1].(map[string]any)
-		if wire["id"] != want.MessageID || wire["phase"] != want.Phase {
+		if wire["id"] != want.ID || wire["phase"] != want.Phase {
 			t.Fatalf("wire block %d = %#v", index, wire)
 		}
 	}
@@ -280,9 +340,9 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 	if !ok {
 		t.Fatalf("terminal = %T", terminal)
 	}
-	replay, exists := message.Blocks()[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !exists || replay.ItemID != "rs_azure" || replay.EncryptedContent != "terminal-cipher" {
-		t.Fatalf("reasoning replay = (%#v, %t)", replay, exists)
+	replay := responsesReasoningSignatureForTest(t, message.Blocks()[0].(llm.ThinkingBlock))
+	if replay["id"] != "rs_azure" || replay["encrypted_content"] != "terminal-cipher" {
+		t.Fatalf("reasoning signature = %#v", replay)
 	}
 
 	directory := t.TempDir()
@@ -311,9 +371,9 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 	}
 	t.Cleanup(func() { _ = restarted.Close() })
 	restartedMessage := restarted.Context().Messages()[0].(llm.AssistantRichMessage)
-	restartedReplay, exists := restartedMessage.Blocks()[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !exists || restartedReplay.ItemID != "rs_azure" || restartedReplay.EncryptedContent != "terminal-cipher" {
-		t.Fatalf("restarted reasoning replay = (%#v, %t)", restartedReplay, exists)
+	restartedReplay := responsesReasoningSignatureForTest(t, restartedMessage.Blocks()[0].(llm.ThinkingBlock))
+	if restartedReplay["id"] != "rs_azure" || restartedReplay["encrypted_content"] != "terminal-cipher" {
+		t.Fatalf("restarted reasoning signature = %#v", restartedReplay)
 	}
 }
 
@@ -369,14 +429,8 @@ func TestOpenAIResponsesRejectsUnsafeTerminalReasoningBackfill(t *testing.T) {
 }
 
 func TestOpenAIResponsesOpaqueReplayRequiresExactAssistantProvenance(t *testing.T) {
-	reasoning, err := llm.NewThinkingBlock("readable plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_original", EncryptedContent: "opaque-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	answer, err := llm.NewTextBlockWithReplay("answer", &llm.TextReplay{MessageID: "msg_original", Phase: "final_answer"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reasoning := responsesReasoningBlock(t, "readable plan", "rs_original", "opaque-secret", "", false)
+	answer := responsesTextBlock(t, "answer", "msg_original", "final_answer")
 	call, err := llm.NewToolCallBlock("call_original|fc_original", "bash", []byte(`{"command":"true"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -434,7 +488,7 @@ func TestOpenAIResponsesOpaqueReplayRequiresExactAssistantProvenance(t *testing.
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			assistant, err := llm.NewAssistantToolUseMessageWithReplay(
+			assistant, err := llm.NewAssistantToolUseMessageWithMetadata(
 				[]llm.AssistantBlock{reasoning, answer, call},
 				llm.Usage{},
 				responsesTestTime,
@@ -527,16 +581,9 @@ func TestOpenAIResponsesOpaqueReplayRequiresExactAssistantProvenance(t *testing.
 }
 
 func TestOpenAIResponsesDropsForeignRedactedReasoning(t *testing.T) {
-	reasoning, err := llm.NewThinkingBlock("must not downgrade", &llm.OpenAIResponsesReasoning{
-		ItemID:           "rs_redacted",
-		EncryptedContent: "opaque-secret",
-		Redacted:         true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	reasoning := responsesReasoningBlock(t, "must not downgrade", "rs_redacted", "opaque-secret", "", true)
 	answer := mustTextBlock(t, "answer")
-	message, err := llm.NewAssistantRichMessageWithReplay(
+	message, err := llm.NewAssistantRichMessageWithMetadata(
 		[]llm.AssistantBlock{reasoning, answer},
 		llm.FinishStop,
 		llm.Usage{},
@@ -584,8 +631,8 @@ func TestOpenAIResponsesStreamsReasoningThenText(t *testing.T) {
 		t.Fatalf("terminal=%T", terminal)
 	}
 	blocks := rich.Blocks()
-	replay, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !ok || replay.EncryptedContent != "cipher" || blocks[1].(llm.TextBlock).Text() != "answer" {
+	replay := responsesReasoningSignatureForTest(t, blocks[0].(llm.ThinkingBlock))
+	if replay["encrypted_content"] != "cipher" || blocks[1].(llm.TextBlock).Text() != "answer" {
 		t.Fatalf("blocks=%#v", blocks)
 	}
 }
@@ -609,9 +656,9 @@ func TestOpenAIResponsesProgressDoneAndPlaintextReasoningReplay(t *testing.T) {
 		t.Fatalf("terminal = %T", terminal)
 	}
 	blocks := rich.Blocks()
-	replay, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !ok || replay.PlaintextContent != "plan" || replay.EncryptedContent != "" {
-		t.Fatalf("reasoning replay = %#v/%v", replay, ok)
+	replay := responsesReasoningSignatureForTest(t, blocks[0].(llm.ThinkingBlock))
+	if replay["content"] != "plan" {
+		t.Fatalf("reasoning signature = %#v", replay)
 	}
 	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go"), terminal, mustToolResult(t, "call_plain|fc_plain", "bash", "ok")}))
 	if err != nil {

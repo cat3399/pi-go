@@ -473,9 +473,7 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 				m.Name = m.ID
 			}
 			m.Headers = mergeHeaders(p.Headers, m.Headers)
-			if m.Compat.OpenAIResponses == nil {
-				m.Compat = cloneCompat(p.Compat)
-			}
+			m.Compat = mergeCompat(p.Compat, m.Compat)
 			m.Provider = p.ID
 			byKey[modelKey(m.Provider, m.ID)] = m
 		}
@@ -950,19 +948,30 @@ func decodeCompat(raw json.RawMessage, owner string) (provider.ModelCompat, erro
 	}
 	for key := range object {
 		switch key {
-		case "supportsDeveloperRole", "sessionAffinityFormat", "supportsLongCacheRetention", "supportsStrictMode", "supportsOpenAIGrammarTools", "supportsToolSearch", "supportsExplicitPromptCacheMode":
+		case "supportsStore", "supportsDeveloperRole", "supportsReasoningEffort", "supportsUsageInStreaming", "supportsFinishReason", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult", "requiresThinkingAsText", "requiresReasoningContentOnAssistantMessages", "thinkingFormat", "supportsOpenAIGrammarTools", "supportsStrictMode", "sendSessionAffinityHeaders", "sessionAffinityFormat", "supportsLongCacheRetention", "supportsToolSearch", "supportsExplicitPromptCacheMode":
 		default:
 			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat contains an unsupported field"}
 		}
 	}
 	var wire struct {
-		SupportsDeveloperRole           *bool   `json:"supportsDeveloperRole"`
-		SessionAffinityFormat           *string `json:"sessionAffinityFormat"`
-		SupportsLongCacheRetention      *bool   `json:"supportsLongCacheRetention"`
-		SupportsStrictMode              *bool   `json:"supportsStrictMode"`
-		SupportsOpenAIGrammarTools      *bool   `json:"supportsOpenAIGrammarTools"`
-		SupportsToolSearch              *bool   `json:"supportsToolSearch"`
-		SupportsExplicitPromptCacheMode *bool   `json:"supportsExplicitPromptCacheMode"`
+		SupportsStore                               *bool   `json:"supportsStore"`
+		SupportsDeveloperRole                       *bool   `json:"supportsDeveloperRole"`
+		SupportsReasoningEffort                     *bool   `json:"supportsReasoningEffort"`
+		SupportsUsageInStreaming                    *bool   `json:"supportsUsageInStreaming"`
+		SupportsFinishReason                        *bool   `json:"supportsFinishReason"`
+		MaxTokensField                              *string `json:"maxTokensField"`
+		RequiresToolResultName                      *bool   `json:"requiresToolResultName"`
+		RequiresAssistantAfterToolResult            *bool   `json:"requiresAssistantAfterToolResult"`
+		RequiresThinkingAsText                      *bool   `json:"requiresThinkingAsText"`
+		RequiresReasoningContentOnAssistantMessages *bool   `json:"requiresReasoningContentOnAssistantMessages"`
+		ThinkingFormat                              *string `json:"thinkingFormat"`
+		SendSessionAffinityHeaders                  *bool   `json:"sendSessionAffinityHeaders"`
+		SessionAffinityFormat                       *string `json:"sessionAffinityFormat"`
+		SupportsLongCacheRetention                  *bool   `json:"supportsLongCacheRetention"`
+		SupportsStrictMode                          *bool   `json:"supportsStrictMode"`
+		SupportsOpenAIGrammarTools                  *bool   `json:"supportsOpenAIGrammarTools"`
+		SupportsToolSearch                          *bool   `json:"supportsToolSearch"`
+		SupportsExplicitPromptCacheMode             *bool   `json:"supportsExplicitPromptCacheMode"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
@@ -970,7 +979,20 @@ func decodeCompat(raw json.RawMessage, owner string) (provider.ModelCompat, erro
 	if wire.SessionAffinityFormat != nil && *wire.SessionAffinityFormat != "openai" && *wire.SessionAffinityFormat != "openai-nosession" && *wire.SessionAffinityFormat != "openrouter" {
 		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid sessionAffinityFormat"}
 	}
-	return provider.ModelCompat{OpenAIResponses: &provider.OpenAIResponsesCompat{SupportsDeveloperRole: wire.SupportsDeveloperRole, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SupportsStrictMode: wire.SupportsStrictMode, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsToolSearch: wire.SupportsToolSearch, SupportsExplicitPromptCacheMode: wire.SupportsExplicitPromptCacheMode}}, nil
+	if wire.MaxTokensField != nil && *wire.MaxTokensField != "max_completion_tokens" && *wire.MaxTokensField != "max_tokens" {
+		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid maxTokensField"}
+	}
+	if wire.ThinkingFormat != nil {
+		switch *wire.ThinkingFormat {
+		case "openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling":
+		default:
+			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid thinkingFormat"}
+		}
+	}
+	return provider.ModelCompat{
+		OpenAIResponses:   &provider.OpenAIResponsesCompat{SupportsDeveloperRole: wire.SupportsDeveloperRole, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SupportsStrictMode: wire.SupportsStrictMode, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsToolSearch: wire.SupportsToolSearch, SupportsExplicitPromptCacheMode: wire.SupportsExplicitPromptCacheMode},
+		OpenAICompletions: &provider.OpenAICompletionsCompat{SupportsStore: wire.SupportsStore, SupportsDeveloperRole: wire.SupportsDeveloperRole, SupportsReasoningEffort: wire.SupportsReasoningEffort, SupportsUsageInStreaming: wire.SupportsUsageInStreaming, SupportsFinishReason: wire.SupportsFinishReason, MaxTokensField: wire.MaxTokensField, RequiresToolResultName: wire.RequiresToolResultName, RequiresAssistantAfterToolResult: wire.RequiresAssistantAfterToolResult, RequiresThinkingAsText: wire.RequiresThinkingAsText, RequiresReasoningContentOnAssistantMessages: wire.RequiresReasoningContentOnAssistantMessages, ThinkingFormat: wire.ThinkingFormat, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsStrictMode: wire.SupportsStrictMode, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention},
+	}, nil
 }
 
 func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMessage, bool, error) {
@@ -1365,9 +1387,6 @@ func cloneThinkingMap(v map[provider.ThinkingLevel]*string) map[provider.Thinkin
 	return out
 }
 func cloneCompat(v provider.ModelCompat) provider.ModelCompat {
-	if v.OpenAIResponses == nil {
-		return provider.ModelCompat{}
-	}
 	clone := func(value *bool) *bool {
 		if value == nil {
 			return nil
@@ -1375,18 +1394,99 @@ func cloneCompat(v provider.ModelCompat) provider.ModelCompat {
 		copy := *value
 		return &copy
 	}
-	return provider.ModelCompat{OpenAIResponses: &provider.OpenAIResponsesCompat{
-		SupportsDeveloperRole: clone(v.OpenAIResponses.SupportsDeveloperRole), SupportsStrictMode: clone(v.OpenAIResponses.SupportsStrictMode),
-		SupportsLongCacheRetention: clone(v.OpenAIResponses.SupportsLongCacheRetention), SupportsOpenAIGrammarTools: clone(v.OpenAIResponses.SupportsOpenAIGrammarTools),
-		SessionAffinityFormat: func() *string {
-			if v.OpenAIResponses.SessionAffinityFormat == nil {
-				return nil
-			}
-			copy := *v.OpenAIResponses.SessionAffinityFormat
-			return &copy
-		}(),
-		SupportsToolSearch: clone(v.OpenAIResponses.SupportsToolSearch), SupportsExplicitPromptCacheMode: clone(v.OpenAIResponses.SupportsExplicitPromptCacheMode),
-	}}
+	result := provider.ModelCompat{}
+	if v.OpenAIResponses != nil {
+		result.OpenAIResponses = &provider.OpenAIResponsesCompat{
+			SupportsDeveloperRole: clone(v.OpenAIResponses.SupportsDeveloperRole), SupportsStrictMode: clone(v.OpenAIResponses.SupportsStrictMode),
+			SupportsLongCacheRetention: clone(v.OpenAIResponses.SupportsLongCacheRetention), SupportsOpenAIGrammarTools: clone(v.OpenAIResponses.SupportsOpenAIGrammarTools),
+			SessionAffinityFormat: func() *string {
+				if v.OpenAIResponses.SessionAffinityFormat == nil {
+					return nil
+				}
+				copy := *v.OpenAIResponses.SessionAffinityFormat
+				return &copy
+			}(),
+			SupportsToolSearch: clone(v.OpenAIResponses.SupportsToolSearch), SupportsExplicitPromptCacheMode: clone(v.OpenAIResponses.SupportsExplicitPromptCacheMode),
+		}
+	}
+	if v.OpenAICompletions != nil {
+		result.OpenAICompletions = &provider.OpenAICompletionsCompat{
+			SupportsStore: clone(v.OpenAICompletions.SupportsStore), SupportsDeveloperRole: clone(v.OpenAICompletions.SupportsDeveloperRole), SupportsReasoningEffort: clone(v.OpenAICompletions.SupportsReasoningEffort), SupportsUsageInStreaming: clone(v.OpenAICompletions.SupportsUsageInStreaming), SupportsFinishReason: clone(v.OpenAICompletions.SupportsFinishReason),
+			MaxTokensField: func() *string {
+				if v.OpenAICompletions.MaxTokensField == nil {
+					return nil
+				}
+				x := *v.OpenAICompletions.MaxTokensField
+				return &x
+			}(), RequiresToolResultName: clone(v.OpenAICompletions.RequiresToolResultName), RequiresAssistantAfterToolResult: clone(v.OpenAICompletions.RequiresAssistantAfterToolResult), RequiresThinkingAsText: clone(v.OpenAICompletions.RequiresThinkingAsText), RequiresReasoningContentOnAssistantMessages: clone(v.OpenAICompletions.RequiresReasoningContentOnAssistantMessages),
+			ThinkingFormat: func() *string {
+				if v.OpenAICompletions.ThinkingFormat == nil {
+					return nil
+				}
+				x := *v.OpenAICompletions.ThinkingFormat
+				return &x
+			}(), SupportsOpenAIGrammarTools: clone(v.OpenAICompletions.SupportsOpenAIGrammarTools), SupportsStrictMode: clone(v.OpenAICompletions.SupportsStrictMode), SendSessionAffinityHeaders: clone(v.OpenAICompletions.SendSessionAffinityHeaders), SessionAffinityFormat: func() *string {
+				if v.OpenAICompletions.SessionAffinityFormat == nil {
+					return nil
+				}
+				x := *v.OpenAICompletions.SessionAffinityFormat
+				return &x
+			}(), SupportsLongCacheRetention: clone(v.OpenAICompletions.SupportsLongCacheRetention),
+		}
+	}
+	return result
+}
+
+func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
+	result := cloneCompat(base)
+	copyBool := func(target **bool, value *bool) {
+		if value != nil {
+			copy := *value
+			*target = &copy
+		}
+	}
+	copyString := func(target **string, value *string) {
+		if value != nil {
+			copy := *value
+			*target = &copy
+		}
+	}
+	if value := override.OpenAIResponses; value != nil {
+		if result.OpenAIResponses == nil {
+			result.OpenAIResponses = &provider.OpenAIResponsesCompat{}
+		}
+		target := result.OpenAIResponses
+		copyBool(&target.SupportsDeveloperRole, value.SupportsDeveloperRole)
+		copyBool(&target.SupportsLongCacheRetention, value.SupportsLongCacheRetention)
+		copyBool(&target.SupportsStrictMode, value.SupportsStrictMode)
+		copyBool(&target.SupportsOpenAIGrammarTools, value.SupportsOpenAIGrammarTools)
+		copyBool(&target.SupportsToolSearch, value.SupportsToolSearch)
+		copyBool(&target.SupportsExplicitPromptCacheMode, value.SupportsExplicitPromptCacheMode)
+		copyString(&target.SessionAffinityFormat, value.SessionAffinityFormat)
+	}
+	if value := override.OpenAICompletions; value != nil {
+		if result.OpenAICompletions == nil {
+			result.OpenAICompletions = &provider.OpenAICompletionsCompat{}
+		}
+		target := result.OpenAICompletions
+		copyBool(&target.SupportsStore, value.SupportsStore)
+		copyBool(&target.SupportsDeveloperRole, value.SupportsDeveloperRole)
+		copyBool(&target.SupportsReasoningEffort, value.SupportsReasoningEffort)
+		copyBool(&target.SupportsUsageInStreaming, value.SupportsUsageInStreaming)
+		copyBool(&target.SupportsFinishReason, value.SupportsFinishReason)
+		copyString(&target.MaxTokensField, value.MaxTokensField)
+		copyBool(&target.RequiresToolResultName, value.RequiresToolResultName)
+		copyBool(&target.RequiresAssistantAfterToolResult, value.RequiresAssistantAfterToolResult)
+		copyBool(&target.RequiresThinkingAsText, value.RequiresThinkingAsText)
+		copyBool(&target.RequiresReasoningContentOnAssistantMessages, value.RequiresReasoningContentOnAssistantMessages)
+		copyString(&target.ThinkingFormat, value.ThinkingFormat)
+		copyBool(&target.SupportsOpenAIGrammarTools, value.SupportsOpenAIGrammarTools)
+		copyBool(&target.SupportsStrictMode, value.SupportsStrictMode)
+		copyBool(&target.SendSessionAffinityHeaders, value.SendSessionAffinityHeaders)
+		copyString(&target.SessionAffinityFormat, value.SessionAffinityFormat)
+		copyBool(&target.SupportsLongCacheRetention, value.SupportsLongCacheRetention)
+	}
+	return result
 }
 func cloneModel(m Model) Model {
 	m.Headers = cloneHeaders(m.Headers)

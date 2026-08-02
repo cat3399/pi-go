@@ -25,6 +25,7 @@ import (
 const (
 	openAIProviderID     = provider.OpenAIProviderID
 	openAIResponsesAPI   = provider.OpenAIResponsesAPI
+	openAICompletionsAPI = provider.OpenAICompletionsAPI
 	defaultOpenAIModel   = "gpt-5.5"
 	agentDirEnvironment  = "PI_CODING_AGENT_DIR"
 	openAIKeyEnvironment = "OPENAI_API_KEY"
@@ -163,7 +164,7 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
 	}
-	if model.Provider() != openAIProviderID || model.API() != openAIResponsesAPI {
+	if model.Provider() != openAIProviderID || (model.API() != openAIResponsesAPI && model.API() != openAICompletionsAPI) {
 		return Dependencies{}, fmt.Errorf("%w: selected provider/API is not supported by this production assembly", ErrUnsupportedProductionValue)
 	}
 	configured, _ := catalog.Provider(model.Provider())
@@ -181,7 +182,13 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: initialize OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
 	}
-	router, err := provider.NewModelRouter([]provider.ProviderRegistration{{ID: openAIProviderID, Adapters: map[string]provider.Provider{provider.OpenAIResponsesAPI: implementation}}})
+	completions, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: modelConfig.baseURL, APIKey: resolvedAuth.APIKey, Client: config.OpenAIHTTPClient, Clock: config.OpenAIClock,
+	})
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: initialize OpenAI Chat Completions provider: %w", ErrInvalidProductionConfig, err)
+	}
+	router, err := provider.NewModelRouter([]provider.ProviderRegistration{{ID: openAIProviderID, Adapters: map[string]provider.Provider{provider.OpenAIResponsesAPI: implementation, provider.OpenAICompletionsAPI: completions}}})
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: initialize provider router: %w", ErrInvalidProductionConfig, err)
 	}

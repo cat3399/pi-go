@@ -155,6 +155,30 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 	}
 }
 
+func TestRunProductionRoutesOpenAIChatCompletionsModel(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	capture := &capturedProductionRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := capture.record(r); err != nil {
+			t.Errorf("record: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"completion answer"},"finish_reason":null}]}`+"\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	key := "key"
+	writeModelsJSON(t, agentDir, server.URL+"/v1", &key, map[string]any{"api": "openai-completions"})
+	config := productionTestConfig(workingDir, agentDir, nil)
+	var stdout, stderr bytes.Buffer
+	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-5.5", "--session", filepath.Join(workingDir, "session.jsonl"), "-p", "hello"}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "completion answer\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	request := capture.snapshot()
+	if request.path != "/v1/chat/completions" || request.payload["stream"] != true {
+		t.Fatalf("request=%#v", request)
+	}
+}
+
 func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -439,17 +463,11 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, err := llm.NewThinkingBlock("parallel plan", &llm.OpenAIResponsesReasoning{
-		ItemID:           "rs_integrated",
-		EncryptedContent: "integrated-cipher",
-	})
+	reasoning, err := llm.NewThinkingBlockWithSignature("parallel plan", `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher"}`, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	commentary, err := llm.NewTextBlockWithReplay("starting both tools", &llm.TextReplay{
-		MessageID: "msg_integrated",
-		Phase:     "commentary",
-	})
+	commentary, err := llm.NewTextBlockWithSignature("starting both tools", `{"v":1,"id":"msg_integrated","phase":"commentary"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +484,7 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 		API:      provider.OpenAIResponsesAPI,
 		Model:    "gpt-rich-tools",
 	}
-	assistant, err := llm.NewAssistantToolUseMessageWithReplay(
+	assistant, err := llm.NewAssistantToolUseMessageWithMetadata(
 		[]llm.AssistantBlock{reasoning, commentary, slowCall, fastCall},
 		llm.Usage{},
 		productionTestTime,
@@ -484,15 +502,12 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignReasoning, err := llm.NewThinkingBlock("foreign readable plan", &llm.OpenAIResponsesReasoning{
-		ItemID:           "rs_foreign",
-		EncryptedContent: "foreign-cipher",
-	})
+	foreignReasoning, err := llm.NewThinkingBlockWithSignature("foreign readable plan", `{"type":"reasoning","id":"rs_foreign","encrypted_content":"foreign-cipher"}`, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	foreignProvenance := llm.AssistantProvenance{Provider: "anthropic", API: "anthropic-messages", Model: "claude-test"}
-	foreignAssistant, err := llm.NewAssistantRichMessageWithReplay(
+	foreignAssistant, err := llm.NewAssistantRichMessageWithMetadata(
 		[]llm.AssistantBlock{foreignReasoning},
 		llm.FinishStop,
 		llm.Usage{},
@@ -731,8 +746,8 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 	if _, ok := messages[1].(llm.AssistantRichMessage); !ok {
 		t.Fatalf("first assistant=%T", messages[1])
 	}
-	if replay, ok := messages[1].(llm.AssistantRichMessage).OpenAIResponsesMetadata(); !ok || replay.RawStopReason != "completed" {
-		t.Fatalf("response replay=%#v", replay)
+	if response, ok := messages[1].(llm.AssistantRichMessage).ResponseMetadata(); !ok || response.RawStopReason != "completed" {
+		t.Fatalf("response metadata=%#v", response)
 	}
 }
 

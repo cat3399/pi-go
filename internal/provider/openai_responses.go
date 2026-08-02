@@ -207,7 +207,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		)
 		return newResponsesFailureStream(ctx, clock, FailureConfiguration, cause, "")
 	}
-	if p.configurationFail != nil && requestAPIKey(request, "") == "" {
+	if p.configurationFail != nil && requestAPIKey(request, "") == "" && !completionsHasAuthorization(request.Model().Headers(), p.headers, request.StreamOptions().Headers) {
 		spec := *p.configurationFail
 		return newResponsesFailureStream(ctx, clock, spec.kind, spec.cause, spec.message)
 	}

@@ -513,7 +513,7 @@ func TestSerializeConversationAndEstimateRichMessagesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thinking, err := llm.NewThinkingBlock("reasoning", nil)
+	thinking, err := llm.NewThinkingBlock("reasoning")
 	if err != nil {
 		t.Fatal(err)
 	}

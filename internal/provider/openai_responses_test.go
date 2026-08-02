@@ -21,6 +21,33 @@ import (
 
 var responsesTestTime = time.Date(2026, time.August, 1, 16, 0, 0, 0, time.UTC)
 
+func TestOpenAIResponsesAcceptsRequestAuthorizationWithoutAPIKey(t *testing.T) {
+	model, err := provider.NewModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAIResponsesAPI, ID: "model", Headers: map[string]string{"Authorization": "Bearer header-key"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, err := provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", Client: responsesDoerFunc(func(incoming *http.Request) (*http.Response, error) {
+		if got := incoming.Header.Get("Authorization"); got != "Bearer header-key" {
+			t.Errorf("Authorization=%q", got)
+		}
+		return responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 1, "output_tokens": 0}}})), nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	if got := eventKinds(events); !reflect.DeepEqual(got, []string{"start", "done"}) {
+		t.Fatalf("events=%v", got)
+	}
+	if _, ok := terminal.(llm.AssistantTextMessage); !ok {
+		t.Fatalf("terminal=%T", terminal)
+	}
+}
+
 func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 	prior := mustTextTerminal(t, "prior answer")
 	request := mustResponsesRequest(t, "system", []llm.ConversationMessage{

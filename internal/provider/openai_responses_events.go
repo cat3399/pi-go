@@ -586,10 +586,11 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 			}
 			s.enqueueResponsesEvent(delta)
 		}
-		end, err := llm.NewTextEndEventWithReplay(slot.contentIndex, finalText, &llm.TextReplay{
-			MessageID: slot.itemID,
-			Phase:     slot.phase,
-		})
+		signature, err := encodeResponsesTextSignature(slot.itemID, slot.phase)
+		if err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		end, err := llm.NewTextEndEventWithSignature(slot.contentIndex, finalText, signature)
 		if err != nil {
 			return invalidResponsesEventFailure(err)
 		}
@@ -656,8 +657,11 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 			completedReasoning.plaintextContent = slot.text.String()
 			s.deferResponsesReasoningEnd(index, completedReasoning)
 		} else {
-			replay := &llm.OpenAIResponsesReasoning{ItemID: slot.itemID, EncryptedContent: event.Item.EncryptedContent}
-			block, err := llm.NewThinkingBlock(slot.text.String(), replay)
+			signature, err := encodeResponsesReasoningSignature(slot.itemID, event.Item.EncryptedContent, "", slot.text.String())
+			if err != nil {
+				return invalidResponsesEventFailure(err)
+			}
+			block, err := llm.NewThinkingBlockWithSignature(slot.text.String(), signature, false)
 			if err != nil {
 				return invalidResponsesEventFailure(err)
 			}
@@ -850,9 +854,9 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if reason == llm.FinishStop && s.sawFunctionCall {
 		reason = llm.FinishToolUse
 	}
-	replay := &llm.OpenAIResponsesResponse{ResponseID: event.Response.ID, RawStopReason: wantStatus}
+	response := &llm.AssistantResponseMetadata{ResponseID: event.Response.ID, RawStopReason: wantStatus}
 	provenance := &llm.AssistantProvenance{Provider: s.model.Provider(), API: s.model.API(), Model: s.model.ID()}
-	done, err := llm.NewDoneEventWithReplay(reason, usage, s.timestamp, provenance, replay)
+	done, err := llm.NewDoneEventWithMetadata(reason, usage, s.timestamp, provenance, response)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}

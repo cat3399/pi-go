@@ -35,9 +35,10 @@ type AssistantBlock interface {
 // ToolCallBlock preserves provider arguments as raw JSON object bytes. Typed
 // argument decoding belongs to the selected tool.
 type ToolCallBlock struct {
-	id        string
-	name      string
-	arguments []byte
+	id               string
+	name             string
+	arguments        []byte
+	thoughtSignature string
 }
 
 func NewToolCallBlock(id, name string, argumentsJSON []byte) (ToolCallBlock, error) {
@@ -46,6 +47,14 @@ func NewToolCallBlock(id, name string, argumentsJSON []byte) (ToolCallBlock, err
 		name:      name,
 		arguments: bytes.Clone(argumentsJSON),
 	}
+	if err := call.validate(); err != nil {
+		return ToolCallBlock{}, err
+	}
+	return call, nil
+}
+
+func NewToolCallBlockWithThoughtSignature(id, name string, argumentsJSON []byte, signature string) (ToolCallBlock, error) {
+	call := ToolCallBlock{id: id, name: name, arguments: bytes.Clone(argumentsJSON), thoughtSignature: signature}
 	if err := call.validate(); err != nil {
 		return ToolCallBlock{}, err
 	}
@@ -62,6 +71,9 @@ func (c ToolCallBlock) validate() error {
 	if !utf8.Valid(c.arguments) {
 		return fmt.Errorf("%w: arguments are not valid UTF-8", ErrInvalidToolCall)
 	}
+	if err := validateOpaqueSignature(c.thoughtSignature); err != nil {
+		return err
+	}
 
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(c.arguments, &object); err != nil || object == nil {
@@ -71,6 +83,10 @@ func (c ToolCallBlock) validate() error {
 		return fmt.Errorf("%w: arguments: %v", ErrInvalidToolCall, err)
 	}
 	return nil
+}
+
+func (c ToolCallBlock) ThoughtSignature() (string, bool) {
+	return c.thoughtSignature, c.thoughtSignature != ""
 }
 
 func (ToolCallBlock) assistantBlock() {}
@@ -97,24 +113,21 @@ type AssistantToolUseMessage struct {
 	content    []AssistantBlock
 	usage      Usage
 	timestamp  time.Time
-	responses  *OpenAIResponsesResponse
+	response   *AssistantResponseMetadata
 	provenance *AssistantProvenance
 }
 
-func NewAssistantToolUseMessageWithResponsesReplay(content []AssistantBlock, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantToolUseMessage, error) {
-	return NewAssistantToolUseMessageWithReplay(content, usage, timestamp, nil, replay)
-}
-func NewAssistantToolUseMessageWithReplay(content []AssistantBlock, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantToolUseMessage, error) {
+func NewAssistantToolUseMessageWithMetadata(content []AssistantBlock, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantToolUseMessage, error) {
 	m, err := NewAssistantToolUseMessage(content, usage, timestamp)
 	if err != nil {
 		return AssistantToolUseMessage{}, err
 	}
-	if replay != nil {
-		copy := *replay
+	if response != nil {
+		copy := *response
 		if err := copy.validate(); err != nil {
 			return AssistantToolUseMessage{}, err
 		}
-		m.responses = &copy
+		m.response = &copy
 	}
 	if provenance != nil {
 		copy := *provenance
@@ -187,24 +200,21 @@ type AssistantRichMessage struct {
 	finish     FinishReason
 	usage      Usage
 	timestamp  time.Time
-	responses  *OpenAIResponsesResponse
+	response   *AssistantResponseMetadata
 	provenance *AssistantProvenance
 }
 
-func NewAssistantRichMessageWithResponsesReplay(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantRichMessage, error) {
-	return NewAssistantRichMessageWithReplay(content, finish, usage, timestamp, nil, replay)
-}
-func NewAssistantRichMessageWithReplay(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantRichMessage, error) {
+func NewAssistantRichMessageWithMetadata(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantRichMessage, error) {
 	m, err := NewAssistantRichMessage(content, finish, usage, timestamp)
 	if err != nil {
 		return AssistantRichMessage{}, err
 	}
-	if replay != nil {
-		copy := *replay
+	if response != nil {
+		copy := *response
 		if err := copy.validate(); err != nil {
 			return AssistantRichMessage{}, err
 		}
-		m.responses = &copy
+		m.response = &copy
 	}
 	if provenance != nil {
 		copy := *provenance
@@ -243,8 +253,8 @@ func NewAssistantRichMessage(content []AssistantBlock, finish FinishReason, usag
 }
 func (m AssistantRichMessage) validate() error {
 	_, err := NewAssistantRichMessage(m.content, m.finish, m.usage, m.timestamp)
-	if err == nil && m.responses != nil {
-		err = m.responses.validate()
+	if err == nil && m.response != nil {
+		err = m.response.validate()
 	}
 	if err == nil && m.provenance != nil {
 		err = m.provenance.validate()
@@ -257,11 +267,11 @@ func (m AssistantRichMessage) AssistantProvenance() (AssistantProvenance, bool) 
 	}
 	return *m.provenance, true
 }
-func (m AssistantRichMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
-	if m.responses == nil {
-		return OpenAIResponsesResponse{}, false
+func (m AssistantRichMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if m.response == nil {
+		return AssistantResponseMetadata{}, false
 	}
-	return *m.responses, true
+	return *m.response, true
 }
 func (AssistantRichMessage) Role() Role { return RoleAssistant }
 func (m AssistantRichMessage) Blocks() []AssistantBlock {
@@ -330,8 +340,8 @@ func (m ToolResultContentMessage) Details() json.RawMessage { return bytes.Clone
 
 func (m AssistantToolUseMessage) validate() error {
 	_, err := NewAssistantToolUseMessage(m.content, m.usage, m.timestamp)
-	if err == nil && m.responses != nil {
-		err = m.responses.validate()
+	if err == nil && m.response != nil {
+		err = m.response.validate()
 	}
 	if err == nil && m.provenance != nil {
 		err = m.provenance.validate()
@@ -344,11 +354,11 @@ func (m AssistantToolUseMessage) AssistantProvenance() (AssistantProvenance, boo
 	}
 	return *m.provenance, true
 }
-func (m AssistantToolUseMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
-	if m.responses == nil {
-		return OpenAIResponsesResponse{}, false
+func (m AssistantToolUseMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if m.response == nil {
+		return AssistantResponseMetadata{}, false
 	}
-	return *m.responses, true
+	return *m.response, true
 }
 
 func (AssistantToolUseMessage) Role() Role {

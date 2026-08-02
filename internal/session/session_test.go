@@ -52,21 +52,23 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	thinking, err := llm.NewThinkingBlock("plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "cipher"})
+	reasoningSignature := `{"type":"reasoning","id":"rs_1","encrypted_content":"cipher"}`
+	thinking, err := llm.NewThinkingBlockWithSignature("plan", reasoningSignature, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, err := llm.NewTextBlockWithReplay("done", &llm.TextReplay{MessageID: "msg_1", Phase: "final_answer"})
+	textSignature := `{"v":1,"id":"msg_1","phase":"final_answer"}`
+	answer, err := llm.NewTextBlockWithSignature("done", textSignature)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantRichMessageWithReplay(
+	assistant, err := llm.NewAssistantRichMessageWithMetadata(
 		[]llm.AssistantBlock{thinking, answer},
 		llm.FinishStop,
 		llm.Usage{},
 		time.UnixMilli(2),
 		&llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model},
-		nil,
+		&llm.AssistantResponseMetadata{ResponseID: "resp_1", ResponseModel: "resolved-model", RawStopReason: "completed"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -100,24 +102,28 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 		t.Fatalf("image=%v", got)
 	}
 	storedAssistant := messages[1].(llm.AssistantRichMessage).Blocks()
-	replay, ok := storedAssistant[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
-	if !ok || replay.ItemID != "rs_1" || replay.EncryptedContent != "cipher" {
+	replay, ok := storedAssistant[0].(llm.ThinkingBlock).ThinkingSignature()
+	if !ok || replay != reasoningSignature {
 		t.Fatalf("reasoning=%#v", storedAssistant[0])
 	}
-	signature, ok := storedAssistant[1].(llm.TextBlock).TextReplay()
-	if !ok || signature.MessageID != "msg_1" || signature.Phase != "final_answer" {
+	signature, ok := storedAssistant[1].(llm.TextBlock).TextSignature()
+	if !ok || signature != textSignature {
 		t.Fatalf("text=%#v", storedAssistant[1])
 	}
 	provenance, ok := messages[1].(llm.AssistantRichMessage).AssistantProvenance()
 	if !ok || provenance != (llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model}) {
 		t.Fatalf("assistant provenance = (%#v, %t)", provenance, ok)
 	}
+	if response, ok := messages[1].(llm.AssistantRichMessage).ResponseMetadata(); !ok || response != (llm.AssistantResponseMetadata{ResponseID: "resp_1", ResponseModel: "resolved-model", RawStopReason: "completed"}) {
+		t.Fatalf("assistant response metadata = (%#v, %t)", response, ok)
+	}
 	raw, err := os.ReadFile(filepath.Join(directory, "rich.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(raw, []byte(`\"v\":1,\"id\":\"msg_1\",\"phase\":\"final_answer\"`)) ||
-		!bytes.Contains(raw, []byte(`\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"cipher\"`)) {
+		!bytes.Contains(raw, []byte(`\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"cipher\"`)) ||
+		!bytes.Contains(raw, []byte(`"responseModel":"resolved-model"`)) {
 		t.Fatalf("session did not use typed v3 replay envelopes: %s", raw)
 	}
 }
@@ -132,7 +138,7 @@ func TestAppendRejectsAssistantMessageProvenanceMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := llm.NewAssistantTextMessageWithReplay(
+	message, err := llm.NewAssistantTextMessageWithMetadata(
 		[]llm.TextBlock{mustTextBlock(t, "answer")},
 		llm.FinishStop,
 		llm.Usage{},
@@ -174,7 +180,7 @@ func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = transcript.Close() })
-			partial, err := llm.NewTextBlockWithReplay("partial", &llm.TextReplay{MessageID: "msg_partial", Phase: "commentary"})
+			partial, err := llm.NewTextBlockWithSignature("partial", `{"v":1,"id":"msg_partial","phase":"commentary"}`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -190,8 +196,8 @@ func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
 				t.Fatalf("failed assistant persisted replay metadata: %s", entry.RawJSON())
 			}
 			stored := transcript.Context().Messages()[0].(llm.AssistantFailureMessage)
-			if replay, ok := stored.Blocks()[0].(llm.TextBlock).TextReplay(); ok {
-				t.Fatalf("failed assistant projected replay metadata: %#v", replay)
+			if signature, ok := stored.Blocks()[0].(llm.TextBlock).TextSignature(); ok {
+				t.Fatalf("failed assistant projected signature: %q", signature)
 			}
 			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
 				t.Fatalf("locally encoded failure diagnostics = %#v", diagnostics)

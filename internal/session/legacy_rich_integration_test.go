@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,14 +81,14 @@ func TestLegacyV2MigrationPreservesRichRawDataAndWriterSafety(t *testing.T) {
 	if len(blocks) != 2 || blocks[0].(llm.ThinkingBlock).Thinking() != "visible plan" || blocks[1].(llm.TextBlock).Text() != "future answer" {
 		t.Fatalf("migrated safe rich blocks = %#v", blocks)
 	}
-	if replay, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay(); ok {
-		t.Fatalf("foreign reasoning signature became replay: %#v", replay)
+	if signature, ok := blocks[0].(llm.ThinkingBlock).ThinkingSignature(); !ok || signature != "anthropic-opaque-secret" {
+		t.Fatalf("foreign reasoning signature = (%q, %t)", signature, ok)
 	}
-	if replay, ok := blocks[1].(llm.TextBlock).TextReplay(); ok {
-		t.Fatalf("future foreign text signature became replay: %#v", replay)
+	if signature, ok := blocks[1].(llm.TextBlock).TextSignature(); !ok || signature != `{"v":9,"id":"msg_future","phase":"future_phase"}` {
+		t.Fatalf("future foreign text signature = (%q, %t)", signature, ok)
 	}
-	if replay, ok := assistant.OpenAIResponsesMetadata(); ok {
-		t.Fatalf("foreign assistant response metadata became replay: %#v", replay)
+	if response, ok := assistant.ResponseMetadata(); ok {
+		t.Fatalf("unexpected assistant response metadata: %#v", response)
 	}
 	var unsafe, unknown int
 	for _, diagnostic := range projected.Diagnostics() {
@@ -98,7 +99,7 @@ func TestLegacyV2MigrationPreservesRichRawDataAndWriterSafety(t *testing.T) {
 			unknown++
 		}
 	}
-	if unsafe != 2 || unknown != 1 {
+	if unsafe != 0 || unknown != 1 {
 		t.Fatalf("migrated rich diagnostics = %#v", projected.Diagnostics())
 	}
 
@@ -164,11 +165,11 @@ func TestV3RichOpenAppendNeverEntersLegacyRewrite(t *testing.T) {
 		t.Fatalf("v3 Open entered migration rewrite: %v\n%s", err, dataAfterOpen)
 	}
 	assistant := transcript.BuildContext().Messages()[0].(llm.AssistantRichMessage)
-	if replay, ok := assistant.Blocks()[0].(llm.ThinkingBlock).OpenAIResponsesReplay(); !ok || replay.ItemID != "rs_current" || replay.EncryptedContent != "cipher" {
-		t.Fatalf("v3 reasoning replay = (%#v, %t)", replay, ok)
+	if signature, ok := assistant.Blocks()[0].(llm.ThinkingBlock).ThinkingSignature(); !ok || signature != `{"type":"reasoning","id":"rs_current","encrypted_content":"cipher"}` {
+		t.Fatalf("v3 reasoning signature = (%q, %t)", signature, ok)
 	}
-	if replay, ok := assistant.Blocks()[1].(llm.TextBlock).TextReplay(); !ok || replay.MessageID != "msg_current" || replay.Phase != "final_answer" {
-		t.Fatalf("v3 text replay = (%#v, %t)", replay, ok)
+	if signature, ok := assistant.Blocks()[1].(llm.TextBlock).TextSignature(); !ok || signature != `{"v":1,"id":"msg_current","phase":"final_answer"}` {
+		t.Fatalf("v3 text signature = (%q, %t)", signature, ok)
 	}
 	if _, err := transcript.Append(context.Background(), mustUserMessage(t, "continue", time.UnixMilli(2)), AppendOptions{}); err != nil {
 		t.Fatal(err)
@@ -234,7 +235,7 @@ func TestRecoverTrailingPartialKeepsRichSelectedBranch(t *testing.T) {
 	if got := assistant.Blocks()[1].(llm.TextBlock).Text(); got != "selected answer" {
 		t.Fatalf("recovered rich tail text = %q", got)
 	}
-	if replay, ok := assistant.Blocks()[0].(llm.ThinkingBlock).OpenAIResponsesReplay(); !ok || replay.ItemID != "rs_selected" {
-		t.Fatalf("recovered reasoning replay = (%#v, %t)", replay, ok)
+	if signature, ok := assistant.Blocks()[0].(llm.ThinkingBlock).ThinkingSignature(); !ok || !strings.Contains(signature, `"id":"rs_selected"`) {
+		t.Fatalf("recovered reasoning signature = (%q, %t)", signature, ok)
 	}
 }

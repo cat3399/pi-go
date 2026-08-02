@@ -84,26 +84,27 @@ func (b ImageBlock) Source() ImageSource { return b.source }
 func (b ImageBlock) Data() []byte        { return bytes.Clone(b.data) }
 func (b ImageBlock) URL() string         { return b.url }
 
-// OpenAIResponsesReasoning is the deliberately small replay envelope needed
-// for store:false Responses continuations. It does not carry an SDK item or
-// arbitrary raw JSON. EncryptedContent is opaque and must never be logged.
-type OpenAIResponsesReasoning struct {
-	ItemID           string
-	EncryptedContent string
-	// PlaintextContent is the complete reasoning item for Responses-compatible
-	// endpoints which require replay as `content` rather than OpenAI's opaque
-	// encrypted_content. It is never inferred from provider identity.
-	PlaintextContent string
-	Redacted         bool
+// AssistantResponseMetadata contains optional provider-neutral identifiers
+// exposed by an upstream response. Adapters decide whether any field is
+// meaningful for replay; Agent and session storage only preserve it.
+type AssistantResponseMetadata struct {
+	ResponseID    string
+	ResponseModel string
+	RawStopReason string
 }
 
-// OpenAIResponsesResponse is the response-level portion of the replay
-// envelope. It deliberately excludes headers, body fragments, and SDK state.
-type OpenAIResponsesResponse struct{ ResponseID, RawStopReason string }
-
-func (r OpenAIResponsesResponse) validate() error {
-	if !utf8.ValidString(r.ResponseID) || !utf8.ValidString(r.RawStopReason) || len(r.ResponseID) > 256 || len(r.RawStopReason) > 128 {
-		return fmt.Errorf("%w: response replay metadata", ErrInvalidRichContent)
+func (r AssistantResponseMetadata) validate() error {
+	for _, field := range []struct {
+		value string
+		limit int
+	}{
+		{value: r.ResponseID, limit: 256},
+		{value: r.ResponseModel, limit: 512},
+		{value: r.RawStopReason, limit: 128},
+	} {
+		if !utf8.ValidString(field.value) || len(field.value) > field.limit {
+			return fmt.Errorf("%w: assistant response metadata", ErrInvalidRichContent)
+		}
 	}
 	return nil
 }
@@ -133,96 +134,65 @@ func (p AssistantProvenance) Matches(provider, api, model string) bool {
 	return p.Provider == provider && p.API == api && p.Model == model
 }
 
-func (r OpenAIResponsesReasoning) validate() error {
-	if !utf8.ValidString(r.ItemID) || strings.TrimSpace(r.ItemID) == "" || len(r.ItemID) > 256 {
-		return fmt.Errorf("%w: reasoning item id", ErrInvalidRichContent)
-	}
-	if !utf8.ValidString(r.EncryptedContent) || len(r.EncryptedContent) > 1<<20 {
-		return fmt.Errorf("%w: encrypted reasoning content", ErrInvalidRichContent)
-	}
-	if !utf8.ValidString(r.PlaintextContent) || len(r.PlaintextContent) > 1<<20 {
-		return fmt.Errorf("%w: plaintext reasoning content", ErrInvalidRichContent)
-	}
-	if r.EncryptedContent != "" && r.PlaintextContent != "" {
-		return fmt.Errorf("%w: ambiguous reasoning replay content", ErrInvalidRichContent)
-	}
-	return nil
-}
-
-// ThinkingBlock preserves readable reasoning plus the optional opaque OpenAI
-// replay handle. Empty text is legal only when a replay handle exists.
+// ThinkingBlock mirrors pi's provider-neutral thinking content. The signature
+// is an opaque adapter-owned string; Agent and session storage preserve it but
+// never branch on its wire shape. Empty text is legal only with a signature.
 type ThinkingBlock struct {
-	thinking string
-	replay   *OpenAIResponsesReasoning
+	thinking          string
+	thinkingSignature string
+	redacted          bool
 }
 
-func (ThinkingBlock) assistantBlock()          {}
-func (ThinkingBlock) Kind() AssistantBlockKind { return AssistantBlockThinking }
-func NewThinkingBlock(thinking string, replay *OpenAIResponsesReasoning) (ThinkingBlock, error) {
-	b := ThinkingBlock{thinking: thinking}
-	if replay != nil {
-		c := *replay
-		b.replay = &c
-	}
+func NewThinkingBlockWithSignature(thinking, signature string, redacted bool) (ThinkingBlock, error) {
+	b := ThinkingBlock{thinking: thinking, thinkingSignature: signature, redacted: redacted}
 	if err := b.validate(); err != nil {
 		return ThinkingBlock{}, err
 	}
 	return b, nil
 }
+
+func (ThinkingBlock) assistantBlock()          {}
+func (ThinkingBlock) Kind() AssistantBlockKind { return AssistantBlockThinking }
+func NewThinkingBlock(thinking string) (ThinkingBlock, error) {
+	return NewThinkingBlockWithSignature(thinking, "", false)
+}
 func (b ThinkingBlock) validate() error {
 	if !utf8.ValidString(b.thinking) {
 		return fmt.Errorf("%w: thinking is not UTF-8", ErrInvalidRichContent)
 	}
-	if b.replay != nil {
-		if err := b.replay.validate(); err != nil {
-			return err
-		}
+	if err := validateOpaqueSignature(b.thinkingSignature); err != nil {
+		return err
 	}
-	if b.thinking == "" && b.replay == nil {
+	if b.thinking == "" && b.thinkingSignature == "" {
 		return fmt.Errorf("%w: empty thinking without replay handle", ErrInvalidRichContent)
+	}
+	if b.redacted && b.thinkingSignature == "" {
+		return fmt.Errorf("%w: redacted thinking without signature", ErrInvalidRichContent)
 	}
 	return nil
 }
 func (b ThinkingBlock) Thinking() string { return b.thinking }
-func (b ThinkingBlock) OpenAIResponsesReplay() (OpenAIResponsesReasoning, bool) {
-	if b.replay == nil {
-		return OpenAIResponsesReasoning{}, false
-	}
-	return *b.replay, true
+func (b ThinkingBlock) ThinkingSignature() (string, bool) {
+	return b.thinkingSignature, b.thinkingSignature != ""
 }
+func (b ThinkingBlock) Redacted() bool { return b.redacted }
 
-// TextReplay is the typed message identity emitted by Responses. Phase is
-// constrained so a stored text block cannot smuggle arbitrary vendor fields.
-type TextReplay struct{ MessageID, Phase string }
-
-func (r TextReplay) validate() error {
-	if !utf8.ValidString(r.MessageID) || strings.TrimSpace(r.MessageID) == "" || len(r.MessageID) > 256 {
-		return fmt.Errorf("%w: text message id", ErrInvalidRichContent)
-	}
-	if r.Phase != "" && r.Phase != "commentary" && r.Phase != "final_answer" {
-		return fmt.Errorf("%w: text message phase", ErrInvalidRichContent)
+func validateOpaqueSignature(signature string) error {
+	if !utf8.ValidString(signature) || len(signature) > 2<<20 {
+		return fmt.Errorf("%w: invalid opaque content signature", ErrInvalidRichContent)
 	}
 	return nil
 }
 
-// NewTextBlockWithReplay retains the response message identity needed for a
-// stateless replay. NewTextBlock remains the normal no-metadata constructor.
-func NewTextBlockWithReplay(text string, replay *TextReplay) (TextBlock, error) {
-	b := TextBlock{text: text}
-	if replay != nil {
-		c := *replay
-		b.replay = &c
-	}
+func NewTextBlockWithSignature(text, signature string) (TextBlock, error) {
+	b := TextBlock{text: text, textSignature: signature}
 	if err := b.validate(); err != nil {
 		return TextBlock{}, err
 	}
 	return b, nil
 }
-func (b TextBlock) TextReplay() (TextReplay, bool) {
-	if b.replay == nil {
-		return TextReplay{}, false
-	}
-	return *b.replay, true
+func (b TextBlock) TextSignature() (string, bool) {
+	return b.textSignature, b.textSignature != ""
 }
 
 // UserContentBlock and ToolResultContentBlock prevent an image from being
