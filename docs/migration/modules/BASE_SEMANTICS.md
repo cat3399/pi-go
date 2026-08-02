@@ -1,6 +1,6 @@
 # M-BASE：基础语义 charter
 
-状态：`in-progress`（`M-BASE/v0.2-rich-content-replay`；v0.1 已复审）
+状态：`ported`（`M-BASE/v0.2-rich-content-replay`；`R-BASE-003` passed）
 
 首个里程碑：`M-BASE/v0.1-text-tool-stream`
 
@@ -123,7 +123,7 @@ response、任意 header/body、stack 和未经筛选的 diagnostic 不进入 do
 | `B-BASE-002` | tool call 与 tool result 的 ID、arguments、content 和 error 关联 | WF-001 | `ported` |
 | `B-BASE-003` | start/text events/done 的严格顺序、snapshot 与唯一 result | WF-001 | `ported` |
 | `B-BASE-004` | error/aborted、unexpected EOF、pending final 和 duplicate terminal 的失败语义 | WF-001 | `ported` |
-| `B-BASE-005` | immutable thinking/image、mixed assistant content 与受控 Responses replay metadata | production Responses replay | `in-progress` |
+| `B-BASE-005` | immutable thinking/image、mixed assistant content 与受控 Responses replay metadata | production Responses replay | `ported` |
 | `B-BASE-006` | provider cost 的单位、精度、舍入、total 与非法 raw number policy | 真实 provider pricing | `deferred` |
 
 `B-BASE-001` 是第一个实现 slice。随后在同一 module 内按
@@ -151,4 +151,5 @@ thinking 仅可降级为 text。session v3 只有明确 `openai/openai-responses
 对应 envelope 投影为 typed replay；foreign、malformed 与未来 metadata 原字节保留，但只投影
 无签名可读内容，redacted/opaque-only 内容省略并产生受控 diagnostic。
 
-完成实现不等同独立 review：本里程碑仍须由未参与者审查，不能覆盖 v0.1 的通过结论。
+`R-BASE-003` 已以 0 Blocker / 0 Major / 0 Minor 通过本里程碑。该结论只覆盖
+rich-content/replay contract；真实 image generation/resize/vision executor 仍延期。

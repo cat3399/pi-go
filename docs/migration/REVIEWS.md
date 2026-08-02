@@ -92,6 +92,27 @@
 - 验证：test、vet、build、race、5 秒 fuzz 均通过；覆盖率 85.1%。
 - 最终结论：`passed`，没有新的 Blocker、Major、correctness 或 data-race 问题。
 
+## R-BASE-003：M-BASE/v0.2 rich-content/replay 跨边界联合复审
+
+- 范围：`internal/llm` rich content、OpenAI Responses reasoning/text/image replay 与
+  `internal/session` v3 signature projection；实现和修订 commits 为 `3177e05`、`64909f9`、
+  `d56b469`，reviewer 未参与实现。
+- 首轮审查 `3177e05` 为 0 Blocker / 3 Major / 0 Minor：message ID/phase 必须保持 source
+  order，Azure terminal encrypted reasoning 必须按 item ID 回填，typed replay 必须精确 gate
+  assistant source provider/API/model；`64909f9` 关闭三项并补足定点回归。
+- 第二轮为 0 Blocker / 1 Major / 0 Minor：generic v3 `textSignature`/
+  `thinkingSignature` 不能无条件解释成 Responses envelope，否则 foreign opaque signature
+  会被误投影，malformed/future metadata 还会阻断 Open；`d56b469` 改为受控 provenance 解码、
+  foreign/future raw preservation 与 unsigned safe projection。
+- 最终验证：原三项 Major、Anthropic/Google opaque、future/malformed/current envelope、
+  fork/reopen、真实 PNG production replay、usage/error/cancel 定点测试通过，相关回归重复
+  20 次通过；累计 diff check、全仓 test/vet/build/race、全部 fuzz，以及 Linux arm64、
+  Windows amd64、Plan 9 amd64 build 与 test-binary compile 均通过。
+- 边界：foreign/future signature 只承诺原始字节保留和安全降级，provider-specific typed
+  replay 仍是后续 debt。`fa78b62` 的 provider/tools review commit 不在本分支祖先链，尚待
+  联合集成与复核；本审查不宣称 `B-PROVIDER-006` 或 WF-003 完成。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
 ## R-PROVIDER-001：M-PROVIDER/v0.1 首轮独立审查
 
 - 范围：`internal/provider`、其测试，以及 provider 消费所需的 `internal/llm` 扩展；

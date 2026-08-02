@@ -14,7 +14,7 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-BASE-002` | tool call 的 ID/name/raw arguments 与关联 ToolResult 保真且可验证 | `packages/ai/src/types.ts`；`packages/agent/test/agent-loop.test.ts` 的 `should handle tool calls and results` | `ported` | R-BASE-002 |
 | `B-BASE-003` | start/text start-delta-end/done 有序、snapshot 不回写、唯一 result | `packages/ai/test/faux-provider.test.ts` 的 `streams an exact event order for fixed-size chunks` | `ported` | R-BASE-002 |
 | `B-BASE-004` | error/aborted、unexpected EOF、pending final、duplicate terminal 都不能伪装成功 | `packages/ai/test/faux-provider.test.ts` pending/error cases；`packages/ai/test/openai-responses-terminal-event.test.ts` | `ported` | R-BASE-002 |
-| `B-BASE-005` | immutable thinking/image、mixed assistant content、typed Responses reasoning/text/response replay envelope；error/aborted 不重放 | `transform-messages.ts`、`openai-responses-shared.ts`、reasoning/message-id/image tests | `in-progress` | foreign/future v3 signature raw-preserve + unsigned safe projection fix applied；R-BASE-v0.2 independent rereview pending；真实 image resize/vision executor deferred |
+| `B-BASE-005` | immutable thinking/image、mixed assistant content、typed Responses reasoning/text/response replay envelope；error/aborted 不重放 | `transform-messages.ts`、`openai-responses-shared.ts`、reasoning/message-id/image tests | `ported` | R-BASE-003；foreign/future v3 signature raw-preserve + unsigned safe projection；真实 image generation/resize/vision executor deferred |
 | `B-BASE-006` | provider cost 的单位、精度、舍入、total 与非法 raw number policy | `packages/ai/src/types.ts` 只有宽 `number`；首 workflow 无消费证据 | `deferred` | 真实 provider pricing/catalog slice |
 
 ## M-PROVIDER
@@ -26,7 +26,7 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error、pre/mid cancel 形成唯一 terminal outcome | faux exhaustion/factory/error/abort tests | `ported` | R-PROVIDER-002 |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown provider 或缺 adapter 返回 error stream | `providers.test.ts`、`models-runtime.test.ts` | `deferred` | application model装配启动 |
 | `B-PROVIDER-005` | 标准 OpenAI Responses 基础 text/SSE 与 terminal handling | `openai-responses-shared.ts` 及 terminal-event tests | `ported` | R-PROVIDER-004；真实 credential smoke 与 production assembler 分开验收 |
-| `B-PROVIDER-006` | OpenAI Responses function schema、assistant/function-call + ToolResult replay、provenance-gated reasoning/text ID+phase replay、terminal encrypted backfill、source-order SSE reducer、images 与 partial/unknown failure | WF-003 | `in-progress` | M-AGENT/v0.1 single-call 接入；多 call dispatch 等 M-AGENT/v0.2；custom/cache/image executor deferred |
+| `B-PROVIDER-006` | OpenAI Responses function schema、assistant/function-call + ToolResult replay、provenance-gated reasoning/text ID+phase replay、terminal encrypted backfill、source-order SSE reducer、images 与 partial/unknown failure | WF-003 | `in-progress` | rich-content/replay 子集 R-BASE-003 passed；provider/tools `fa78b62` 联合集成尚待；custom/cache/image executor deferred |
 
 ## M-AGENT
 
@@ -50,7 +50,7 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-SESSION-002` | storage-first append，唯一 ID/parent chain；失败不推进 leaf | Harness JSONL append 与 session aggregate tests | `ported` | R-SESSION-002 |
 | `B-SESSION-003` | 关闭旧对象后按 path resume，重建 WF-001 四消息 context | `packages/agent/test/harness/session-backends.test.ts` 的 `writes headers and entries and reopens the aggregate`；coding session format | `ported` | R-SESSION-002 |
 | `B-SESSION-004` | pre-write failure 不改文件；write/sync failure 不推进 leaf、poison writer，并显式报告磁盘结果不确定 | 项目 data safety constraint；上游缺直接 fault test | `ported` | R-SESSION-002 |
-| `B-SESSION-005` | unknown header/entry/message/content round-trip，未知语义不进入 provider context | coding append-only behavior；Harness base-envelope parser | `ported` | R-SESSION-002 |
+| `B-SESSION-005` | unknown header/entry/message/content round-trip；foreign/future signature raw 保留，仅安全 unsigned 内容进入 provider context | coding append-only behavior；Harness base-envelope parser | `ported` | R-SESSION-002；rich signature projection R-BASE-003 |
 | `B-SESSION-006` | future version、middle malformed、trailing partial、duplicate/broken parent 拒绝并禁止 append | coding permissive tests；Harness strict tests | `ported` | R-SESSION-002 |
 | `B-SESSION-007` | 同 session concurrent append 串行成一条 parent chain | `packages/agent/test/harness/session-backends.test.ts` 的 `serializes concurrent appends into one parent chain` | `ported` | R-SESSION-002 |
 | `B-SESSION-008` | coding-agent v1/v2 自动迁移到 v3 | coding migration tests/fixtures | `deferred` | v0.1 v3 writer/reader 稳定 |

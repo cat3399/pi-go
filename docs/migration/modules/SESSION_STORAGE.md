@@ -148,7 +148,7 @@ Fixture 使用固定 clock/ID、脱敏内容并记录上游 commit。上游大�
 | `B-SESSION-002` | storage-first ordered append 与唯一 parent chain | WF-001 | `ported` |
 | `B-SESSION-003` | close 全部旧对象后按 path resume 并重建四消息 context | WF-001 | `ported` |
 | `B-SESSION-004` | pre-write failure 不改文件；write/sync failure 不推进 leaf、poison writer 并报告 commit unknown | WF-001 | `ported` |
-| `B-SESSION-005` | Open→Append 保持原 byte prefix；unknown raw 保留且 context 安全投影 | compatibility | `ported` |
+| `B-SESSION-005` | Open→Append 保持原 byte prefix；unknown/foreign/future signature raw 保留，只有受控 Responses envelope 与 unsigned readable content 安全投影 | compatibility | `ported` |
 | `B-SESSION-006` | future/corrupt/partial 与 unsupported tree shape 拒绝且文件不变 | recovery | `ported` |
 | `B-SESSION-007` | 同 session concurrent append 串行且通过 race test | recovery | `ported` |
 
@@ -163,6 +163,10 @@ Fixture 使用固定 clock/ID、脱敏内容并记录上游 commit。上游大�
 
 v1/v2 migration、tree/compaction 和 multi-process writer 仍是独立里程碑，不被线性
 v3 通过结论掩盖。
+
+v3 rich signature 的 raw-preservation、fork/reopen 与安全 context projection 另由
+`R-BASE-003` 复审通过；这不把 foreign provider signature 解释成 Responses metadata，
+也不替代未来 provider-specific replay adapter。
 
 ## M-SESSION/v0.2-tree-branch
 

@@ -113,7 +113,8 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 ## WF-003：production OpenAI single tool replay
 
-状态：`in-progress`（awaiting M-PROVIDER/M-TOOL/M-APP independent review）
+状态：`in-progress`（rich-content/replay 子集由 `R-BASE-003` 通过；provider/tools
+`fa78b62` 联合集成尚待）
 
 ~~~text
 production OpenAI request (built-in tool schemas)
@@ -124,4 +125,4 @@ production OpenAI request (built-in tool schemas)
   -> final assistant text / session
 ~~~
 
-本地 HTTP/SSE E2E 断言 request1 有 bash/filesystem schemas，call ID 与 `fc_*` item identity 正确归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。M-AGENT/v0.2 的 multi-call scheduler 是集成前提，不由本 workflow 宣称完成。
+本地 HTTP/SSE E2E 断言 request1 有 bash/filesystem schemas，call ID 与 `fc_*` item identity 正确归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。M-AGENT/v0.2 的 multi-call scheduler 是集成前提；`fa78b62` 未与当前 rich-content/replay 分支联合验证前，本 workflow 不宣称完成。

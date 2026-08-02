@@ -1,6 +1,7 @@
 # M-PROVIDER：AI 与 provider runtime charter
 
-状态：`in-progress`（`M-PROVIDER/v0.3-openai-tools-replay`；rich-content extension awaiting independent review，v0.1/v0.2 已复审）
+状态：`in-progress`（`M-PROVIDER/v0.3-openai-tools-replay`；rich-content/replay 子集由
+`R-BASE-003` 通过，provider/tools `fa78b62` 联合集成尚待；v0.1/v0.2 已复审）
 
 最近完成里程碑：`M-PROVIDER/v0.2-openai-responses-text`
 
@@ -139,3 +140,7 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 | ID | 行为 | Workflow | 状态 |
 | --- | --- | --- | --- |
 | `B-PROVIDER-006` | Responses function tool schema encoding、tool replay、strict SSE function-call reducer | WF-003 | `in-progress` |
+
+`R-BASE-003` 只关闭本行为中的 rich-content、provenance、source-order 与 terminal replay
+子集。`fa78b62` 不在当前分支祖先链；其 provider/tools review 证据尚待与本分支联合集成和
+复核，因此这里不把 `B-PROVIDER-006` 或 WF-003 标成完成。
