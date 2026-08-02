@@ -1,10 +1,83 @@
 # M-AGENT：Agent runtime charter
 
-状态：`ported`（`M-AGENT/v0.2-multi-tool-queues`；v0.1/v0.2 均已复审）
+状态：`ported`（`M-AGENT/v0.3-context-retry-lifecycle`；`R-AGENT-003` 最终 `passed`，0B/0M/0m）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
-最近完成里程碑：`M-AGENT/v0.2-multi-tool-queues`
+最近完成里程碑：`M-AGENT/v0.3-context-retry-lifecycle`
+
+## v0.3 context-retry-lifecycle
+
+### 负责
+
+- 每次 provider attempt 从 `Session.BuildContext` 的不可变 selected-leaf snapshot 取 context；
+  transform 仍只是 request-local projection，绝不回写 transcript；
+- 在 prompt/turn boundary、provider request 之前，以 `contextWindow - reserve` 判定自动压缩，
+  并调用既有 `Session.Compact` 的 snapshot/commit gate；`Agent.Compact` 提供同一 real
+  summarizer seam 的 idle/manual 入口；
+- active run 是 compaction、retry wait、provider、queue 与 terminal 的唯一 coordinator；所有
+  provider/storage/summarizer/sleeper 调用均在 coordinator mutex 外，`WaitForIdle` 要等到它们
+  及 observer settle；
+- 仅对 transport 与 408/409/425/429/5xx provider failures 做 bounded exponential retry；server
+  `Retry-After` 在 provider adapter 归一，并由 policy cap。cancel、auth/config/invalid request、
+  invalid response、tool 与 storage failure 不重试。
+- OpenAI HTTP 400 优先按 allowlisted error type/code 归一 `contextOverflow`；缺少结构化标识时，
+  message fallback 只接受已固定的 input/prompt-context 短语，并先排除 output/completion/max-output
+  与 parameter validation 语义。active run 最多调用一次既有 `Session.Compact`，随后重新
+  `BuildContext` 并请求；无法明确分类的普通 400 宁可不压缩/重试，第二次 overflow 成为唯一
+  final terminal，不能形成 compact loop。
+- `ContextSummarizer` 复用同一个 retry controller，对 transport/drop 与 408/409/425/429/5xx 做
+  独立且有限的可取消 retry；provider-owned observer 只传 normalized metadata，由 Agent 映射为
+  summarization-scoped lifecycle，provider 不反向依赖 Agent。summary attempts 全部失败时
+  `Session.Compact` 不 append checkpoint。
+
+### 关键不变量与取舍
+
+- `RetryPolicy.MaxAttempts` 包含首个请求。未 accepted 的 transient attempt 从不 append user、
+  assistant 或 tool durable record；只有最终 accepted terminal 进入 usage/transcript，因此 totals
+  不会因重试重复计数。stream 无 terminal 的 transport drop 也遵循这条规则。
+- threshold 自动 compaction 每个 logical provider turn 最多一次；明确 context-overflow 另有且仅有一次
+  compact-and-retry admission。每个 retry 都重新取得 immutable context snapshot。conflict/cancel/summary error/commit-unknown 均
+  fail-explicit，后者沿 Session poison quarantine 传播，不能重试或伪装为 provider failure。
+- steering/follow-up 可以在 compact/retry 期间入队，但只在既有 provider/tool boundary reserve；
+  因而它们不会进入已经发出的 summary/request，也不会跨 retry 造成重复 durable user entry。
+- 普通 turn 默认 retry 为一次请求（关闭重试）；summarizer 默认三次。共享 controller 的 jitter/sleep
+  seam 尊重 active cancel，`MaxRetryAfter==0` 明确归一为 60s 硬 cap，负 delay 拒绝配置。
+  `Retry-After` delta-seconds 仅接受 trim 后的 unsigned ASCII `1*DIGIT`；`+17`、`-0`、past/malformed
+  HTTP-date 不产生 delay。adapter 只分类/归一，仍不持有 Agent queue、Session 或 run ownership。
+- `retry_scheduled -> [retry_attempt] -> retry_finished` 是闭合 lifecycle：attempt 表示 request
+  reconstruction 已开始；wait 中 cancel 可以无 attempt，但 transform/request build/cancel 等任一早退都
+  必须产生唯一 finished。event 只暴露 normalized failure kind/status、attempt、delay/success/finish
+  reason，不携带 vendor message/cause。summarizer 使用独立的 `summarization_retry_*` scope，每个
+  scheduled retry 最终闭合 finished，cancel/exhaustion 也是 typed safe reason。
+- compaction start/settled 均携带 `manual`、`threshold` 或 `overflow` typed reason；#5217 的
+  `willRetry` 语义固定为 manual/threshold=false、overflow=true。manual failure 的
+  `CompactionSettled` 与唯一 `RunSettled` 使用同一个 safe Session sentinel。context-overflow 分类也
+  丢弃可能回显 request/secret 的原始 type/code/message，只保留稳定 safe category。
+
+### 验收与延期
+
+- Go integration fixture 驱动 real OpenAI Responses HTTP/SSE adapter：context 超阈值先 durable
+  summary，chunked transient stream drop 后 retry，最终 text success，断言 session 无重复 prompt/
+  assistant 且有一个 compaction checkpoint；另有 unit/race/fault gates。
+- 第二组 local HTTP/SSE fixture 覆盖 provider 400 overflow → summary durable → rebuilt request → success，
+  adversarial input/output/parameter 400 matrix、summarizer drop/503 retry scoped lifecycle、multi-retry
+  exhaustion no-write、second-overflow/ordinary-400 no-loop、Retry-After unsigned seconds/future-date/
+  signed/past/malformed/default cap/jitter/cancel，以及 retry wait 中 Abort/queue/WaitForIdle settlement。
+- 最终联合 oracle 在 trusted system prompt 下组合 rich reasoning/text、parallel multi-tool、source-order
+  durable replay 与第二 turn transient stream retry；两个 retry request 的 causal transcript 相同，
+  session tool results 不重复，Summarizer request 不广告 Agent tools。
+- manual/threshold/overflow compaction reason 与 willRetry 成对断言；manual summary failure、Abort 与
+  concurrent append stale conflict 均验证 settled/run-settled 唯一、safe 且无 checkpoint。普通 retry
+  还覆盖二次 transform/request reconstruction 失败和 redispatch 前 cancel 的 lifecycle 闭合。
+- 上游 coding-agent `AgentSession._checkCompaction` 的 pre-prompt threshold、overflow-triggered compact/
+  retry 与 `compaction` reason，以及 Harness compact/retry event intent 作为 policy 证据；Go 仍将 durable
+  snapshot/commit ownership 留在 `Session.Compact`，不复制第二套 session runtime。
+- 真实 credential smoke 仍显式延期；production CLI 尚未暴露 context window/retry/manual compact
+  flags，后续 M-APP 只负责配置/用户 surface，不得绕过本 coordinator 和 `Session.Compact`。
+- 不实现 TUI、tool wire replay、mixed length/tool terminal 或 Harness 独立 runtime；这些保持原有
+  deferred behavior。`R-AGENT-003` 仍只覆盖 `5d0099d`、`eff0ad7`、`a419519`；随后完成的
+  `c8d1d1c` + rich + context 最终 integration 不追溯扩张该 review 范围。
 
 ## v0.2 multi-tool queues
 

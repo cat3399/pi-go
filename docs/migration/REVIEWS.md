@@ -284,6 +284,33 @@
 - 最终结论：`passed`，0 Blocker / 0 Major / 0 Minor；`B-AGENT-010..014` 标为 `ported`，
   `T-AGENT-010..013` 标为 `strengthened`，WF-003 通过。
 
+## R-AGENT-003：M-AGENT/v0.3 context-retry-lifecycle 独立复审
+
+- 范围：`5d0099d` 的 threshold/manual/overflow compaction、provider/Summarizer bounded retry、
+  OpenAI classification/Retry-After 与 lifecycle 初版，以及修订 `eff0ad7`、`a419519`；reviewer 未参与实现。
+- 首轮结论：`changes-required`，0 Blocker / 3 Major / 2 Minor。`eff0ad7` 补齐 explicit overflow
+  compact-and-retry/no-loop、共享 retry controller/Retry-After、Summarizer bounded retry、secret-safe
+  lifecycle 与 no-duplicate/no-write 回归。
+- 第二轮结论：`changes-required`，0 Blocker / 3 Major / 3 Minor。message-only overflow admission
+  仍可能把 output/parameter 400 误当 input overflow；Summarizer retry 未显式映射到 Agent-scoped
+  lifecycle；compaction event 缺 #5217 typed reason；普通 retry 的 request reconstruction/cancel 早退
+  可能留下未闭合 scheduled；Retry-After delta 接受 signed decimal；manual Compact failure 的
+  `RunSettled` 未携带与 `CompactionSettled` 一致的 safe error。
+- `a419519` 将 400 分类改为 structured-first 和 input/prompt phrase allowlist，并以 output/max-output/
+  parameter adversarial matrix fail-closed；provider-owned `RetryObserver` 由 Agent 映射
+  `summarization_retry_scheduled/attempt/finished`，每个 scheduled 对 success/failure/cancel/exhaustion
+  闭合且不形成 provider→Agent 依赖；compaction start/settled 统一携带 manual/threshold/overflow 与
+  #5217 willRetry；普通 retry 将 attempt 固定在 request reconstruction 起点，并在 transform/build/
+  cancel 早退闭合 typed finished；delta-seconds 收紧为 unsigned ASCII `1*DIGIT`；manual summary
+  failure、Abort 与 concurrent stale conflict 的 compaction/run settlement 使用同一 safe Session
+  sentinel 且各自唯一。
+- 候选验证：全仓 test/vet/build/race、Agent/Provider 定点回归重复 20 次、Linux/Windows amd64 与
+  Darwin arm64 test compile，以及累计 diff check 均通过。
+- 边界：production CLI context/retry/manual-compact 配置 surface 与真实 credential smoke 仍 deferred；
+  本复审只覆盖上述三提交链，随后完成的 core/rich/context integration 不追溯扩张该范围。
+- 最终结论：`passed`，0 Blocker / 0 Major / 0 Minor；`B-AGENT-015..017`、去重后的
+  `B-PROVIDER-007` 标为 `ported`，`T-AGENT-014`、`T-PROVIDER-014` 标为 `strengthened`。
+
 ## R-APP-001：M-APP/v0.1 与 WF-001 完整联合审查
 
 - 范围：`internal/app`、`cmd/pi-go` 及 M-BASE/M-PROVIDER/M-TOOL/M-SESSION/M-AGENT
@@ -423,9 +450,15 @@
   signature 写入 v3 session 后 close/reopen；下一请求同时断言 tools/parallel、source-order
   outputs 和 same-provenance opaque metadata。Foreign signature bytes 保持原 prefix，但其 ID/
   cipher 不进入请求；`T-PROVIDER-012` 因此由 deferred 更新为 `strengthened`。
-- Core integration 候选通过 app/provider/session 关键矩阵各 20 次重复、全仓
+- 最终 context integration 在 `2998f18` 上并入 `5d0099d`、`eff0ad7`、`a419519`：每个 attempt
+  重新读取 `Session.BuildContext`，同时保留 Request tools/parallel、rich replay provenance 与
+  typed retry/compaction lifecycle；`ContextSummarizer` 仍构造无 Agent tools 的独立 request。
+- 最终 local HTTP/SSE oracle 在 trusted resource system prompt 下产生 reasoning/commentary 与两个
+  parallel calls，按 source order 持久化/replay results；第二 turn stream drop 后重建的 retry input
+  完全相同，最终 text、retry reason/finished 与唯一 run settlement 均闭合，session 无重复 entry。
+- Core integration 候选通过 agent/app/provider/session 关键矩阵各 20 次重复、全仓
   test/vet/build/race、9 个相关 fuzz 目标各 5 秒，以及 Linux/Windows/Plan 9 amd64 build 与
   test-binary compile；累计 diff/conflict audit 无异常。
-- Provider+rich integration gate 已完成，但不构成新的独立 module review；`R-PROVIDER-005`、
-  `R-BASE-003` 与 `R-AGENT-002` 各自的 passed 范围保持不变。M-AGENT context/retry production
-  integration 仍待后续 core 合并。
+- Provider+rich+context integration gate 已完成，但不构成新的独立 module review；
+  `R-PROVIDER-005`、`R-BASE-003`、`R-AGENT-002` 与 `R-AGENT-003` 各自的 passed 范围保持不变。
+  真实 credential smoke 与 production CLI context/retry/manual-compact tuning 仍 deferred。

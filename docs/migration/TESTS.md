@@ -2,7 +2,7 @@
 
 本表追踪首批 behavior 的上游测试意图。最终状态只使用 `ported`、`strengthened`、
 `deferred`、`intentionally-incompatible` 和 `not-applicable`。M-BASE/v0.1 与
-v0.2-rich-content-replay 均已通过独立复审；provider/tools/rich 联合集成也已单独验收。
+v0.2-rich-content-replay 均已通过独立复审；provider/tools/rich/context 联合集成也已验收。
 
 固定上游 commit：`a116523434806910336b9de3e38a41aa5860030b`。
 
@@ -46,6 +46,7 @@ v0.2-rich-content-replay 均已通过独立复审；provider/tools/rich 联合�
 | `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；R-PROVIDER-005 |
 | `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `strengthened` | exact provider/API/model replay gate、foreign/missing-origin ID normalization、reasoning/text/image restart、Azure terminal backfill、phase/order、causal tool outputs 与 valid PNG；R-BASE-003 + R-PROVIDER-005 + integration gate |
 | `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | full-root local `$ref` JSON Pointer/recursive graph admission、raw boolean `additionalProperties:false` 全路径、traversal budget/fuzz、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire；Agent 有效 mode matrix 与 production multi-call simulated-server oracle 已完成；R-PROVIDER-005 + integration gate |
+| `T-PROVIDER-014` | B-PROVIDER-007 | OpenAI error wrapper + `AgentSession._checkCompaction` classification intent | `strengthened` | R-AGENT-003 + final integration；structured-first + adversarial input/output/parameter/generic-400 secret-safe matrix；Retry-After ASCII digits/+17/-0/date/past/malformed/default-cap/jitter/cancel；transient status matrix；Summarizer request 无 Agent tools |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -67,6 +68,7 @@ Prompt cache、multiple model、unregister 以外的 compat/global registry test
 | `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `strengthened` | R-AGENT-002；cancel/terminate/missing/failure、late update、fault barrier 与 race |
 | `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `strengthened` | R-AGENT-002；one/all、Continue admission、reentrant storage、durable prefix ack、clear/enqueue/Abort fault/race |
 | `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `strengthened` | R-AGENT-002；immutable request、transform error/cancel、multi-worker abort、pending state 与 settlement race |
+| `T-AGENT-014` | B-AGENT-015..017 | coding/Harness `_checkCompaction`, compact/retry/event paths；regressions 5217/6647 and pre-prompt/settlement intent | `strengthened` | R-AGENT-003；local HTTP/SSE threshold + explicit overflow；manual/threshold/overflow reason+willRetry；summarizer scoped success/multi-exhaust/cancel closure；ordinary retry transform/request/cancel early closure；final rich/parallel-tool replay retry oracle；manual failure/Abort/concurrent stale safe unique settlement；no-write/no-duplicate/accepted-usage/race |
 
 AgentSession 与低层 Agent 中重复证明相同 invariant 的测试，在 Go 中由一套
 contract/scenario suite 覆盖，不复制两套 runtime test。
@@ -149,7 +151,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 
 | ID | Workflow | 上游 test intent | 当前状态 | 覆盖 |
 | --- | --- | --- | --- | --- |
-| `T-WF-003` | WF-003 | Responses function tools、rich replay、Agent multi-tool 与 durable production print intents 分散证明 | `strengthened` | concurrent two-call HTTP/SSE workflow + close/reopen rich/tool/image combined request；R-PROVIDER-005 + R-AGENT-002 + R-BASE-003 integration |
+| `T-WF-003` | WF-003 | Responses function tools、rich replay、Agent multi-tool 与 durable production print intents 分散证明 | `strengthened` | concurrent two-call HTTP/SSE workflow + close/reopen rich/tool/image request + trusted rich/parallel replay transient-retry oracle；R-PROVIDER-005 + R-AGENT-002/003 + R-BASE-003 integration |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

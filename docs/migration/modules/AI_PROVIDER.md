@@ -1,7 +1,7 @@
 # M-PROVIDER：AI 与 provider runtime charter
 
-状态：`ported`（`M-PROVIDER/v0.3-openai-tools-replay`；`R-PROVIDER-005` 与
-rich-content `R-BASE-003` passed，联合 integration gate 完成）
+状态：`ported`（`M-PROVIDER/v0.3-openai-tools-replay`；`R-PROVIDER-005`、
+rich-content `R-BASE-003` 与 context/retry `R-AGENT-003` passed，最终联合 gate 完成）
 
 最近完成里程碑：`M-PROVIDER/v0.3-openai-tools-replay`
 
@@ -21,8 +21,9 @@ rich-content `R-BASE-003` passed，联合 integration gate 完成）
 - 内置 tool 执行；
 - 全局 mutable compat registry 或 default provider fallback；
 - 把每个 provider registration 文件变成独立 Go architecture module；
-- 首里程碑中的 OAuth、prompt cache、dynamic catalog、image generation、retry matrix 或
-  cross-provider handoff。
+- 首里程碑中的 OAuth、prompt cache、dynamic catalog、image generation 或
+  cross-provider handoff。Agent-owned bounded retry policy 已在 M-AGENT/v0.3 消费 provider
+  failure taxonomy；adapter 不自行重试。
 
 ## 上游证据
 
@@ -105,6 +106,8 @@ Prompt-cache simulation、multiple model registry、thinking/image/multiple-tool
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error 与 pre/mid-stream cancellation | WF-001 | `ported` |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown/missing adapter 归一 error stream | 后续装配 slice | `deferred` |
 | `B-PROVIDER-005` | 标准 `openai-responses` 基础 text streaming 与 terminal handling | 阶段 2 真实 dialect 验证 | `ported` |
+| `B-PROVIDER-006` | Responses function tool schema encoding、rich/tool replay、strict SSE function-call reducer | WF-003 | `ported` |
+| `B-PROVIDER-007` | OpenAI 400 structured/input-only context-overflow safe classification、strict Retry-After normalization 与共享 retry controller/observer | M-AGENT/v0.3 | `ported` |
 
 M-BASE 的 stream/message contract 是前三项的直接依赖。真实 adapter 首选标准
 `openai-responses`，先用本地 HTTP/SSE fixture 验证 text/terminal，再运行显式启用的
@@ -121,6 +124,25 @@ M-BASE 的 stream/message contract 是前三项的直接依赖。真实 adapter 
 
 Provider dispatch 与真实 adapter 分别形成后续独立里程碑和 review，不被 v0.1 的 fake
 通过结论掩盖。
+
+OpenAI Responses adapter 还会把 valid HTTP `Retry-After` delta-seconds/HTTP-date 归一为
+`ProviderFailure.RetryAfter`；delta-seconds 只接受 trim 后的 unsigned ASCII `1*DIGIT`，因此
+`+17`、`-0`、malformed/past header 被忽略。共享 retry controller 在零配置时采用
+60s `MaxRetryAfter` hard cap，并拒绝负 delay。具体 attempt budget、jitter、cancel
+和 retry admission 由 M-AGENT 的 active-run owner 决定，避免 provider adapter 重发有副作用
+的 Agent request。
+
+M-AGENT/v0.3 还消费 adapter 的 secret-safe `FailureContextOverflow`：只有 OpenAI HTTP 400 的
+allowlisted context type/code，或缺少结构化标识时严格 allowlisted input/prompt-context message 才
+分类；message fallback 先排除 output/completion/max-output 与 parameter-validation 语义，模糊的
+context wording 和普通 400 保持 `FailureHTTPStatus`。
+overflow failure 的公开 message/cause/vendor code 均为固定 normalized 值，不保留可能回显 prompt/
+credential 的 response 文本。adapter 本身不 compact/retry；Agent 最多一次调用 `Session.Compact`。
+
+`ContextSummarizer` 的 bounded retry 通过本模块定义的同步 `RetryObserver` 报告 normalized
+scheduled/attempt/finished metadata；Agent 负责把它映射为 compaction-scoped lifecycle。本模块不
+import Agent，也不拥有 session/run state。每个 scheduled scope 对 success、failure、cancel 或
+exhaustion 都有 finished closure。
 
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005
@@ -146,6 +168,8 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 
 `R-PROVIDER-005` 已以 0 Blocker / 0 Major / 0 Minor 通过 provider 本里程碑；随后完成的
 M-AGENT/v0.2 联合 gate 不重写该历史 review 范围；rich-content/session 子集仍由
-`R-BASE-003` 的独立结论负责。Production close/reopen oracle 已完成 Provider+rich 并集验证；
-M-AGENT context/retry 的 production integration 仍待后续 core 合并。明确延期项不因
-integration 改变。
+`R-BASE-003` 的独立结论负责；相邻 `B-PROVIDER-007` 由 `R-AGENT-003` 通过。最终 core
+integration 的 local HTTP/SSE oracle 同时固定 trusted system prompt、rich reasoning/text、parallel
+tools、source-order replay 与 transient retry 重建；Summarizer request 保持无 Agent tools。
+真实 credential smoke 与 CLI context/retry/manual-compact tuning 仍 deferred；上述 integration
+不扩张三个历史 review 的候选范围。

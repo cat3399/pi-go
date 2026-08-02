@@ -5,8 +5,8 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 
 首个 deterministic standalone workflow 所需的六个领域模块均已通过独立复审；
 `WF-001`、标准 Responses text 与 `WF-003` production multi-tool/rich replay 已闭环；
-provider capability、Agent 调度、source-order durable replay 与 session reopen metadata
-由联合 integration gate 固定。
+provider capability、Agent 调度、source-order durable replay、session reopen metadata 与
+context/retry lifecycle 由最终联合 integration gate 固定。
 
 ## M-BASE
 
@@ -39,6 +39,7 @@ provider capability、Agent 调度、source-order durable replay 与 session reo
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown provider 或缺 adapter 返回 error stream | `providers.test.ts`、`models-runtime.test.ts` | `deferred` | application model装配启动 |
 | `B-PROVIDER-005` | 标准 OpenAI Responses 基础 text/SSE 与 terminal handling | `openai-responses-shared.ts` 及 terminal-event tests | `ported` | R-PROVIDER-004；真实 credential smoke 与 production assembler 分开验收 |
 | `B-PROVIDER-006` | OpenAI Responses function schemas、assistant reasoning/text/function-call + ToolResult replay、exact-provenance ID/phase gate、terminal encrypted backfill、source-order SSE reducer、images 与 partial/unknown failure | WF-003 | `ported` | R-PROVIDER-005 + R-BASE-003 + core integration；built-ins `strict:false`，parallel flag 按有效 execution mode；custom/cache/image executor deferred |
+| `B-PROVIDER-007` | OpenAI 400 context-overflow secret-safe typed/input-only classification；Retry-After unsigned-ASCII seconds/future-date normalization；共享 bounded retry controller/observer | OpenAI error wrapper；coding `AgentSession._checkCompaction` error path | `ported` | R-AGENT-003 + final core integration；output/parameter/普通 400 与 signed/past/malformed no-admission，zero cap=60s |
 
 ## M-AGENT
 
@@ -58,6 +59,9 @@ provider capability、Agent 调度、source-order durable replay 与 session reo
 | `B-AGENT-012` | steering/follow-up FIFO queue drain mode、snapshot/clear、Continue assistant-tail admission 与 durable queue ack | `agent.ts::PendingMessageQueue/steer/followUp/continue`；agent tests | `ported` | R-AGENT-002 |
 | `B-AGENT-013` | provider 前 immutable context transform；error/cancel 不静默 fallback | `agent-loop.ts::streamAssistantResponse`；agent-loop transform tests | `ported` | R-AGENT-002 |
 | `B-AGENT-014` | multi-worker Abort/settlement、single active run、unique terminal/usage commit | `agent.ts::runWithLifecycle`；AgentSession settlement regressions | `ported` | R-AGENT-002 |
+| `B-AGENT-015` | 每个 provider logical turn 从 immutable Session.BuildContext 取 snapshot；threshold/reserve pre-prompt compact、manual compact，以及明确 overflow 最多一次 compact-and-retry 均走同一 Session gate；start/settled 携带一致 typed reason/willRetry | coding `AgentSession._checkCompaction/compact`；Harness compact utils；5217 compaction reason regression | `ported` | R-AGENT-003；普通 400/second overflow no-loop；manual/stale/cancel safe settlement |
+| `B-AGENT-016` | turn 与 Summarizer 共享 transient retry policy、Retry-After/default cap、cancel/no-retry matrix；不重复 durable entries/accepted usage；Summarizer observer 映射独立 scoped lifecycle | agent/runtime retry paths；provider taxonomy；6647 retry/session regressions | `ported` | R-AGENT-003；每个 scheduled 最终 finished，summary exhaustion no checkpoint；真实 credential smoke deferred |
+| `B-AGENT-017` | secret-safe retry scheduled/[attempt]/finished event、typed finish reason、compaction phase/reason、queue timing 与 WaitForIdle settlement | Agent/AgentSession + Harness lifecycle；1717/2113、6363 settlement regressions | `ported` | R-AGENT-003；CLI 配置 surface deferred |
 
 ## M-SESSION
 
