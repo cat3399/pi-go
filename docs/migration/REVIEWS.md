@@ -199,6 +199,13 @@
   等待 M-BASE 表达能力，不能用 text-only length 冒充。
 - 最终结论：`passed`，0 Blocker，0 剩余 in-scope Major/Minor；关闭 `F-STAGE0-003`。
 
+## R-AGENT-002：M-AGENT/v0.2 multi-tool queues（待安排）
+
+- 范围：multiple tool calls、parallel/sequential override、completion/source-order split、queue/Continue、transform seam、Abort/late update/settlement 及对应 Go race evidence。
+- 实现状态：`implementation-complete-awaiting-review`。行为与 test ledger 仍保持 `in-progress`/`deferred`；本条不是审查通过结论。
+- reviewer 核验重点：worker 不直接写 transcript；ToolResult source-order append 与 completion event 分离；abort 后无 worker/append/observer late mutation；queue drain 点和 assistant-tail Continue admission；transform 没有 fallback 或 mutable transcript side effect。
+- 依赖边界：M-TOOL/v0.2 filesystem `R-TOOL-004` 仍为独立 pending review。本审查只核验 agent named-tool consumer，不修改 filesystem 实现，也不得把该依赖写成 passed。
+
 ## R-APP-001：M-APP/v0.1 与 WF-001 完整联合审查
 
 - 范围：`internal/app`、`cmd/pi-go` 及 M-BASE/M-PROVIDER/M-TOOL/M-SESSION/M-AGENT

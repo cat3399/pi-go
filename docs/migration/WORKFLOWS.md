@@ -106,6 +106,22 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 本地 production workflow、错误持久化、全仓 quality gate 与 `R-APP-002` 已通过。
 
+## WF-003：multi-tool control flow
+
+状态：`in-progress`
+
+~~~text
+user -> assistant(tool A, tool B, ...)
+     -> parallel completion events / source-order durable ToolResults
+     -> steering drain before next provider turn
+     -> terminal assistant -> follow-up drain -> Continue admission
+~~~
+
+验收要求并行 completion 与 transcript source order 有独立 oracle；missing/failure/terminate/cancel
+混合批次不越过 durable barrier；transform 只影响 provider snapshot；Abort/WaitForIdle 在所有
+worker、append 与 observer settle 后才公开 idle。该 workflow 归属 M-AGENT/v0.2，等待独立 review，
+不依赖或替代 filesystem pending review。
+
 ## 后续 workflow 规则
 
 新增 workflow 必须说明用户入口、可观察成功与失败、跨模块 ownership、durable data

@@ -57,6 +57,9 @@ type Agent struct {
 
 	observers      []observerEntry
 	nextObserverID uint64
+
+	steeringQueue []llm.UserTextMessage
+	followUpQueue []llm.UserTextMessage
 }
 
 func New(config Config) (*Agent, error) {
@@ -177,35 +180,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr e
 	if err != nil {
 		return Result{}, err
 	}
-	result.runID = active.id
-
-	defer a.finishRun(active)
-	defer func() {
-		a.enterSettling(active)
-		result.providerTurns, result.toolExecutions = a.runCounts(active)
-		a.notify(active.ctx, Event{
-			Kind:     EventRunSettled,
-			RunID:    active.id,
-			Turn:     a.runTurn(active),
-			Terminal: result.terminal,
-			RunError: runErr,
-		})
-	}()
-
-	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
-	a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: 1})
-	if err := a.commit(active, 1, user); err != nil {
-		return result, err
-	}
-
-	terminal, err := a.providerTurn(active, 1)
-	if err != nil {
-		return result, err
-	}
-	if toolUse, ok := terminal.(llm.AssistantToolUseMessage); ok {
-		return a.runToolTurn(active, toolUse, result)
-	}
-	return a.commitTerminal(active, 1, terminal, result)
+	return a.runV2(active, []llm.UserTextMessage{user})
 }
 
 func (a *Agent) beginRun(

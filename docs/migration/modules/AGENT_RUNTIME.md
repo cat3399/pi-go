@@ -1,8 +1,50 @@
 # M-AGENT：Agent runtime charter
 
-状态：`ported`
+状态：`in-progress`（`M-AGENT/v0.2-multi-tool-queues`；v0.1 已复审）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
+
+当前里程碑：`M-AGENT/v0.2-multi-tool-queues`
+
+## v0.2 multi-tool queues
+
+### 负责
+
+- 同一 assistant message 的完整 multi-tool batch，默认并行、全局 sequential 与 tool-level sequential override；
+- 并发 worker 的 completion-order lifecycle event，及独立、固定的 assistant source-order durable ToolResult commit；
+- missing/failure/cancel/termination 混合 batch、settled update isolation，以及 batch 后的 provider barrier；
+- steering/follow-up FIFO queue、`one-at-a-time`/`all` drain、snapshot/clear、idle/busy/Continue admission；
+- 每个 provider request 前的 immutable `TransformContext` seam，及其 cancel/error 的 fail-explicit contract。
+
+### 不负责
+
+- M-BASE 尚未表达的 `length + toolCall` 混合 terminal、tool schema wire、before/after extension hooks、retry、compaction 或 Harness storage；
+- filesystem tool 的实现或其仍待独立复审的状态；v0.2 只消费 named execution port。
+
+### v0.2 contract
+
+- 先 durable commit assistant tool-use，才开始任一副作用 worker；所有 worker settle 后，ToolResult 严格按 assistant block 的 source order append，下一 provider request 因此永远读取可解释顺序。
+- 并行 `tool_settled` 是 completion order；它绝不决定 transcript order。任一个 requested tool 声明 sequential 时，整批 downgrade 为 sequential，避免隐蔽依赖竞争。
+- worker 和 report closure 都不拥有 transcript。`Execute` 返回后的 update 被 gate 丢弃；Abort 取消 worker context 并等待全部 worker 结算，之后由 coordinator durable 记录各 call 的已知 outcome 和唯一 aborted assistant。
+- steering 只在一个 assistant/tool batch完整结束后、下一 provider request 前 drain；follow-up 只在本来会停止时 drain。两队列均 FIFO，默认 `one-at-a-time`，可显式 `all`；clear 只影响尚未 drain 的项目。
+- `Continue` 只接受 durable user/tool-result tail；assistant tail 必须先由 queued steering/follow-up 形成新的 user tail。busy admission、Abort 与 WaitForIdle 仍由同一个 active run slot 管辖。
+- Transform 输入和输出都复制；它仅改变本次 provider request，绝不修改 session transcript。transform error 是 `ErrContextTransform` 并在 provider 调用前 fail；cancel 在 seam 后形成 aborted terminal。
+
+### v0.2 behavior slice
+
+| ID | 行为 | Workflow | 初始状态 |
+| --- | --- | --- | --- |
+| `B-AGENT-010` | multiple tool calls、global/tool override 与 source-order durable result | WF-003 | `in-progress` |
+| `B-AGENT-011` | parallel completion event、mixed missing/failure/terminate 与 late-update isolation | WF-003 | `in-progress` |
+| `B-AGENT-012` | steering/follow-up queues、snapshot/clear、Continue and busy/idle | WF-003 | `in-progress` |
+| `B-AGENT-013` | immutable transform before every provider call; error/cancel contract | WF-003 | `in-progress` |
+| `B-AGENT-014` | multi-worker Abort, settlement barrier, unique usage/terminal | WF-003 | `in-progress` |
+
+### v0.2 review gate
+
+- 定点 normal/error/cancel/concurrency tests、`go test -race ./...`、fuzz 和 cross-platform compile 全部通过；
+- M-TOOL filesystem 的 `R-TOOL-004` 仍是独立 pending review，v0.2 不改变也不替其宣布通过；
+- behavior/test 在未参与实现的 reviewer 联合审查前均保持 `in-progress`/`deferred`，不得标 `ported`。
 
 ## 负责
 

@@ -1,0 +1,485 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"runtime/debug"
+	"sync"
+	"unicode/utf8"
+
+	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/provider"
+)
+
+// Steer accepts a user message while a run is active or idle. It is injected
+// after the current tool batch and before the next provider request. A queue
+// is deliberately not a second run: it cannot bypass the active-run barrier.
+func (a *Agent) Steer(prompt string) error { return a.enqueue(prompt, true) }
+
+// FollowUp accepts a message that is consumed only after the agent would
+// otherwise stop. It is useful for a producer which receives input while the
+// current assistant turn is still settling.
+func (a *Agent) FollowUp(prompt string) error { return a.enqueue(prompt, false) }
+
+func (a *Agent) enqueue(prompt string, steering bool) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	timestamp, err := a.now()
+	if err != nil {
+		return err
+	}
+	message, err := llm.NewUserTextMessage(prompt, timestamp)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
+	}
+	a.mu.Lock()
+	if steering {
+		a.steeringQueue = append(a.steeringQueue, message)
+	} else {
+		a.followUpQueue = append(a.followUpQueue, message)
+	}
+	a.mu.Unlock()
+	return nil
+}
+
+// Queues returns immutable snapshots in FIFO order. It is intentionally a
+// diagnostic/admission surface, not a mutable transcript view.
+func (a *Agent) Queues() (steering, followUp []llm.UserTextMessage) {
+	if a == nil {
+		return nil, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]llm.UserTextMessage(nil), a.steeringQueue...), append([]llm.UserTextMessage(nil), a.followUpQueue...)
+}
+
+func (a *Agent) ClearSteeringQueue() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.steeringQueue = nil
+	a.mu.Unlock()
+}
+func (a *Agent) ClearFollowUpQueue() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.followUpQueue = nil
+	a.mu.Unlock()
+}
+func (a *Agent) ClearAllQueues() { a.ClearSteeringQueue(); a.ClearFollowUpQueue() }
+
+// Continue starts from a durable user/tool-result tail. If the transcript ends
+// in an assistant result, only queued input can make continuation legal; that
+// exactly mirrors the queue drain point rather than silently fabricating a
+// provider request from an assistant tail.
+func (a *Agent) Continue(ctx context.Context) (Result, error) {
+	if a == nil {
+		return Result{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if ctx == nil || context.Cause(ctx) != nil {
+		return Result{}, fmt.Errorf("%w: invalid continuation context", ErrInvalidRun)
+	}
+	messages := a.config.transcript.Context().Messages()
+	if len(messages) == 0 {
+		return Result{}, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
+	}
+	initial := []llm.UserTextMessage(nil)
+	if messages[len(messages)-1].Role() == llm.RoleAssistant {
+		initial = a.drainQueue(true)
+		if len(initial) == 0 {
+			initial = a.drainQueue(false)
+		}
+		if len(initial) == 0 {
+			return Result{}, fmt.Errorf("%w: assistant tail", ErrCannotContinue)
+		}
+	}
+	active, err := a.beginContinuation(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runV2(active, initial)
+}
+
+func (a *Agent) beginContinuation(ctx context.Context) (*activeRun, error) {
+	if a == nil || ctx == nil || context.Cause(ctx) != nil {
+		return nil, fmt.Errorf("%w: invalid continuation", ErrInvalidRun)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != nil || a.starting {
+		return nil, ErrBusy
+	}
+	if a.nextID == ^uint64(0) {
+		return nil, ErrRunIDExhausted
+	}
+	a.nextID++
+	runCtx, cancel := context.WithCancelCause(ctx)
+	active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
+	a.active = active
+	return active, nil
+}
+
+func (a *Agent) drainQueue(steering bool) []llm.UserTextMessage {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	queue := &a.followUpQueue
+	mode := a.config.followUpMode
+	if steering {
+		queue, mode = &a.steeringQueue, a.config.steeringMode
+	}
+	if len(*queue) == 0 {
+		return nil
+	}
+	n := 1
+	if mode == QueueAll {
+		n = len(*queue)
+	}
+	items := append([]llm.UserTextMessage(nil), (*queue)[:n]...)
+	copy((*queue), (*queue)[n:])
+	for i := len(*queue) - n; i < len(*queue); i++ {
+		(*queue)[i] = llm.UserTextMessage{}
+	}
+	*queue = (*queue)[:len(*queue)-n]
+	return items
+}
+
+func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result Result, runErr error) {
+	result.runID = active.id
+	defer a.finishRun(active)
+	defer func() {
+		a.enterSettling(active)
+		result.providerTurns, result.toolExecutions = a.runCounts(active)
+		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: a.runTurn(active), Terminal: result.terminal, RunError: runErr})
+	}()
+	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
+	turn := uint32(1)
+	if len(initial) > 0 {
+		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+		for _, message := range initial {
+			if err := a.commit(active, turn, message); err != nil {
+				return result, err
+			}
+		}
+	}
+	for {
+		if len(initial) == 0 {
+			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+		}
+		terminal, err := a.providerTurnV2(active, turn)
+		if err != nil {
+			return result, err
+		}
+		toolUse, usesTools := terminal.(llm.AssistantToolUseMessage)
+		if !usesTools {
+			if err := a.commitAssistantV2(active, turn, terminal); err != nil {
+				return result, err
+			}
+			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: terminal})
+			if terminal.FinishReason() == llm.FinishError || terminal.FinishReason() == llm.FinishAborted {
+				return a.acceptFinalV2(active, result, terminal)
+			}
+			if queued := a.drainQueue(true); len(queued) > 0 {
+				turn++
+				initial = queued
+				a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+				if err := a.commitQueued(active, turn, queued); err != nil {
+					return result, err
+				}
+				continue
+			}
+			if queued := a.drainQueue(false); len(queued) > 0 {
+				turn++
+				initial = queued
+				a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+				if err := a.commitQueued(active, turn, queued); err != nil {
+					return result, err
+				}
+				continue
+			}
+			return a.acceptFinalV2(active, result, terminal)
+		}
+
+		if err := a.commit(active, turn, toolUse); err != nil {
+			return result, err
+		}
+		batch, err := a.executeBatchV2(active, turn, toolUse)
+		if err != nil {
+			return result, err
+		}
+		for _, outcome := range batch.outcomes {
+			if err := a.commitToolResultV2(active, turn, outcome); err != nil {
+				return result, err
+			}
+		}
+		a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: toolUse})
+		if batch.cancelled || a.runCause(active) != nil {
+			failure, err := a.failureTerminal(nil, llm.FinishAborted, runToolCancelText, a.contextCause(active), llm.Usage{})
+			if err != nil {
+				return result, err
+			}
+			turn++
+			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			if err := a.commitAssistantV2(active, turn, failure); err != nil {
+				return result, err
+			}
+			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: failure})
+			return a.acceptFinalV2(active, result, failure)
+		}
+		if batch.terminate {
+			return a.acceptFinalV2(active, result, toolUse)
+		}
+		if queued := a.drainQueue(true); len(queued) > 0 {
+			turn++
+			initial = queued
+			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			if err := a.commitQueued(active, turn, queued); err != nil {
+				return result, err
+			}
+			continue
+		}
+		turn++
+		initial = nil
+	}
+}
+
+func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.UserTextMessage) error {
+	for _, message := range messages {
+		if err := a.commit(active, turn, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Agent) commitAssistantV2(active *activeRun, turn uint32, terminal llm.AssistantTerminal) error {
+	if err := a.commit(active, turn, terminal); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *Agent) acceptFinalV2(active *activeRun, result Result, terminal llm.AssistantTerminal) (Result, error) {
+	a.mu.Lock()
+	if a.active != active || active.terminalAccepted {
+		a.mu.Unlock()
+		return result, fmt.Errorf("%w: duplicate terminal", ErrInvariant)
+	}
+	active.terminalAccepted = true
+	active.phase = PhaseSettling
+	a.mu.Unlock()
+	result.terminal = terminal
+	return result, nil
+}
+
+func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTerminal, error) {
+	messages := a.config.transcript.Context().Messages()
+	if a.config.transformContext != nil {
+		if cause := a.runCause(active); cause != nil {
+			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", cause, llm.Usage{})
+		}
+		transformed, err := a.transformV2(active.ctx, messages)
+		if err != nil {
+			if cause := a.runCause(active); cause != nil {
+				return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", cause, llm.Usage{})
+			}
+			return nil, err
+		}
+		if context.Cause(active.ctx) != nil {
+			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", a.contextCause(active), llm.Usage{})
+		}
+		messages = append([]llm.ConversationMessage(nil), transformed...)
+	}
+	request, err := provider.NewRequest(a.config.model, a.config.systemPrompt, messages)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
+	}
+	a.mu.Lock()
+	if a.active != active || active.terminalAccepted {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("%w: inactive provider turn", ErrInvariant)
+	}
+	active.phase, active.turn = PhaseProvider, turn
+	active.providerTurns++
+	a.mu.Unlock()
+	terminal, streamErr := a.collectProvider(active, turn, request)
+	if streamErr != nil {
+		reason, text, cause := llm.FinishError, "Provider stream failed", streamErr
+		if runCause := a.runCause(active); runCause != nil {
+			reason, text, cause = llm.FinishAborted, "Run cancelled during provider execution", errors.Join(runCause, streamErr)
+		}
+		return a.failureTerminal(nil, reason, text, cause, llm.Usage{})
+	}
+	if cause := a.runCause(active); cause != nil && terminal.FinishReason() != llm.FinishAborted {
+		return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled during provider execution", cause, llm.Usage{})
+	}
+	return terminal, nil
+}
+
+func (a *Agent) transformV2(ctx context.Context, messages []llm.ConversationMessage) (transformed []llm.ConversationMessage, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			transformed = nil
+			err = fmt.Errorf("%w: panic: %s\n%s", ErrContextTransform, safeValueText(recovered), debug.Stack())
+		}
+	}()
+	transformed, err = a.config.transformContext(ctx, append([]llm.ConversationMessage(nil), messages...))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrContextTransform, err)
+	}
+	return append([]llm.ConversationMessage(nil), transformed...), nil
+}
+
+type batchOutcome struct {
+	call      llm.ToolCallBlock
+	output    ToolOutput
+	err       error
+	cancelled bool
+}
+type toolBatch struct {
+	outcomes  []batchOutcome
+	terminate bool
+	cancelled bool
+}
+
+func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.AssistantToolUseMessage) (toolBatch, error) {
+	calls := toolCalls(assistant)
+	if len(calls) == 0 {
+		return toolBatch{}, fmt.Errorf("%w: empty tool batch", ErrInvariant)
+	}
+	a.mu.Lock()
+	if a.active != active {
+		a.mu.Unlock()
+		return toolBatch{}, fmt.Errorf("%w: inactive tool batch", ErrInvariant)
+	}
+	active.phase = PhaseTool
+	active.pendingToolCall = calls[0].ID()
+	active.pendingToolName = calls[0].Name()
+	a.mu.Unlock()
+	sequential := a.config.toolExecution == ToolExecutionSequential
+	if modes, ok := a.config.tool.(ToolExecutionOverride); ok {
+		for _, call := range calls {
+			if mode, set := modes.ToolExecutionMode(call.Name()); set && mode == ToolExecutionSequential {
+				sequential = true
+			}
+		}
+	}
+	results := make([]batchOutcome, len(calls))
+	if sequential {
+		for i, call := range calls {
+			outcome := a.executeOneV2(active, turn, call)
+			results[i] = outcome
+			a.emitToolSettled(active, turn, outcome)
+			if outcome.cancelled {
+				break
+			}
+		}
+	} else {
+		var workers sync.WaitGroup
+		completed := make(chan batchOutcome, len(calls))
+		for i, call := range calls {
+			a.emitToolStart(active, turn, call)
+			workers.Add(1)
+			go func(index int, c llm.ToolCallBlock) {
+				defer workers.Done()
+				outcome := a.executeOneNoStartV2(active, turn, c)
+				outcome.call = c
+				results[index] = outcome
+				completed <- outcome
+			}(i, call)
+		}
+		go func() { workers.Wait(); close(completed) }()
+		for outcome := range completed {
+			a.emitToolSettled(active, turn, outcome)
+		}
+	}
+	batch := toolBatch{outcomes: results}
+	allTerminate := len(results) > 0
+	for _, outcome := range results {
+		batch.cancelled = batch.cancelled || outcome.cancelled
+		allTerminate = allTerminate && outcome.output.Terminate
+	}
+	batch.terminate = allTerminate
+	return batch, nil
+}
+
+func (a *Agent) emitToolStart(active *activeRun, turn uint32, call llm.ToolCallBlock) {
+	a.notify(active.ctx, Event{Kind: EventToolStarted, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name()})
+}
+func (a *Agent) emitToolSettled(active *activeRun, turn uint32, outcome batchOutcome) {
+	a.notify(active.ctx, Event{Kind: EventToolSettled, RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), ToolOutput: outcome.output, ToolError: outcome.err})
+}
+func (a *Agent) executeOneV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {
+	a.emitToolStart(active, turn, call)
+	return a.executeOneNoStartV2(active, turn, call)
+}
+
+func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {
+	outcome := batchOutcome{call: call}
+	if a.runCause(active) != nil {
+		outcome.output, outcome.err, outcome.cancelled = ToolOutput{Text: toolCancellationText}, ErrAgentAborted, true
+		return outcome
+	}
+	if a.config.tool == nil || !toolSupports(a.config.tool, a.config.toolName, call.Name()) {
+		outcome.output, outcome.err = ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())}, fmt.Errorf("%w: %s", ErrToolNotFound, call.Name())
+		return outcome
+	}
+	a.mu.Lock()
+	if a.active != active || active.terminalAccepted {
+		a.mu.Unlock()
+		outcome.err = fmt.Errorf("%w: inactive tool", ErrInvariant)
+		return outcome
+	}
+	active.toolExecutions++
+	a.mu.Unlock()
+	var updates sync.Mutex
+	accepting := true
+	report := func(update ToolUpdate) {
+		updates.Lock()
+		defer updates.Unlock()
+		if !accepting || !validToolUpdate(update) {
+			return
+		}
+		a.notify(active.ctx, Event{Kind: EventToolProgress, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolUpdate: update})
+	}
+	outcome.output, outcome.err = executeNamedToolSafely(a.config.tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
+	updates.Lock()
+	accepting = false
+	updates.Unlock()
+	outcome.output, outcome.err = normalizeToolOutcome(outcome.output, outcome.err)
+	a.mu.Lock()
+	outcome.cancelled = a.active == active && context.Cause(active.ctx) != nil
+	a.mu.Unlock()
+	if outcome.cancelled {
+		outcome.output, outcome.err = ToolOutput{Text: toolCancellationText}, errors.Join(ErrAgentAborted, a.contextCause(active))
+	}
+	return outcome
+}
+
+func validToolUpdate(update ToolUpdate) bool { return utf8.ValidString(update.Text) }
+
+func (a *Agent) commitToolResultV2(active *activeRun, turn uint32, outcome batchOutcome) error {
+	block, err := llm.NewTextBlock(outcome.output.Text)
+	if err != nil {
+		return fmt.Errorf("%w: tool text: %w", ErrInvariant, err)
+	}
+	timestamp, err := a.now()
+	if err != nil {
+		return err
+	}
+	message, err := llm.NewToolResultMessage(outcome.call.ID(), outcome.call.Name(), []llm.TextBlock{block}, outcome.err != nil, timestamp)
+	if err != nil {
+		return fmt.Errorf("%w: tool result: %w", ErrInvariant, err)
+	}
+	if err := llm.ValidateToolResultAssociation(outcome.call, message); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvariant, err)
+	}
+	if err := a.commit(active, turn, message); err != nil {
+		return err
+	}
+	return nil
+}

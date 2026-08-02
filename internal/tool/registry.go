@@ -9,12 +9,25 @@ import (
 
 var ErrInvalidToolRegistry = errors.New("invalid tool registry")
 
+// ExecutionMode is dispatch metadata, not an execution ownership transfer.
+// A sequential tool causes its enclosing agent batch to serialize because its
+// effects may depend on neighbouring calls in source order.
+type ExecutionMode uint8
+
+const (
+	ExecutionParallel ExecutionMode = iota + 1
+	ExecutionSequential
+)
+
 // JSONTool is the narrow common dispatch contract used by the agent adapter.
 // Tool implementations own argument validation and provider-visible text.
 type JSONTool interface {
 	Name() string
 	ExecuteJSON(context.Context, []byte) (ToolResult, error)
 }
+
+// ExecutionModeTool is optional so existing tools remain parallel by default.
+type ExecutionModeTool interface{ ToolExecutionMode() ExecutionMode }
 
 // Registry has immutable dispatch state after construction. It returns cloned
 // results so a caller cannot mutate metadata observed by another invocation.
@@ -54,6 +67,28 @@ func (r *Registry) Supports(name string) bool {
 	}
 	_, ok := r.tools[name]
 	return ok
+}
+
+// ExecutionMode returns the selected tool override. Unknown and malformed
+// metadata deliberately fail closed to sequential rather than allowing an
+// undeclared side-effecting tool to race a batch.
+func (r *Registry) ExecutionMode(name string) (ExecutionMode, bool) {
+	if r == nil {
+		return 0, false
+	}
+	candidate, ok := r.tools[name]
+	if !ok {
+		return 0, false
+	}
+	modeTool, ok := candidate.(ExecutionModeTool)
+	if !ok {
+		return ExecutionParallel, true
+	}
+	mode := modeTool.ToolExecutionMode()
+	if mode != ExecutionParallel && mode != ExecutionSequential {
+		return ExecutionSequential, true
+	}
+	return mode, true
 }
 func (r *Registry) ExecuteJSON(ctx context.Context, name string, arguments []byte) (ToolResult, error) {
 	if r == nil {
