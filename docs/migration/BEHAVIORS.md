@@ -131,6 +131,16 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 
 ## 首个 workflow 之外的明确分类
 
+## M-RESOURCE/v0.1：trusted prompt assets
+
+| ID | 行为 | 上游证据 | 状态 | Go 说明 |
+| --- | --- | --- | --- | --- |
+| `B-RESOURCE-001` | agent-dir global 与 explicit-trusted project resource precedence | `resource-loader.ts`、`project-trust.ts` | `ported` | non-probe/physical-anchor strengthening；R-RESOURCE-001 |
+| `B-RESOURCE-002` | nearest-ancestor durable trust decision | `trust-manager.ts`、`trust-manager.test.ts` | `ported` | private/atomic/lock/cancel/raw preservation strengthened；Windows persistence fail-closed；R-RESOURCE-001 |
+| `B-RESOURCE-003` | AGENTS/CLAUDE, templates and nested skills | `resource-loader.ts`、`prompt-templates.ts`、`skills.ts` | `ported` | UTF-8/size/symlink/collision strengthening；R-RESOURCE-001 |
+| `B-RESOURCE-004` | snapshot reload and system prompt composition | `resource-loader.ts`、`system-prompt.ts`、regressions 2753/2781 | `ported` | generation-gated reload strengthening；extensions/packages deferred；R-RESOURCE-001 |
+| `B-APP-009` | production uses trusted assembled system prompt | `main.ts` resource/runtime assembly | `ported` | pre-session/pre-network assembly and template expansion；R-RESOURCE-001 |
+
 - Prompt cache、multiple models、thinking/image、parallel tools、steering/follow-up、retry、
   compaction、branch/tree、settings/auth、dynamic catalog、JSON/RPC/interactive/TUI 均为
   `deferred`，按新的 behavior ID 和真实依赖逐项进入。

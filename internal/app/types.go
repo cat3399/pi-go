@@ -56,6 +56,9 @@ type Dependencies struct {
 	BashArtifactDirectory string
 	BashMaxOutputLines    int
 	BashMaxOutputBytes    int
+	// ExpandPrompt is an already-admitted, pure input transform. It exists for
+	// trusted local prompt templates and runs before any session/network work.
+	ExpandPrompt func(string) string
 }
 
 type runtimeDependencies struct {
@@ -72,6 +75,7 @@ type runtimeDependencies struct {
 	settlementTimeout  time.Duration
 	executor           agent.ToolExecutor
 	bashOptions        tool.BashOptions
+	expandPrompt       func(string) string
 }
 
 func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
@@ -135,6 +139,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		settlementTimeout:  deps.SettlementTimeout,
 		executor:           executor,
 		bashOptions:        bashOptions,
+		expandPrompt:       deps.ExpandPrompt,
 	}, nil
 }
 

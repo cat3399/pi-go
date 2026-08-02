@@ -20,6 +20,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -107,12 +108,16 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 		t.Fatalf("payload routing = %#v", request.payload)
 	}
 	input, ok := request.payload["input"].([]any)
-	if !ok || len(input) != 1 {
+	if !ok || len(input) != 2 {
 		t.Fatalf("payload input = %#v", request.payload["input"])
 	}
-	user, ok := input[0].(map[string]any)
+	system, ok := input[0].(map[string]any)
+	if !ok || system["role"] != "system" || !strings.Contains(system["content"].(string), "<available_tools>") {
+		t.Fatalf("system prompt = %#v", input[0])
+	}
+	user, ok := input[1].(map[string]any)
 	if !ok || user["role"] != "user" {
-		t.Fatalf("payload user = %#v", input[0])
+		t.Fatalf("payload user = %#v", input[1])
 	}
 
 	matches, err := filepath.Glob(filepath.Join(agentDir, "sessions", "*", "*.jsonl"))
@@ -498,6 +503,155 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 				t.Fatalf("preflight changed session tree: %v", err)
 			}
 		})
+	}
+}
+
+func TestRunProductionResourceFailurePrecedesSessionAndNetwork(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	// Invalid global data is a configuration error. A project copy would be
+	// ignored without a durable trust decision, but global data is already in
+	// the user's trusted agent directory and must not be silently omitted.
+	if err := os.WriteFile(filepath.Join(agentDir, "SYSTEM.md"), []byte{0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessionParent := filepath.Join(workingDir, "must-not-exist")
+	doer := &countingProductionDoer{}
+	config := productionTestConfig(workingDir, agentDir, []string{"OPENAI_API_KEY=secret"})
+	config.OpenAIHTTPClient = doer
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), config, []string{
+		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(sessionParent, "session.jsonl"),
+	}, &stdout, &stderr)
+	if code != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "trusted prompt assets") {
+		t.Fatalf("RunProduction() = %d, %q, %q", code, stdout.String(), stderr.String())
+	}
+	if doer.calls.Load() != 0 {
+		t.Fatalf("resource preflight reached network")
+	}
+	if _, err := os.Stat(sessionParent); !os.IsNotExist(err) {
+		t.Fatalf("resource preflight created session tree: %v", err)
+	}
+}
+
+func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("persistent project trust is deliberately fail-closed on Windows")
+	}
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workingDir, ".pi"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workingDir, ".pi", "SYSTEM.md"), []byte("project system prompt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resources, err := resource.New(resource.Config{CWD: workingDir, AgentDir: agentDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resources.Trust().Set(context.Background(), workingDir, true); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(workingDir, "result.jsonl"),
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	system := input[0].(map[string]any)["content"].(string)
+	if !strings.Contains(system, "project system prompt") || !strings.Contains(system, "Current working directory:") {
+		t.Fatalf("assembled system prompt = %q", system)
+	}
+}
+
+func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("existing persistent trust is deliberately fail-closed on Windows")
+	}
+	root := t.TempDir()
+	workingDir := filepath.Join(root, "parent", "project")
+	agentDir := filepath.Join(root, "agent")
+	if err := os.MkdirAll(filepath.Join(workingDir, ".pi"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workingDir, ".pi", "SYSTEM.md"), []byte("project must stay unauthorized"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := fmt.Sprintf("{\n  %q: true,\n  %q: {\"trusted\": false}\n}\n", filepath.Dir(workingDir), workingDir)
+	if err := os.WriteFile(filepath.Join(agentDir, "trust.json"), []byte(trust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "ordinary prompt", "--session", filepath.Join(workingDir, "result.jsonl"),
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	system := input[0].(map[string]any)["content"].(string)
+	if strings.Contains(system, "project must stay unauthorized") {
+		t.Fatalf("future trust value inherited parent authorization: %q", system)
+	}
+	userContent := input[1].(map[string]any)["content"].([]any)
+	if userContent[0].(map[string]any)["text"] != "ordinary prompt" {
+		t.Fatalf("ordinary prompt changed: %#v", input[1])
+	}
+}
+
+func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(agentDir, "prompts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompts", "review.md"), []byte("review $1 ${2:-all}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	path := filepath.Join(workingDir, "expanded.jsonl")
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "/review file.go", "--session", path,
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	user := input[1].(map[string]any)
+	content, ok := user["content"].([]any)
+	if !ok || len(content) != 1 || content[0].(map[string]any)["text"] != "review file.go all" {
+		t.Fatalf("provider user prompt = %#v", user)
+	}
+	transcript, err := session.Open(path, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) == 0 {
+		t.Fatalf("durable expanded prompt = %#v", messages)
+	}
+	stored, ok := messages[0].(llm.UserTextMessage)
+	if !ok || textBlocks(stored.Content()) != "review file.go all" {
+		t.Fatalf("durable expanded prompt = %#v", messages)
 	}
 }
 

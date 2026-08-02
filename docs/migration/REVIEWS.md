@@ -350,3 +350,11 @@
 - 延期：真实 credential/browser smoke 与 interactive CLI/TUI login surface 等待对应产品里程碑；
   Windows DACL-backed persistent store 与 Windows 实机执行仍未完成，当前 contract 继续 fail-closed。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-RESOURCE-001：M-RESOURCE/v0.1 独立审查与复审
+
+- 范围：`internal/resource`、production prompt/template assembly、charter 与 behavior/test/data ledger；固定上游 `a116523434806910336b9de3e38a41aa5860030b`。实现与修订 commits：`70b48be`、`290ba78`、`78c8e7c`、`38a8ca5`、`c38696d`。
+- 审查闭环：首轮 `1B/5M/0m` 关闭 untrusted cwd probe、trust raw/serialization/durability、directory TOCTOU 与 template consumer；第二轮 `1B/3M/2m` 关闭 future-value downgrade、raw number、scope collision、UTF-8/whitespace/skill scalar；第三轮 `1B/1M/1m` 关闭 stale reload publication、serialized size 与 ECMAScript whitespace；最终复审新增的 control-character JSON key Major 由 `c38696d` 关闭。
+- 验证：累计全仓 test/vet/build/race、resource parser/template fuzz、production E2E，以及 Windows amd64、Linux arm64、Plan 9 amd64 build/test compile；最终 control-key 修订另通过 resource/app targeted/race、全仓 test/vet/build、Windows compile、fuzz 与 diff check。
+- 延期：interactive trust selector、extension/package/remote resource loading、themes、legacy commands migration、settings hot reload 与 Windows private trust persistence；跨平台 compile 不等于 Windows 实机验证。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。

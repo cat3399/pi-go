@@ -17,6 +17,7 @@ import (
 	"github.com/cat3399/pi-go/internal/auth"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
 )
@@ -107,10 +108,33 @@ func assembleProductionDependencies(
 	if parsed.hasAPIKey && parsed.modelID == "" {
 		return Dependencies{}, fmt.Errorf("%w: --api-key requires an explicit --model", ErrInvalidArguments)
 	}
+	// Prompt assets are admitted before credential resolution, session creation,
+	// or network access. Resource.Service itself asks the durable trust store
+	// before touching cwd-derived paths, so an untrusted project cannot affect
+	// content, diagnostics, or discovery timing through a local asset.
+	resources, err := resource.New(resource.Config{
+		CWD:      workingDir,
+		AgentDir: agentDir,
+		Tools: []resource.Tool{{
+			Name:    tool.BashToolName,
+			Snippet: "Execute a shell command in the current working directory.",
+		}},
+	})
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: initialize trusted prompt assets: %w", ErrInvalidProductionConfig, err)
+	}
+	if err := resources.Reload(ctx); err != nil {
+		return Dependencies{}, fmt.Errorf("%w: load trusted prompt assets: %w", ErrInvalidProductionConfig, err)
+	}
+	resourceSnapshot, err := resources.Snapshot()
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: trusted prompt assets unavailable", ErrInvalidProductionConfig)
+	}
 	catalog, err := modelcatalog.NewRuntime(modelcatalog.Options{
 		AgentDir: agentDir, WorkingDir: workingDir,
-		// Project settings are deliberately not trusted merely by being present.
-		ProjectTrusted: false,
+		// The same durable decision that admitted project resources also gates
+		// project settings. Presence alone never grants project influence.
+		ProjectTrusted: resourceSnapshot.Trusted,
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "models.json") {
@@ -181,7 +205,7 @@ func assembleProductionDependencies(
 	return Dependencies{
 		Provider:              implementation,
 		Model:                 model,
-		SystemPrompt:          "",
+		SystemPrompt:          resourceSnapshot.SystemPrompt,
 		WorkingDir:            workingDir,
 		DefaultSessionPath:    defaultPath,
 		SessionID:             sessionID,
@@ -196,6 +220,9 @@ func assembleProductionDependencies(
 		BashArtifactDirectory: config.BashArtifactDirectory,
 		BashMaxOutputLines:    config.BashMaxOutputLines,
 		BashMaxOutputBytes:    config.BashMaxOutputBytes,
+		ExpandPrompt: func(prompt string) string {
+			return resource.ExpandTemplate(prompt, resourceSnapshot.Templates)
+		},
 	}, nil
 }
 
