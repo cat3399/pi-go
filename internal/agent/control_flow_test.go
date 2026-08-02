@@ -16,13 +16,25 @@ import (
 )
 
 type namedBatchTool struct {
-	mu      sync.Mutex
-	started map[string]chan struct{}
-	release map[string]chan struct{}
-	mode    agent.ToolExecutionMode
+	mu             sync.Mutex
+	started        map[string]chan struct{}
+	release        map[string]chan struct{}
+	mode           agent.ToolExecutionMode
+	supportLookups []string
 }
 
 type mixedTool struct{}
+
+type panickingLookupTool struct{}
+
+func (panickingLookupTool) Name() string { return "lookup" }
+func (panickingLookupTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	return agent.ToolOutput{}, errors.New("must not execute")
+}
+func (panickingLookupTool) Supports(string) bool { panic("lookup boom") }
+func (panickingLookupTool) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	return agent.ToolOutput{}, errors.New("must not execute")
+}
 
 type admissionTranscript struct {
 	base *session.Session
@@ -156,8 +168,13 @@ func (mixedTool) ExecuteNamed(_ context.Context, name string, _ []byte, _ func(a
 	}
 }
 
-func (t *namedBatchTool) Name() string              { return "batch" }
-func (t *namedBatchTool) Supports(name string) bool { return name == "slow" || name == "fast" }
+func (t *namedBatchTool) Name() string { return "batch" }
+func (t *namedBatchTool) Supports(name string) bool {
+	t.mu.Lock()
+	t.supportLookups = append(t.supportLookups, name)
+	t.mu.Unlock()
+	return name == "slow" || name == "fast"
+}
 func (t *namedBatchTool) ToolExecutionMode(string) (agent.ToolExecutionMode, bool) {
 	return t.mode, t.mode != 0
 }
@@ -642,9 +659,223 @@ func TestParallelBatchSettlesEventsByCompletionButCommitsSourceOrder(t *testing.
 	}
 }
 
+func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t *testing.T) {
+	transcript := newSession(t)
+	slow, err := llm.NewToolCallBlock("one", "slow", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fast, err := llm.NewToolCallBlock("two", "fast", []byte(`{"x":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := &namedBatchTool{
+		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+	}
+	var before, after, lifecycle []string
+	var lock sync.Mutex
+	runtime, err := agent.New(agent.Config{
+		Provider: newScriptedProvider(t, assistant, mustTextTerminal(t, "done")), Transcript: transcript, Model: model,
+		Tool: tool, ToolExecution: agent.ToolExecutionParallel, Now: func() time.Time { return agentTestEpoch },
+		BeforeToolCall: func(_ context.Context, input agent.BeforeToolCallContext) (agent.BeforeToolCallResult, error) {
+			lock.Lock()
+			before = append(before, input.ToolCall.Name())
+			lock.Unlock()
+			if input.ToolCall.Name() == "fast" {
+				return agent.BeforeToolCallResult{Block: true, Reason: "policy blocked"}, nil
+			}
+			return agent.BeforeToolCallResult{}, nil
+		},
+		AfterToolCall: func(_ context.Context, input agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+			lock.Lock()
+			after = append(after, input.ToolCall.Name())
+			lock.Unlock()
+			terminate := false
+			return agent.AfterToolCallResult{Details: ptr(any(map[string]any{"hook": input.ToolCall.Name()})), Terminate: &terminate}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+		switch event.Kind {
+		case agent.EventToolStarted:
+			lifecycle = append(lifecycle, "start:"+event.ToolName)
+		case agent.EventToolSettled:
+			lifecycle = append(lifecycle, "end:"+event.ToolName)
+		}
+	})
+	done := make(chan error, 1)
+	go func() { _, runErr := runtime.Run(context.Background(), "go"); done <- runErr }()
+	waitClosed(t, tool.started["slow"], "prepared slow tool")
+	select {
+	case <-tool.started["fast"]:
+		t.Fatal("blocked fast tool was executed")
+	default:
+	}
+	lock.Lock()
+	gotBefore := append([]string(nil), before...)
+	gotAfter := append([]string(nil), after...)
+	gotLifecycle := append([]string(nil), lifecycle...)
+	lock.Unlock()
+	if !reflect.DeepEqual(gotBefore, []string{"slow", "fast"}) {
+		t.Fatalf("before hooks = %v", gotBefore)
+	}
+	if len(gotAfter) != 0 {
+		t.Fatalf("after hooks ran before prepared tool settled: %v", gotAfter)
+	}
+	if !reflect.DeepEqual(gotLifecycle, []string{"start:slow", "start:fast", "end:fast"}) {
+		t.Fatalf("immediate lifecycle = %v", gotLifecycle)
+	}
+	close(tool.release["slow"])
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	lock.Lock()
+	gotLifecycle = append([]string(nil), lifecycle...)
+	gotAfter = append([]string(nil), after...)
+	lock.Unlock()
+	if !reflect.DeepEqual(gotLifecycle, []string{"start:slow", "start:fast", "end:fast", "end:slow"}) {
+		t.Fatalf("final lifecycle = %v", gotLifecycle)
+	}
+	if !reflect.DeepEqual(gotAfter, []string{"slow"}) {
+		t.Fatalf("after hooks = %v", gotAfter)
+	}
+	tool.mu.Lock()
+	gotLookups := append([]string(nil), tool.supportLookups...)
+	tool.mu.Unlock()
+	if !reflect.DeepEqual(gotLookups, []string{"slow", "fast"}) {
+		t.Fatalf("tool lookups = %v, want one source-ordered preflight lookup per call", gotLookups)
+	}
+	results := transcript.Context().Messages()
+	if detail := toolResultAt(t, results, 2).Details(); string(detail) != `{"hook":"slow"}` {
+		t.Fatalf("slow details = %s", detail)
+	}
+}
+
+func TestParallelToolLookupPanicSettlesAsAssociatedResult(t *testing.T) {
+	call, err := llm.NewToolCallBlock("lookup-call", "missing", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.New(agent.Config{
+		Provider: newScriptedProvider(t, assistant, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
+		Tool: panickingLookupTool{}, ToolExecution: agent.ToolExecutionParallel, Now: func() time.Time { return agentTestEpoch },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.EventKind
+	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+		if event.Kind == agent.EventToolStarted || event.Kind == agent.EventToolSettled {
+			events = append(events, event.Kind)
+		}
+	})
+	result, err := runtime.Run(context.Background(), "go")
+	if err != nil || !result.Succeeded() {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	if !reflect.DeepEqual(events, []agent.EventKind{agent.EventToolStarted, agent.EventToolSettled}) {
+		t.Fatalf("lookup panic events = %v", events)
+	}
+}
+
+func TestToolHookPanicsBecomeAssociatedErrorResults(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		before     agent.BeforeToolCallHook
+		after      agent.AfterToolCallHook
+		wantCalls  uint32
+		wantPrefix string
+	}{
+		{
+			name: "before",
+			before: func(context.Context, agent.BeforeToolCallContext) (agent.BeforeToolCallResult, error) {
+				panic("before boom")
+			},
+			wantPrefix: "before tool hook panicked: before boom",
+		},
+		{
+			name: "after",
+			after: func(context.Context, agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+				panic("after boom")
+			},
+			wantCalls:  1,
+			wantPrefix: "after tool hook panicked: after boom",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transcript := newSession(t)
+			tool := &fakeTool{name: "echo", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+				return agent.ToolOutput{Text: "ordinary result"}, nil
+			}}
+			runtime, err := agent.New(agent.Config{
+				Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "done")),
+				Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
+				BeforeToolCall: test.before, AfterToolCall: test.after,
+				Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
+				t.Fatalf("Run = (%#v, %v)", result, err)
+			}
+			if tool.CallCount() != test.wantCalls {
+				t.Fatalf("tool calls = %d, want %d", tool.CallCount(), test.wantCalls)
+			}
+			result := toolResultAt(t, transcript.Context().Messages(), 2)
+			if !result.IsError() || !strings.HasPrefix(onlyText(t, result.Content()), test.wantPrefix) {
+				t.Fatalf("hook result = error %t text %q", result.IsError(), onlyText(t, result.Content()))
+			}
+		})
+	}
+}
+
+func TestUnmarshalableToolDetailsFailBeforeDurableResult(t *testing.T) {
+	transcript := newSession(t)
+	tool := &fakeTool{name: "echo", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+		return agent.ToolOutput{Text: "ordinary result", Details: func() {}}, nil
+	}}
+	runtime, err := agent.New(agent.Config{
+		Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`))),
+		Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Run(context.Background(), "go"); !errors.Is(err, agent.ErrInvariant) {
+		t.Fatalf("Run error = %v, want ErrInvariant", err)
+	}
+	messages := transcript.Context().Messages()
+	if len(messages) != 2 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant {
+		t.Fatalf("messages after invalid details = %#v", messages)
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
+
 func TestSteeringFollowUpContinueAndTransformBoundaries(t *testing.T) {
 	transcript := newSession(t)
-	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "steered"), mustTextTerminal(t, "followed"), mustTextTerminal(t, "continued"))
+	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "followed"), mustTextTerminal(t, "continued"))
 	runtime := newAgent(t, transcript, scripted, nil)
 	if err := runtime.Steer("steer now"); err != nil {
 		t.Fatal(err)
@@ -658,7 +889,7 @@ func TestSteeringFollowUpContinueAndTransformBoundaries(t *testing.T) {
 	if _, err := runtime.Run(context.Background(), "initial"); err != nil {
 		t.Fatal(err)
 	}
-	if scripted.CallCount() != 3 {
+	if scripted.CallCount() != 2 {
 		t.Fatalf("provider calls after queues = %d", scripted.CallCount())
 	}
 	if err := runtime.Steer("continue"); err != nil {
@@ -667,13 +898,13 @@ func TestSteeringFollowUpContinueAndTransformBoundaries(t *testing.T) {
 	if _, err := runtime.Continue(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if scripted.CallCount() != 4 {
+	if scripted.CallCount() != 3 {
 		t.Fatalf("provider calls after continue = %d", scripted.CallCount())
 	}
 	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
 		t.Fatalf("queues after drain = %d/%d", len(steering), len(followUp))
 	}
-	if got := messageRoles(transcript.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant}) {
+	if got := messageRoles(transcript.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{llm.RoleUser, llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant}) {
 		t.Fatalf("transcript roles = %v", got)
 	}
 }
@@ -833,7 +1064,7 @@ func TestMixedToolBatchPreservesEverySourceResultAndOnlyAllTerminateStops(t *tes
 	}
 }
 
-func TestTerminatingBatchStillDrainsSteeringThenFollowUp(t *testing.T) {
+func TestTerminatingBatchStillDrainsInitialSteeringAndFollowUp(t *testing.T) {
 	transcript := newSession(t)
 	first, err := llm.NewToolCallBlock("first", "terminate", []byte(`{"x":1}`))
 	if err != nil {
@@ -847,7 +1078,7 @@ func TestTerminatingBatchStillDrainsSteeringThenFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "steered"), mustTextTerminal(t, "followed"))
+	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "followed"))
 	runtime := newAgent(t, transcript, scripted, mixedTool{})
 	if err := runtime.Steer("steer after terminate"); err != nil {
 		t.Fatal(err)
@@ -858,12 +1089,12 @@ func TestTerminatingBatchStillDrainsSteeringThenFollowUp(t *testing.T) {
 	if _, err := runtime.Run(context.Background(), "start"); err != nil {
 		t.Fatal(err)
 	}
-	if scripted.CallCount() != 3 {
-		t.Fatalf("provider calls = %d, want terminating batch plus steering/follow-up drain", scripted.CallCount())
+	if scripted.CallCount() != 2 {
+		t.Fatalf("provider calls = %d, want initial steering plus terminating batch and follow-up drain", scripted.CallCount())
 	}
 	if got := messageRoles(transcript.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{
-		llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult,
-		llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant,
+		llm.RoleUser, llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult,
+		llm.RoleUser, llm.RoleAssistant,
 	}) {
 		t.Fatalf("terminating batch transcript roles = %v", got)
 	}

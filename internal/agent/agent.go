@@ -33,6 +33,10 @@ type activeRun struct {
 	toolExecutions   uint32
 	terminalAccepted bool
 	queueReservation *queueReservation
+	// snapshot is replaced only at the provider-turn boundary, before foreign
+	// provider code starts. It is then the immutable configuration that owns
+	// the resulting assistant/tool batch and its durable provenance.
+	snapshot *TurnSnapshot
 }
 
 type observerEntry struct {
@@ -40,7 +44,7 @@ type observerEntry struct {
 	observer Observer
 }
 
-// Agent is the single owner of volatile run state. Provider, tool, transcript
+// Agent is the existing stateful execution coordinator. Provider, tool, transcript
 // append, and observers are always called without holding mu. Continue reserves
 // its single-run slot under mu, reads its transcript snapshot without mu, then
 // validates the snapshot and consumes queues under mu.
@@ -59,8 +63,8 @@ type Agent struct {
 	observers      []observerEntry
 	nextObserverID uint64
 
-	steeringQueue []llm.UserTextMessage
-	followUpQueue []llm.UserTextMessage
+	steeringQueue []llm.ConversationMessage
+	followUpQueue []llm.ConversationMessage
 	// Reserved entries are always a prefix. Clear operations preserve this
 	// prefix; durable per-message acknowledgements remove it one entry at a time.
 	steeringReserved int
@@ -251,7 +255,19 @@ func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr e
 	if err != nil {
 		return Result{}, err
 	}
-	return a.runV2(active, []llm.UserTextMessage{user})
+	return a.runV2(active, []llm.ConversationMessage{user})
+}
+
+// RunContent accepts one rich user message while idle.  It deliberately uses
+// the same admission and run seam as Run: the message is committed by runV2
+// and therefore has the same event, provenance, and cancellation behaviour
+// as a text prompt.
+func (a *Agent) RunContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
+	active, user, err := a.beginRunContent(ctx, content)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runV2(active, []llm.ConversationMessage{user})
 }
 
 func (a *Agent) beginRun(
@@ -313,6 +329,61 @@ func (a *Agent) beginRun(
 		phase:  PhaseProvider,
 		turn:   1,
 	}
+	a.starting = false
+	a.active = active
+	reserved = false
+	a.mu.Unlock()
+	return active, user, nil
+}
+
+func (a *Agent) beginRunContent(ctx context.Context, content []llm.UserContentBlock) (*activeRun, llm.UserContentMessage, error) {
+	if a == nil {
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if ctx == nil {
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: context is nil", ErrInvalidRun)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
+	}
+
+	a.mu.Lock()
+	if a.active != nil || a.starting {
+		a.mu.Unlock()
+		return nil, llm.UserContentMessage{}, ErrBusy
+	}
+	if a.nextID == math.MaxUint64 {
+		a.mu.Unlock()
+		return nil, llm.UserContentMessage{}, ErrRunIDExhausted
+	}
+	a.starting = true
+	a.mu.Unlock()
+
+	reserved := true
+	defer func() {
+		if reserved {
+			a.mu.Lock()
+			a.starting = false
+			a.mu.Unlock()
+		}
+	}()
+	timestamp, err := a.now()
+	if err != nil {
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: prompt timestamp: %w", ErrInvalidRun, err)
+	}
+	user, err := llm.NewUserContentMessage(content, timestamp)
+	if err != nil {
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: prompt content: %w", ErrInvalidRun, err)
+	}
+
+	a.mu.Lock()
+	if !a.starting || a.active != nil {
+		a.mu.Unlock()
+		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: run reservation was lost", ErrInvariant)
+	}
+	a.nextID++
+	runContext, cancel := context.WithCancelCause(ctx)
+	active := &activeRun{id: a.nextID, ctx: runContext, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
 	a.starting = false
 	a.active = active
 	reserved = false
@@ -385,17 +456,30 @@ func (a *Agent) commitAfterAppend(
 	message llm.ConversationMessage,
 	afterAppend func() error,
 ) error {
-	settlementBase := context.WithoutCancel(active.ctx)
-	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
 	options := session.AppendOptions{}
+	var eventModel provider.ModelRef
 	if message.Role() == llm.RoleAssistant {
+		snapshot, snapshotErr := a.activeSnapshot(active)
+		if snapshotErr != nil {
+			// A cancellation can be persisted before any provider attempt (for
+			// example while durable queued input is settling). No turn snapshot
+			// exists in that case; use the immutable loop defaults solely for
+			// failure provenance rather than fabricating a request snapshot.
+			if !errors.Is(snapshotErr, ErrInvariant) {
+				return snapshotErr
+			}
+			snapshot = TurnSnapshot{Model: a.config.model}
+		}
 		options.Assistant = session.AssistantProvenance{
-			API:      a.config.model.API(),
-			Provider: a.config.model.Provider(),
-			Model:    a.config.model.ID(),
+			API:      snapshot.Model.API(),
+			Provider: snapshot.Model.Provider(),
+			Model:    snapshot.Model.ID(),
 			Cost:     session.ZeroUsageCost(),
 		}
+		eventModel = snapshot.Model
 	}
+	settlementBase := context.WithoutCancel(active.ctx)
+	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
 	_, err := a.config.transcript.Append(settlement, message, options)
 	cancel()
 	if err != nil {
@@ -411,6 +495,7 @@ func (a *Agent) commitAfterAppend(
 		RunID:   active.id,
 		Turn:    turn,
 		Message: message,
+		Model:   eventModel,
 	})
 	return nil
 }
@@ -465,6 +550,7 @@ func (a *Agent) collectProvider(
 			RunID:            active.id,
 			Turn:             turn,
 			ProviderSnapshot: snapshot,
+			ProviderEvent:    event,
 		})
 	}
 

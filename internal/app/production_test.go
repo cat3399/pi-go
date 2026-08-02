@@ -1029,7 +1029,7 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare: func(t *testing.T, agentDir string) {
 				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, map[string]any{
-					"headers": map[string]any{"X-Secret": "models-secret"},
+					"futureRequestOption": map[string]any{"X-Secret": "models-secret"},
 				})
 			},
 			want:    "selected model configuration is not migrated",

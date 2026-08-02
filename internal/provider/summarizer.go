@@ -77,24 +77,25 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		if retryPending {
 			if cause := context.Cause(ctx); cause != nil {
 				notifyRetryObserver(ctx, observer, RetryEvent{
-					Kind: RetryFinished, Attempt: attempt, FailureKind: FailureCancelled,
-					FinishReason: RetryFinishCancelled,
+					Kind: RetryFinished, Attempt: attempt, MaxAttempts: s.retry.MaxAttempts(), FailureKind: FailureCancelled,
+					FinishReason: RetryFinishCancelled, FinalError: "summary retry cancelled",
 				})
 				return session.SummaryOutput{}, fmt.Errorf("summary retry cancelled: %w", cause)
 			}
-			notifyRetryObserver(ctx, observer, RetryEvent{Kind: RetryAttempt, Attempt: attempt})
+			notifyRetryObserver(ctx, observer, RetryEvent{Kind: RetryAttempt, Attempt: attempt, MaxAttempts: s.retry.MaxAttempts()})
 		}
-		finishRetry := func(kind FailureKind, status int, succeeded bool, reason RetryFinishReason) {
+		finishRetry := func(kind FailureKind, status int, succeeded bool, reason RetryFinishReason, finalError string) {
 			if !retryPending {
 				return
 			}
 			notifyRetryObserver(ctx, observer, RetryEvent{
-				Kind: RetryFinished, Attempt: attempt, FailureKind: kind,
-				HTTPStatus: status, FinishReason: reason, Succeeded: succeeded,
+				Kind: RetryFinished, Attempt: attempt, MaxAttempts: s.retry.MaxAttempts(), FailureKind: kind,
+				HTTPStatus: status, FinishReason: reason, Succeeded: succeeded, FinalError: finalError,
 			})
 			retryPending = false
 		}
 		terminal, streamErr := s.collectAttempt(ctx, request)
+		errorMessage := summaryRetryError(terminal, streamErr)
 		var failure *ProviderFailure
 		if terminalFailure, ok := terminal.(llm.AssistantFailureMessage); ok {
 			_ = errors.As(terminalFailure.Failure().Cause(), &failure)
@@ -102,16 +103,16 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		retryable := IsTransientStreamError(streamErr) || IsTransientFailure(failure)
 		kind, status, _ := normalizedRetryOutcome(terminal, streamErr)
 		if retryable && attempt < s.retry.MaxAttempts() {
-			finishRetry(kind, status, false, RetryFinishFailed)
+			finishRetry(kind, status, false, RetryFinishFailed, errorMessage)
 			delay := s.retry.Delay(attempt+1, failure)
 			notifyRetryObserver(ctx, observer, RetryEvent{
-				Kind: RetryScheduled, Attempt: attempt + 1, Delay: delay,
-				FailureKind: kind, HTTPStatus: status,
+				Kind: RetryScheduled, Attempt: attempt + 1, MaxAttempts: s.retry.MaxAttempts(), Delay: delay,
+				FailureKind: kind, HTTPStatus: status, ErrorMessage: errorMessage,
 			})
 			if err := s.retry.Wait(ctx, delay); err != nil {
 				notifyRetryObserver(ctx, observer, RetryEvent{
-					Kind: RetryFinished, Attempt: attempt + 1, FailureKind: FailureCancelled,
-					FinishReason: RetryFinishCancelled,
+					Kind: RetryFinished, Attempt: attempt + 1, MaxAttempts: s.retry.MaxAttempts(), FailureKind: FailureCancelled,
+					FinishReason: RetryFinishCancelled, FinalError: "summary retry cancelled",
 				})
 				return session.SummaryOutput{}, fmt.Errorf("summary retry cancelled: %w", err)
 			}
@@ -120,14 +121,14 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		}
 		failureReason := RetryFinishFailed
 		if cause := context.Cause(ctx); cause != nil {
-			finishRetry(FailureCancelled, 0, false, RetryFinishCancelled)
+			finishRetry(FailureCancelled, 0, false, RetryFinishCancelled, "summary retry cancelled")
 			return session.SummaryOutput{}, fmt.Errorf("summary retry cancelled: %w", cause)
 		}
 		if retryable && attempt >= s.retry.MaxAttempts() {
 			failureReason = RetryFinishExhausted
 		}
 		if streamErr != nil {
-			finishRetry(kind, status, false, failureReason)
+			finishRetry(kind, status, false, failureReason, errorMessage)
 			return session.SummaryOutput{}, fmt.Errorf("summary stream: %w", streamErr)
 		}
 		text, usage, err := summaryTerminal(terminal)
@@ -135,12 +136,22 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 			if kind == 0 {
 				kind = FailureInvalidResponse
 			}
-			finishRetry(kind, status, false, failureReason)
+			finishRetry(kind, status, false, failureReason, errorMessage)
 			return session.SummaryOutput{}, err
 		}
-		finishRetry(0, 0, true, RetryFinishSucceeded)
+		finishRetry(0, 0, true, RetryFinishSucceeded, "")
 		return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.ZeroUsageCost()}}, nil
 	}
+}
+
+func summaryRetryError(terminal llm.AssistantTerminal, streamErr error) string {
+	if streamErr != nil {
+		return "summary stream failed"
+	}
+	if failure, ok := terminal.(llm.AssistantFailureMessage); ok {
+		return failure.ErrorMessage()
+	}
+	return ""
 }
 
 func notifyRetryObserver(ctx context.Context, observer RetryObserver, event RetryEvent) {

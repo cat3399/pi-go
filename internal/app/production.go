@@ -181,6 +181,10 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: initialize OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
 	}
+	router, err := provider.NewModelRouter([]provider.ProviderRegistration{{ID: openAIProviderID, Adapters: map[string]provider.Provider{provider.OpenAIResponsesAPI: implementation}}})
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: initialize provider router: %w", ErrInvalidProductionConfig, err)
+	}
 
 	sessionClock := config.SessionNow
 	if sessionClock == nil {
@@ -203,8 +207,9 @@ func assembleProductionDependencies(
 	defaultPath := productionSessionPathFactory(agentDir, createdAt, sessionID)
 
 	return Dependencies{
-		Provider:              implementation,
+		Provider:              router,
 		Model:                 model,
+		Stream:                provider.StreamOptions{APIKey: resolvedAuth.APIKey, SessionID: sessionID},
 		SystemPrompt:          resourceSnapshot.SystemPrompt,
 		WorkingDir:            workingDir,
 		DefaultSessionPath:    defaultPath,

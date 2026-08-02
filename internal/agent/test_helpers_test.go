@@ -219,6 +219,22 @@ func onlyText(t *testing.T, blocks []llm.TextBlock) string {
 	return blocks[0].Text()
 }
 
+func messageText(t *testing.T, message llm.ConversationMessage) string {
+	t.Helper()
+	switch value := message.(type) {
+	case llm.UserTextMessage:
+		return onlyText(t, value.Content())
+	case llm.UserContentMessage:
+		for _, block := range value.Content() {
+			if text, ok := block.(llm.TextBlock); ok {
+				return text.Text()
+			}
+		}
+	}
+	t.Fatalf("message %T has no user text", message)
+	return ""
+}
+
 func waitClosed(t *testing.T, channel <-chan struct{}, label string) {
 	t.Helper()
 	select {

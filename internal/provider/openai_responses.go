@@ -46,8 +46,11 @@ type OpenAIResponsesConfig struct {
 	// APIKey is the already-resolved bearer credential. A missing or malformed
 	// credential is a FailureConfiguration stream, not a constructor panic/error.
 	APIKey string
-	Client HTTPDoer
-	Clock  Clock
+	// Headers are adapter/provider-level headers. Model headers are applied
+	// first and request headers last, so a request can override either.
+	Headers map[string]string
+	Client  HTTPDoer
+	Clock   Clock
 	// SystemRole selects the explicit Responses role for a non-empty system
 	// prompt. Zero selects "system"; reasoning-model assembly may select
 	// OpenAIResponsesDeveloperRole without guessing from a model ID.
@@ -64,6 +67,7 @@ type OpenAIResponsesConfig struct {
 type OpenAIResponsesProvider struct {
 	endpoint          string
 	apiKey            string
+	headers           map[string]string
 	client            HTTPDoer
 	clock             Clock
 	systemRole        OpenAIResponsesSystemRole
@@ -139,6 +143,7 @@ func NewOpenAIResponsesProvider(config OpenAIResponsesConfig) (*OpenAIResponsesP
 	return &OpenAIResponsesProvider{
 		endpoint:          endpoint,
 		apiKey:            config.APIKey,
+		headers:           cloneStrings(config.Headers),
 		client:            client,
 		clock:             synchronizedClock(clock),
 		systemRole:        config.SystemRole,
@@ -193,7 +198,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err := request.validate(); err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
-	if request.Model().Provider() != OpenAIProviderID || request.Model().API() != OpenAIResponsesAPI {
+	if request.Model().API() != OpenAIResponsesAPI {
 		cause := fmt.Errorf(
 			"%w: model routes to provider %q API %q",
 			ErrOpenAIResponsesRequest,
@@ -202,7 +207,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		)
 		return newResponsesFailureStream(ctx, clock, FailureConfiguration, cause, "")
 	}
-	if p.configurationFail != nil {
+	if p.configurationFail != nil && requestAPIKey(request, "") == "" {
 		spec := *p.configurationFail
 		return newResponsesFailureStream(ctx, clock, spec.kind, spec.cause, spec.message)
 	}
@@ -210,21 +215,48 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureConfiguration, err, "")
 	}
+	if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SupportsDeveloperRole != nil && !*compat.SupportsDeveloperRole {
+		systemRole = "system"
+	}
 	payload, err := encodeOpenAIResponsesRequest(request, systemRole)
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
+	endpoint := p.endpoint
+	if baseURL := request.Model().BaseURL(); baseURL != "" {
+		endpoint, err = responsesEndpoint(baseURL)
+		if err != nil {
+			return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		}
+	}
 	streamContext, cancel := context.WithCancelCause(ctx)
+	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, request.StreamOptions().Headers)
+	if sessionID := request.StreamOptions().SessionID; sessionID != "" {
+		format := "openai"
+		if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SessionAffinityFormat != nil {
+			format = *compat.SessionAffinityFormat
+		}
+		switch format {
+		case "openrouter":
+			headers["x-session-id"] = sessionID
+		case "openai-nosession":
+			headers["x-client-request-id"] = sessionID
+		default:
+			headers["session_id"] = sessionID
+			headers["x-client-request-id"] = sessionID
+		}
+	}
 	return &openAIResponsesStream{
 		ctx:               streamContext,
 		cancel:            cancel,
-		endpoint:          p.endpoint,
-		apiKey:            p.apiKey,
+		endpoint:          endpoint,
+		apiKey:            requestAPIKey(request, p.apiKey),
 		client:            p.client,
 		clock:             clock,
 		timestamp:         clock(),
 		payload:           payload,
 		model:             request.Model(),
+		headers:           headers,
 		maxEventBytes:     p.maxEventBytes,
 		maxErrorBodyBytes: p.maxErrorBodyBytes,
 		slots:             make(map[int]*responsesTextSlot),
@@ -235,6 +267,31 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		completedPhases:   make(map[int]string),
 		pendingReasoning:  make(map[int]*responsesCompletedReasoning),
 	}
+}
+
+func (*OpenAIResponsesProvider) SupportsModel(model ModelRef) bool {
+	return model.API() == OpenAIResponsesAPI
+}
+
+func requestAPIKey(request Request, fallback string) string {
+	if key := request.StreamOptions().APIKey; key != "" {
+		return key
+	}
+	return fallback
+}
+func mergeResponseHeaders(groups ...map[string]string) map[string]string {
+	merged := map[string]string{}
+	for _, group := range groups {
+		for key, value := range group {
+			for existing := range merged {
+				if strings.EqualFold(existing, key) {
+					delete(merged, existing)
+				}
+			}
+			merged[key] = value
+		}
+	}
+	return merged
 }
 
 func isTypedNil(value any) bool {

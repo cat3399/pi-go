@@ -51,6 +51,7 @@ func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 			},
 			map[string]any{"type": "response.output_text.delta", "output_index": 0, "item_id": "msg-1", "delta": "hel"},
 			map[string]any{"type": "response.output_text.delta", "output_index": 0, "item_id": "msg-1", "delta": "lo"},
+			map[string]any{"type": "response.output_text.done", "output_index": 0, "item_id": "msg-1", "text": "hello"},
 			map[string]any{
 				"type": "response.output_item.done", "output_index": 0,
 				"item": map[string]any{
@@ -285,6 +286,7 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 		{name: "malformed JSON", contentType: "text/event-stream", body: "data: {\n\n"},
 		{name: "early EOF", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.created"})},
 		{name: "DONE before terminal", contentType: "text/event-stream", body: "data: [DONE]\n\n"},
+		{name: "unknown done progress event", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.unrecognized.done"})},
 		{name: "delta without item", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.output_text.delta", "output_index": 0, "delta": "x"})},
 		{
 			name: "final text mismatch", contentType: "text/event-stream",

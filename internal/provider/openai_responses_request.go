@@ -11,12 +11,20 @@ import (
 )
 
 type responsesRequestPayload struct {
-	Model             string                  `json:"model"`
-	Input             []any                   `json:"input"`
-	Tools             []responsesFunctionTool `json:"tools,omitempty"`
-	ParallelToolCalls bool                    `json:"parallel_tool_calls"`
-	Stream            bool                    `json:"stream"`
-	Store             bool                    `json:"store"`
+	Model             string                     `json:"model"`
+	Input             []any                      `json:"input"`
+	Tools             []responsesFunctionTool    `json:"tools,omitempty"`
+	ParallelToolCalls bool                       `json:"parallel_tool_calls"`
+	Stream            bool                       `json:"stream"`
+	Store             bool                       `json:"store"`
+	Reasoning         *responsesReasoningOptions `json:"reasoning,omitempty"`
+	Include           []string                   `json:"include,omitempty"`
+	MaxOutputTokens   uint64                     `json:"max_output_tokens,omitempty"`
+}
+
+type responsesReasoningOptions struct {
+	Effort  string `json:"effort"`
+	Summary string `json:"summary,omitempty"`
 }
 
 type responsesFunctionTool struct {
@@ -45,6 +53,7 @@ type responsesReasoningInput struct {
 	Type             string                      `json:"type"`
 	ID               string                      `json:"id"`
 	EncryptedContent string                      `json:"encrypted_content,omitempty"`
+	Content          string                      `json:"content,omitempty"`
 	Summary          []responsesReasoningSummary `json:"summary,omitempty"`
 }
 type responsesReasoningSummary struct {
@@ -159,14 +168,32 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	payload, err := json.Marshal(responsesRequestPayload{
+	payloadValue := responsesRequestPayload{
 		Model:             request.Model().ID(),
 		Input:             input,
 		Tools:             tools,
 		ParallelToolCalls: request.ParallelToolCalls(),
 		Stream:            true,
 		Store:             false,
-	})
+	}
+	if effort, enabled := request.Model().ThinkingEffort(request.ThinkingLevel()); enabled {
+		payloadValue.Reasoning = &responsesReasoningOptions{Effort: effort}
+		if request.ThinkingLevel() != "" && request.ThinkingLevel() != ThinkingOff {
+			payloadValue.Reasoning.Summary = "auto"
+			payloadValue.Include = []string{"reasoning.encrypted_content"}
+		}
+	}
+	maxTokens := request.Model().MaxTokens()
+	if request.StreamOptions().MaxTokens != 0 {
+		maxTokens = request.StreamOptions().MaxTokens
+	}
+	if maxTokens != 0 {
+		if maxTokens < 16 {
+			maxTokens = 16
+		}
+		payloadValue.MaxOutputTokens = maxTokens
+	}
+	payload, err := json.Marshal(payloadValue)
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode JSON: %w", ErrOpenAIResponsesRequest, err)
 	}
@@ -231,7 +258,14 @@ func appendResponsesAssistantBlocks(input []any, messageIndex int, blocks []llm.
 				continue
 			}
 			reasoning := responsesReasoningInput{Type: "reasoning", ID: replay.ItemID, EncryptedContent: replay.EncryptedContent}
-			if block.Thinking() != "" {
+			plaintext := replay.PlaintextContent != ""
+			if plaintext {
+				reasoning.EncryptedContent = ""
+				reasoning.Content = replay.PlaintextContent
+				if reasoning.Content == "" {
+					reasoning.Content = block.Thinking()
+				}
+			} else if block.Thinking() != "" {
 				reasoning.Summary = []responsesReasoningSummary{{Type: "summary_text", Text: block.Thinking()}}
 			}
 			input = append(input, reasoning)

@@ -77,13 +77,20 @@ func (r RetryFinishReason) String() string {
 
 // RetryEvent contains only normalized, secret-safe retry metadata.
 type RetryEvent struct {
-	Kind         RetryEventKind
-	Attempt      uint32
+	Kind    RetryEventKind
+	Attempt uint32
+	// MaxAttempts includes the initial request. Consumers which present a
+	// retry-only budget should subtract one.
+	MaxAttempts  uint32
 	Delay        time.Duration
 	FailureKind  FailureKind
 	HTTPStatus   int
 	FinishReason RetryFinishReason
 	Succeeded    bool
+	// ErrorMessage and FinalError are provider-normalized, display-safe retry
+	// context. They are intentionally optional for attempt-start events.
+	ErrorMessage string
+	FinalError   string
 }
 
 // RetryObserver synchronously observes one retry scope owned by its caller.

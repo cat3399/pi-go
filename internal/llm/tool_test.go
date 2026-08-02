@@ -2,6 +2,7 @@ package llm_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -224,5 +225,25 @@ func TestNewToolResultMessageRejectsInvalidIdentity(t *testing.T) {
 				t.Fatalf("NewToolResultMessage() error = %v, want ErrInvalidToolResult", err)
 			}
 		})
+	}
+}
+
+func TestToolResultDetailsAreValidatedAndCopied(t *testing.T) {
+	details := json.RawMessage(`{"nested":{"value":1}}`)
+	result, err := llm.NewToolResultMessageWithDetails("call", "tool", nil, false, time.UnixMilli(1), details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details[0] = '['
+	got := result.Details()
+	if string(got) != `{"nested":{"value":1}}` {
+		t.Fatalf("details copy = %s", got)
+	}
+	got[0] = '['
+	if string(result.Details()) != `{"nested":{"value":1}}` {
+		t.Fatal("details output aliases result")
+	}
+	if _, err := llm.NewToolResultMessageWithDetails("call", "tool", nil, false, time.UnixMilli(1), json.RawMessage(`{`)); !errors.Is(err, llm.ErrInvalidToolResult) {
+		t.Fatalf("invalid details error = %v", err)
 	}
 }

@@ -130,13 +130,14 @@ func runApplication(
 		return ExitFailure
 	}
 
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider:          runtime.provider,
 		Transcript:        transcript,
 		Model:             runtime.model,
 		SystemPrompt:      runtime.systemPrompt,
 		Tool:              executor,
 		Tools:             toolDefinitions,
+		Stream:            runtime.stream,
 		Now:               runtime.agentNow,
 		SettlementTimeout: runtime.settlementTimeout,
 	})
@@ -144,6 +145,12 @@ func runApplication(
 		writeDiagnostic(stderr, fmt.Errorf("initialize agent: %w", err))
 		return ExitFailure
 	}
+	defer func() {
+		if err := coordinator.Close(context.Background()); err != nil && exitCode == ExitSuccess {
+			writeDiagnostic(stderr, fmt.Errorf("close agent: %w", err))
+			exitCode = ExitFailure
+		}
+	}()
 
 	result, runErr := coordinator.Run(runContext, prompt)
 	if signalCode, caught := signals.exitCode(); caught {

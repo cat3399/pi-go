@@ -83,6 +83,10 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 		encoded = strconv.AppendBool(encoded, message.IsError())
 		encoded = append(encoded, `,"timestamp":`...)
 		encoded = strconv.AppendInt(encoded, message.Timestamp().UnixMilli(), 10)
+		if details := message.Details(); len(details) != 0 {
+			encoded = append(encoded, `,"details":`...)
+			encoded = append(encoded, details...)
+		}
 		return append(encoded, '}'), nil
 	case llm.ToolResultContentMessage:
 		content, err := encodeToolResultContentBlocks(message.Content())
@@ -105,6 +109,10 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 		encoded = strconv.AppendBool(encoded, message.IsError())
 		encoded = append(encoded, `,"timestamp":`...)
 		encoded = strconv.AppendInt(encoded, message.Timestamp().UnixMilli(), 10)
+		if details := message.Details(); len(details) != 0 {
+			encoded = append(encoded, `,"details":`...)
+			encoded = append(encoded, details...)
+		}
 		return append(encoded, '}'), nil
 	default:
 		return nil, fmt.Errorf("invalid conversation message %T", message)

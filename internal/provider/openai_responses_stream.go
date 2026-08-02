@@ -54,6 +54,7 @@ type responsesCompletedReasoning struct {
 	itemID           string
 	text             string
 	encryptedContent string
+	plaintextContent string
 }
 
 type responsesDeferredEvent struct {
@@ -72,6 +73,7 @@ type openAIResponsesStream struct {
 	timestamp         time.Time
 	payload           []byte
 	model             ModelRef
+	headers           map[string]string
 	maxEventBytes     int
 	maxErrorBodyBytes int
 	preflight         *responsesFailureSpec
@@ -289,6 +291,9 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 	request.Header.Set("Authorization", "Bearer "+s.apiKey)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
+	for name, value := range s.headers {
+		request.Header.Set(name, value)
+	}
 
 	response, err := invokeResponsesHTTPDoer(s.client, request)
 	if response != nil && response.Body != nil && !isTypedNil(response.Body) {
@@ -613,6 +618,7 @@ func (s *openAIResponsesStream) flushResponsesDeferredEvents() error {
 		replay := &llm.OpenAIResponsesReasoning{
 			ItemID:           reasoning.itemID,
 			EncryptedContent: reasoning.encryptedContent,
+			PlaintextContent: reasoning.plaintextContent,
 		}
 		block, err := llm.NewThinkingBlock(reasoning.text, replay)
 		if err != nil {

@@ -10,6 +10,43 @@ import (
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
+func TestThinkingLevelMatchesPiSelection(t *testing.T) {
+	medium := "medium"
+	model, err := provider.NewModel(provider.ModelSpec{Provider: "test", API: "test", ID: "reasoner", Reasoning: true, ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingOff: nil, provider.ThinkingLow: nil, provider.ThinkingHigh: nil, provider.ThinkingMedium: &medium}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := model.ClampThinkingLevel(provider.ThinkingOff); got != provider.ThinkingMinimal {
+		t.Fatalf("off:null clamp = %q, want minimal", got)
+	}
+	if got := model.ClampThinkingLevel(provider.ThinkingLow); got != provider.ThinkingMedium {
+		t.Fatalf("low clamp = %q, want medium", got)
+	}
+	if got := model.ClampThinkingLevel(provider.ThinkingXHigh); got != provider.ThinkingMedium {
+		t.Fatalf("unmapped xhigh clamp = %q, want medium", got)
+	}
+	if got := model.ClampThinkingLevel(provider.ThinkingMax); got != provider.ThinkingMedium {
+		t.Fatalf("unmapped max clamp = %q, want medium", got)
+	}
+	if effort, ok := model.ThinkingEffort(provider.ThinkingOff); !ok || effort != "minimal" {
+		t.Fatalf("off:null effort = %q/%v, want minimal/true", effort, ok)
+	}
+}
+
+func TestModelEqualUsesProviderAndIDNotMetadataPointer(t *testing.T) {
+	first, err := provider.NewModel(provider.ModelSpec{Provider: "same", API: "one", ID: "model", Name: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := provider.NewModel(provider.ModelSpec{Provider: "same", API: "two", ID: "model", Name: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Equal(second) {
+		t.Fatalf("models with provider/id identity should compare equal")
+	}
+}
+
 func TestRequestValidatesAndCopiesConversation(t *testing.T) {
 	t.Parallel()
 

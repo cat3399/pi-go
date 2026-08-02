@@ -39,6 +39,7 @@ type SessionPathFactory func(workingDir string) (string, error)
 type Dependencies struct {
 	Provider           provider.Provider
 	Model              provider.ModelRef
+	Stream             provider.StreamOptions
 	SystemPrompt       string
 	WorkingDir         string
 	DefaultSessionPath SessionPathFactory
@@ -64,6 +65,7 @@ type Dependencies struct {
 type runtimeDependencies struct {
 	provider           provider.Provider
 	model              provider.ModelRef
+	stream             provider.StreamOptions
 	systemPrompt       string
 	workingDir         string
 	defaultSessionPath SessionPathFactory
@@ -77,6 +79,17 @@ type runtimeDependencies struct {
 	toolDefinitions    []provider.ToolDefinition
 	bashOptions        tool.BashOptions
 	expandPrompt       func(string) string
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
 }
 
 func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
@@ -125,6 +138,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	return runtimeDependencies{
 		provider:           deps.Provider,
 		model:              deps.Model,
+		stream:             provider.StreamOptions{APIKey: deps.Stream.APIKey, Headers: cloneStringMap(deps.Stream.Headers), MaxTokens: deps.Stream.MaxTokens, SessionID: deps.Stream.SessionID},
 		systemPrompt:       deps.SystemPrompt,
 		workingDir:         filepath.Clean(workingDir),
 		defaultSessionPath: deps.DefaultSessionPath,

@@ -582,11 +582,19 @@ func decodeToolResultMessage(entryID string, object map[string]json.RawMessage) 
 		}
 	}
 	if len(rich) != len(texts) {
-		message, err := llm.NewToolResultContentMessage(toolCallID, toolName, rich, isError, timestamp)
+		message, err := llm.NewToolResultContentMessageWithDetails(toolCallID, toolName, rich, isError, timestamp, toolResultDetails(object))
 		return message, diagnostics, err
 	}
-	message, err := llm.NewToolResultMessage(toolCallID, toolName, texts, isError, timestamp)
+	message, err := llm.NewToolResultMessageWithDetails(toolCallID, toolName, texts, isError, timestamp, toolResultDetails(object))
 	return message, diagnostics, err
+}
+
+func toolResultDetails(object map[string]json.RawMessage) json.RawMessage {
+	raw, ok := object["details"]
+	if !ok || len(raw) == 0 || !json.Valid(raw) {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
 }
 
 func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesReplay bool) ([]llm.AssistantBlock, []Diagnostic, error) {

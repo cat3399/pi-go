@@ -90,6 +90,10 @@ func (b ImageBlock) URL() string         { return b.url }
 type OpenAIResponsesReasoning struct {
 	ItemID           string
 	EncryptedContent string
+	// PlaintextContent is the complete reasoning item for Responses-compatible
+	// endpoints which require replay as `content` rather than OpenAI's opaque
+	// encrypted_content. It is never inferred from provider identity.
+	PlaintextContent string
 	Redacted         bool
 }
 
@@ -135,6 +139,12 @@ func (r OpenAIResponsesReasoning) validate() error {
 	}
 	if !utf8.ValidString(r.EncryptedContent) || len(r.EncryptedContent) > 1<<20 {
 		return fmt.Errorf("%w: encrypted reasoning content", ErrInvalidRichContent)
+	}
+	if !utf8.ValidString(r.PlaintextContent) || len(r.PlaintextContent) > 1<<20 {
+		return fmt.Errorf("%w: plaintext reasoning content", ErrInvalidRichContent)
+	}
+	if r.EncryptedContent != "" && r.PlaintextContent != "" {
+		return fmt.Errorf("%w: ambiguous reasoning replay content", ErrInvalidRichContent)
 	}
 	return nil
 }

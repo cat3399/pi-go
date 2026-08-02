@@ -278,13 +278,20 @@ type ToolResultContentMessage struct {
 	content              []ToolResultContentBlock
 	isError              bool
 	timestamp            time.Time
+	details              json.RawMessage
 }
 
 func (ToolResultContentMessage) conversationMessage() {}
 func NewToolResultContentMessage(id, name string, content []ToolResultContentBlock, isError bool, timestamp time.Time) (ToolResultContentMessage, error) {
-	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp}
+	return NewToolResultContentMessageWithDetails(id, name, content, isError, timestamp, nil)
+}
+func NewToolResultContentMessageWithDetails(id, name string, content []ToolResultContentBlock, isError bool, timestamp time.Time, details json.RawMessage) (ToolResultContentMessage, error) {
+	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(details)}
 	if err := m.validate(); err != nil {
 		return ToolResultContentMessage{}, err
+	}
+	if len(m.details) != 0 && !json.Valid(m.details) {
+		return ToolResultContentMessage{}, fmt.Errorf("%w: details are not valid JSON", ErrInvalidToolResult)
 	}
 	return m, nil
 }
@@ -317,8 +324,9 @@ func (m ToolResultContentMessage) ToolName() string   { return m.toolName }
 func (m ToolResultContentMessage) Content() []ToolResultContentBlock {
 	return append([]ToolResultContentBlock(nil), m.content...)
 }
-func (m ToolResultContentMessage) IsError() bool        { return m.isError }
-func (m ToolResultContentMessage) Timestamp() time.Time { return m.timestamp }
+func (m ToolResultContentMessage) IsError() bool            { return m.isError }
+func (m ToolResultContentMessage) Timestamp() time.Time     { return m.timestamp }
+func (m ToolResultContentMessage) Details() json.RawMessage { return bytes.Clone(m.details) }
 
 func (m AssistantToolUseMessage) validate() error {
 	_, err := NewAssistantToolUseMessage(m.content, m.usage, m.timestamp)
@@ -375,6 +383,7 @@ type ToolResultMessage struct {
 	content    []TextBlock
 	isError    bool
 	timestamp  time.Time
+	details    json.RawMessage
 }
 
 func (ToolResultMessage) conversationMessage() {}
@@ -386,12 +395,20 @@ func NewToolResultMessage(
 	isError bool,
 	timestamp time.Time,
 ) (ToolResultMessage, error) {
+	return NewToolResultMessageWithDetails(toolCallID, toolName, content, isError, timestamp, nil)
+}
+
+func NewToolResultMessageWithDetails(toolCallID string, toolName string, content []TextBlock, isError bool, timestamp time.Time, details json.RawMessage) (ToolResultMessage, error) {
 	result := ToolResultMessage{
 		toolCallID: toolCallID,
 		toolName:   toolName,
 		content:    append([]TextBlock(nil), content...),
 		isError:    isError,
 		timestamp:  timestamp,
+		details:    bytes.Clone(details),
+	}
+	if len(result.details) != 0 && !json.Valid(result.details) {
+		return ToolResultMessage{}, fmt.Errorf("%w: details are not valid JSON", ErrInvalidToolResult)
 	}
 	if err := result.validate(); err != nil {
 		return ToolResultMessage{}, err
@@ -437,6 +454,7 @@ func (m ToolResultMessage) IsError() bool {
 func (m ToolResultMessage) Timestamp() time.Time {
 	return m.timestamp
 }
+func (m ToolResultMessage) Details() json.RawMessage { return bytes.Clone(m.details) }
 
 func ValidateToolResultAssociation(call ToolCallBlock, result ToolResultMessage) error {
 	if err := call.validate(); err != nil {
@@ -460,6 +478,26 @@ func ValidateToolResultAssociation(call ToolCallBlock, result ToolResultMessage)
 			result.ToolName(),
 			call.Name(),
 		)
+	}
+	return nil
+}
+
+// ValidateToolResultContentAssociation is the rich-content equivalent of
+// ValidateToolResultAssociation. Keeping the association validation at the
+// message boundary means the agent loop can preserve image tool output without
+// weakening causality checks.
+func ValidateToolResultContentAssociation(call ToolCallBlock, result ToolResultContentMessage) error {
+	if err := call.validate(); err != nil {
+		return err
+	}
+	if err := result.validate(); err != nil {
+		return err
+	}
+	if call.ID() != result.ToolCallID() {
+		return fmt.Errorf("%w: result call id %q, want %q", ErrToolResultMismatch, result.ToolCallID(), call.ID())
+	}
+	if call.Name() != result.ToolName() {
+		return fmt.Errorf("%w: result tool name %q, want %q", ErrToolResultMismatch, result.ToolName(), call.Name())
 	}
 	return nil
 }

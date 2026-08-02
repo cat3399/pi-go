@@ -49,13 +49,19 @@ type Diagnostic struct{ Source, Path, Message string }
 func (d Diagnostic) Error() string { return fmt.Sprintf("%s %s: %s", d.Source, d.Path, d.Message) }
 
 type Model struct {
-	Provider  string            `json:"provider"`
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	API       string            `json:"api"`
-	BaseURL   string            `json:"baseUrl"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Reasoning bool              `json:"reasoning"`
+	Provider         string                             `json:"provider"`
+	ID               string                             `json:"id"`
+	Name             string                             `json:"name"`
+	API              string                             `json:"api"`
+	BaseURL          string                             `json:"baseUrl"`
+	Headers          map[string]string                  `json:"headers,omitempty"`
+	Reasoning        bool                               `json:"reasoning"`
+	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
+	Input            []provider.InputKind               `json:"input,omitempty"`
+	Cost             provider.CostRates                 `json:"cost"`
+	ContextWindow    uint64                             `json:"contextWindow"`
+	MaxTokens        uint64                             `json:"maxTokens"`
+	Compat           provider.ModelCompat               `json:"-"`
 	// UnsupportedFields and UnknownFields are parser diagnostics attached to a
 	// runtime projection. They are not model metadata and are intentionally not
 	// part of CachedCatalog's durable model contract.
@@ -63,11 +69,18 @@ type Model struct {
 	UnknownFields     []string `json:"-"`
 }
 
-func (m Model) Ref() (provider.ModelRef, error) { return provider.NewModelRef(m.Provider, m.API, m.ID) }
+func (m Model) Ref() (provider.ModelRef, error) {
+	return provider.NewModel(provider.ModelSpec{
+		Provider: m.Provider, API: m.API, ID: m.ID, Name: m.Name, BaseURL: m.BaseURL,
+		Headers: m.Headers, Reasoning: m.Reasoning, ThinkingLevelMap: m.ThinkingLevelMap, Input: m.Input,
+		Cost: m.Cost, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, Compat: m.Compat,
+	})
+}
 
 type ProviderConfig struct {
 	ID, Name, API, BaseURL string
 	Headers                map[string]string
+	Compat                 provider.ModelCompat
 	// ConfiguredAPIKey is returned only to the in-process assembly that passes it
 	// to auth. It is never put in diagnostics or persisted by this package.
 	ConfiguredAPIKey  *string
@@ -459,6 +472,10 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 			if m.Name == "" {
 				m.Name = m.ID
 			}
+			m.Headers = mergeHeaders(p.Headers, m.Headers)
+			if m.Compat.OpenAIResponses == nil {
+				m.Compat = cloneCompat(p.Compat)
+			}
 			m.Provider = p.ID
 			byKey[modelKey(m.Provider, m.ID)] = m
 		}
@@ -581,12 +598,21 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 	if p.API, err = optionalString(o, "api", id); err != nil {
 		return p, err
 	}
+	if p.Headers, err = optionalHeaders(o, "headers", id); err != nil {
+		return p, err
+	}
+	if raw, ok := o["compat"]; ok {
+		if p.Compat, err = decodeCompat(raw, id); err != nil {
+			p.UnsupportedFields = append(p.UnsupportedFields, "compat")
+			err = nil
+		}
+	}
 	if key, ok, err := optionalSecret(o, "apiKey", id); err != nil {
 		return p, err
 	} else if ok {
 		p.ConfiguredAPIKey = &key
 	}
-	for _, key := range []string{"headers", "compat", "oauth", "authHeader"} {
+	for _, key := range []string{"oauth", "authHeader"} {
 		if _, present := o[key]; present {
 			p.UnsupportedFields = append(p.UnsupportedFields, key)
 		}
@@ -693,11 +719,38 @@ func parseModel(providerID string, index int, raw json.RawMessage) (Model, error
 	if err != nil {
 		return m, err
 	}
+	if raw, exists := o["reasoning"]; exists && json.Unmarshal(raw, &m.Reasoning) != nil {
+		return m, Diagnostic{"models.json", providerID, "reasoning must be boolean"}
+	}
+	if m.ThinkingLevelMap, err = decodeThinkingLevelMap(o["thinkingLevelMap"], providerID); err != nil {
+		return m, err
+	}
+	if m.Input, err = decodeInputKinds(o["input"], providerID); err != nil {
+		return m, err
+	}
+	if m.Headers, err = optionalHeaders(o, "headers", providerID); err != nil {
+		return m, err
+	}
+	if raw, exists := o["cost"]; exists {
+		if m.Cost, err = decodeCost(raw, providerID); err != nil {
+			return m, err
+		}
+	}
+	if m.ContextWindow, err = optionalUint64(o, "contextWindow", providerID); err != nil {
+		return m, err
+	}
+	if m.MaxTokens, err = optionalUint64(o, "maxTokens", providerID); err != nil {
+		return m, err
+	}
+	if raw, exists := o["compat"]; exists {
+		if m.Compat, err = decodeCompat(raw, providerID); err != nil {
+			m.UnsupportedFields = append(m.UnsupportedFields, "compat")
+			err = nil
+		}
+	}
 	for key := range o {
 		switch key {
-		case "id", "name", "api", "baseUrl":
-		case "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
-			m.UnsupportedFields = append(m.UnsupportedFields, key)
+		case "id", "name", "api", "baseUrl", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
 		default:
 			m.UnknownFields = append(m.UnknownFields, key)
 		}
@@ -809,6 +862,115 @@ func optionalHeaders(o map[string]json.RawMessage, key, owner string) (map[strin
 		}
 	}
 	return h, nil
+}
+
+func optionalUint64(o map[string]json.RawMessage, key, owner string) (uint64, error) {
+	raw, ok := o[key]
+	if !ok {
+		return 0, nil
+	}
+	var value uint64
+	if err := json.Unmarshal(raw, &value); err != nil || value == 0 {
+		return 0, Diagnostic{"models.json", key, "must be a positive integer"}
+	}
+	return value, nil
+}
+
+func decodeThinkingLevelMap(raw json.RawMessage, owner string) (map[provider.ThinkingLevel]*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var wire map[string]*string
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, Diagnostic{"models.json", owner, "thinkingLevelMap must be an object"}
+	}
+	result := make(map[provider.ThinkingLevel]*string, len(wire))
+	for key, value := range wire {
+		level := provider.ThinkingLevel(key)
+		if !level.Valid() || (value != nil && !validValue(*value)) {
+			return nil, Diagnostic{"models.json", owner, "thinkingLevelMap contains an invalid value"}
+		}
+		if value != nil {
+			copy := *value
+			result[level] = &copy
+		} else {
+			result[level] = nil
+		}
+	}
+	return result, nil
+}
+
+func decodeInputKinds(raw json.RawMessage, owner string) ([]provider.InputKind, error) {
+	if raw == nil {
+		return []provider.InputKind{provider.InputText}, nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil || len(values) == 0 {
+		return nil, Diagnostic{"models.json", owner, "input must be a non-empty array"}
+	}
+	result := make([]provider.InputKind, len(values))
+	seen := map[provider.InputKind]bool{}
+	for index, value := range values {
+		kind := provider.InputKind(value)
+		if (kind != provider.InputText && kind != provider.InputImage) || seen[kind] {
+			return nil, Diagnostic{"models.json", owner, "input contains an invalid value"}
+		}
+		seen[kind] = true
+		result[index] = kind
+	}
+	return result, nil
+}
+
+func decodeCost(raw json.RawMessage, owner string) (provider.CostRates, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain all rates"}
+	}
+	for _, name := range []string{"input", "output", "cacheRead", "cacheWrite"} {
+		if _, ok := fields[name]; !ok {
+			return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain all rates"}
+		}
+	}
+	var value struct {
+		Input      float64 `json:"input"`
+		Output     float64 `json:"output"`
+		CacheRead  float64 `json:"cacheRead"`
+		CacheWrite float64 `json:"cacheWrite"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.Input < 0 || value.Output < 0 || value.CacheRead < 0 || value.CacheWrite < 0 {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain non-negative rates"}
+	}
+	return provider.CostRates{Input: value.Input, Output: value.Output, CacheRead: value.CacheRead, CacheWrite: value.CacheWrite}, nil
+}
+
+func decodeCompat(raw json.RawMessage, owner string) (provider.ModelCompat, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
+	}
+	for key := range object {
+		switch key {
+		case "supportsDeveloperRole", "sessionAffinityFormat", "supportsLongCacheRetention", "supportsStrictMode", "supportsOpenAIGrammarTools", "supportsToolSearch", "supportsExplicitPromptCacheMode":
+		default:
+			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat contains an unsupported field"}
+		}
+	}
+	var wire struct {
+		SupportsDeveloperRole           *bool   `json:"supportsDeveloperRole"`
+		SessionAffinityFormat           *string `json:"sessionAffinityFormat"`
+		SupportsLongCacheRetention      *bool   `json:"supportsLongCacheRetention"`
+		SupportsStrictMode              *bool   `json:"supportsStrictMode"`
+		SupportsOpenAIGrammarTools      *bool   `json:"supportsOpenAIGrammarTools"`
+		SupportsToolSearch              *bool   `json:"supportsToolSearch"`
+		SupportsExplicitPromptCacheMode *bool   `json:"supportsExplicitPromptCacheMode"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
+	}
+	if wire.SessionAffinityFormat != nil && *wire.SessionAffinityFormat != "openai" && *wire.SessionAffinityFormat != "openai-nosession" && *wire.SessionAffinityFormat != "openrouter" {
+		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid sessionAffinityFormat"}
+	}
+	return provider.ModelCompat{OpenAIResponses: &provider.OpenAIResponsesCompat{SupportsDeveloperRole: wire.SupportsDeveloperRole, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SupportsStrictMode: wire.SupportsStrictMode, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsToolSearch: wire.SupportsToolSearch, SupportsExplicitPromptCacheMode: wire.SupportsExplicitPromptCacheMode}}, nil
 }
 
 func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMessage, bool, error) {
@@ -1187,14 +1349,57 @@ func cloneHeaders(v map[string]string) map[string]string {
 	}
 	return out
 }
+func cloneThinkingMap(v map[provider.ThinkingLevel]*string) map[provider.ThinkingLevel]*string {
+	if v == nil {
+		return nil
+	}
+	out := make(map[provider.ThinkingLevel]*string, len(v))
+	for key, value := range v {
+		if value == nil {
+			out[key] = nil
+		} else {
+			copy := *value
+			out[key] = &copy
+		}
+	}
+	return out
+}
+func cloneCompat(v provider.ModelCompat) provider.ModelCompat {
+	if v.OpenAIResponses == nil {
+		return provider.ModelCompat{}
+	}
+	clone := func(value *bool) *bool {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		return &copy
+	}
+	return provider.ModelCompat{OpenAIResponses: &provider.OpenAIResponsesCompat{
+		SupportsDeveloperRole: clone(v.OpenAIResponses.SupportsDeveloperRole), SupportsStrictMode: clone(v.OpenAIResponses.SupportsStrictMode),
+		SupportsLongCacheRetention: clone(v.OpenAIResponses.SupportsLongCacheRetention), SupportsOpenAIGrammarTools: clone(v.OpenAIResponses.SupportsOpenAIGrammarTools),
+		SessionAffinityFormat: func() *string {
+			if v.OpenAIResponses.SessionAffinityFormat == nil {
+				return nil
+			}
+			copy := *v.OpenAIResponses.SessionAffinityFormat
+			return &copy
+		}(),
+		SupportsToolSearch: clone(v.OpenAIResponses.SupportsToolSearch), SupportsExplicitPromptCacheMode: clone(v.OpenAIResponses.SupportsExplicitPromptCacheMode),
+	}}
+}
 func cloneModel(m Model) Model {
 	m.Headers = cloneHeaders(m.Headers)
+	m.Input = append([]provider.InputKind(nil), m.Input...)
+	m.ThinkingLevelMap = cloneThinkingMap(m.ThinkingLevelMap)
+	m.Compat = cloneCompat(m.Compat)
 	m.UnsupportedFields = append([]string(nil), m.UnsupportedFields...)
 	m.UnknownFields = append([]string(nil), m.UnknownFields...)
 	return m
 }
 func cloneProvider(p ProviderConfig) ProviderConfig {
 	p.Headers = cloneHeaders(p.Headers)
+	p.Compat = cloneCompat(p.Compat)
 	p.Models = append([]Model(nil), p.Models...)
 	p.UnknownFields = append([]string(nil), p.UnknownFields...)
 	p.UnsupportedFields = append([]string(nil), p.UnsupportedFields...)

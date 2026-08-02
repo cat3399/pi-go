@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/llm"
@@ -29,14 +30,21 @@ type ContextTokenEstimate struct {
 // available, then adds conservative estimates for the trailing messages.
 func EstimateContextTokens(messages []llm.ConversationMessage) (ContextTokenEstimate, error) {
 	result := ContextTokenEstimate{LastUsageIndex: -1}
-	for index := len(messages) - 1; index >= 0; index-- {
-		usage, ok := usableAssistantUsage(messages[index])
+	var latestPrefixTimestamp time.Time
+	for index, message := range messages {
+		timestamp := messageTimestamp(message)
+		if timestamp.After(latestPrefixTimestamp) {
+			latestPrefixTimestamp = timestamp
+		}
+		usage, ok := usableAssistantUsage(message)
 		if !ok {
+			continue
+		}
+		if timestamp.Before(latestPrefixTimestamp) {
 			continue
 		}
 		result.LastUsageIndex = index
 		result.UsageTokens = usage.TotalTokens()
-		break
 	}
 	start := 0
 	if result.LastUsageIndex >= 0 {
@@ -60,6 +68,29 @@ func EstimateContextTokens(messages []llm.ConversationMessage) (ContextTokenEsti
 	return result, nil
 }
 
+func messageTimestamp(message llm.ConversationMessage) time.Time {
+	switch value := message.(type) {
+	case llm.UserTextMessage:
+		return value.Timestamp()
+	case llm.UserContentMessage:
+		return value.Timestamp()
+	case llm.AssistantTextMessage:
+		return value.Timestamp()
+	case llm.AssistantToolUseMessage:
+		return value.Timestamp()
+	case llm.AssistantRichMessage:
+		return value.Timestamp()
+	case llm.AssistantFailureMessage:
+		return value.Timestamp()
+	case llm.ToolResultMessage:
+		return value.Timestamp()
+	case llm.ToolResultContentMessage:
+		return value.Timestamp()
+	default:
+		return time.Time{}
+	}
+}
+
 func usableAssistantUsage(message llm.ConversationMessage) (llm.Usage, bool) {
 	switch message := message.(type) {
 	case llm.AssistantTextMessage:
@@ -68,6 +99,10 @@ func usableAssistantUsage(message llm.ConversationMessage) (llm.Usage, bool) {
 		}
 	case llm.AssistantToolUseMessage:
 		if message.Usage().TotalTokens() > 0 {
+			return message.Usage(), true
+		}
+	case llm.AssistantRichMessage:
+		if message.FinishReason() != llm.FinishError && message.FinishReason() != llm.FinishAborted && message.Usage().TotalTokens() > 0 {
 			return message.Usage(), true
 		}
 	}
@@ -95,6 +130,11 @@ func estimateMessageTokens(message llm.ConversationMessage) (uint64, error) {
 		chars, err = checkedAddTokens(chars, uint64(len(text)))
 		return err
 	}
+	addImage := func() error {
+		var err error
+		chars, err = checkedAddTokens(chars, 4800)
+		return err
+	}
 	switch value := message.(type) {
 	case llm.UserTextMessage:
 		for _, block := range value.Content() {
@@ -102,10 +142,36 @@ func estimateMessageTokens(message llm.ConversationMessage) (uint64, error) {
 				return 0, err
 			}
 		}
+	case llm.UserContentMessage:
+		for _, block := range value.Content() {
+			switch block := block.(type) {
+			case llm.TextBlock:
+				if err := add(block.Text()); err != nil {
+					return 0, err
+				}
+			case llm.ImageBlock:
+				if err := addImage(); err != nil {
+					return 0, err
+				}
+			}
+		}
 	case llm.AssistantTextMessage:
 		for _, block := range value.Content() {
 			if err := add(block.Text()); err != nil {
 				return 0, err
+			}
+		}
+	case llm.AssistantRichMessage:
+		for _, block := range value.Blocks() {
+			switch block := block.(type) {
+			case llm.TextBlock:
+				if err := add(block.Text()); err != nil {
+					return 0, err
+				}
+			case llm.ThinkingBlock:
+				if err := add(block.Thinking()); err != nil {
+					return 0, err
+				}
 			}
 		}
 	case llm.AssistantToolUseMessage:
@@ -137,6 +203,25 @@ func estimateMessageTokens(message llm.ConversationMessage) (uint64, error) {
 		for _, block := range value.Content() {
 			if err := add(block.Text()); err != nil {
 				return 0, err
+			}
+		}
+		if err := add(value.ToolCallID()); err != nil {
+			return 0, err
+		}
+		if err := add(value.ToolName()); err != nil {
+			return 0, err
+		}
+	case llm.ToolResultContentMessage:
+		for _, block := range value.Content() {
+			switch block := block.(type) {
+			case llm.TextBlock:
+				if err := add(block.Text()); err != nil {
+					return 0, err
+				}
+			case llm.ImageBlock:
+				if err := addImage(); err != nil {
+					return 0, err
+				}
 			}
 		}
 		if err := add(value.ToolCallID()); err != nil {
@@ -462,8 +547,12 @@ func SerializeConversation(messages []llm.ConversationMessage) string {
 		switch value := message.(type) {
 		case llm.UserTextMessage:
 			parts = append(parts, "[User]: "+joinTextBlocks(value.Content()))
+		case llm.UserContentMessage:
+			parts = append(parts, "[User]: "+joinUserContent(value.Content()))
 		case llm.AssistantTextMessage:
 			parts = append(parts, "[Assistant]: "+joinTextBlocks(value.Content()))
+		case llm.AssistantRichMessage:
+			parts = append(parts, "[Assistant]: "+joinAssistantBlocks(value.Blocks()))
 		case llm.AssistantToolUseMessage:
 			text := make([]string, 0)
 			calls := make([]string, 0)
@@ -484,14 +573,60 @@ func SerializeConversation(messages []llm.ConversationMessage) string {
 		case llm.AssistantFailureMessage:
 			parts = append(parts, "[Assistant error]: "+joinTextBlocks(value.Content())+"\n"+value.ErrorMessage())
 		case llm.ToolResultMessage:
-			text := joinTextBlocks(value.Content())
-			if len(text) > maxToolResultChars {
-				text = text[:maxToolResultChars] + "\n\n[... " + strconv.Itoa(len(text)-maxToolResultChars) + " more characters truncated]"
-			}
-			parts = append(parts, "[Tool result]: "+text)
+			parts = append(parts, "[Tool result]: "+truncateToolResult(joinTextBlocks(value.Content()), maxToolResultChars))
+		case llm.ToolResultContentMessage:
+			parts = append(parts, "[Tool result]: "+truncateToolResult(joinToolResultContent(value.Content()), maxToolResultChars))
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func joinUserContent(blocks []llm.UserContentBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.TextBlock:
+			parts = append(parts, block.Text())
+		case llm.ImageBlock:
+			parts = append(parts, "[image]")
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func joinAssistantBlocks(blocks []llm.AssistantBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.TextBlock:
+			parts = append(parts, block.Text())
+		case llm.ThinkingBlock:
+			parts = append(parts, block.Thinking())
+		case llm.ToolCallBlock:
+			parts = append(parts, block.Name()+"("+string(block.ArgumentsJSON())+")")
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func joinToolResultContent(blocks []llm.ToolResultContentBlock) string {
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.TextBlock:
+			parts = append(parts, block.Text())
+		case llm.ImageBlock:
+			parts = append(parts, "[image]")
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func truncateToolResult(text string, max int) string {
+	if len(text) <= max {
+		return text
+	}
+	return text[:max] + "\n\n[... " + strconv.Itoa(len(text)-max) + " more characters truncated]"
 }
 
 func joinTextBlocks(blocks []llm.TextBlock) string {

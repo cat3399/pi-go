@@ -590,6 +590,46 @@ func TestOpenAIResponsesStreamsReasoningThenText(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesProgressDoneAndPlaintextReasoningReplay(t *testing.T) {
+	frames := []any{
+		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_plain"}},
+		map[string]any{"type": "response.reasoning_text.delta", "output_index": 0, "item_id": "rs_plain", "delta": "plan"},
+		map[string]any{"type": "response.reasoning_text.done", "output_index": 0, "item_id": "rs_plain", "text": "plan"},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_plain", "content": "plan"}},
+	}
+	frames = append(frames, functionCallSSEEvents(1, "fc_plain", "call_plain", `{"marker":"ok"}`)...)
+	frames = append(frames, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "reasoning", "id": "rs_plain", "content": "plan"}, map[string]any{"type": "function_call", "id": "fc_plain", "call_id": "call_plain", "name": "bash"}}}})
+	p := mustResponsesProvider(t, provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(frames...)))})
+	events, terminal := collectStream(t, p.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
+	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	rich, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok {
+		t.Fatalf("terminal = %T", terminal)
+	}
+	blocks := rich.Blocks()
+	replay, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
+	if !ok || replay.PlaintextContent != "plan" || replay.EncryptedContent != "" {
+		t.Fatalf("reasoning replay = %#v/%v", replay, ok)
+	}
+	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go"), terminal, mustToolResult(t, "call_plain|fc_plain", "bash", "ok")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reasoning map[string]any
+	for _, raw := range payload["input"].([]any) {
+		item, ok := raw.(map[string]any)
+		if ok && item["type"] == "reasoning" {
+			reasoning = item
+			break
+		}
+	}
+	if reasoning == nil || reasoning["content"] != "plan" || reasoning["encrypted_content"] != nil || reasoning["summary"] != nil {
+		t.Fatalf("plaintext replay input = %#v", reasoning)
+	}
+}
+
 func TestOpenAIResponsesStreamsMixedTextAndMultipleFunctionCallsInSourceOrder(t *testing.T) {
 	frames := []any{
 		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "content": []any{}}},

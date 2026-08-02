@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -40,6 +41,33 @@ func (a *Agent) enqueue(prompt string, steering bool) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
 	}
+	return a.enqueueMessage(message, steering)
+}
+
+func (a *Agent) SteerContent(content []llm.UserContentBlock) error {
+	return a.enqueueContent(content, true)
+}
+func (a *Agent) FollowUpContent(content []llm.UserContentBlock) error {
+	return a.enqueueContent(content, false)
+}
+func (a *Agent) enqueueContent(content []llm.UserContentBlock, steering bool) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	timestamp, err := a.now()
+	if err != nil {
+		return err
+	}
+	message, err := llm.NewUserContentMessage(content, timestamp)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
+	}
+	return a.enqueueMessage(message, steering)
+}
+func (a *Agent) enqueueMessage(message llm.ConversationMessage, steering bool) error {
+	if message.Role() != llm.RoleUser {
+		return fmt.Errorf("%w: queued message must be user content", ErrInvalidQueueMessage)
+	}
 	a.mu.Lock()
 	if steering {
 		a.steeringQueue = append(a.steeringQueue, message)
@@ -53,12 +81,26 @@ func (a *Agent) enqueue(prompt string, steering bool) error {
 // Queues returns immutable snapshots in FIFO order. It is intentionally a
 // diagnostic/admission surface, not a mutable transcript view.
 func (a *Agent) Queues() (steering, followUp []llm.UserTextMessage) {
+	richSteering, richFollow := a.RichQueues()
+	for _, message := range richSteering {
+		if text, ok := message.(llm.UserTextMessage); ok {
+			steering = append(steering, text)
+		}
+	}
+	for _, message := range richFollow {
+		if text, ok := message.(llm.UserTextMessage); ok {
+			followUp = append(followUp, text)
+		}
+	}
+	return
+}
+func (a *Agent) RichQueues() (steering, followUp []llm.ConversationMessage) {
 	if a == nil {
 		return nil, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]llm.UserTextMessage(nil), a.steeringQueue...), append([]llm.UserTextMessage(nil), a.followUpQueue...)
+	return append([]llm.ConversationMessage(nil), a.steeringQueue...), append([]llm.ConversationMessage(nil), a.followUpQueue...)
 }
 
 func (a *Agent) ClearSteeringQueue() {
@@ -87,9 +129,9 @@ func (a *Agent) ClearAllQueues() {
 	a.mu.Unlock()
 }
 
-func clearUnreservedQueue(queue *[]llm.UserTextMessage, reserved int) {
+func clearUnreservedQueue(queue *[]llm.ConversationMessage, reserved int) {
 	for index := reserved; index < len(*queue); index++ {
-		(*queue)[index] = llm.UserTextMessage{}
+		(*queue)[index] = nil
 	}
 	*queue = (*queue)[:reserved]
 	if reserved == 0 {
@@ -115,7 +157,7 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 	return a.runV2(active, initial)
 }
 
-func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTextMessage, error) {
+func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.ConversationMessage, error) {
 	if a == nil || ctx == nil || context.Cause(ctx) != nil {
 		return nil, nil, fmt.Errorf("%w: invalid continuation", ErrInvalidRun)
 	}
@@ -150,7 +192,7 @@ func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTe
 	messages := a.config.transcript.Context().Messages()
 
 	a.mu.Lock()
-	active, initial, err := func() (*activeRun, []llm.UserTextMessage, error) {
+	active, initial, err := func() (*activeRun, []llm.ConversationMessage, error) {
 		defer a.mu.Unlock()
 		// Every path after reserving must return the slot if admission does not
 		// install an active run. No queue is touched until validation succeeds.
@@ -166,7 +208,7 @@ func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTe
 		if len(messages) == 0 {
 			return nil, nil, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
 		}
-		var initial []llm.UserTextMessage
+		var initial []llm.ConversationMessage
 		var reservation *queueReservation
 		if messages[len(messages)-1].Role() == llm.RoleAssistant {
 			var err error
@@ -203,7 +245,7 @@ func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTe
 	return active, initial, err
 }
 
-func (a *Agent) reserveQueue(active *activeRun, steering bool) ([]llm.UserTextMessage, error) {
+func (a *Agent) reserveQueue(active *activeRun, steering bool) ([]llm.ConversationMessage, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.active != active || active.queueReservation != nil {
@@ -217,7 +259,7 @@ func (a *Agent) reserveQueue(active *activeRun, steering bool) ([]llm.UserTextMe
 	return messages, nil
 }
 
-func (a *Agent) reserveQueueLocked(steering bool) ([]llm.UserTextMessage, *queueReservation, error) {
+func (a *Agent) reserveQueueLocked(steering bool) ([]llm.ConversationMessage, *queueReservation, error) {
 	queue := &a.followUpQueue
 	reserved := &a.followUpReserved
 	mode := a.config.followUpMode
@@ -235,7 +277,7 @@ func (a *Agent) reserveQueueLocked(steering bool) ([]llm.UserTextMessage, *queue
 	return items, &queueReservation{steering: steering, remaining: len(items)}, nil
 }
 
-func queuePrefix(queue []llm.UserTextMessage, mode QueueMode) []llm.UserTextMessage {
+func queuePrefix(queue []llm.ConversationMessage, mode QueueMode) []llm.ConversationMessage {
 	if len(queue) == 0 {
 		return nil
 	}
@@ -243,19 +285,24 @@ func queuePrefix(queue []llm.UserTextMessage, mode QueueMode) []llm.UserTextMess
 	if mode == QueueAll {
 		n = len(queue)
 	}
-	return append([]llm.UserTextMessage(nil), queue[:n]...)
+	return append([]llm.ConversationMessage(nil), queue[:n]...)
 }
 
-func discardQueuePrefix(queue *[]llm.UserTextMessage, count int) {
+func discardQueuePrefix(queue *[]llm.ConversationMessage, count int) {
 	copy(*queue, (*queue)[count:])
 	for index := len(*queue) - count; index < len(*queue); index++ {
-		(*queue)[index] = llm.UserTextMessage{}
+		(*queue)[index] = nil
 	}
 	*queue = (*queue)[:len(*queue)-count]
 }
 
-func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result Result, runErr error) {
+func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (result Result, runErr error) {
 	result.runID = active.id
+	// Continue from an assistant tail may already have reserved one steering
+	// message as the run's prompt. Upstream skips only that one initial steering
+	// poll; ordinary prompts, tool-result continuations, and follow-up-backed
+	// continuations all admit steering before their first provider request.
+	skipInitialSteeringPoll := a.hasInitialSteeringReservation(active)
 	defer a.finishRun(active)
 	defer func() {
 		a.enterSettling(active)
@@ -268,6 +315,24 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
 		if err := a.commitQueued(active, turn, initial); err != nil {
 			return result, err
+		}
+	}
+	if !skipInitialSteeringPoll {
+		queued, err := a.reserveQueue(active, true)
+		if err != nil {
+			return result, err
+		}
+		if len(queued) > 0 {
+			if len(initial) == 0 {
+				a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			}
+			if err := a.commitQueued(active, turn, queued); err != nil {
+				return result, err
+			}
+			// initial is only the current turn-start marker after commits complete.
+			// Keeping it non-empty prevents the loop below from emitting a duplicate
+			// turn_start before the first provider request.
+			initial = append(initial, queued...)
 		}
 	}
 	for {
@@ -375,7 +440,13 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 	}
 }
 
-func (a *Agent) startQueuedTurnV2(active *activeRun, turn uint32, messages []llm.UserTextMessage) error {
+func (a *Agent) hasInitialSteeringReservation(active *activeRun) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.active == active && active.queueReservation != nil && active.queueReservation.steering
+}
+
+func (a *Agent) startQueuedTurnV2(active *activeRun, turn uint32, messages []llm.ConversationMessage) error {
 	if err := a.setRunPhaseV2(active, turn, PhaseProvider); err != nil {
 		return err
 	}
@@ -399,7 +470,7 @@ func (a *Agent) completeToolBatchV2(active *activeRun, turn uint32) error {
 	return a.setRunPhaseV2(active, turn, PhaseSettling)
 }
 
-func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.UserTextMessage) error {
+func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.ConversationMessage) error {
 	a.mu.Lock()
 	queueBacked := active.queueReservation != nil
 	if queueBacked && (a.active != active || active.queueReservation.remaining != len(messages)) {
@@ -410,7 +481,13 @@ func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.User
 	for _, message := range messages {
 		if queueBacked {
 			if err := a.commitAfterAppend(active, turn, message, func() error {
-				return a.ackQueueReservation(active)
+				if err := a.ackQueueReservation(active); err != nil {
+					return err
+				}
+				// Match pi's queue contract: consumers see the updated queue before
+				// this queued user message emits message_start/message_end.
+				a.notify(active.ctx, Event{Kind: EventQueueUpdated, RunID: active.id, Turn: turn})
+				return nil
 			}); err != nil {
 				return err
 			}
@@ -458,7 +535,7 @@ func (a *Agent) releaseQueueReservationLocked(active *activeRun) {
 	active.queueReservation = nil
 }
 
-func (a *Agent) queueStateLocked(steering bool) (*[]llm.UserTextMessage, *int) {
+func (a *Agent) queueStateLocked(steering bool) (*[]llm.ConversationMessage, *int) {
 	if steering {
 		return &a.steeringQueue, &a.steeringReserved
 	}
@@ -486,12 +563,6 @@ func (a *Agent) acceptFinalV2(active *activeRun, result Result, terminal llm.Ass
 }
 
 func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTerminal, error) {
-	if err := a.compactBeforeProvider(active, turn); err != nil {
-		if cause := a.runCause(active); cause != nil {
-			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled during context compaction", cause, llm.Usage{})
-		}
-		return nil, err
-	}
 	var providerAttempt uint32
 	var chainAttempt uint32
 	overflowRetried := false
@@ -522,7 +593,22 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 			// attempt; transform/build failures after it still get a finish.
 			a.notify(active.ctx, Event{Kind: EventRetryAttempt, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt})
 		}
-		request, err := a.providerRequest(active)
+		// A snapshot is the atomic turn configuration boundary: request,
+		// threshold policy, terminal provenance and the next tool batch all see
+		// this same value. Retries deliberately obtain a fresh snapshot.
+		turnSnapshot, err := a.prepareTurnSnapshot(active)
+		if err != nil {
+			return nil, err
+		}
+		if providerAttempt == 1 {
+			if err := a.compactBeforeProvider(active, turn, turnSnapshot); err != nil {
+				if cause := a.runCause(active); cause != nil {
+					return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled during context compaction", cause, llm.Usage{})
+				}
+				return nil, err
+			}
+		}
+		request, err := a.providerRequest(active, turnSnapshot)
 		if err != nil {
 			if cause := a.runCause(active); cause != nil {
 				finishRetry(provider.FailureCancelled, 0, false, provider.RetryFinishCancelled)
@@ -597,6 +683,9 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 			Kind: EventRetryScheduled, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt + 1,
 			RetryDelay: delay, RetryFailureKind: kind, RetryHTTPStatus: status,
 		})
+		// Failed attempts remain runtime-only. runV2 commits only the terminal
+		// returned from this function, so a resend is rebuilt from unchanged
+		// durable conversation context.
 		if err := a.config.retry.Wait(active.ctx, delay); err != nil {
 			a.notify(active.ctx, Event{
 				Kind: EventRetryFinished, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt + 1,
@@ -608,7 +697,7 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 	}
 }
 
-func (a *Agent) providerRequest(active *activeRun) (provider.Request, error) {
+func (a *Agent) providerRequest(active *activeRun, turnSnapshot TurnSnapshot) (provider.Request, error) {
 	var snapshot session.Context
 	if builder, ok := a.config.transcript.(ContextBuilder); ok {
 		snapshot = builder.BuildContext()
@@ -623,9 +712,11 @@ func (a *Agent) providerRequest(active *activeRun) (provider.Request, error) {
 		}
 		messages = transformed
 	}
-	request, err := provider.NewRequestWithOptions(a.config.model, a.config.systemPrompt, messages, provider.RequestOptions{
-		Tools:                  a.config.tools,
-		AllowParallelToolCalls: a.config.allowParallelToolCalls(),
+	request, err := provider.NewRequestWithOptions(turnSnapshot.Model, turnSnapshot.SystemPrompt, messages, provider.RequestOptions{
+		Tools:                  turnSnapshot.Tools,
+		AllowParallelToolCalls: effectiveToolExecutionMode(a.config.toolExecution, turnSnapshot.Tool, toolDefinitionNames(turnSnapshot.Tools)) == ToolExecutionParallel,
+		ThinkingLevel:          turnSnapshot.ThinkingLevel,
+		Stream:                 turnSnapshot.Stream,
 	})
 	if err != nil {
 		return provider.Request{}, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
@@ -633,12 +724,71 @@ func (a *Agent) providerRequest(active *activeRun) (provider.Request, error) {
 	return request, nil
 }
 
-func (a *Agent) compactBeforeProvider(active *activeRun, turn uint32) error {
-	if a.config.contextWindow == 0 {
+func toolDefinitionNames(definitions []provider.ToolDefinition) []string {
+	names := make([]string, len(definitions))
+	for index, definition := range definitions {
+		names[index] = definition.Name()
+	}
+	return names
+}
+
+func (a *Agent) prepareTurnSnapshot(active *activeRun) (TurnSnapshot, error) {
+	turn := a.runTurn(active)
+	snapshot := TurnSnapshot{
+		Model: a.config.model, SystemPrompt: a.config.systemPrompt,
+		Tool: a.config.tool, Tools: append([]provider.ToolDefinition(nil), a.config.tools...),
+		BeforeToolCall: a.config.beforeToolCall, AfterToolCall: a.config.afterToolCall,
+	}
+	if a.config.prepareTurn != nil {
+		var err error
+		snapshot, err = a.config.prepareTurn(active.ctx, TurnContext{RunID: active.id, Turn: turn})
+		if err != nil {
+			return TurnSnapshot{}, fmt.Errorf("%w: prepare turn: %w", ErrInvariant, err)
+		}
+		snapshot.Tools = append([]provider.ToolDefinition(nil), snapshot.Tools...)
+	}
+	if _, err := provider.NewRequestWithOptions(snapshot.Model, snapshot.SystemPrompt, nil, provider.RequestOptions{Tools: snapshot.Tools, ThinkingLevel: snapshot.ThinkingLevel}); err != nil {
+		return TurnSnapshot{}, fmt.Errorf("%w: invalid turn snapshot: %w", ErrInvariant, err)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active || active.terminalAccepted {
+		return TurnSnapshot{}, fmt.Errorf("%w: inactive turn snapshot", ErrInvariant)
+	}
+	copy := snapshot
+	active.snapshot = &copy
+	return snapshot, nil
+}
+
+func (a *Agent) activeSnapshot(active *activeRun) (TurnSnapshot, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active || active.snapshot == nil {
+		return TurnSnapshot{}, fmt.Errorf("%w: missing active turn snapshot", ErrInvariant)
+	}
+	copy := *active.snapshot
+	copy.Tools = append([]provider.ToolDefinition(nil), copy.Tools...)
+	return copy, nil
+}
+
+func (a *Agent) compactBeforeProvider(active *activeRun, turn uint32, snapshot TurnSnapshot) error {
+	window, reserve := a.config.contextWindow, a.config.contextReserve
+	// A model catalog window is metadata, not consent to mutate transcript.
+	// Automatic compaction is enabled only by explicit session policy.
+	if window == 0 {
 		return nil
 	}
-	snapshot := a.contextSnapshot()
-	compact, err := session.ShouldCompact(snapshot.Messages(), a.config.contextWindow, a.config.contextReserve)
+	if snapshot.Model.ContextWindow() != 0 {
+		window = snapshot.Model.ContextWindow()
+	}
+	if snapshot.Model.MaxTokens() != 0 {
+		reserve = snapshot.Model.MaxTokens()
+	}
+	if a.config.compactor == nil || a.config.summarizer == nil {
+		return fmt.Errorf("%w: model context window requires configured compaction", ErrCompactionUnavailable)
+	}
+	contextSnapshot := a.contextSnapshot()
+	compact, err := session.ShouldCompact(contextSnapshot.Messages(), window, reserve)
 	if err != nil {
 		return fmt.Errorf("context threshold: %w", err)
 	}
@@ -808,6 +958,10 @@ type toolBatch struct {
 }
 
 func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.AssistantToolUseMessage) (toolBatch, error) {
+	snapshot, err := a.activeSnapshot(active)
+	if err != nil {
+		return toolBatch{}, err
+	}
 	calls := toolCalls(assistant)
 	if len(calls) == 0 {
 		return toolBatch{}, fmt.Errorf("%w: empty tool batch", ErrInvariant)
@@ -816,7 +970,7 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 	for index, call := range calls {
 		names[index] = call.Name()
 	}
-	sequential := effectiveToolExecutionMode(a.config.toolExecution, a.config.tool, names) == ToolExecutionSequential
+	sequential := effectiveToolExecutionMode(a.config.toolExecution, snapshot.Tool, names) == ToolExecutionSequential
 	a.mu.Lock()
 	if a.active != active {
 		a.mu.Unlock()
@@ -828,7 +982,7 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 	results := make([]batchOutcome, len(calls))
 	if sequential {
 		for i, call := range calls {
-			outcome := a.executeOneV2(active, turn, call)
+			outcome := a.executeOneV2(active, turn, snapshot, assistant, call)
 			results[i] = outcome
 			a.emitToolSettled(active, turn, outcome)
 			if outcome.cancelled {
@@ -849,18 +1003,31 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 	} else {
 		var workers sync.WaitGroup
 		completed := make(chan batchOutcome, len(calls))
+		type preparedCall struct {
+			index int
+			call  llm.ToolCallBlock
+		}
+		prepared := make([]preparedCall, 0, len(calls))
 		for i, call := range calls {
 			if err := a.beginToolCallV2(active, turn, call); err != nil {
 				return toolBatch{}, err
 			}
+			if immediate, ok := a.preflightToolCallV2(active, snapshot, assistant, call); ok {
+				results[i] = immediate
+				a.emitToolSettled(active, turn, immediate)
+				continue
+			}
+			prepared = append(prepared, preparedCall{index: i, call: call})
+		}
+		for _, item := range prepared {
 			workers.Add(1)
 			go func(index int, c llm.ToolCallBlock) {
 				defer workers.Done()
-				outcome := a.executeOneNoStartV2(active, turn, c)
+				outcome := a.executeOneNoStartV2(active, turn, snapshot, assistant, c, true)
 				outcome.call = c
 				results[index] = outcome
 				completed <- outcome
-			}(i, call)
+			}(item.index, item.call)
 		}
 		go func() { workers.Wait(); close(completed) }()
 		for outcome := range completed {
@@ -878,17 +1045,48 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 }
 
 func (a *Agent) emitToolStart(active *activeRun, turn uint32, call llm.ToolCallBlock) {
-	a.notify(active.ctx, Event{Kind: EventToolStarted, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name()})
+	a.notify(active.ctx, Event{Kind: EventToolStarted, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolArguments: call.ArgumentsJSON()})
 }
 func (a *Agent) emitToolSettled(active *activeRun, turn uint32, outcome batchOutcome) {
 	a.removePendingToolCallV2(active, outcome.call.ID())
-	a.notify(active.ctx, Event{Kind: EventToolSettled, RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), ToolOutput: outcome.output, ToolError: outcome.err})
+	a.notify(active.ctx, Event{Kind: EventToolSettled, RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), ToolArguments: outcome.call.ArgumentsJSON(), ToolOutput: outcome.output, ToolError: outcome.err})
 }
-func (a *Agent) executeOneV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {
+func (a *Agent) executeOneV2(active *activeRun, turn uint32, snapshot TurnSnapshot, assistant llm.AssistantToolUseMessage, call llm.ToolCallBlock) batchOutcome {
 	if err := a.beginToolCallV2(active, turn, call); err != nil {
 		return batchOutcome{call: call, err: err}
 	}
-	return a.executeOneNoStartV2(active, turn, call)
+	return a.executeOneNoStartV2(active, turn, snapshot, assistant, call, false)
+}
+
+// preflightToolCallV2 is deliberately called by the parallel path in source
+// order before any worker launches. It owns lookup and before-hook decisions;
+// prepared executions then overlap without racing hook ordering.
+func (a *Agent) preflightToolCallV2(active *activeRun, snapshot TurnSnapshot, assistant llm.AssistantToolUseMessage, call llm.ToolCallBlock) (batchOutcome, bool) {
+	if a.runCause(active) != nil {
+		return batchOutcome{call: call, output: ToolOutput{Text: toolCancellationText}, err: ErrAgentAborted, cancelled: true}, true
+	}
+	supported, lookupErr := supportsToolCall(snapshot.Tool, call.Name())
+	if lookupErr != nil {
+		return batchOutcome{call: call, output: ToolOutput{Text: lookupErr.Error()}, err: lookupErr}, true
+	}
+	if !supported {
+		return batchOutcome{call: call, output: ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())}, err: fmt.Errorf("%w: %s", ErrToolNotFound, call.Name())}, true
+	}
+	if snapshot.BeforeToolCall == nil {
+		return batchOutcome{}, false
+	}
+	before, err := callBeforeToolHook(snapshot.BeforeToolCall, active.ctx, BeforeToolCallContext{Assistant: assistant, ToolCall: call, Arguments: call.ArgumentsJSON(), Context: a.contextSnapshot().Messages()})
+	if err != nil || before.Block {
+		reason := before.Reason
+		if reason == "" && err != nil {
+			reason = err.Error()
+		}
+		if reason == "" {
+			reason = "Tool execution was blocked"
+		}
+		return batchOutcome{call: call, output: ToolOutput{Text: reason}, err: errors.New(reason)}, true
+	}
+	return batchOutcome{}, false
 }
 
 func (a *Agent) beginToolCallV2(active *activeRun, turn uint32, call llm.ToolCallBlock) error {
@@ -919,15 +1117,37 @@ func (a *Agent) removePendingToolCallV2(active *activeRun, id string) {
 	a.mu.Unlock()
 }
 
-func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {
+func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, snapshot TurnSnapshot, assistant llm.AssistantToolUseMessage, call llm.ToolCallBlock, preflighted bool) batchOutcome {
 	outcome := batchOutcome{call: call}
 	if a.runCause(active) != nil {
 		outcome.output, outcome.err, outcome.cancelled = ToolOutput{Text: toolCancellationText}, ErrAgentAborted, true
 		return outcome
 	}
-	if a.config.tool == nil || !toolSupports(a.config.tool, a.config.toolName, call.Name()) {
-		outcome.output, outcome.err = ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())}, fmt.Errorf("%w: %s", ErrToolNotFound, call.Name())
-		return outcome
+	contextMessages := a.contextSnapshot().Messages()
+	if !preflighted {
+		supported, lookupErr := supportsToolCall(snapshot.Tool, call.Name())
+		if lookupErr != nil {
+			outcome.output, outcome.err = ToolOutput{Text: lookupErr.Error()}, lookupErr
+			return outcome
+		}
+		if !supported {
+			outcome.output, outcome.err = ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())}, fmt.Errorf("%w: %s", ErrToolNotFound, call.Name())
+			return outcome
+		}
+		if snapshot.BeforeToolCall != nil {
+			before, beforeErr := callBeforeToolHook(snapshot.BeforeToolCall, active.ctx, BeforeToolCallContext{Assistant: assistant, ToolCall: call, Arguments: call.ArgumentsJSON(), Context: contextMessages})
+			if beforeErr != nil || before.Block {
+				reason := before.Reason
+				if reason == "" && beforeErr != nil {
+					reason = beforeErr.Error()
+				}
+				if reason == "" {
+					reason = "Tool execution was blocked"
+				}
+				outcome.output, outcome.err = ToolOutput{Text: reason}, errors.New(reason)
+				return outcome
+			}
+		}
 	}
 	a.mu.Lock()
 	if a.active != active || active.terminalAccepted {
@@ -945,13 +1165,38 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, call llm.Too
 		if !accepting || !validToolUpdate(update) {
 			return
 		}
-		a.notify(active.ctx, Event{Kind: EventToolProgress, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolUpdate: update})
+		a.notify(active.ctx, Event{Kind: EventToolProgress, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolArguments: call.ArgumentsJSON(), ToolUpdate: update})
 	}
-	outcome.output, outcome.err = executeNamedToolSafely(a.config.tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
+	outcome.output, outcome.err = executeNamedToolSafely(snapshot.Tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
 	updates.Lock()
 	accepting = false
 	updates.Unlock()
 	outcome.output, outcome.err = normalizeToolOutcome(outcome.output, outcome.err)
+	if snapshot.AfterToolCall != nil {
+		after, afterErr := callAfterToolHook(snapshot.AfterToolCall, active.ctx, AfterToolCallContext{Assistant: assistant, ToolCall: call, Arguments: call.ArgumentsJSON(), Context: contextMessages, Result: outcome.output, IsError: outcome.err != nil})
+		if afterErr != nil {
+			outcome.output, outcome.err = ToolOutput{Text: afterErr.Error()}, afterErr
+		} else {
+			if after.Content != nil {
+				outcome.output.Content = append([]llm.ToolResultContentBlock(nil), (*after.Content)...)
+				outcome.output.Text = ""
+			}
+			if after.Details != nil {
+				outcome.output.Details = *after.Details
+			}
+			if after.Terminate != nil {
+				outcome.output.Terminate = *after.Terminate
+			}
+			if after.IsError != nil {
+				if *after.IsError && outcome.err == nil {
+					outcome.err = errors.New("tool result marked as error")
+				}
+				if !*after.IsError {
+					outcome.err = nil
+				}
+			}
+		}
+	}
 	a.mu.Lock()
 	outcome.cancelled = a.active == active && context.Cause(active.ctx) != nil
 	a.mu.Unlock()
@@ -961,30 +1206,84 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, call llm.Too
 	return outcome
 }
 
+func callBeforeToolHook(hook BeforeToolCallHook, ctx context.Context, input BeforeToolCallContext) (result BeforeToolCallResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("before tool hook panicked: %v", recovered)
+		}
+	}()
+	return hook(ctx, input)
+}
+func callAfterToolHook(hook AfterToolCallHook, ctx context.Context, input AfterToolCallContext) (result AfterToolCallResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("after tool hook panicked: %v", recovered)
+		}
+	}()
+	return hook(ctx, input)
+}
+
 func validToolUpdate(update ToolUpdate) bool { return utf8.ValidString(update.Text) }
 
-func toolSupports(executor ToolExecutor, configuredName, requestedName string) bool {
-	if named, ok := executor.(NamedToolExecutor); ok {
-		return named.Supports(requestedName)
+// supportsToolCall turns registry/name lookup failures into associated tool
+// results. A registry is extension code, so even a panicking Supports method
+// must not tear down the batch or leave a started call without settlement.
+func supportsToolCall(executor ToolExecutor, requestedName string) (supported bool, err error) {
+	if executor == nil {
+		return false, nil
 	}
-	return configuredName == requestedName
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("tool lookup panicked: %s", safeValueText(recovered))
+		}
+	}()
+	if named, ok := executor.(NamedToolExecutor); ok {
+		return named.Supports(requestedName), nil
+	}
+	configuredName, err := configuredToolName(executor)
+	if err != nil {
+		return false, err
+	}
+	return configuredName == requestedName, nil
 }
 
 func (a *Agent) commitToolResultV2(active *activeRun, turn uint32, outcome batchOutcome) error {
-	block, err := llm.NewTextBlock(outcome.output.Text)
-	if err != nil {
-		return fmt.Errorf("%w: tool text: %w", ErrInvariant, err)
-	}
 	timestamp, err := a.now()
 	if err != nil {
 		return err
 	}
-	message, err := llm.NewToolResultMessage(outcome.call.ID(), outcome.call.Name(), []llm.TextBlock{block}, outcome.err != nil, timestamp)
+	var message llm.ConversationMessage
+	var details json.RawMessage
+	if outcome.output.Details != nil {
+		encoded, marshalErr := json.Marshal(outcome.output.Details)
+		if marshalErr != nil {
+			return fmt.Errorf("%w: tool details: %w", ErrInvariant, marshalErr)
+		}
+		details = encoded
+	}
+	if len(outcome.output.Content) != 0 {
+		message, err = llm.NewToolResultContentMessageWithDetails(outcome.call.ID(), outcome.call.Name(), outcome.output.Content, outcome.err != nil, timestamp, details)
+	} else {
+		block, blockErr := llm.NewTextBlock(outcome.output.Text)
+		if blockErr != nil {
+			return fmt.Errorf("%w: tool text: %w", ErrInvariant, blockErr)
+		}
+		message, err = llm.NewToolResultMessageWithDetails(outcome.call.ID(), outcome.call.Name(), []llm.TextBlock{block}, outcome.err != nil, timestamp, details)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: tool result: %w", ErrInvariant, err)
 	}
-	if err := llm.ValidateToolResultAssociation(outcome.call, message); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvariant, err)
+	switch result := message.(type) {
+	case llm.ToolResultMessage:
+		if err := llm.ValidateToolResultAssociation(outcome.call, result); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvariant, err)
+		}
+	case llm.ToolResultContentMessage:
+		if err := llm.ValidateToolResultContentAssociation(outcome.call, result); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvariant, err)
+		}
+	default:
+		return fmt.Errorf("%w: unexpected tool result %T", ErrInvariant, message)
 	}
 	if err := a.commit(active, turn, message); err != nil {
 		return err

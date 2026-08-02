@@ -294,6 +294,12 @@ type Context struct {
 	hasAssistant bool
 }
 
+// NewContext constructs an in-memory runtime projection. It is intentionally
+// separate from Session's durable selected-branch projection.
+func NewContext(messages []llm.ConversationMessage) Context {
+	return Context{messages: append([]llm.ConversationMessage(nil), messages...)}
+}
+
 func (c Context) Messages() []llm.ConversationMessage {
 	return append([]llm.ConversationMessage(nil), c.messages...)
 }

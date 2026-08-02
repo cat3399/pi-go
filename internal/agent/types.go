@@ -62,10 +62,74 @@ type RetryPolicy = provider.RetryPolicy
 // non-nil Execute error makes the associated ToolResult an error result.
 type ToolOutput struct {
 	Text string
+	// Content is the provider-visible rich result.  Text remains the legacy
+	// convenience surface; when Content is present it is authoritative and is
+	// never flattened by the loop. Details is encoded as immutable opaque JSON
+	// on the durable tool-result message, but remains excluded from provider
+	// request payloads.
+	Content []llm.ToolResultContentBlock
+	Details any
 	// Terminate asks the coordinator to stop after this batch. A batch stops
 	// early only when every finalized call asks to terminate; this prevents a
 	// concurrent success from silently hiding another call's continuation.
 	Terminate bool
+}
+
+type BeforeToolCallContext struct {
+	Assistant llm.AssistantToolUseMessage
+	ToolCall  llm.ToolCallBlock
+	Arguments []byte
+	Context   []llm.ConversationMessage
+}
+type BeforeToolCallResult struct {
+	Block  bool
+	Reason string
+}
+type AfterToolCallContext struct {
+	Assistant llm.AssistantToolUseMessage
+	ToolCall  llm.ToolCallBlock
+	Arguments []byte
+	Context   []llm.ConversationMessage
+	Result    ToolOutput
+	IsError   bool
+}
+type AfterToolCallResult struct {
+	Content   *[]llm.ToolResultContentBlock
+	Details   *any
+	IsError   *bool
+	Terminate *bool
+}
+type BeforeToolCallHook func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
+type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
+
+// TurnSnapshot is the immutable product configuration used for one provider
+// turn. Agent obtains a new snapshot before every request, including the
+// request after a tool batch. This is the Go equivalent of pi's
+// prepareNextTurn boundary: a long-lived AgentSession can change its model,
+// thinking level, system prompt, or enabled tools without replacing a run.
+//
+// Provider and Transcript deliberately remain loop dependencies. They are
+// resource-lifetime owners, not mutable product settings.
+type TurnSnapshot struct {
+	Model          provider.ModelRef
+	ThinkingLevel  provider.ThinkingLevel
+	SystemPrompt   string
+	Tool           ToolExecutor
+	Tools          []provider.ToolDefinition
+	BeforeToolCall BeforeToolCallHook
+	AfterToolCall  AfterToolCallHook
+	Stream         provider.StreamOptions
+}
+
+// PrepareTurn is called without the Agent mutex held. Implementations
+// must return a self-contained immutable value and must not retain a mutable
+// slice supplied by the session. The supplied TurnContext is observational;
+// changing it cannot mutate loop state.
+type PrepareTurn func(context.Context, TurnContext) (TurnSnapshot, error)
+
+type TurnContext struct {
+	RunID uint64
+	Turn  uint32
 }
 
 // ToolUpdate is an ephemeral progress snapshot. It is never persisted or fed
@@ -119,7 +183,14 @@ type Config struct {
 	// Tools is the immutable model-visible schema snapshot for this run. It is
 	// separate from Tool execution so deterministic providers can remain
 	// tool-free while production binds both views through one registry.
-	Tools []provider.ToolDefinition
+	Tools          []provider.ToolDefinition
+	BeforeToolCall BeforeToolCallHook
+	AfterToolCall  AfterToolCallHook
+	// PrepareTurn optionally replaces the static Model/SystemPrompt/Tool/Tools
+	// fields for every provider request. It is the only mutable-settings seam
+	// in Agent; callers that do not need a session keep the legacy static
+	// fields and receive identical behavior.
+	PrepareTurn PrepareTurn
 	// ContextWindow and ContextReserve enable pre-prompt automatic compaction.
 	// A configured threshold requires a real Session compactor and summarizer.
 	ContextWindow     uint64
@@ -139,6 +210,9 @@ type runtimeConfig struct {
 	tool              ToolExecutor
 	toolName          string
 	tools             []provider.ToolDefinition
+	beforeToolCall    BeforeToolCallHook
+	afterToolCall     AfterToolCallHook
+	prepareTurn       PrepareTurn
 	now               func() time.Time
 	settlementTimeout time.Duration
 	toolExecution     ToolExecutionMode
@@ -303,6 +377,9 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		tool:              configuredTool,
 		toolName:          toolName,
 		tools:             append([]provider.ToolDefinition(nil), config.Tools...),
+		beforeToolCall:    config.BeforeToolCall,
+		afterToolCall:     config.AfterToolCall,
+		prepareTurn:       config.PrepareTurn,
 		now:               now,
 		settlementTimeout: settlementTimeout,
 		toolExecution:     toolExecution,
@@ -443,6 +520,9 @@ const (
 	EventSummarizationRetryScheduled
 	EventSummarizationRetryAttempt
 	EventSummarizationRetryFinished
+	// EventQueueUpdated is emitted only after a reserved queued message has
+	// been durably committed and removed from its source queue.
+	EventQueueUpdated
 )
 
 func (k EventKind) String() string {
@@ -481,6 +561,8 @@ func (k EventKind) String() string {
 		return "summarization_retry_attempt"
 	case EventSummarizationRetryFinished:
 		return "summarization_retry_finished"
+	case EventQueueUpdated:
+		return "queue_updated"
 	default:
 		return "unknown"
 	}
@@ -494,8 +576,10 @@ type Event struct {
 	Turn             uint32
 	Message          llm.ConversationMessage
 	ProviderSnapshot llm.StreamSnapshot
+	ProviderEvent    llm.StreamEvent
 	ToolCallID       string
 	ToolName         string
+	ToolArguments    []byte
 	ToolUpdate       ToolUpdate
 	ToolOutput       ToolOutput
 	ToolError        error
@@ -516,6 +600,9 @@ type Event struct {
 	CompactionReason    CompactionReason
 	CompactionWillRetry bool
 	Compaction          *session.CompactResult
+	// Model is the immutable turn model which produced an assistant terminal.
+	// Session policy must not substitute a model selected later by observers.
+	Model provider.ModelRef
 }
 
 // Observer is invoked synchronously in subscription order. The Agent holds no

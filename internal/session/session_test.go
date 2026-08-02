@@ -459,6 +459,44 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 	}
 }
 
+func TestToolResultDetailsRoundTripThroughDurableSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "details.jsonl")
+	session, err := Create(path, CreateOptions{
+		ID: "details", WorkingDir: "/workspace", Now: func() time.Time { return time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC) },
+		NewEntryID: sequenceIDs("details-entry"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := llm.NewTextBlock("result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewToolResultMessageWithDetails("call", "tool", []llm.TextBlock{block}, false, time.UnixMilli(1), json.RawMessage(`{"trace":{"id":"kept"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := session.Append(context.Background(), message, AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(entry.RawJSON(), []byte(`"details":{"trace":{"id":"kept"}}`)) {
+		t.Fatalf("details absent from raw entry: %s", entry.RawJSON())
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored, ok := reopened.Context().Messages()[0].(llm.ToolResultMessage)
+	if !ok || string(restored.Details()) != `{"trace":{"id":"kept"}}` {
+		t.Fatalf("restored details = %#v", reopened.Context().Messages())
+	}
+}
+
 func TestConcurrentAppendFormsOneDurableParentChain(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "concurrent.jsonl")

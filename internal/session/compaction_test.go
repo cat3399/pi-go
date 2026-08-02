@@ -502,6 +502,46 @@ func TestEstimateContextTokensUsesToolUsageAndTrailingSuffix(t *testing.T) {
 	}
 }
 
+func TestSerializeConversationAndEstimateRichMessagesOnce(t *testing.T) {
+	t.Parallel()
+	image, err := llm.NewImageDataBlock("image/png", []byte{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustTextBlock(t, "hello")
+	user, err := llm.NewUserContentMessage([]llm.UserContentBlock{text, image}, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking, err := llm.NewThinkingBlock("reasoning", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{Input: 1, Output: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking, mustTextBlock(t, "answer")}, llm.FinishStop, usage, time.UnixMilli(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := llm.NewToolResultContentMessage("id", "tool", []llm.ToolResultContentBlock{mustTextBlock(t, "output"), image}, false, time.UnixMilli(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := SerializeConversation([]llm.ConversationMessage{user, assistant, tool})
+	for _, want := range []string{"[User]: hello[image]", "[Assistant]: reasoninganswer", "[Tool result]: output[image]"} {
+		if !bytes.Contains([]byte(serialized), []byte(want)) {
+			t.Fatalf("SerializeConversation() = %q, missing %q", serialized, want)
+		}
+	}
+	// Images use the production 4,800-char estimate (1,200 tokens); ID/name
+	// are each counted once alongside the text content.
+	if tokens, err := estimateMessageTokens(tool); err != nil || tokens != 1203 {
+		t.Fatalf("rich tool estimate = (%d, %v), want 1203", tokens, err)
+	}
+}
+
 func TestTokenEstimateOverflowFailsPolicyCutAndCompactWithoutWrite(t *testing.T) {
 	t.Parallel()
 	maxUsage, err := llm.NewUsage(llm.UsageSpec{Input: math.MaxUint64})

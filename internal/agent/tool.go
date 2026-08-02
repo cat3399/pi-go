@@ -139,7 +139,7 @@ func (e *RegistryExecutor) ExecuteNamed(ctx context.Context, name string, argume
 		return ToolOutput{Text: "Tool registry is not configured"}, errors.New("tool registry is not configured")
 	}
 	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
-	return ToolOutput{Text: result.Text}, err
+	return ToolOutput{Text: result.Text, Details: result.Details}, err
 }
 
 func NewFilesystemExecutor(registry *tool.Registry) (*FilesystemExecutor, error) {
@@ -177,10 +177,16 @@ func (e *FilesystemExecutor) ExecuteNamed(ctx context.Context, name string, argu
 		return ToolOutput{Text: "Filesystem tools are not configured"}, errors.New("filesystem tools are not configured")
 	}
 	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
-	return ToolOutput{Text: result.Text}, err
+	return ToolOutput{Text: result.Text, Details: result.Details}, err
 }
 
 func normalizeToolOutcome(output ToolOutput, err error) (ToolOutput, error) {
+	// Rich content is authoritative. A tool may deliberately have no text
+	// fallback (for example an image result), so validating/repairing the legacy
+	// Text field here would silently discard a valid rich result and its details.
+	if len(output.Content) != 0 {
+		return output, err
+	}
 	if utf8.ValidString(output.Text) {
 		if err == nil || output.Text != "" {
 			return output, err

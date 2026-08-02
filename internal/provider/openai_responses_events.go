@@ -22,6 +22,7 @@ type responsesOutputEvent struct {
 	OutputIndex *int                `json:"output_index"`
 	ItemID      string              `json:"item_id"`
 	Delta       string              `json:"delta"`
+	Text        string              `json:"text"`
 	CallID      string              `json:"call_id"`
 	Name        string              `json:"name"`
 	Arguments   string              `json:"arguments"`
@@ -38,8 +39,43 @@ type responsesOutputItem struct {
 	Name             string                   `json:"name"`
 	Arguments        string                   `json:"arguments"`
 	Content          []responsesOutputContent `json:"content"`
+	PlaintextContent string                   `json:"-"`
 	Summary          []responsesOutputContent `json:"summary"`
 	EncryptedContent string                   `json:"encrypted_content"`
+}
+
+// Some Responses-compatible endpoints represent reasoning content as a
+// string, while OpenAI uses an array for message/reasoning content. Preserve
+// this narrow wire variance without making arbitrary item JSON opaque.
+func (item *responsesOutputItem) UnmarshalJSON(data []byte) error {
+	type itemAlias responsesOutputItem
+	var wire struct {
+		Type             string                   `json:"type"`
+		ID               string                   `json:"id"`
+		Role             string                   `json:"role"`
+		Status           string                   `json:"status"`
+		Phase            string                   `json:"phase"`
+		CallID           string                   `json:"call_id"`
+		Name             string                   `json:"name"`
+		Arguments        string                   `json:"arguments"`
+		Content          json.RawMessage          `json:"content"`
+		Summary          []responsesOutputContent `json:"summary"`
+		EncryptedContent string                   `json:"encrypted_content"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*item = responsesOutputItem{Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, Phase: wire.Phase, CallID: wire.CallID, Name: wire.Name, Arguments: wire.Arguments, Summary: wire.Summary, EncryptedContent: wire.EncryptedContent}
+	if len(wire.Content) == 0 || bytes.Equal(bytes.TrimSpace(wire.Content), []byte("null")) {
+		return nil
+	}
+	if err := json.Unmarshal(wire.Content, &item.Content); err == nil {
+		return nil
+	}
+	if err := json.Unmarshal(wire.Content, &item.PlaintextContent); err != nil {
+		return fmt.Errorf("content must be an array or string: %w", err)
+	}
+	return nil
 }
 
 type responsesOutputContent struct {
@@ -129,6 +165,18 @@ func (s *openAIResponsesStream) processResponsesEvent(
 			return invalidResponsesEventFailure(err)
 		}
 		return s.addResponsesReasoningDelta(event)
+	case "response.output_text.done", "response.refusal.done":
+		var event responsesOutputEvent
+		if err := unmarshalResponsesEvent(data, &event); err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		return s.finishResponsesTextProgress(event)
+	case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+		var event responsesOutputEvent
+		if err := unmarshalResponsesEvent(data, &event); err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		return s.finishResponsesReasoningProgress(event)
 	case "response.reasoning_summary_part.done":
 		var event responsesOutputEvent
 		if err := unmarshalResponsesEvent(data, &event); err != nil {
@@ -261,6 +309,60 @@ func (s *openAIResponsesStream) addResponsesReasoningDelta(event responsesOutput
 		return invalidResponsesEventFailure(err)
 	}
 	s.enqueueResponsesEvent(delta)
+	return nil
+}
+
+func responsesDoneText(event responsesOutputEvent) string {
+	if event.Text != "" {
+		return event.Text
+	}
+	return event.Delta
+}
+
+// The `*.done` events complete a streamed content part, not an output item.
+// They must agree with the open slot but never emit a second end event; the
+// authoritative durable close remains response.output_item.done.
+func (s *openAIResponsesStream) finishResponsesTextProgress(event responsesOutputEvent) *responsesFailureSpec {
+	index, failure := requireResponsesOutputIndex(event.OutputIndex)
+	if failure != nil {
+		return failure
+	}
+	slot := s.slots[index]
+	if slot == nil {
+		return invalidResponsesEventFailure(fmt.Errorf("text done has no open output item at index %d", index))
+	}
+	if event.ItemID != "" && event.ItemID != slot.itemID {
+		return invalidResponsesEventFailure(fmt.Errorf("text done item id %q does not match %q", event.ItemID, slot.itemID))
+	}
+	text := responsesDoneText(event)
+	if !utf8.ValidString(text) {
+		return invalidResponsesEventFailure(errors.New("text done is not valid UTF-8"))
+	}
+	if text != "" && !strings.HasPrefix(text, slot.text.String()) && !strings.HasPrefix(slot.text.String(), text) {
+		return invalidResponsesEventFailure(errors.New("completed text does not match streamed deltas"))
+	}
+	return nil
+}
+
+func (s *openAIResponsesStream) finishResponsesReasoningProgress(event responsesOutputEvent) *responsesFailureSpec {
+	index, failure := requireResponsesOutputIndex(event.OutputIndex)
+	if failure != nil {
+		return failure
+	}
+	slot := s.reasoningSlots[index]
+	if slot == nil {
+		return invalidResponsesEventFailure(fmt.Errorf("reasoning done has no open item at index %d", index))
+	}
+	if event.ItemID != "" && event.ItemID != slot.itemID {
+		return invalidResponsesEventFailure(errors.New("reasoning done item id mismatch"))
+	}
+	text := responsesDoneText(event)
+	if !utf8.ValidString(text) {
+		return invalidResponsesEventFailure(errors.New("reasoning done is not valid UTF-8"))
+	}
+	if text != "" && !strings.HasPrefix(text, slot.text.String()) && !strings.HasPrefix(slot.text.String(), text) {
+		return invalidResponsesEventFailure(errors.New("completed reasoning does not match streamed deltas"))
+	}
 	return nil
 }
 func (s *openAIResponsesStream) addResponsesReasoningSeparator(event responsesOutputEvent) *responsesFailureSpec {
@@ -551,6 +653,7 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 			encryptedContent: event.Item.EncryptedContent,
 		}
 		if event.Item.EncryptedContent == "" {
+			completedReasoning.plaintextContent = slot.text.String()
 			s.deferResponsesReasoningEnd(index, completedReasoning)
 		} else {
 			replay := &llm.OpenAIResponsesReasoning{ItemID: slot.itemID, EncryptedContent: event.Item.EncryptedContent}
@@ -603,7 +706,10 @@ func responsesReasoningText(item responsesOutputItem) string {
 			}
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	if len(parts) != 0 {
+		return strings.Join(parts, "\n\n")
+	}
+	return item.PlaintextContent
 }
 
 func responsesOutputItemText(item responsesOutputItem) (string, *responsesFailureSpec) {
@@ -724,6 +830,9 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	for _, pending := range s.pendingReasoning {
 		if terminal, ok := terminalReasoningByID[pending.itemID]; ok {
 			pending.encryptedContent = terminal.encryptedContent
+			if terminal.encryptedContent != "" {
+				pending.plaintextContent = ""
+			}
 		}
 	}
 	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
