@@ -285,7 +285,11 @@ func RecoverTrailingPartial(path string) (RecoveryResult, error) {
 		}
 		return RecoveryResult{BackupPath: backup}, fmt.Errorf("%w: recovery publication: %w", ErrStorage, replaceErr)
 	}
-	return RecoveryResult{BackupPath: backup, TruncatedBytes: int64(len(partial))}, nil
+	result := RecoveryResult{BackupPath: backup, TruncatedBytes: int64(len(partial))}
+	if err := refreshSessionWriterAfterRewrite(claim, resolved); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // backupName is intentionally fixed and no-clobber. It prevents a second

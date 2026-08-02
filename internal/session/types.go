@@ -37,6 +37,10 @@ var (
 	ErrSessionTooLarge       = errors.New("session exceeds safety limit")
 )
 
+// ErrAtomicReplaceUnsupported reports that the host cannot replace an open
+// session target atomically. The operation fails before publication.
+var ErrAtomicReplaceUnsupported = errors.New("atomic session replacement unsupported")
+
 // CompactionSummaryPrefix and CompactionSummarySuffix are the v3 context
 // representation of a durable compaction record. They make the checkpoint an
 // explicit user-context message without changing the sealed llm message union.

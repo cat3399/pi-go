@@ -115,13 +115,14 @@ field、检测 trailing partial、使用可诊断错误和 crash-aware write。�
 test 在 Go ledger 中标记为 `strengthened` 目标，不机械复制 silent skip。
 
 Create 采用同目录 temporary file、file sync、no-replace atomic publication 和适用平台的
-directory sync；
+metadata durability request（Unix directory sync；Windows no-replace write-through move）；
 append 在 acknowledgment 前 sync。Atomic create 是 pi-go strengthening：上游
 `SessionManager.newSession()` 只创建内存状态，实际首次落盘由 `_persist/_rewriteFile`
 完成且没有同等 durability contract。
 
-若 create 的 rename 已成功但 directory sync 失败，返回 typed `durability unknown`，不
-返回 writable aggregate；目标 path 可能存在，调用者只能显式 reopen，不能覆盖。
+若 create 的 publication 已成功但其后 durability request 失败，返回 typed
+`durability unknown`，不返回 writable aggregate；目标 path 可能存在，调用者只能显式
+reopen，不能覆盖。
 Append 的 uncertain failure 如上进入 poison 状态；partial final record 会被 reader 拒写，
 完整 record 则可能在 reopen 后出现或未出现，这是 fsync failure 无法消除的不确定性。
 显式 recovery/truncate 不属于 v0.1，不能在普通 Open 中自动“修复”。
@@ -283,11 +284,13 @@ key/invalidation、cancel/fault publication 与 selected-path context，才可�
 
 Open 先持有进程内 claim、canonical path 的跨进程 sidecar lock 和现有 session inode lock，
 读取 source byte snapshot，执行纯 migration，再以同目录 private temp/file fsync/atomic
-replace/directory sync 发布。rewrite 后 claim 同时保留旧 inode lock 并取得新 inode lock，
+replace/platform metadata durability request 发布。rewrite 后 claim 同时保留旧 inode lock
+并取得新 inode lock，
 因此 hardlink alias 不能绕过仍活跃的 writer；final-component symlink 在 admission 时解析为
 同一 target。多 hardlink 的 migration/recovery 会以 `ErrUnsafeWriterAlias` fail-closed，因为
 atomic replace 会把各 link 分裂成不同历史；普通单路径以及不发生 rewrite 的 v3 resume
-不退化。rename 或 directory sync 后的错误返回 durability-unknown 且不发布可写 aggregate；
+不退化。rename 或 publication 后 durability error 返回 durability-unknown 且不发布可写
+aggregate；
 原文件可由下一次
 严格 Open reconcile。普通 Open 对 future version、UTF-8、duplicate/graph、middle malformed
 和 trailing partial 一律拒绝且不改写。64 MiB、100 万行、4 MiB/line 是明确 admission
@@ -299,10 +302,39 @@ atomic replace 截断。它绝不处理 middle corruption 或完整 tail，且�
 自动调用。Unix 使用 kernel-released `flock`，Windows 使用 `LockFileEx`；两者都不采用会在
 crash 后变成安全风险的 stale-directory sentinel。Windows identity handle 由明确的
 `CreateFileW(GENERIC_READ, SHARE_READ|SHARE_WRITE|SHARE_DELETE, OPEN_EXISTING)` 建立，允许
-持锁期间的同卷 replacement；replacement 明确使用
-`MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)` 且不允许 `COPY_ALLOWED`，因此不会退化为
-非原子的跨卷 copy/delete。对应 runtime migration/recovery/rename-under-lock test 必须在
-Windows runner 执行；非 Windows gate 只验证参数 contract 与 Windows compile。
+持锁期间删除旧 directory entry，同时旧 handle 继续锁定旧 identity。replacement 只接受
+`SetFileInformationByHandle(FileRenameInfoEx)`，同目录 temporary handle 以
+`GENERIC_READ|GENERIC_WRITE|DELETE`、全 share mode 和 `FILE_FLAG_WRITE_THROUGH` 打开，rename
+flags 必须同时包含 `FILE_RENAME_REPLACE_IF_EXISTS|FILE_RENAME_POSIX_SEMANTICS`。Microsoft 对
+POSIX flag 的 contract 是：即使旧 target 仍有 open handle 也可替换，旧 handle 继续指向旧
+文件，后续按 target name 打开获得新文件；因此 replacement 不需要先释放旧 identity lock，
+publication 后仍在 path lock 与旧 identity lock 下取得新 identity lock，成功返回前同时持有
+两者。temporary 与 target 必须同 directory，且没有
+`MoveFileExW`、普通 `FileRenameInfo`、`COPY_ALLOWED` 或 copy/delete fallback，因此请求不能
+退化成跨卷/非原子 replacement。
+
+官方 product behavior 将 `FileRenameInformationEx` 的系统下限列为 Windows 10 v1607 与
+Windows Server 2016；文件系统仍可独立拒绝 information class 或 POSIX flag。代码因此执行
+runtime capability check，并把 `ERROR_INVALID_FUNCTION`、`ERROR_NOT_SUPPORTED`、
+`ERROR_INVALID_PARAMETER`、`ERROR_CALL_NOT_IMPLEMENTED` 作为
+`ErrAtomicReplaceUnsupported` 在 publication 前 fail-closed，绝不尝试较弱 fallback。
+对应参考：[FILE_RENAME_INFORMATION flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)、
+[Windows product behavior](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/d4bc551b-7aaf-4b4f-ba0e-3a75e7c528f0)。
+
+durability 顺序是 temporary `fsync`/close、以 write-through handle 发出原子 rename、再对已改名
+的同一 file handle 调用 `FlushFileBuffers`。Microsoft 明确说明 write-through request 会让 NTFS
+flush 该 request 引起的 rename metadata；`FlushFileBuffers` 要求 `GENERIC_WRITE`。文档化的
+Win32 directory-handle function 列表没有 directory `FlushFileBuffers`/`fsync` 等价物，因此
+Windows contract 不伪称额外 directory fsync，而以 write-through rename + post-rename file
+flush 为持久化边界；rename 后 flush/close 失败返回 publication=true，由上层报告
+`ErrDurabilityUnknown`。参考：[CreateFile caching behavior](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#caching-behavior)、
+[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)、
+[Directory Handles](https://learn.microsoft.com/en-us/windows/win32/fileio/obtaining-a-handle-to-a-directory)。
+
+Windows-only runtime suite 必须实际执行 open-destination replacement、migration 与 recovery，
+并验证旧 open handle 仍读到旧 identity、target name 已读到新 identity；非 Windows ABI seam
+明确只验证 32/64-bit buffer/flags/handle 参数 contract，不能当作 runtime 通过证据。当前 macOS
+工作机只做 Windows 386/amd64/arm64 compile，真实 runtime 结果仍是 independent review gate。
 
 rewrite 在 chmod/write/fsync/close 或
 pre-rename failure 时关闭并移除 private temp，cleanup error 与主错误一起返回；rename 后的

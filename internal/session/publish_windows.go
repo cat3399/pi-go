@@ -24,7 +24,7 @@ func publishTemporary(temporaryPath, targetPath string) (bool, error) {
 	ok, _, callErr := moveFileExW.Call(
 		uintptr(unsafePointer(from)),
 		uintptr(unsafePointer(to)),
-		uintptr(windowsMoveFileWrite),
+		uintptr(sessionWindowsCreatePublishFlags()),
 	)
 	if ok == 0 {
 		if callErr == nil {

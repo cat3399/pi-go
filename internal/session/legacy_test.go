@@ -170,6 +170,18 @@ func TestMigrationPublicationUncertaintyDoesNotPublishWritableSession(t *testing
 	}
 }
 
+func TestMigrationUnsupportedAtomicReplacementFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.jsonl")
+	data := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n")
+	storage := &fakeStorage{readData: data, replaceErr: ErrAtomicReplaceUnsupported}
+	if _, err := openWithStorage(storage, path, OpenOptions{}); !errors.Is(err, ErrStorage) || !errors.Is(err, ErrAtomicReplaceUnsupported) {
+		t.Fatalf("unsupported migration replacement = %v, want storage + atomic-replace-unsupported", err)
+	}
+	if storage.replaceCalled != 1 || storage.replaceDone {
+		t.Fatalf("unsupported migration replacement = calls %d, published %t", storage.replaceCalled, storage.replaceDone)
+	}
+}
+
 func TestRecoverTrailingPartialRequiresExplicitBackupThenReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "partial.jsonl")
 	prefix := []byte(testHeader + "\n" + userEntryJSON("root", "entry-1", "null", 1) + "\n")

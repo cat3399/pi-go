@@ -152,8 +152,10 @@ func (osSessionStorage) append(ctx context.Context, path string, data []byte) (b
 }
 
 // replace writes a complete private sibling, syncs it, atomically swaps it in
-// place, then syncs the directory. The boolean means that the visible name may
-// already point to the replacement, so callers must fail closed on an error.
+// place, then requests the platform's metadata-durability boundary (directory
+// sync on Unix; write-through rename plus file flush on Windows). The boolean
+// means that the visible name may already point to the replacement, so callers
+// must fail closed on an error.
 func (osSessionStorage) replace(path string, data []byte) (bool, error) {
 	if err := (osSessionStorage{}).validateReplace(path); err != nil {
 		return false, err

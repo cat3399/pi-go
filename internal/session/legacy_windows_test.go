@@ -25,7 +25,7 @@ func TestWindowsFailedIdentityLockClosesHandle(t *testing.T) {
 	}
 }
 
-func TestWindowsIdentityLockAllowsWriteThroughReplacement(t *testing.T) {
+func TestWindowsFileRenameInfoExReplacesOpenDestinationUnderIdentityLock(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target.jsonl")
 	temporary := filepath.Join(directory, "temporary.jsonl")
@@ -35,6 +35,24 @@ func TestWindowsIdentityLockAllowsWriteThroughReplacement(t *testing.T) {
 	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	targetPointer, err := syscall.UTF16PtrFromString(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := sessionWindowsIdentityHandleSpec()
+	oldHandle, err := syscall.CreateFile(
+		targetPointer,
+		identity.DesiredAccess,
+		identity.ShareMode,
+		nil,
+		identity.CreationDisposition,
+		identity.FlagsAndAttributes,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.CloseHandle(oldHandle)
 	unlock, err := claimProcessIdentityWriter(target)
 	if err != nil {
 		t.Fatal(err)
@@ -48,8 +66,37 @@ func TestWindowsIdentityLockAllowsWriteThroughReplacement(t *testing.T) {
 	if err != nil || !bytes.Equal(data, []byte("new")) {
 		t.Fatalf("replacement target = %q, %v", data, err)
 	}
+	oldData := make([]byte, 3)
+	var oldRead uint32
+	if err := syscall.ReadFile(oldHandle, oldData, &oldRead, nil); err != nil {
+		t.Fatalf("read replaced destination handle: %v", err)
+	}
+	if !bytes.Equal(oldData[:oldRead], []byte("old")) {
+		t.Fatalf("open destination handle changed identity: %q", oldData[:oldRead])
+	}
 	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
 		t.Fatalf("replacement temporary still exists: %v", err)
+	}
+}
+
+func TestWindowsReplacementRejectsNonSiblingTemporaryBeforePublication(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target.jsonl")
+	temporary := filepath.Join(t.TempDir(), "temporary.jsonl")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := replaceTemporary(temporary, target)
+	if err == nil || replaced {
+		t.Fatalf("non-sibling replacement = (%t, %v)", replaced, err)
+	}
+	for path, want := range map[string][]byte{target: []byte("old"), temporary: []byte("new")} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(data, want) {
+			t.Fatalf("non-sibling replacement changed %s: %q, %v", path, data, readErr)
+		}
 	}
 }
 
