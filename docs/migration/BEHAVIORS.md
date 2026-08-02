@@ -125,6 +125,16 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-AUTH-004` | runtime override 及 stored/configured/environment source ownership | `runtime-credentials.ts`；`runtime-credentials.test.ts`；`auth/resolve.ts` | `ported` | production 使用同一 resolver，request key 不持久化；R-AUTH-001 |
 | `B-AUTH-005` | literal/environment template 与 command safe refusal | `resolve-config-value.ts`；`resolve-config-value.test.ts` | `ported` | command process 不启动，待安全/process slice 重评；R-AUTH-001 |
 
+## M-TUI
+
+| ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
+| --- | --- | --- | --- |
+| `B-TUI-001` | stdin chunk framing：partial UTF-8/ESC/CSI/X10/SGR、bracketed paste、Kitty raw duplicate、EOF/size bound/error policy | `packages/tui/src/stdin-buffer.ts`; `test/stdin-buffer.test.ts` | `in-progress` | implementation/tests complete; awaiting `R-TUI-001` |
+| `B-TUI-002` | legacy VT、modifyOtherKeys、CSI-u Kitty key/event/modifier parse and canonical matching | `src/keys.ts`; `test/keys.test.ts` | `in-progress` | v0.1 representative matrix complete; awaiting review; full functional-key matrix deferred |
+| `B-TUI-003` | ANSI-invisible cell width, CJK/combining/emoji/RI/tab, contiguous truncate, wrap and cell slicing | `src/utils.ts`; width/wrap/truncate regression tests | `in-progress` | foundation complete; renderer-specific ANSI style continuation deferred |
+| `B-TUI-004` | raw-mode/mode restoration, negotiation/capability/color parsing, deterministic dimensions and no hidden input goroutine | `src/terminal.ts`, `terminal-colors.ts`; corresponding tests | `in-progress` | awaiting review; platform PTY runtime smoke belongs to interactive assembly |
+| `B-TUI-005` | whitespace/punctuation/CJK word navigation | `src/word-navigation.ts`; `test/word-navigation.test.ts` | `in-progress` | Go UTF-8 byte offsets documented; awaiting review |
+
 ## 首个 workflow 之外的明确分类
 
 - Prompt cache、multiple models、thinking/image、parallel tools、steering/follow-up、retry、

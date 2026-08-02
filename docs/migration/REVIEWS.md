@@ -332,3 +332,10 @@
   contract，完整 compat/OAuth/authHeader adapter，fuzzy selection/model cycling 与正式 project
   trust decision 均需独立后续 slice，不能由本里程碑的通过结论覆盖。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-TUI-001：M-TUI/v0.1 terminal foundation
+
+- 状态：`awaiting independent review`。
+- 范围：`internal/tui`、其 unit/fuzz/race coverage、`TUI_FOUNDATION.md` 与对应 behavior/test ledger。
+- 待核验：固定上游 evidence、input framing 的 EOF/partial/size/invalid-UTF-8 contract、no-goroutine lifecycle、raw-mode restoration、key modifier semantics、Unicode cell boundaries 与 platform isolation。
+- 实现者已运行全仓 test/vet/build/race、fuzz seed 与 Linux/Windows cross-build；该记录不构成 review passed，测试 intents 在 review 前保持 `deferred`。

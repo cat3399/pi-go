@@ -11,6 +11,7 @@ review gate；随着新行为证据调整时，必须同步更新 ledger 与受�
 - [TOOL_SYSTEM.md](TOOL_SYSTEM.md) — M-TOOL Bash 与 filesystem tool suite；
 - [APPLICATION_CLI.md](APPLICATION_CLI.md) — M-APP text print 与 WF-001 装配。
 - [AUTH_STORAGE.md](AUTH_STORAGE.md) — M-AUTH API-key storage、runtime overlay 与 config resolution。
+- [TUI_FOUNDATION.md](TUI_FOUNDATION.md) — M-TUI terminal input/cell/lifecycle foundation。
 
 阶段 0 之后的产品服务、Interactive/TUI、Extension 和 Remote 模块仍以
 [../../ARCHITECTURE.md](../../ARCHITECTURE.md) 与 [../../ROADMAP.md](../../ROADMAP.md)

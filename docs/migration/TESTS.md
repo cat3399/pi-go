@@ -141,3 +141,13 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 
 JSON print mode 的 error exit、RPC、interactive、真实 provider 和 terminal integration tests
 不属于 WF-001 v0.1；进入对应 workflow 时逐项登记。
+
+## M-TUI
+
+| ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
+| --- | --- | --- | --- | --- |
+| `T-TUI-001` | B-TUI-001 | `packages/tui/test/stdin-buffer.test.ts` — split CSI/mouse, Kitty, paste, timeout/flush and destroy cases | `deferred` | Go representative framing, invalid UTF-8 policy, bounded-buffer and EOF tests plus fuzz are implemented; awaiting `R-TUI-001` |
+| `T-TUI-002` | B-TUI-002 | `packages/tui/test/keys.test.ts` legacy/CSI-u/modifyOtherKeys/keypad/event cases | `deferred` | legacy, CSI-u modifier/release and modifyOtherKeys matrix is implemented; full keypad/function compatibility deferred to keybinding consumer slice |
+| `T-TUI-003` | B-TUI-003 | `wrap-ansi`, `truncate-to-width`, `tab-width`, regional-indicator regression tests | `deferred` | cell/ANSI/CJK/combining/emoji/tab, truncate/wrap/slice representative regressions are implemented; ANSI style replay remains renderer work |
+| `T-TUI-004` | B-TUI-004 | `terminal.test.ts`, `terminal-colors.test.ts` negotiation/dimensions/color intent | `deferred` | fake-raw lifecycle and pure parser tests implemented; PTY and real Windows console smoke deferred to interactive assembly |
+| `T-TUI-005` | B-TUI-005 | `word-navigation.test.ts` whitespace/punctuation/CJK cases | `deferred` | Go UTF-8-byte navigation tests implemented; awaiting `R-TUI-001` |
