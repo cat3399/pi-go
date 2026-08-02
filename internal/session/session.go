@@ -80,12 +80,16 @@ func createWithStorage(storage sessionStorage, path string, options CreateOption
 	if err := ValidateSessionID(sessionID); err != nil {
 		return nil, err
 	}
+	if options.ParentSession != "" && (!utf8.ValidString(options.ParentSession) || strings.TrimSpace(options.ParentSession) == "") {
+		return nil, fmt.Errorf("%w: parent session must be valid UTF-8", ErrInvalidSession)
+	}
 	wire := newHeaderWire{
-		Type:       "session",
-		Version:    3,
-		ID:         sessionID,
-		Timestamp:  formatISOTime(timestamp),
-		WorkingDir: workingDir,
+		Type:          "session",
+		Version:       3,
+		ID:            sessionID,
+		Timestamp:     formatISOTime(timestamp),
+		WorkingDir:    workingDir,
+		ParentSession: options.ParentSession,
 	}
 	raw, err := json.Marshal(wire)
 	if err != nil {
@@ -107,10 +111,12 @@ func createWithStorage(storage sessionStorage, path string, options CreateOption
 		storage:    storage,
 		path:       resolvedPath,
 		header: Header{
-			id:         sessionID,
-			workingDir: workingDir,
-			timestamp:  timestamp,
-			raw:        raw,
+			id:               sessionID,
+			workingDir:       workingDir,
+			parentSession:    options.ParentSession,
+			hasParentSession: options.ParentSession != "",
+			timestamp:        timestamp,
+			raw:              raw,
 		},
 		byID:        make(map[string]int),
 		leaf:        -1,
@@ -493,9 +499,10 @@ func validateISOTime(value time.Time) error {
 }
 
 type newHeaderWire struct {
-	Type       string `json:"type"`
-	Version    int    `json:"version"`
-	ID         string `json:"id"`
-	Timestamp  string `json:"timestamp"`
-	WorkingDir string `json:"cwd"`
+	Type          string `json:"type"`
+	Version       int    `json:"version"`
+	ID            string `json:"id"`
+	Timestamp     string `json:"timestamp"`
+	WorkingDir    string `json:"cwd"`
+	ParentSession string `json:"parentSession,omitempty"`
 }

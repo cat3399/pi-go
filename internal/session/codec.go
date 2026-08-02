@@ -17,7 +17,6 @@ func decodeSessionFile(path string, data []byte) (Header, []Entry, map[string]in
 	entries := make([]Entry, 0)
 	byID := make(map[string]int)
 	haveHeader := false
-	rootCount := 0
 
 	for _, line := range physicalLines(data) {
 		if len(bytes.TrimSpace(line.data)) == 0 {
@@ -43,13 +42,10 @@ func decodeSessionFile(path string, data []byte) (Header, []Entry, map[string]in
 		if _, duplicate := byID[entry.id]; duplicate {
 			return Header{}, nil, nil, false, parseError(ErrInvalidEntry, path, line.number, "duplicate entry id", nil)
 		}
-		if !entry.hasParent {
-			rootCount++
-			if rootCount > 1 {
-				return Header{}, nil, nil, false, parseError(ErrUnsupportedTree, path, line.number, "multiple roots", nil)
+		if entry.hasParent {
+			if _, parentExists := byID[entry.parentID]; !parentExists {
+				return Header{}, nil, nil, false, parseError(ErrUnsupportedTree, path, line.number, "parent must reference an earlier entry", nil)
 			}
-		} else if _, parentExists := byID[entry.parentID]; !parentExists {
-			return Header{}, nil, nil, false, parseError(ErrUnsupportedTree, path, line.number, "parent must reference an earlier entry", nil)
 		}
 		byID[entry.id] = len(entries)
 		entries = append(entries, entry)
@@ -57,9 +53,6 @@ func decodeSessionFile(path string, data []byte) (Header, []Entry, map[string]in
 
 	if !haveHeader {
 		return Header{}, nil, nil, false, fmt.Errorf("%w: %s: missing header", ErrInvalidSession, path)
-	}
-	if len(entries) > 0 && rootCount != 1 {
-		return Header{}, nil, nil, false, fmt.Errorf("%w: %s: entries have no root", ErrUnsupportedTree, path)
 	}
 	needsSeparator := len(data) > 0 && data[len(data)-1] != '\n'
 	return header, entries, byID, needsSeparator, nil
@@ -122,13 +115,19 @@ func decodeHeader(raw []byte) (Header, error) {
 	if err != nil || strings.TrimSpace(workingDir) == "" {
 		return Header{}, fmt.Errorf("invalid header cwd")
 	}
+	parentSession := ""
+	hasParentSession := false
 	if parent, exists := object["parentSession"]; exists {
 		var value string
 		if json.Unmarshal(parent, &value) != nil {
 			return Header{}, fmt.Errorf("invalid header parentSession")
 		}
+		if !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
+			return Header{}, fmt.Errorf("invalid header parentSession")
+		}
+		parentSession, hasParentSession = value, true
 	}
-	return Header{id: id, workingDir: workingDir, timestamp: timestamp, raw: bytes.Clone(raw)}, nil
+	return Header{id: id, workingDir: workingDir, parentSession: parentSession, hasParentSession: hasParentSession, timestamp: timestamp, raw: bytes.Clone(raw)}, nil
 }
 
 func decodeEntry(raw []byte) (Entry, error) {

@@ -163,3 +163,37 @@ Fixture 使用固定 clock/ID、脱敏内容并记录上游 commit。上游大�
 
 v1/v2 migration、tree/compaction 和 multi-process writer 仍是独立里程碑，不被线性
 v3 通过结论掩盖。
+
+## M-SESSION/v0.2-tree-branch
+
+状态：`implemented-awaiting-independent-review`
+
+本里程碑扩大 v3 的 domain 输入域为 append-only forest：每个 entry 仍有唯一 ID，非根
+entry 仍必须引用物理更早的 parent；因此 broken/forward parent、duplicate ID 和 cycle
+继续拒绝，但多个 root 是 `reset leaf -> append` 的合法结果。JSONL 没有 leaf-pointer
+record，`SelectLeaf` 与 `ResetLeaf` 是进程内的明确选择；重新打开时一律选择物理最后一条
+entry，保证行为可复现且不重写历史。
+
+负责：
+
+- root-to-selected-leaf path、immutable forest snapshot、按 selected leaf 的 context；
+- serialized `SelectLeaf`/`ResetLeaf` 与 Append，确保新 entry 精确挂在已选 parent；
+- 从一个 selected leaf atomic extract 至新文件，及复制全 forest 的 `ForkFrom`；新 header
+  使用新的 ID/cwd/timestamp，`parentSession` 指向 source，source bytes 永不改写；
+- create publication、取消和 writer claim 继续沿用 v0.1 的 data-safety contract。
+
+明确延期：`branch_summary`、compaction summary、label/custom/model/thinking entry 的创建和
+compaction-aware context。这些 wire entry 可作为未知 entry 保留和走 tree，但没有完整可投影
+的 Go domain 语义；不得把它们伪装成已支持的 summary/compaction。
+
+验收重点：branch/reset/reopen round-trip、extract/fork source-preservation、已存在 target 和
+post-publication fault、cancel-before-create、forest graph fuzz，以及 selection/append race。
+本段不构成独立 review 结论。
+
+上游 `session-manager` test 分类：`tree-traversal` 的 message/tree/path/branch/reset 和
+`createBranchedSession` 路径为 ported/strengthened（atomic target 与 source-preservation）；
+`build-context` 的 selected-path 部分 ported，compaction/branch-summary projection deferred；
+`custom-session-id` 的 Create 既有 coverage 保持，fork custom ID 在本模块 ported；
+`file-operations` 的 strict open 已在 v0.1，discovery/list 与空文件初始化属于 application
+selector policy deferred；`labels`、`save-entry` 的 extension entry 及 `migration` 的 v1/v2
+rewrite 均 deferred，不能因 tree reader 能保留 unknown entry 而宣称其 API 已实现。

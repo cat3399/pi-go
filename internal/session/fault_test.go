@@ -69,6 +69,41 @@ func TestCreateClassifiesKnownAndUnknownDurabilityFailures(t *testing.T) {
 	}
 }
 
+func TestExtractClassifiesPublicationFailureAndNeverAppendsTarget(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		created bool
+		want    error
+	}{
+		{name: "before publication", want: ErrStorage},
+		{name: "after publication", created: true, want: ErrDurabilityUnknown},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			storage := &fakeStorage{createCreated: tt.created, createErr: errors.New("publish failed")}
+			_, err := extractWithStorage(context.Background(), storage, filepath.Join(t.TempDir(), "source.jsonl"), nil, ExtractOptions{
+				TargetPath: filepath.Join(t.TempDir(), "target.jsonl"), ID: "target", WorkingDir: t.TempDir(),
+				Now: func() time.Time { return time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC) },
+			})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("extract error = %v, want %v", err, tt.want)
+			}
+			if len(storage.createCalls) != 1 || len(storage.appendCalls) != 0 {
+				t.Fatalf("extract writes: create=%d append=%d", len(storage.createCalls), len(storage.appendCalls))
+			}
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	storage := &fakeStorage{createCreated: true}
+	_, err := extractWithStorage(ctx, storage, filepath.Join(t.TempDir(), "source.jsonl"), nil, ExtractOptions{TargetPath: filepath.Join(t.TempDir(), "target.jsonl"), ID: "target", WorkingDir: t.TempDir()})
+	if !errors.Is(err, ErrAppendCanceled) || len(storage.createCalls) != 0 {
+		t.Fatalf("canceled extraction = %v, creates=%d", err, len(storage.createCalls))
+	}
+}
+
 func TestAppendPreWriteFailureLeavesWriterUsable(t *testing.T) {
 	t.Parallel()
 
