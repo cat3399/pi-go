@@ -19,6 +19,15 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 
 ## M-PROVIDER
 
+## M-MODEL
+
+| ID | 行为 | 上游证据 | 状态 | 重评条件 |
+| --- | --- | --- | --- | --- |
+| `B-MODEL-001` | strict JSONC models admission、typed secret-safe diagnostics | `model-config.ts` | `ported/strengthened` | full compat schema 与 provider adapter slice |
+| `B-MODEL-002` | builtin OpenAI + configured provider/model overlay/custom model | `model-runtime.ts`、`provider-composer.ts` | `ported/strengthened` | generated catalog input/manifest availability |
+| `B-MODEL-003` | exact CLI/default/enabled ordered resolution and unavailable diagnostics | `model-resolver.ts`; 3217/6949 | `ported-exact-v0.1` | fuzzy/cycling interactive workflow |
+| `B-MODEL-004` | atomic snapshots, failed reload preserves health, global unknown preservation | `settings-manager.ts`; 6999/3616/2753 | `strengthened` | project trust service and richer settings migration |
+
 | ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
 | --- | --- | --- | --- | --- |
 | `B-PROVIDER-001` | 每实例 FIFO script、固定 chunk/clock/ID/usage、request capture | `packages/ai/test/faux-provider.test.ts` 的 `consumes queued responses in order and errors when exhausted`、`can replace and append queued responses` | `ported` | R-PROVIDER-002 |

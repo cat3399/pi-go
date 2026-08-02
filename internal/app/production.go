@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/auth"
+	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
@@ -96,13 +97,48 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, err
 	}
-	model, err := resolveProductionModel(parsed)
-	if err != nil {
-		return Dependencies{}, err
+	if parsed.hasAPIKey && parsed.modelID == "" {
+		return Dependencies{}, fmt.Errorf("%w: --api-key requires an explicit --model", ErrInvalidArguments)
 	}
-	modelConfig, err := loadOpenAIModelConfig(agentDir)
+	catalog, err := modelcatalog.NewRuntime(modelcatalog.Options{
+		AgentDir: agentDir, WorkingDir: workingDir,
+		// Project settings are deliberately not trusted merely by being present.
+		ProjectTrusted: false,
+	})
 	if err != nil {
-		return Dependencies{}, err
+		if strings.Contains(err.Error(), "models.json") {
+			return Dependencies{}, fmt.Errorf("%w: parse models.json", ErrInvalidProductionConfig)
+		}
+		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
+	}
+	if prefix, _, prefixed := strings.Cut(parsed.modelID, "/"); prefixed &&
+		!strings.EqualFold(prefix, openAIProviderID) {
+		known := false
+		for _, id := range catalog.Snapshot().Providers {
+			known = known || strings.EqualFold(id, prefix)
+		}
+		if !known {
+			return Dependencies{}, fmt.Errorf("%w: --model selects an unknown provider", ErrInvalidArguments)
+		}
+	}
+	selection, err := catalog.Resolve(modelcatalog.Selection{Provider: parsed.providerID, Model: parsed.modelID})
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
+	}
+	model, err := selection.Model.Ref()
+	if err != nil {
+		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
+	}
+	if model.Provider() != openAIProviderID || model.API() != openAIResponsesAPI {
+		return Dependencies{}, fmt.Errorf("%w: selected provider/API is not supported by this production assembly", ErrUnsupportedProductionValue)
+	}
+	configured, _ := catalog.Provider(model.Provider())
+	if len(configured.UnknownFields) != 0 {
+		return Dependencies{}, fmt.Errorf("%w: models.json OpenAI provider contains a field outside the migrated projection", ErrUnsupportedProductionValue)
+	}
+	modelConfig := openAIModelConfig{apiKey: configured.ConfiguredAPIKey, baseURL: selection.Model.BaseURL}
+	if len(selection.Model.Headers) != 0 {
+		return Dependencies{}, fmt.Errorf("%w: models.json OpenAI provider contains a field outside the migrated projection (configured request headers)", ErrUnsupportedProductionValue)
 	}
 	apiKey, err := resolveOpenAIAPIKey(ctx, parsed, agentDir, modelConfig, ambientEnvironment)
 	if err != nil {
