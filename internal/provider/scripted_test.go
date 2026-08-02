@@ -873,6 +873,12 @@ func eventKind(event llm.StreamEvent) string {
 		return "text_delta"
 	case llm.TextEndEvent:
 		return "text_end"
+	case llm.ThinkingStartEvent:
+		return "thinking_start"
+	case llm.ThinkingDeltaEvent:
+		return "thinking_delta"
+	case llm.ThinkingEndEvent:
+		return "thinking_end"
 	case llm.ToolCallStartEvent:
 		return "toolcall_start"
 	case llm.ToolCallDeltaEvent:

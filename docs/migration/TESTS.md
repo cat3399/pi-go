@@ -11,7 +11,7 @@
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
 | `T-BASE-001` | B-BASE-001 | `packages/coding-agent/test/suite/agent-session-prompt.test.ts` — `prompts while idle and records a single text response`，只提供 user normalization/role happy path | `deferred` | B-BASE-001 unit + later agent scenario；不把它误作 finish/usage 裁判 |
-| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `deferred` | text 先 port；thinking 在 B-BASE-005 重评 |
+| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `strengthened` | immutable rich values, alias/fuzz, mixed stream and session replay；independent review pending |
 | `T-BASE-003` | B-BASE-002 | `packages/agent/test/agent-loop.test.ts` — `should handle tool calls and results` | `deferred` | B-BASE-002 validation + agent scenario；目标 `strengthened` |
 | `T-BASE-004` | B-BASE-001 | `packages/ai/test/faux-provider.test.ts` — `registers a custom provider and estimates usage`；`packages/ai/test/total-tokens.test.ts` — `totalTokens field` | `deferred` | checked total 与真实 provider sum；目标 `strengthened` |
 | `T-BASE-005` | B-BASE-003 | `packages/ai/test/faux-provider.test.ts` — `streams an exact event order for fixed-size chunks` | `strengthened` | strict state machine 同时覆盖 mixed tool、顺序和 snapshot |
@@ -26,7 +26,7 @@
 | `T-PROVIDER-001` | B-PROVIDER-001/003 | `packages/ai/test/faux-provider.test.ts` — `consumes queued responses in order and errors when exhausted` | `strengthened` | FIFO、并发分配、request snapshot 与 typed exhaustion |
 | `T-PROVIDER-002` | B-PROVIDER-001 | `packages/ai/test/faux-provider.test.ts` — `can replace and append queued responses` | `strengthened` | replace/append 及非法 step 的原子性 |
 | `T-PROVIDER-003` | B-PROVIDER-001/003 | `packages/ai/test/faux-provider.test.ts` — `supports async response factories`、`emits an error when a response factory throws` | `strengthened` | lazy factory、returned error、panic、typed cause 与唯一 terminal |
-| `T-PROVIDER-004` | B-PROVIDER-002/003 | `packages/ai/test/faux-provider.test.ts` 的 exact-order、explicit error/aborted cases | `deferred` | text/tool/error 已覆盖；thinking/image block 进入对应 slice 后重评 |
+| `T-PROVIDER-004` | B-PROVIDER-002/003 | `packages/ai/test/faux-provider.test.ts` 的 exact-order、explicit error/aborted cases | `strengthened` | thinking source-order, strict orphan/dirty EOF and immutable snapshots；independent review pending |
 | `T-PROVIDER-005` | B-PROVIDER-003 | `packages/ai/test/faux-provider.test.ts` — `supports aborting before the first chunk` 及同文件 mid-block abort cases | `strengthened` | pre/mid-text/factory-time cancel、race 与 terminal cause |
 | `T-PROVIDER-006` | — | `packages/ai/test/faux-provider.test.ts` — `unregisters the provider` | `not-applicable` | 只验证 legacy global compat registry；pi-go 使用显式 instance |
 | `T-PROVIDER-007` | B-PROVIDER-004 | `packages/ai/test/providers.test.ts` — mixed-API dispatch、missing implementation；`models-runtime.test.ts` — unknown provider error stream | `deferred` | provider runtime dispatch 里程碑 |

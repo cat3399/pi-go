@@ -227,6 +227,74 @@ func TestRunProductionOpenAIToolWorkflowReplaysDurableResult(t *testing.T) {
 	}
 }
 
+func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(workingDir, "reasoning.jsonl")
+	var mu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode: %v", err)
+			return
+		}
+		mu.Lock()
+		payloads = append(payloads, payload)
+		turn := len(payloads)
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if turn == 1 {
+			reasoning := map[string]any{"type": "reasoning", "id": "rs_persist", "encrypted_content": "cipher"}
+			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
+			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoning}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoning, text}}})
+			return
+		}
+		text := map[string]any{"type": "message", "id": "msg_next", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "second"}}}
+		writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{text}}})
+	}))
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	for _, prompt := range []string{"first prompt", "continue"} {
+		var stdout, stderr bytes.Buffer
+		if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-reason", "--session", sessionPath, "-p", prompt}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+			t.Fatalf("run %q: code=%d stdout=%q stderr=%q", prompt, code, stdout.String(), stderr.String())
+		}
+	}
+	mu.Lock()
+	received := append([]map[string]any(nil), payloads...)
+	mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("requests=%d", len(received))
+	}
+	input := received[1]["input"].([]any)
+	found := false
+	for _, item := range input {
+		wire := item.(map[string]any)
+		if wire["type"] == "reasoning" {
+			found = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher"
+		}
+	}
+	if !found {
+		t.Fatalf("resumed input=%#v", input)
+	}
+	transcript, err := session.Open(sessionPath, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) != 4 {
+		t.Fatalf("durable messages=%#v", messages)
+	}
+	if _, ok := messages[1].(llm.AssistantRichMessage); !ok {
+		t.Fatalf("first assistant=%T", messages[1])
+	}
+	if replay, ok := messages[1].(llm.AssistantRichMessage).OpenAIResponsesMetadata(); !ok || replay.RawStopReason != "completed" {
+		t.Fatalf("response replay=%#v", replay)
+	}
+}
+
 func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 	testCases := []struct {
 		name          string

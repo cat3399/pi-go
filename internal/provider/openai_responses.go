@@ -225,6 +225,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		maxEventBytes:     p.maxEventBytes,
 		maxErrorBodyBytes: p.maxErrorBodyBytes,
 		slots:             make(map[int]*responsesTextSlot),
+		reasoningSlots:    make(map[int]*responsesReasoningSlot),
 		toolSlots:         make(map[int]*responsesToolSlot),
 		completedOutputs:  make(map[int]struct{}),
 	}

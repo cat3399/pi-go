@@ -21,7 +21,7 @@ func TestOpenAppendPreservesUnknownRawPrefixAndProjectsKnownContent(t *testing.T
 	path := filepath.Join(directory, "unknown.jsonl")
 	prefix := []byte(
 		` {"type":"session","version":3,"id":"session-1","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace","future":{"keep":true}}` + "\n" +
-			`{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","futureEntry":1,"message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"image","data":"opaque","mimeType":"image/png"},{"type":"text","text":"second"}],"timestamp":1785542401000,"futureMessage":{"x":1}}}` + "\n" +
+			`{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","futureEntry":1,"message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"image","data":"AA==","mimeType":"image/png"},{"type":"text","text":"second"}],"timestamp":1785542401000,"futureMessage":{"x":1}}}` + "\n" +
 			`{"type":"future_state","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02.000Z","payload":{"opaque":[1,2,3]}}` + "\n" +
 			`{"type":"message","id":"entry-3","parentId":"entry-2","timestamp":"2026-08-01T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"opaque"},{"type":"text","text":"reply"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1785542403000}}`,
 	)
@@ -41,18 +41,18 @@ func TestOpenAppendPreservesUnknownRawPrefixAndProjectsKnownContent(t *testing.T
 	if len(messages) != 2 {
 		t.Fatalf("context message count = %d, want 2", len(messages))
 	}
-	user := messages[0].(llm.UserTextMessage)
-	if got := user.Content(); len(got) != 2 || got[0].Text() != "first" || got[1].Text() != "second" {
+	user := messages[0].(llm.UserContentMessage)
+	if got := user.Content(); len(got) != 3 || got[0].(llm.TextBlock).Text() != "first" || got[2].(llm.TextBlock).Text() != "second" {
 		t.Fatalf("projected user content = %#v", got)
 	}
-	if got := messages[1].(llm.AssistantTextMessage).Content(); len(got) != 1 || got[0].Text() != "reply" {
+	if got := messages[1].(llm.AssistantRichMessage).Blocks(); len(got) != 2 || got[1].(llm.TextBlock).Text() != "reply" {
 		t.Fatalf("projected assistant content = %#v", got)
 	}
 	diagnostics := context.Diagnostics()
-	if len(diagnostics) != 3 {
-		t.Fatalf("diagnostics = %#v, want unknown image/entry/thinking", diagnostics)
+	if len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want unknown entry", diagnostics)
 	}
-	if diagnostics[0].Code != DiagnosticUnknownContentBlock || diagnostics[1].Code != DiagnosticUnknownEntry || diagnostics[2].Code != DiagnosticUnknownContentBlock {
+	if diagnostics[0].Code != DiagnosticUnknownEntry {
 		t.Fatalf("diagnostic codes = %#v", diagnostics)
 	}
 

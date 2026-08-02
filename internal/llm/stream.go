@@ -111,6 +111,65 @@ type TextEndEvent struct {
 	content      string
 }
 
+// Thinking events mirror text events but retain their opaque replay handle at
+// end-of-block. Providers must not expose an encrypted signature before the
+// item is complete.
+type ThinkingStartEvent struct{ contentIndex int }
+
+func NewThinkingStartEvent(contentIndex int) (ThinkingStartEvent, error) {
+	e := ThinkingStartEvent{contentIndex}
+	return e, e.validate()
+}
+func (ThinkingStartEvent) streamEvent() {}
+func (e ThinkingStartEvent) validate() error {
+	if e.contentIndex < 0 {
+		return fmt.Errorf("%w: negative content index", ErrInvalidStreamEvent)
+	}
+	return nil
+}
+func (e ThinkingStartEvent) ContentIndex() int { return e.contentIndex }
+
+type ThinkingDeltaEvent struct {
+	contentIndex int
+	delta        string
+}
+
+func NewThinkingDeltaEvent(contentIndex int, delta string) (ThinkingDeltaEvent, error) {
+	e := ThinkingDeltaEvent{contentIndex, delta}
+	return e, e.validate()
+}
+func (ThinkingDeltaEvent) streamEvent() {}
+func (e ThinkingDeltaEvent) validate() error {
+	if e.contentIndex < 0 || !utf8.ValidString(e.delta) {
+		return fmt.Errorf("%w: invalid thinking delta", ErrInvalidStreamEvent)
+	}
+	return nil
+}
+func (e ThinkingDeltaEvent) ContentIndex() int { return e.contentIndex }
+func (e ThinkingDeltaEvent) Delta() string     { return e.delta }
+
+type ThinkingEndEvent struct {
+	contentIndex int
+	content      ThinkingBlock
+}
+
+func NewThinkingEndEvent(contentIndex int, content ThinkingBlock) (ThinkingEndEvent, error) {
+	e := ThinkingEndEvent{contentIndex, content}
+	return e, e.validate()
+}
+func (ThinkingEndEvent) streamEvent() {}
+func (e ThinkingEndEvent) validate() error {
+	if e.contentIndex < 0 {
+		return fmt.Errorf("%w: negative content index", ErrInvalidStreamEvent)
+	}
+	if err := e.content.validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidStreamEvent, err)
+	}
+	return nil
+}
+func (e ThinkingEndEvent) ContentIndex() int      { return e.contentIndex }
+func (e ThinkingEndEvent) Content() ThinkingBlock { return e.content }
+
 func NewTextEndEvent(contentIndex int, content string) (TextEndEvent, error) {
 	event := TextEndEvent{contentIndex: contentIndex, content: content}
 	if err := event.validate(); err != nil {
@@ -250,6 +309,22 @@ type DoneEvent struct {
 	reason    FinishReason
 	usage     Usage
 	timestamp time.Time
+	responses *OpenAIResponsesResponse
+}
+
+func NewDoneEventWithResponsesReplay(reason FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (DoneEvent, error) {
+	event, err := NewDoneEvent(reason, usage, timestamp)
+	if err != nil {
+		return DoneEvent{}, err
+	}
+	if replay != nil {
+		copy := *replay
+		if err := copy.validate(); err != nil {
+			return DoneEvent{}, err
+		}
+		event.responses = &copy
+	}
+	return event, nil
 }
 
 func NewDoneEvent(reason FinishReason, usage Usage, timestamp time.Time) (DoneEvent, error) {
@@ -279,6 +354,12 @@ func (e DoneEvent) Usage() Usage {
 
 func (e DoneEvent) Timestamp() time.Time {
 	return e.timestamp
+}
+func (e DoneEvent) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
+	if e.responses == nil {
+		return OpenAIResponsesResponse{}, false
+	}
+	return *e.responses, true
 }
 
 type ErrorEvent struct {
@@ -551,17 +632,18 @@ const (
 // intentionally synchronous; provider goroutines may produce events but do not
 // share or mutate collector state.
 type StreamCollector struct {
-	phase         streamPhase
-	blocks        []AssistantBlock
-	current       strings.Builder
-	activeKind    AssistantBlockKind
-	currentIndex  int
-	nextIndex     int
-	toolCallID    string
-	toolName      string
-	toolArguments []byte
-	terminal      AssistantTerminal
-	failure       error
+	phase          streamPhase
+	blocks         []AssistantBlock
+	current        strings.Builder
+	activeKind     AssistantBlockKind
+	currentIndex   int
+	nextIndex      int
+	toolCallID     string
+	toolName       string
+	toolArguments  []byte
+	thinkingReplay *OpenAIResponsesReasoning
+	terminal       AssistantTerminal
+	failure        error
 }
 
 func (c *StreamCollector) Accept(event StreamEvent) error {
@@ -634,6 +716,32 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		c.finishActiveBlock()
 		return nil
 
+	case ThinkingStartEvent:
+		if c.phase != streamActive || c.activeKind != 0 || event.contentIndex != c.nextIndex {
+			return c.fail(nil, "thinking_start arrived out of order")
+		}
+		c.activeKind = AssistantBlockThinking
+		c.currentIndex = event.contentIndex
+		c.current.Reset()
+		c.thinkingReplay = nil
+		return nil
+	case ThinkingDeltaEvent:
+		if c.phase != streamActive || c.activeKind != AssistantBlockThinking || event.contentIndex != c.currentIndex {
+			return c.fail(nil, "thinking_delta arrived without open thinking")
+		}
+		_, _ = c.current.WriteString(event.delta)
+		return nil
+	case ThinkingEndEvent:
+		if c.phase != streamActive || c.activeKind != AssistantBlockThinking || event.contentIndex != c.currentIndex {
+			return c.fail(nil, "thinking_end arrived without open thinking")
+		}
+		if event.content.Thinking() != c.current.String() {
+			return c.fail(nil, "thinking_end content does not match accumulated deltas")
+		}
+		c.blocks = append(c.blocks, event.content)
+		c.finishActiveBlock()
+		return nil
+
 	case ToolCallStartEvent:
 		if c.phase != streamActive {
 			return c.fail(nil, "toolcall_start arrived before start")
@@ -690,16 +798,35 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		switch event.reason {
 		case FinishStop, FinishLength:
 			text := make([]TextBlock, len(c.blocks))
+			hasThinking := false
 			for index, block := range c.blocks {
 				var ok bool
 				text[index], ok = block.(TextBlock)
+				if _, thinking := block.(ThinkingBlock); thinking {
+					hasThinking = true
+					continue
+				}
 				if !ok {
 					return c.fail(nil, "%s terminal contains a tool call", event.reason)
 				}
 			}
-			message, err = NewAssistantTextMessage(text, event.reason, event.usage, event.timestamp)
+			replay, _ := event.OpenAIResponsesMetadata()
+			var replayPointer *OpenAIResponsesResponse
+			if _, ok := event.OpenAIResponsesMetadata(); ok {
+				replayPointer = &replay
+			}
+			if hasThinking {
+				message, err = NewAssistantRichMessageWithResponsesReplay(c.blocks, event.reason, event.usage, event.timestamp, replayPointer)
+			} else {
+				message, err = NewAssistantTextMessageWithResponsesReplay(text, event.reason, event.usage, event.timestamp, replayPointer)
+			}
 		case FinishToolUse:
-			message, err = NewAssistantToolUseMessage(c.blocks, event.usage, event.timestamp)
+			replay, _ := event.OpenAIResponsesMetadata()
+			var replayPointer *OpenAIResponsesResponse
+			if _, ok := event.OpenAIResponsesMetadata(); ok {
+				replayPointer = &replay
+			}
+			message, err = NewAssistantToolUseMessageWithResponsesReplay(c.blocks, event.usage, event.timestamp, replayPointer)
 		}
 		if err != nil {
 			return c.fail(err, "done is not a valid terminal")
@@ -836,6 +963,12 @@ func validateStreamEvent(event StreamEvent) error {
 	case TextDeltaEvent:
 		return event.validate()
 	case TextEndEvent:
+		return event.validate()
+	case ThinkingStartEvent:
+		return event.validate()
+	case ThinkingDeltaEvent:
+		return event.validate()
+	case ThinkingEndEvent:
 		return event.validate()
 	case ToolCallStartEvent:
 		return event.validate()

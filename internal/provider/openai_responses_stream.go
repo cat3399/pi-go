@@ -41,6 +41,11 @@ type responsesToolSlot struct {
 	arguments     []byte
 	argumentsDone bool
 }
+type responsesReasoningSlot struct {
+	contentIndex int
+	itemID       string
+	text         strings.Builder
+}
 
 type openAIResponsesStream struct {
 	ctx               context.Context
@@ -67,6 +72,7 @@ type openAIResponsesStream struct {
 	decoder          *responsesSSEDecoder
 	queue            []llm.StreamEvent
 	slots            map[int]*responsesTextSlot
+	reasoningSlots   map[int]*responsesReasoningSlot
 	toolSlots        map[int]*responsesToolSlot
 	completedOutputs map[int]struct{}
 	nextContentIndex int
@@ -100,6 +106,7 @@ func newResponsesFailureStream(
 			message: message,
 		},
 		slots:            make(map[int]*responsesTextSlot),
+		reasoningSlots:   make(map[int]*responsesReasoningSlot),
 		toolSlots:        make(map[int]*responsesToolSlot),
 		completedOutputs: make(map[int]struct{}),
 	}

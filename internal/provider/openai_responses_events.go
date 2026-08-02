@@ -29,15 +29,17 @@ type responsesOutputEvent struct {
 }
 
 type responsesOutputItem struct {
-	Type      string                   `json:"type"`
-	ID        string                   `json:"id"`
-	Role      string                   `json:"role"`
-	Status    string                   `json:"status"`
-	Phase     string                   `json:"phase"`
-	CallID    string                   `json:"call_id"`
-	Name      string                   `json:"name"`
-	Arguments string                   `json:"arguments"`
-	Content   []responsesOutputContent `json:"content"`
+	Type             string                   `json:"type"`
+	ID               string                   `json:"id"`
+	Role             string                   `json:"role"`
+	Status           string                   `json:"status"`
+	Phase            string                   `json:"phase"`
+	CallID           string                   `json:"call_id"`
+	Name             string                   `json:"name"`
+	Arguments        string                   `json:"arguments"`
+	Content          []responsesOutputContent `json:"content"`
+	Summary          []responsesOutputContent `json:"summary"`
+	EncryptedContent string                   `json:"encrypted_content"`
 }
 
 type responsesOutputContent struct {
@@ -52,6 +54,7 @@ type responsesTerminalEvent struct {
 }
 
 type responsesResponse struct {
+	ID                string                      `json:"id"`
 	Status            string                      `json:"status"`
 	Output            []responsesOutputItem       `json:"output"`
 	Usage             *responsesUsage             `json:"usage"`
@@ -120,10 +123,18 @@ func (s *openAIResponsesStream) processResponsesEvent(
 		}
 		return s.addResponsesTextDelta(event)
 
-	case "response.reasoning_summary_text.delta",
-		"response.reasoning_summary_part.done",
-		"response.reasoning_text.delta":
-		return unsupportedResponsesOutputFailure("reasoning")
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		var event responsesOutputEvent
+		if err := unmarshalResponsesEvent(data, &event); err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		return s.addResponsesReasoningDelta(event)
+	case "response.reasoning_summary_part.done":
+		var event responsesOutputEvent
+		if err := unmarshalResponsesEvent(data, &event); err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		return s.addResponsesReasoningSeparator(event)
 
 	case "response.function_call_arguments.delta":
 		var event responsesOutputEvent
@@ -190,7 +201,7 @@ func (s *openAIResponsesStream) addResponsesOutputItem(event responsesOutputEven
 	if index != s.nextOutputIndex {
 		return invalidResponsesEventFailure(fmt.Errorf("output item index %d, want %d", index, s.nextOutputIndex))
 	}
-	if len(s.slots) != 0 || len(s.toolSlots) != 0 {
+	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("output item started before previous item completed"))
 	}
 	switch event.Item.Type {
@@ -207,11 +218,67 @@ func (s *openAIResponsesStream) addResponsesOutputItem(event responsesOutputEven
 		return s.startResponsesTextSlot(index, event.Item.ID)
 	case "function_call":
 		return s.startResponsesToolSlot(index, event.Item.ID, event.Item.CallID, event.Item.Name, event.Item.Arguments)
-	case "reasoning", "custom_tool_call":
+	case "reasoning":
+		return s.startResponsesReasoningSlot(index, event.Item.ID)
+	case "custom_tool_call":
 		return unsupportedResponsesOutputFailure(event.Item.Type)
 	default:
 		return unsupportedResponsesOutputFailure(event.Item.Type)
 	}
+}
+
+func (s *openAIResponsesStream) startResponsesReasoningSlot(index int, itemID string) *responsesFailureSpec {
+	if !utf8.ValidString(itemID) || strings.TrimSpace(itemID) == "" {
+		return invalidResponsesEventFailure(errors.New("reasoning item has no id"))
+	}
+	slot := &responsesReasoningSlot{contentIndex: s.nextContentIndex, itemID: itemID}
+	s.reasoningSlots[index] = slot
+	start, err := llm.NewThinkingStartEvent(slot.contentIndex)
+	if err != nil {
+		return invalidResponsesEventFailure(err)
+	}
+	s.queue = append(s.queue, start)
+	return nil
+}
+func (s *openAIResponsesStream) addResponsesReasoningDelta(event responsesOutputEvent) *responsesFailureSpec {
+	index, f := requireResponsesOutputIndex(event.OutputIndex)
+	if f != nil {
+		return f
+	}
+	slot := s.reasoningSlots[index]
+	if slot == nil {
+		return invalidResponsesEventFailure(errors.New("reasoning delta has no open item"))
+	}
+	if event.ItemID != "" && event.ItemID != slot.itemID {
+		return invalidResponsesEventFailure(errors.New("reasoning delta item id mismatch"))
+	}
+	if !utf8.ValidString(event.Delta) {
+		return invalidResponsesEventFailure(errors.New("reasoning delta invalid UTF-8"))
+	}
+	slot.text.WriteString(event.Delta)
+	delta, err := llm.NewThinkingDeltaEvent(slot.contentIndex, event.Delta)
+	if err != nil {
+		return invalidResponsesEventFailure(err)
+	}
+	s.queue = append(s.queue, delta)
+	return nil
+}
+func (s *openAIResponsesStream) addResponsesReasoningSeparator(event responsesOutputEvent) *responsesFailureSpec {
+	index, f := requireResponsesOutputIndex(event.OutputIndex)
+	if f != nil {
+		return f
+	}
+	slot := s.reasoningSlots[index]
+	if slot == nil {
+		return invalidResponsesEventFailure(errors.New("reasoning separator has no open item"))
+	}
+	slot.text.WriteString("\n\n")
+	delta, err := llm.NewThinkingDeltaEvent(slot.contentIndex, "\n\n")
+	if err != nil {
+		return invalidResponsesEventFailure(err)
+	}
+	s.queue = append(s.queue, delta)
+	return nil
 }
 
 func (s *openAIResponsesStream) startResponsesTextSlot(index int, itemID string) *responsesFailureSpec {
@@ -413,12 +480,68 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 		s.completedOutputs[index] = struct{}{}
 		s.nextOutputIndex++
 		s.sawFunctionCall = true
-	case "reasoning", "custom_tool_call":
+	case "reasoning":
+		slot := s.reasoningSlots[index]
+		if slot == nil {
+			if failure := s.startResponsesReasoningSlot(index, event.Item.ID); failure != nil {
+				return failure
+			}
+			slot = s.reasoningSlots[index]
+		} else if event.Item.ID != "" && event.Item.ID != slot.itemID {
+			return invalidResponsesEventFailure(errors.New("reasoning item id mismatch"))
+		}
+		text := responsesReasoningText(event.Item)
+		if text != "" {
+			partial := slot.text.String()
+			if !strings.HasPrefix(text, partial) {
+				return invalidResponsesEventFailure(errors.New("reasoning content does not match deltas"))
+			}
+			if suffix := text[len(partial):]; suffix != "" {
+				slot.text.WriteString(suffix)
+				d, err := llm.NewThinkingDeltaEvent(slot.contentIndex, suffix)
+				if err != nil {
+					return invalidResponsesEventFailure(err)
+				}
+				s.queue = append(s.queue, d)
+			}
+		}
+		replay := &llm.OpenAIResponsesReasoning{ItemID: slot.itemID, EncryptedContent: event.Item.EncryptedContent}
+		block, err := llm.NewThinkingBlock(slot.text.String(), replay)
+		if err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		end, err := llm.NewThinkingEndEvent(slot.contentIndex, block)
+		if err != nil {
+			return invalidResponsesEventFailure(err)
+		}
+		s.queue = append(s.queue, end)
+		delete(s.reasoningSlots, index)
+		s.nextContentIndex++
+		s.completedOutputs[index] = struct{}{}
+		s.nextOutputIndex++
+	case "custom_tool_call":
 		return unsupportedResponsesOutputFailure(event.Item.Type)
 	default:
 		return unsupportedResponsesOutputFailure(event.Item.Type)
 	}
 	return nil
+}
+
+func responsesReasoningText(item responsesOutputItem) string {
+	parts := make([]string, 0, len(item.Summary)+len(item.Content))
+	for _, value := range item.Summary {
+		if value.Text != "" {
+			parts = append(parts, value.Text)
+		}
+	}
+	if len(parts) == 0 {
+		for _, value := range item.Content {
+			if value.Text != "" {
+				parts = append(parts, value.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func responsesOutputItemText(item responsesOutputItem) (string, *responsesFailureSpec) {
@@ -489,13 +612,17 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 			if _, completed := s.completedOutputs[outputIndex]; !completed {
 				return invalidResponsesEventFailure(fmt.Errorf("terminal function call at index %d was not completed by output_item events", outputIndex))
 			}
-		case "reasoning", "custom_tool_call":
+		case "reasoning":
+			if _, completed := s.completedOutputs[outputIndex]; !completed {
+				return invalidResponsesEventFailure(fmt.Errorf("terminal reasoning item at index %d was not completed", outputIndex))
+			}
+		case "custom_tool_call":
 			return unsupportedResponsesOutputFailure(item.Type)
 		default:
 			return unsupportedResponsesOutputFailure(item.Type)
 		}
 	}
-	if len(s.slots) != 0 || len(s.toolSlots) != 0 {
+	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("terminal response arrived with an open output item"))
 	}
 	usage, failure := normalizeResponsesUsage(event.Response.Usage)
@@ -507,7 +634,8 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if reason == llm.FinishStop && s.sawFunctionCall {
 		reason = llm.FinishToolUse
 	}
-	done, err := llm.NewDoneEvent(reason, usage, s.timestamp)
+	replay := &llm.OpenAIResponsesResponse{ResponseID: event.Response.ID, RawStopReason: wantStatus}
+	done, err := llm.NewDoneEventWithResponsesReplay(reason, usage, s.timestamp, replay)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}

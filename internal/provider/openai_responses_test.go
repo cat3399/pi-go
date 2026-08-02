@@ -358,7 +358,7 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 1.5}}}),
 		},
 		{
-			name: "reasoning replay is explicit", contentType: "text/event-stream", wantCause: provider.ErrOpenAIResponsesUnsupported,
+			name: "incomplete reasoning item is invalid", contentType: "text/event-stream",
 			body: responsesSSE(
 				map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs"}},
 				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "reasoning"}}}},
@@ -372,7 +372,7 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			),
 		},
 		{
-			name: "orphan reasoning delta is explicit", contentType: "text/event-stream", wantCause: provider.ErrOpenAIResponsesUnsupported,
+			name: "orphan reasoning delta is invalid", contentType: "text/event-stream",
 			body: responsesSSE(
 				map[string]any{"type": "response.reasoning_text.delta", "output_index": 0, "delta": "hidden"},
 				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},

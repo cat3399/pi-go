@@ -515,6 +515,24 @@ func buildEvents(terminal llm.AssistantTerminal, chunkRunes int) ([]llm.StreamEv
 				return nil, err
 			}
 			events = append(events, end)
+		case llm.ThinkingBlock:
+			start, err := llm.NewThinkingStartEvent(index)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, start)
+			for _, chunk := range splitRunes(block.Thinking(), chunkRunes) {
+				delta, err := llm.NewThinkingDeltaEvent(index, chunk)
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, delta)
+			}
+			end, err := llm.NewThinkingEndEvent(index, block)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, end)
 
 		default:
 			return nil, fmt.Errorf("unsupported assistant block %T", block)
@@ -522,7 +540,7 @@ func buildEvents(terminal llm.AssistantTerminal, chunkRunes int) ([]llm.StreamEv
 	}
 
 	switch terminal := terminal.(type) {
-	case llm.AssistantTextMessage, llm.AssistantToolUseMessage:
+	case llm.AssistantTextMessage, llm.AssistantToolUseMessage, llm.AssistantRichMessage:
 		done, err := llm.NewDoneEvent(
 			terminal.FinishReason(),
 			terminal.Usage(),

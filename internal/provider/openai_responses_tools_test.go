@@ -106,6 +106,82 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
+	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := mustTextBlock(t, "inspect this")
+	image, err := llm.NewImageDataBlock("image/png", []byte{0, 1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := llm.NewUserContentMessage([]llm.UserContentBlock{text, image}, responsesTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning, err := llm.NewThinkingBlock("brief plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "opaque-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("call_1|fc_1", "bash", []byte(`{"command":"true"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{reasoning, call}, llm.Usage{}, responsesTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultContentMessage(call.ID(), "bash", []llm.ToolResultContentBlock{mustTextBlock(t, "ok"), image}, false, responsesTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{user, assistant, result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := payload["input"].([]any)
+	userWire := input[0].(map[string]any)["content"].([]any)
+	if userWire[1].(map[string]any)["type"] != "input_image" || userWire[1].(map[string]any)["image_url"] != "data:image/png;base64,AAEC" {
+		t.Fatalf("user image = %#v", userWire[1])
+	}
+	if reasoningWire := input[1].(map[string]any); reasoningWire["type"] != "reasoning" || reasoningWire["id"] != "rs_1" || reasoningWire["encrypted_content"] != "opaque-secret" {
+		t.Fatalf("reasoning = %#v", reasoningWire)
+	}
+	output := input[3].(map[string]any)["output"].([]any)
+	if len(output) != 2 || output[1].(map[string]any)["type"] != "input_image" {
+		t.Fatalf("tool output = %#v", output)
+	}
+}
+
+func TestOpenAIResponsesStreamsReasoningThenText(t *testing.T) {
+	body := responsesSSE(
+		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_1"}},
+		map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_1", "delta": "plan"},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_1", "encrypted_content": "cipher"}},
+		map[string]any{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}}},
+		map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "reasoning"}, map[string]any{"type": "message"}}}},
+	)
+	p := mustResponsesProvider(t, provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", body))})
+	events, terminal := collectStream(t, p.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
+	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_delta", "thinking_end", "text_start", "text_delta", "text_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events=%v", got)
+	}
+	rich, ok := terminal.(llm.AssistantRichMessage)
+	if !ok {
+		t.Fatalf("terminal=%T", terminal)
+	}
+	blocks := rich.Blocks()
+	replay, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
+	if !ok || replay.EncryptedContent != "cipher" || blocks[1].(llm.TextBlock).Text() != "answer" {
+		t.Fatalf("blocks=%#v", blocks)
+	}
+}
+
 func TestOpenAIResponsesStreamsMixedTextAndMultipleFunctionCallsInSourceOrder(t *testing.T) {
 	frames := []any{
 		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "content": []any{}}},

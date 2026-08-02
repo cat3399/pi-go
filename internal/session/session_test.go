@@ -23,6 +23,74 @@ var testAssistantProvenance = AssistantProvenance{
 	Cost:     ZeroUsageCost(),
 }
 
+func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) {
+	directory := t.TempDir()
+	transcript, err := Create(filepath.Join(directory, "rich.jsonl"), CreateOptions{ID: "rich", WorkingDir: directory, Now: func() time.Time { return time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC) }, NewEntryID: sequenceIDs("u", "a", "r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes := []byte{0, 1, 2}
+	image, err := llm.NewImageDataBlock("image/png", imageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes[0] = 9
+	text := mustTextBlock(t, "look")
+	user, err := llm.NewUserContentMessage([]llm.UserContentBlock{text, image}, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking, err := llm.NewThinkingBlock("plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "cipher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := llm.NewTextBlockWithReplay("done", &llm.TextReplay{MessageID: "msg_1", Phase: "final_answer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking, answer}, llm.FinishStop, llm.Usage{}, time.UnixMilli(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultContentMessage("call_1", "bash", []llm.ToolResultContentBlock{image}, false, time.UnixMilli(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []llm.ConversationMessage{user, assistant, result} {
+		options := AppendOptions{}
+		if message.Role() == llm.RoleAssistant {
+			options.Assistant = testAssistantProvenance
+		}
+		if _, err := transcript.Append(context.Background(), message, options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(filepath.Join(directory, "rich.jsonl"), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := reopened.Context().Messages()
+	if len(messages) != 3 {
+		t.Fatalf("messages=%#v", messages)
+	}
+	storedUser := messages[0].(llm.UserContentMessage).Content()
+	if got := storedUser[1].(llm.ImageBlock).Data(); !bytes.Equal(got, []byte{0, 1, 2}) {
+		t.Fatalf("image=%v", got)
+	}
+	storedAssistant := messages[1].(llm.AssistantRichMessage).Blocks()
+	replay, ok := storedAssistant[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
+	if !ok || replay.ItemID != "rs_1" || replay.EncryptedContent != "cipher" {
+		t.Fatalf("reasoning=%#v", storedAssistant[0])
+	}
+	signature, ok := storedAssistant[1].(llm.TextBlock).TextReplay()
+	if !ok || signature.MessageID != "msg_1" {
+		t.Fatalf("text=%#v", storedAssistant[1])
+	}
+}
+
 func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {
 	t.Parallel()
 
