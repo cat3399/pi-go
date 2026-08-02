@@ -1,10 +1,10 @@
 # M-APP：Coding-agent application 与 headless CLI charter
 
-状态：`in-progress`（`M-APP/v0.3-production-tool-replay`；v0.1/v0.2 已复审）
+状态：`ported`（`M-APP/v0.3-production-tool-replay`；`R-PROVIDER-005` passed）
 
-最近通过里程碑：`M-APP/v0.2-production-assembly`
+最近通过里程碑：`M-APP/v0.3-production-tool-replay`
 
-当前里程碑：`M-APP/v0.3-production-tool-replay`。production assembly 以同一个 immutable built-in registry 生成 agent executor 与 provider tool definitions；本地 HTTP/SSE 模拟 OpenAI schema/concurrency admission，固定验证 built-ins `strict:false` 与 `parallel_tool_calls:false`，只验收一个 sequential tool call 的 durable replay。不改变 auth/model/resource selection，也不宣称已复审的 M-AGENT/v0.2 multi-call scheduler 已合入本分支。
+通过里程碑：`M-APP/v0.3-production-tool-replay`。production assembly 以同一个 immutable built-in registry 生成 agent executor 与 provider tool definitions；本地 HTTP/SSE 模拟 OpenAI schema/concurrency admission，固定验证 built-ins `strict:false` 与 `parallel_tool_calls:false`，只验收一个 sequential tool call 的 durable replay。不改变 auth/model/resource selection；M-AGENT/v0.2 multi-call scheduler 尚待联合分支集成，当前 production 未启用 parallelism。
 
 ## 负责
 

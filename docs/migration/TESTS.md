@@ -33,9 +33,9 @@
 | `T-PROVIDER-008` | B-PROVIDER-005 | `packages/ai/test/openai-responses-terminal-event.test.ts` 的 premature EOF、wrapper error 与唯一 terminal cases | `strengthened` | R-PROVIDER-004；另覆盖 dirty EOF、staged terminal/usage、race 与 fuzz |
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
-| `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；awaiting module review |
-| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `deferred` | 已覆盖 request causality、local SSE、empty output、bounded/stable non-`fc_*` normalization 与 multi-text fallback IDs；assistant message 尚无 source provider/API/model，无法区分 native/foreign `fc_*` 或 same-provider different-model pairing。M-BASE/session provenance 进入 provider Request 时必须重评并补 foreign `fc_*`/model-handoff fixture；awaiting module review |
-| `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | full-root local `$ref` JSON Pointer/recursive graph admission、raw boolean `additionalProperties:false` 全路径、traversal budget/fuzz、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire 与 production simulated-server 400 oracle；`true` 仅在已复审 M-AGENT/v0.2 合入并完成 integration test 后启用；awaiting rereview |
+| `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；R-PROVIDER-005 |
+| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `deferred` | 已覆盖 request causality、local SSE、empty output、bounded/stable non-`fc_*` normalization 与 multi-text fallback IDs；assistant message 尚无 source provider/API/model，无法区分 native/foreign `fc_*` 或 same-provider different-model pairing。M-BASE/session provenance 进入 provider Request 时必须重评并补 foreign `fc_*`/model-handoff fixture；R-PROVIDER-005 确认延期 |
+| `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | full-root local `$ref` JSON Pointer/recursive graph admission、raw boolean `additionalProperties:false` 全路径、traversal budget/fuzz、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire 与 production simulated-server 400 oracle；`true` 仅在 M-AGENT/v0.2 联合分支集成并完成 integration test 后启用；R-PROVIDER-005 |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -94,7 +94,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `strengthened` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；R-TOOL-005 |
 | `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `strengthened` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；R-TOOL-005 |
 | `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `strengthened` | JSON/edit/unified-patch fuzz、symlink TOCTOU、effective permission、cancel/race strengthening；R-TOOL-005 |
-| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission、fixed-upstream `strict:false`、Bash timeout schema/decoder exact boundary contract、filesystem schema/runtime samples and WF-003 request assertion；awaiting module review |
+| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission、fixed-upstream `strict:false` intentional contract、Bash timeout schema/decoder exact boundary contract、filesystem schema/runtime samples and WF-003 request assertion；R-PROVIDER-005 |
 
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。
@@ -111,7 +111,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-APP-006` | B-APP-005/007 | `args.test.ts` provider/model/api-key cases；`model-resolver.test.ts` provider-prefixed/custom model cases | `strengthened` | production request/model/exit integration；R-APP-002 |
 | `T-APP-007` | B-APP-006 | `models-runtime.test.ts` explicit/stored/ambient 与 wrong-handler cases；`auth-storage.test.ts` read/malformed intent | `strengthened` | 四层 precedence、secret-safe、无 session/network 副作用 matrix；R-APP-002 |
 | `T-APP-008` | B-APP-008 | `session-manager.ts` default cwd-encoded directory/new filename；上游缺同等 crash-safe create test | `strengthened` | filename/header ID/time、explicit resume advancing clock；R-APP-002 |
-| `T-APP-009` | B-APP-009 | `agent-session` prompt/tool persistence flow + Responses request/stream evidence | `strengthened` | local HTTP/SSE request1 tools → function call → durable result → request2 replay → final print；awaiting module review |
+| `T-APP-009` | B-APP-009 | `agent-session` prompt/tool persistence flow + Responses request/stream evidence | `strengthened` | local HTTP/SSE request1 tools → function call → durable result → request2 replay → final print；R-PROVIDER-005 |
 
 ## M-AUTH
 
@@ -122,6 +122,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-AUTH-003` | B-AUTH-003 | `auth-storage.test.ts` concurrent modifications | `strengthened` | same/different Store、local/file wait cancellation、two contending process writers、failure release/merge、`-race`；R-AUTH-001 |
 | `T-AUTH-004` | B-AUTH-004 | `runtime-credentials.test.ts`；`models-runtime.test.ts` ownership | `strengthened` | nonpersistent override、四层 precedence、统一 production resolver、不 lower fallback；R-AUTH-001 |
 | `T-AUTH-005` | B-AUTH-005 | `resolve-config-value.test.ts` templates/commands | `intentionally-incompatible` | template/fuzz；command side effect rejected until security/process contract exists；R-AUTH-001 |
+| `T-WF-003` | WF-003 | Responses function tools、durable ToolResult 与 production print intents 分散证明 | `strengthened` | simulated OpenAI admission + two-request local HTTP/SSE workflow；R-PROVIDER-005；parallel true 不在本 workflow |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

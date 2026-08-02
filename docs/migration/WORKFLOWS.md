@@ -113,7 +113,7 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 ## WF-003：production OpenAI single tool replay
 
-状态：`in-progress`（awaiting M-PROVIDER/M-TOOL/M-APP independent review）
+状态：`passed`（`R-PROVIDER-005`；single-tool scope）
 
 ~~~text
 production OpenAI request (built-in tool schemas)
@@ -124,4 +124,7 @@ production OpenAI request (built-in tool schemas)
   -> final assistant text / session
 ~~~
 
-本地 HTTP/SSE E2E 的模拟 OpenAI admission 在 incompatible strict schema 或 `parallel_tool_calls:true` 时返回 400；成功路径断言两次 request 的七个 built-ins 都是 `strict:false` 且 `parallel_tool_calls:false`，request1 有 bash/filesystem schemas，call ID、native-shaped `fc_*` 与 non-`fc_*` bounded identity 依当前无 provenance 的 policy 归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。foreign `fc_*` 的 provider/API 判定明确留在 `T-PROVIDER-012`；显式 parallel `true` 以已复审 M-AGENT/v0.2 合入和 integration oracle 为 gate，本 workflow 均不宣称覆盖。
+本地 HTTP/SSE E2E 的模拟 OpenAI admission 在 incompatible strict schema 或 `parallel_tool_calls:true` 时返回 400；成功路径断言两次 request 的七个 built-ins 都是 `strict:false` 且 `parallel_tool_calls:false`，request1 有 bash/filesystem schemas，call ID、native-shaped `fc_*` 与 non-`fc_*` bounded identity 依当前无 provenance 的 policy 归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。foreign `fc_*` 的 provider/API 判定明确留在 `T-PROVIDER-012`；显式 parallel `true` 以已复审 M-AGENT/v0.2 的后续联合分支集成和 integration oracle 为 gate，本 workflow 均不宣称覆盖。
+
+`R-PROVIDER-005` 最终以 0 Blocker / 0 Major / 0 Minor 通过；built-ins non-strict 与
+production single-call flag 是本 workflow 的有意边界，不表示 parallel production 已启用。
