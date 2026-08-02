@@ -25,6 +25,12 @@ pi-go 将成为 pi 产品的完整、整洁、可维护的 Go 实现。Go 在项
 
 上游 package 列表只用于梳理范围，不要求 pi-go 复制相同的 package 边界。
 
+迁移组织遵循三层口径：领域模块里程碑是实现与 review 单位，behavior slice 是
+需求和测试追踪单位，完整用户 workflow 是跨模块验收单位。模块负责定义职责、
+invariant 和依赖方向；一个里程碑应把相互关联的行为一起实现，再做一次联合 review；
+多个模块仍要尽早组成真实闭环。固定基线的源码分布、热点和候选模块见
+[SOURCE_MAP.md](SOURCE_MAP.md)。
+
 ### 完整的回归保护
 
 - 每项迁移功能都必须同时迁移相关测试，不能先堆积实现、最后补测试。
@@ -105,6 +111,11 @@ transport 的定义。
 兼容目标是用户可观察行为、数据语义和重要错误行为，不是文件数量、源码行数、
 npm import path 或 class 层次。TypeScript abstraction 不适合 Go 时，应保留其
 行为和 invariant，重新设计实现。
+
+上游热点文件通常聚合多个职责，只用于定位行为证据，不作为迁移任务。一个行为
+跨越多个上游 package 时，应在同一个 slice 中保留端到端语义；一个文件包含多个
+行为时，应拆成多个 slice。任何模块开始实现前都要明确 module charter，但这不
+构成 public package 或长期兼容承诺。
 
 ### 数据安全
 

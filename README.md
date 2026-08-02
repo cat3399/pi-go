@@ -4,8 +4,10 @@ pi-go 是 [pi](https://github.com/cat3399/pi) 的 Go 重写项目。首要目标
 能够独立运行、独立测试、独立发布的 Pi，而不是先把它建设成某个外部项目的
 backend。
 
-当前处于文档初始化阶段：仅建立项目目标、迁移边界和 Git 基线，尚未创建 Go
-module 或业务源码。
+当前处于 standalone core 实现阶段：deterministic WF-001、标准 OpenAI Responses text/SSE
+adapter 和 production text-print assembly 均已通过整模块复审。发布入口可从显式 CLI、
+只读 auth/models 配置或环境变量装配 OpenAI；尚未迁移的能力明确失败，不包含 scripted
+provider 或 TypeScript fallback。
 
 ## 项目目标
 
@@ -33,6 +35,8 @@ module 或业务源码。
 
 - [项目目标与约束](docs/PROJECT.md)
 - [架构边界](docs/ARCHITECTURE.md)
+- [pi 上游源码地图与迁移模块](docs/SOURCE_MAP.md)
+- [迁移执行台账](docs/migration/README.md)
 - [迁移路线](docs/ROADMAP.md)
 - [测试与回归策略](docs/TESTING.md)
 - [上游基线](docs/UPSTREAM.md)

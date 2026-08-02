@@ -1,8 +1,8 @@
 # 测试与回归策略
 
 测试迁移与功能迁移是同一项工作。不能先翻译大量源码，再把上游 test suite 当作
-最后的验收工具。每个 feature slice 都要先确认行为证据，随后迁移测试、实现功能、
-比较差异并更新 ledger。
+最后的验收工具。每个模块里程碑先确认行为证据，再把相关测试和实现一起完成，
+最后统一更新 ledger 并 review。
 
 默认 Go test suite 必须 self-contained，不依赖 Node.js、network、真实 provider
 credential 或上游 checkout。
@@ -25,9 +25,9 @@ TypeScript test suite 是行为证据和回归历史，不要求逐行翻译测�
 `deferred` 不是永久 skip。每个条目都需要上游文件、测试名称或 fixture、固定
 commit 和重新评估条件。
 
-## Feature slice 流程
+## 模块里程碑流程
 
-每项迁移按以下顺序完成：
+每个领域模块里程碑按以下顺序完成：
 
 1. 阅读相关源码、测试、fixture 和历史回归案例。
 2. 写下需要保留的行为、错误、取消和数据 invariant。
@@ -38,6 +38,30 @@ commit 和重新评估条件。
 7. 更新 behavior ledger 和 test ledger。
 
 不能仅凭“文件已翻译”或“测试数量接近”认定完成。
+
+Behavior slice 必须关联一个主要领域模块和至少一个可观察行为，但只承担追踪作用。
+同一模块里相互依赖的 behavior 应在一个里程碑内一起实现和联合审查；上游聚合文件中
+互不相干的行为仍不能仅因同文件而混成同一职责。
+
+测试通过是独立模块审查的输入，不等于审查结论。每个模块里程碑必须由未参与实现
+的 reviewer 同时检查测试覆盖是否足以证明 contract、实现是否符合依赖和 ownership
+约束，以及当前结构是否能自然接入后续迁移。审查结论和未关闭事项必须进入 ledger；
+不能只保留在临时对话中。
+
+## 模块 contract 与 workflow 验收
+
+领域模块通过 contract test 固化职责和 invariant，完整产品通过跨模块 scenario 或
+E2E workflow 验收。二者不能互相替代：
+
+- module contract test 证明输入、输出、错误、取消、并发和 durable data 语义；
+- workflow test 证明 provider、agent、tool、session 和 application 的组合顺序成立；
+- public CLI/TUI test 证明用户可观察的输出、退出和 terminal lifecycle；
+- differential test 只在行为仍不清楚时帮助建立证据，不定义产品架构。
+
+首个 standalone workflow 至少贯穿 prompt、deterministic provider stream、agent
+turn、一次 tool execution、assistant result、session 保存与恢复和 print mode
+退出。后续 slice 应持续接入已有 workflow，或明确建立新的完整 workflow；不得
+长期只积累相互未集成的 package-level unit test。
 
 ## 测试层次
 
@@ -52,6 +76,10 @@ test 与 fuzz。
 针对 provider、tool、storage、session 和 terminal component 建立可复用 test
 suite。Component test 验证 pi-go 内部稳定语义，不要求为了测试而创建 public API
 或 remote transport。
+
+Component suite 的边界来自 module charter，而不是上游 TypeScript package。若
+测试迫使 Go 代码暴露只为模拟上游内部 class 的接口，应重新检查测试是否关注了
+实现结构而非产品行为。
 
 ### Agent 与 session scenario test
 
@@ -131,5 +159,5 @@ go build ./...
 涉及 concurrency、session、streaming、cancellation 或 shared cache 时，运行相关
 race test。涉及 parser 或持久化格式时，运行 fuzz seed、历史 fixture 和恢复测试。
 
-一个 feature slice 只有在正常路径、错误路径、取消行为和 ledger 都完成后，才可
-标记为 `ported`。
+一个 behavior 只有在所属模块里程碑的正常路径、错误路径、取消行为、ledger 和独立
+review 都完成后，才可标记为 `ported`。

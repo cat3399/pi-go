@@ -25,6 +25,114 @@ network 或 serialization boundary。
 上层负责产品 workflow，下层负责可复用语义和外部系统接入。依赖方向不能因为
 未来某个 plugin 或 pi-web 的需求而倒置。
 
+## 迁移组织模型
+
+pi-go 不按上游文件、package 或 class 机械迁移。迁移工作使用三个层次：
+
+1. **领域模块里程碑是实现与 review 单位**：一次完成一组相互关联的职责、invariant、
+   state ownership 和依赖方向，再做联合审查。
+2. **Behavior feature slice 是追踪单位**：记录每个可观察行为及其正常、错误、取消
+   和数据路径，但不要求逐项停工或独立 review。
+3. **完整用户 workflow 是验收单位**：尽早把多个模块组成可执行闭环，不能等各
+   模块分别“完成”后才验证集成。
+
+一个领域模块可以跨越多个上游 package，也可以由多个 Go internal package 实现。
+反过来，一个上游热点文件通常包含多个行为，必须拆成多个 slice。源码行数、文件
+存在或编译通过都不是模块完成条件。
+
+开始实现模块前，需要建立 module charter，至少记录：
+
+- 负责和明确不负责的职责；
+- 上游源码、测试、fixture、文档与固定 commit 依据；
+- 输入、输出、错误、取消、并发和 durable data invariant；
+- 依赖方向、state ownership 和允许的并发边界；
+- TypeScript 与 Go 之间需要重新决策的语义；
+- 首批 behavior slice 和验收 workflow。
+
+Module charter 是当前设计假设，可以随行为证据演进，不是 public API 或 wire
+compatibility 承诺。上游源码分布、热点与这些模块的证据映射见
+[SOURCE_MAP.md](SOURCE_MAP.md)。
+
+## 初始领域模块
+
+下面的模块是迁移起点，不预设最终目录名称。
+
+### 基础语义
+
+承载 message、content、tool call、usage、finish reason、model metadata、stream
+event 和稳定错误类别。只共享已经稳定且被多个真实场景需要的语义，不能演变为
+无边界的 common package。
+
+### AI 与 provider runtime
+
+承载 provider auth、request conversion、stream parsing、error mapping、retry 和
+必要 vendor metadata。Provider adapter 位于 domain 外侧；先由 deterministic fake
+与一个真实 API dialect 验证边界，再按行为族增加 adapter。
+
+### Agent runtime
+
+承载 turn lifecycle、model stream、tool-call loop、下一轮推理、steering/follow-up、
+abort 和结束状态。它依赖基础语义、provider、tool 与 session，但不拥有 terminal
+展示或持久化 record 格式。
+
+### Session 与 storage
+
+承载 durable conversation state、append、tree、resume、branch、compaction record、
+历史格式兼容、恢复和写入一致性。Domain state、storage record 与具体 filesystem/
+SQLite adapter 分离，相同 durable invariant 只实现一次。
+
+### Tool 与系统能力
+
+承载 read、write、edit、bash 等内置 tool 的语义和执行生命周期。Filesystem、
+subprocess、environment 与 platform adapter 位于边界处；root、permission、timeout、
+output limit 和 cancellation 是模块 contract 的一部分。
+
+### Coding-agent application 与 headless CLI
+
+组合 agent、session、provider 与 tool，形成 prompt、stream、tool execution、保存、
+恢复和退出的用户 workflow。CLI、print mode、signal、exit code 和诊断属于这一层；
+下层 domain 不反向依赖命令行或 serialization。
+
+### 产品服务
+
+按实际 workflow 提供 model selection、auth storage、settings、system prompt、prompt
+template、skill、resource loading、package management、context management、retry 和
+高级 compaction。不同能力不因同属“配置”或“资源”而被塞进巨大统一 service。
+
+### Interactive 与 TUI
+
+承载 terminal lifecycle、input、editor、keybinding、autocomplete、layout、overlay、
+incremental rendering、image、IME 和 selector。Interactive mode 直接组合 application
+能力，展示状态不得进入 agent/session domain。
+
+### Extension
+
+在 standalone core 稳定后，从真实内部能力中提炼最小 extension surface。上游
+extension type 和 loader 是需求证据，不是 source-compatible contract。
+
+### Remote 能力
+
+承载上游 protocol、client 和 server 中确属产品行为的部分。普通 storage adapter
+属于 Session 与 storage 模块；只有 transport-specific persistence 才随 remote 能力
+评估。进入该模块时重新决定 domain boundary、wire compatibility 和 transport；
+早期 core 不得为了它建立统一 remote API。
+
+初始依赖主线可以概括为：
+
+~~~text
+              CLI / print / interactive TUI
+                         |
+              coding-agent application
+                  /              \
+          product services    agent runtime
+                              /     |      \
+                    AI/provider    tool   session/storage
+                              \     |      /
+                              base semantics
+
+           extension and remote capabilities are later boundaries
+~~~
+
 ## Go package 策略
 
 - 迁移早期的大多数实现默认放在 `internal` 范围，保留调整 package 和类型的空间。
@@ -38,6 +146,12 @@ network 或 serialization boundary。
 
 上游的 `ai`、`agent`、`coding-agent`、`tui`、`protocol`、`server` 和 `client`
 package 是迁移清单，不是必须照抄的 Go module 结构。
+
+固定上游基线还同时包含 coding-agent 自己的 `AgentSession` 产品路径和 `agent`
+package 导出的独立 `AgentHarness`。二者在 session、tool、compaction 与 resource 上
+存在相邻职责，当前 coding-agent executable 仍直接使用低层 `Agent`，没有直接
+实例化 `AgentHarness`。阶段 0 必须先分类两条路径的产品行为和共享 invariant；
+不得仅因上游有两套 class，就在 Go 中预设两套 runtime。
 
 ## Agent 与 session
 

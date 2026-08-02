@@ -1,0 +1,195 @@
+# 独立审查记录
+
+本文件记录领域模块里程碑的独立 review gate。Reviewer 必须未参与被审查里程碑的
+实现，并直接检查 diff、测试、ledger、module charter 和固定上游证据。
+
+## 结论格式
+
+每次审查使用稳定 ID `R-<MODULE|STAGE>-NNN`，至少记录：
+
+- 被审查 module、milestone、behavior 和 commit/worktree 范围；
+- reviewer 与实现者；
+- 实际检查的上游源码、测试、fixture 和本地验证命令；
+- 行为正确性、规则符合性、依赖/ownership、并发/数据安全、可继续迁移性结论；
+- blocker、需要修正的问题和允许延期的 debt；
+- 最终结论：`changes-required` 或 `passed`。
+
+`passed` 只表示声明的里程碑通过，不表示整个领域模块的未来范围已经迁完。
+
+## 未关闭事项
+
+| ID | 严重度 | Owner module | 影响 | 重新评估条件 | 来源 review | 状态 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `F-STAGE0-001` | Blocker | M-BASE | B-BASE-001 缺可执行 finish/usage validity oracle | successful text/usage matrix 经独立复审 | R-STAGE0-001 | `fix-applied-awaiting-review` |
+| `F-STAGE0-002` | Blocker | M-SESSION | append failure 同时承诺原文件不变又承认可留下 partial | poison/commit-unknown contract 经独立复审 | R-STAGE0-001 | `closed-by-R-SESSION-002` |
+| `F-STAGE0-003` | Blocker | M-AGENT | tool cancel 后 durable transcript 与 terminal owner 缺失 | provider call count/transcript/settlement oracle 经独立复审 | R-STAGE0-001 | `closed-by-R-AGENT-001` |
+| `F-STAGE0-004` | Major | M-PROVIDER | auth stored/ambient precedence 事实错误 | per-handler/per-field merge 规则经独立复审 | R-STAGE0-001 | `fix-applied-awaiting-review` |
+| `F-STAGE0-005` | Major | M-SESSION | trust/keybinding/legacy resource 数据清单不完整 | DATA_FORMATS inventory 经独立复审 | R-STAGE0-001 | `fix-applied-awaiting-review` |
+| `F-STAGE0-006` | Major | M-PROVIDER | OpenAI Responses text test/source ledger 错位漏项 | request/transport/text/terminal/tool 分类经独立复审 | R-STAGE0-001 | `fix-applied-awaiting-review` |
+| `F-STAGE0-007` | Major | M-SESSION | v0.1 reader 对合法 v3 tree 输入域未定义 | reader/writer 子集与 fixture oracle 经独立复审 | R-STAGE0-001 | `closed-by-R-SESSION-002` |
+| `F-STAGE0-008` | Major | M-SESSION | unknown round-trip 无可断言操作与 authority | byte-prefix append/projection contract 经独立复审 | R-STAGE0-001 | `closed-by-R-SESSION-002` |
+| `F-STAGE0-009` | Major | M-TOOL | env/shell、background pipe、artifact visibility/retention 未决 | Bash 完整 contract 经独立复审 | R-STAGE0-001 | `closed-by-R-TOOL-002` |
+| `F-STAGE0-010` | Major | M-APP | deterministic fake 无 process-level test seam | test re-exec 与 production Run path 经独立复审 | R-STAGE0-001 | `closed-by-R-APP-001` |
+| `F-STAGE0-011` | Major | M-BASE | module review gate 与 slice 顺序形成文字循环 | 明确 DAG 经独立复审 | R-STAGE0-001 | `fix-applied-awaiting-review` |
+| `F-STAGE0-012` | Major | M-SESSION | atomic-create 引用了不存在的上游 symbol | upstream/strengthening 证据经独立复审 | R-STAGE0-001 | `closed-by-R-SESSION-002` |
+| `F-BASE-001` | Blocker | M-BASE | 首版 stream 只能形成 text terminal，不能承载完整 tool call | tool start/delta/end 与 tool-use terminal 经复审 | R-BASE-001 | `closed-by-R-BASE-002` |
+| `F-BASE-002` | Major | M-BASE | exported zero-value tool call 可通过消息与关联校验 | 所有消费边界重新验证 tool call/result | R-BASE-001 | `closed-by-R-BASE-002` |
+| `F-BASE-003` | Major | M-BASE | exported zero-value terminal event 可结束 stream | collector 在状态变更前验证所有 event | R-BASE-001 | `closed-by-R-BASE-002` |
+| `F-PROVIDER-001` | Major | M-PROVIDER | response factory panic 绕过唯一 terminal contract | panic 转为单一 typed error terminal 并复审 | R-PROVIDER-001 | `closed-by-R-PROVIDER-002` |
+| `F-PROVIDER-002` | Major | M-PROVIDER | queue/factory failure 的 cause/category 被降为字符串 | failure 从 event 贯穿 collector/result 并支持 errors.Is/As | R-PROVIDER-001 | `closed-by-R-PROVIDER-002` |
+| `F-PROVIDER-003` | Minor | M-PROVIDER | 极大 ChunkRunes 使容量计算溢出并 panic | MaxInt 回归与无溢出分块计算经复审 | R-PROVIDER-001 | `closed-by-R-PROVIDER-002` |
+| `F-PROVIDER-004` | Major | M-PROVIDER | 失败 assistant 的 partial text 被当成 completed history 回放 | error/aborted history 全部跳过且不占 wire index | R-PROVIDER-003 | `closed-by-R-PROVIDER-004` |
+| `F-PROVIDER-005` | Major | M-PROVIDER | staged terminal 后的残缺 SSE 尾帧可被 EOF 掩盖为成功 | dirty EOF 转 invalid-response 并保留 staged usage | R-PROVIDER-003 | `closed-by-R-PROVIDER-004` |
+| `F-SESSION-001` | Major | M-SESSION | raw arguments 的字节校验不接受上游 parse/stringify 后的语义等价 JSON | exact decimal/escape semantic comparison 与 rewrite/reopen 回归 | R-SESSION-001 | `closed-by-R-SESSION-002` |
+| `F-SESSION-002` | Major | M-SESSION | Create 隐式 MkdirAll，但未同步新 ancestor 在父目录中的目录项 | parent precondition 与缺目录回归 | R-SESSION-001 | `closed-by-R-SESSION-002` |
+| `F-SESSION-003` | Minor | M-SESSION | 超出 RFC3339 四位年份的 clock 值可写但不可 reopen | create/append 可重开时间验证 | R-SESSION-001 | `closed-by-R-SESSION-002` |
+| `F-SESSION-004` | Minor | M-AGENT | bounded settlement 容易被误解为 write 后仍可由 deadline 中断 | 首次 write 线性化边界写入 charter | R-SESSION-001 | `closed-by-R-SESSION-002` |
+
+## R-STAGE0-001：事实基线首轮独立审查
+
+- 范围：阶段 0 的 source map、scope、provider/data/behavior/test ledger、六个 module
+  charter、WF-001 和当时完整未提交文档 diff；不包含 Go 实现。
+- 固定上游：`a116523434806910336b9de3e38a41aa5860030b`；reviewer 直接读取
+  `/Users/mac/dev/pi` 对应源码、测试、fixture 与 session format。
+- 实现者：主任务 `/root`；reviewer：未参与文档编写的独立任务
+  `/root/stage0_independent_review`，并分别复核 provider 与 session/tool/workflow 证据。
+- 本地核验：复算 495 个 TS/TSX、112,232 行与 package 数量；确认固定 checkout、
+  executable AgentSession 路径、provider/dialect/model shard 数量、Markdown link 与稳定 ID。
+  审查是只读证据审查，未运行上游测试、Go test 或 build。
+- 正确性结论：源码地图、主 agent path、模块 ownership 高层方向、provider/dialect 数量、
+  catalog baseline gap 与 strict session/Bash 基础事实通过；3 个 Blocker、9 个 Major 如上表，
+  另有路径精度、Cloudflare 术语、ToolResult ownership 与 data 状态语义等 Minor。
+- 数据/并发结论：single coordinator、storage-first 和 unknown-preserving 方向成立，但
+  append failure、tree 输入域、tool cancel terminal 与 background child contract 未闭合。
+- 可继续迁移性结论：架构依赖本身无环；当时的 review gate/实施顺序文字不能照章执行，
+  且 B-BASE-001 会迫使实现者发明规则。
+- 最终结论：`changes-required`。在所有 `F-STAGE0-*` 经复审关闭前，阶段 0 不通过，
+  B-BASE-001 不得进入 Go 实现。
+
+首轮结论后的修订已落在当前 worktree；表中状态只表示 implementer 已提交候选修复，
+不表示 reviewer 已接受。复审使用新的稳定 review ID 记录。
+
+## R-BASE-001：M-BASE/v0.1 首轮独立审查
+
+- 范围：`internal/llm` 的 message、usage、tool 与 stream 实现及测试。
+- 结论：`changes-required`。完整 tool-call stream 缺失为 Blocker；零值 tool call 与
+  terminal event 校验缺口为 Major。usage overflow、terminal 组合和事件终止后的测试
+  需要补强，Go 最低版本需更新。
+- 修订：候选修复与补强测试已通过 test、vet、build、race 和短时 fuzz，等待定点复审。
+
+## R-BASE-002：M-BASE/v0.1 定点复审
+
+- 范围：R-BASE-001 修订后的 `internal/llm` 完整实现与测试；reviewer 未参与实现。
+- 核验：tool stream/terminal、zero-value 防绕过、tool result 关联、terminal/EOF、usage
+  overflow、snapshot ownership 与下一 provider 接口可演进性。
+- 验证：test、vet、build、race、5 秒 fuzz 均通过；覆盖率 85.1%。
+- 最终结论：`passed`，没有新的 Blocker、Major、correctness 或 data-race 问题。
+
+## R-PROVIDER-001：M-PROVIDER/v0.1 首轮独立审查
+
+- 范围：`internal/provider`、其测试，以及 provider 消费所需的 `internal/llm` 扩展；
+  reviewer 未参与实现且未派生其他 agent。
+- 验证：test、vet、build、race 重复、两组 fuzz 与固定上游 faux 行为核对均完成。
+- 最终结论：`changes-required`；无 Blocker，两个 Major 与一个 Minor 见上表。
+- 修订：候选修复已加入 typed failure/cause 贯穿、factory panic 边界、MaxInt-safe 分块及
+  回归测试，等待定点复审。
+
+## R-PROVIDER-002：M-PROVIDER/v0.1 定点复审
+
+- 范围：R-PROVIDER-001 三项修订及其 `internal/llm` failure 贯穿；reviewer 全程只读且
+  未派生其他 agent。
+- 验证：test、vet、build、race、两包各 50 次定点 race 与单独 5 秒 fuzz 通过。
+- 最终结论：`passed`；三个 finding 已关闭，没有新的 Blocker、Major 或 Minor。
+
+## R-PROVIDER-003：M-PROVIDER/v0.2 整模块审查
+
+- 范围：标准 `openai/openai-responses` text adapter 的 request/history、HTTP/SSE、reducer、
+  usage、terminal、failure、cancellation 与 body ownership；reviewer 未参与实现且未派生
+  其他 agent。
+- 首轮结论：`changes-required`；无 Blocker，两个跨层 Major 见 `F-PROVIDER-004/005`。
+
+## R-PROVIDER-004：M-PROVIDER/v0.2 定点复审
+
+- 范围：R-PROVIDER-003 的两项修订及相邻回归；同一 reviewer 全程只读且未派生其他 agent。
+- 验证：定点回归、provider test/race、SSE fuzz、全仓 test/race/vet/build 与 Windows、Linux、
+  Plan 9 交叉编译通过。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0；真实 credential smoke、production
+  assembler、tool/reasoning replay 仍属于后续里程碑。
+
+## R-TOOL-001：M-TOOL/v0.1 首轮及修订复核
+
+- 范围：`internal/tool` 的 Bash、runner、output、artifact 与跨平台 process tree；reviewer
+  未参与实现且未派生其他 agent。
+- 最终结论：`changes-required`。复核先后发现 cancellation settlement、Windows
+  descendant cleanup、zero-value outcome、UTF-8/error 与 artifact fault 等缺口，以及
+  Windows 386 Job Object 结构的 ABI padding 问题。
+
+## R-TOOL-002：M-TOOL/v0.1 最终定点复审
+
+- 范围：R-TOOL-001 修订后的完整模块与针对性回归；reviewer 未参与实现且未派生其他
+  agent。
+- 验证：全仓 test、vet、race、重复 settlement/process tests，Windows 386/amd64/arm64
+  和 Plan 9 交叉编译通过；32/64 位 Job Object layout 有尺寸断言。
+- 最终结论：`passed`，没有未关闭 Blocker 或 Major。真实 Windows Job Object lifecycle
+  尚未在本机执行，保留为跨平台验证债务。
+
+## R-SESSION-001：M-SESSION/v0.1 首轮联合审查
+
+- 范围：`internal/session` 完整 v3 JSONL aggregate、storage、resume/projection、并发与
+  fault contract；reviewer 未参与实现且未派生其他 agent。
+- 首轮结论：`changes-required`。原始参数 lexical resume、durable/in-memory 时间、
+  alias-aware single writer 和 cancellable append 四项 Major 已修订；联合复审后又确认
+  `F-SESSION-001..004`。
+- 当前修订：JSON 语义等价使用 exact decimal normalization；Create 要求 parent 已存在；
+  ISO timestamp 先验证可重开；Agent charter 明确 pre-write cancellation/post-write settle。
+  全仓 test/race/vet/build、短时 fuzz 与多平台交叉编译已通过，等待最终复审。
+
+## R-SESSION-002：M-SESSION/v0.1 最终定点复审
+
+- 范围：R-SESSION-001 全部修订后的完整模块；reviewer 全程只读且未派生其他 agent。
+- 核验：raw arguments 的上游 rewrite/reopen 与 exact-number 语义、preexisting parent
+  durability contract、可重开 timestamp、alias writer 和 Append cancellation settlement。
+- 最终结论：`passed`，0 Blocker、0 Major、0 Minor。真实掉电注入和真实 Windows runtime
+  保留为平台验证债务，不阻塞 v0.1。
+
+## R-AGENT-001：M-AGENT/v0.1 完整模块联合审查
+
+- 范围：`internal/agent` 的完整 single-tool loop、provider/tool/session 因果 barrier、
+  busy/abort/settlement、fatal storage 和生产 Bash adapter；reviewer 未参与实现且未派生
+  其他 agent。
+- 核验：固定上游 Agent/AgentSession lifecycle 与 regression evidence、当前完整 worktree、
+  terminal/Abort 和 tool/cancel 线性化、late update、stream Close、busy admission 及 storage
+  successor barrier。全仓 test/race/vet/build 与多平台交叉构建由实现者在最终候选上通过。
+- 修订：review 中发现的 Close panic 二次调用风险和 busy loser 触碰共享 clock 已修复并有
+  回归；同步 observer 的 self-join 限制已写入 API 注释。
+- 延后边界：durable ToolResult category/details 等待 M-BASE/M-SESSION 共同设计；真实
+  provider tool schema 等待 adapter slice；mixed `length + toolCall` 由 `B/T-AGENT-009`
+  等待 M-BASE 表达能力，不能用 text-only length 冒充。
+- 最终结论：`passed`，0 Blocker，0 剩余 in-scope Major/Minor；关闭 `F-STAGE0-003`。
+
+## R-APP-001：M-APP/v0.1 与 WF-001 完整联合审查
+
+- 范围：`internal/app`、`cmd/pi-go` 及 M-BASE/M-PROVIDER/M-TOOL/M-SESSION/M-AGENT
+  组成的完整 headless tool workflow；reviewer 未参与实现且未派生其他 agent。
+- 核验：固定上游 print/session/signal 行为、CLI admission、durable cwd、stdout/stderr/exit、
+  signal settlement、invalid preservation、全新进程 restart/resume、test re-exec seam、
+  production fail-closed 和跨平台构建。
+- 修订：联合审查发现并关闭 leading-dash required value、session parent provisioning、
+  SessionID 无副作用预检，以及重复 signal process evidence 缺口。
+- 边界：真实 provider/auth、model selection 与默认 session path assembler 属下一里程碑；
+  release binary 在此之前明确失败，不包含 deterministic fake 或 TypeScript fallback。
+- 最终结论：`passed`，0 Blocker、0 Major、0 Minor；关闭 `F-STAGE0-010`，WF-001 通过。
+
+## R-APP-002：M-APP/v0.2 production assembly 联合审查
+
+- 范围：production CLI/model admission、OpenAI key/base URL source、只读 auth/models
+  projection、release entry、默认/显式 session 与本地 HTTP/SSE WF-002；reviewer 未参与实现
+  且未派生其他 agent。
+- 首轮发现：selected OpenAI models 配置会静默忽略未知字段（Major）；预取 creation clock
+  会污染 existing-session 首次 append（Minor）。
+- 修订：selected provider 改为字段白名单、未知字段 secret-safe preflight fail；creation time
+  只在 Create 分支重放，existing resume 使用原时钟，并加入对应无副作用/递增时钟回归。
+- 验证：全仓 test/vet/race/build、配置 fuzz、本地 HTTP/SSE workflow，以及 Windows/Linux/
+  Plan 9 build 和 app test compile 通过。
+- 最终结论：`passed`，0 Blocker、0 Major、0 Minor；OAuth/auth 写入、command config value、
+  完整 models/catalog、system prompt、tool wire 与真实 credential smoke 保留为后续里程碑。
