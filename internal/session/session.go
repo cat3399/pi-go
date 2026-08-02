@@ -1,12 +1,14 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -150,6 +152,52 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 	data, err := storage.read(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read %s: %w", ErrStorage, resolvedPath, err)
+	}
+	if err := checkSessionLimits(data); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, resolvedPath)
+	}
+	version, err := sessionVersion(data)
+	if err != nil {
+		return nil, err
+	}
+	if version < 3 {
+		migrated, err := migrateLegacySession(resolvedPath, data, version, normalizeRuntime(options.Now, options.NewEntryID).newEntryID)
+		if err != nil {
+			return nil, err
+		}
+		// Migration is pure, but it is not trusted merely because it encoded.
+		// Validate the exact candidate against every current v3 invariant before
+		// any rename can replace evidence from the legacy source.
+		if _, _, _, _, err := decodeSessionFile(resolvedPath, migrated); err != nil {
+			return nil, err
+		}
+		if err := storage.validateReplace(resolvedPath); err != nil {
+			return nil, err
+		}
+		// A cooperating writer is excluded by the process lock held with the
+		// claim. Re-read the source snapshot so a non-cooperating mutation is
+		// never silently overwritten.
+		current, readErr := storage.read(resolvedPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: reread migration source %s: %w", ErrStorage, resolvedPath, readErr)
+		}
+		if !bytes.Equal(current, data) {
+			return nil, fmt.Errorf("%w: migration source changed before publication", ErrStorage)
+		}
+		replaced, replaceErr := storage.replace(resolvedPath, migrated)
+		if replaceErr != nil {
+			if replaced {
+				return nil, fmt.Errorf("%w: legacy migration publication: %w", ErrDurabilityUnknown, replaceErr)
+			}
+			return nil, fmt.Errorf("%w: legacy migration publication: %w", ErrStorage, replaceErr)
+		}
+		if err := refreshSessionWriterAfterRewrite(claim, resolvedPath); err != nil {
+			// The target already names the migrated bytes. Identity adoption is
+			// therefore a post-publication failure even when the new inode cannot
+			// be statted or locked; never return a writable aggregate.
+			return nil, fmt.Errorf("%w: adopt migrated session identity: %w", ErrDurabilityUnknown, err)
+		}
+		data = migrated
 	}
 	header, entries, byID, needsSeparator, err := decodeSessionFile(resolvedPath, data)
 	if err != nil {
@@ -507,7 +555,18 @@ func resolveSessionPath(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: resolve path: %w", ErrInvalidSession, err)
 	}
-	return filepath.Clean(resolved), nil
+	resolved = filepath.Clean(resolved)
+	// A final-component symlink names the target session, not an independent
+	// replacement destination. Resolve that component so migration/recovery do
+	// not replace the link itself. Preserve ordinary lexical paths (including
+	// platform aliases such as macOS /var -> /private/var) for API compatibility;
+	// the writer descriptor separately canonicalizes them for locking.
+	if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
+			return filepath.Clean(target), nil
+		}
+	}
+	return resolved, nil
 }
 
 func resolveWorkingDir(path string) (string, error) {

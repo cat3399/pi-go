@@ -8,8 +8,6 @@ import (
 	"syscall"
 )
 
-const moveFileWriteThrough = 0x00000008
-
 var moveFileExW = syscall.NewLazyDLL("kernel32.dll").NewProc("MoveFileExW")
 
 func publishTemporary(temporaryPath, targetPath string) (bool, error) {
@@ -26,7 +24,7 @@ func publishTemporary(temporaryPath, targetPath string) (bool, error) {
 	ok, _, callErr := moveFileExW.Call(
 		uintptr(unsafePointer(from)),
 		uintptr(unsafePointer(to)),
-		moveFileWriteThrough,
+		uintptr(sessionWindowsCreatePublishFlags()),
 	)
 	if ok == 0 {
 		if callErr == nil {

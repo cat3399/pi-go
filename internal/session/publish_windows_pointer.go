@@ -7,3 +7,7 @@ import "unsafe"
 func unsafePointer[T any](value *T) unsafe.Pointer {
 	return unsafe.Pointer(value)
 }
+
+func windowsNativePointerSize() int {
+	return int(unsafe.Sizeof(uintptr(0)))
+}

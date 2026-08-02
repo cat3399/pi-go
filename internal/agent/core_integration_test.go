@@ -22,6 +22,110 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
+// This joins the legacy Session admission path to the production-shaped
+// Responses retry controller. Both attempts must rebuild the same migrated
+// context, while only the accepted turn is appended to durable v3 state.
+func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "legacy-retry.jsonl")
+	legacy := []byte(
+		`{"type":"session","version":2,"id":"legacy-retry","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace"}` + "\n" +
+			`{"type":"message","id":"legacy-root","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"legacy context"}],"timestamp":1785542401000}}` + "\n",
+	)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entryIDs := []string{"retry-user", "retry-assistant"}
+	nextEntryID := 0
+	transcript, err := session.Open(path, session.OpenOptions{
+		Now: func() time.Time { return agentTestEpoch },
+		NewEntryID: func() (string, error) {
+			if nextEntryID >= len(entryIDs) {
+				return "", fmt.Errorf("unexpected entry id request %d", nextEntryID)
+			}
+			id := entryIDs[nextEntryID]
+			nextEntryID++
+			return id, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transcript.Close() })
+
+	var requestMu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode retry request: %v", err)
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		requestMu.Lock()
+		payloads = append(payloads, payload)
+		requestNumber := len(payloads)
+		requestMu.Unlock()
+		switch requestNumber {
+		case 1:
+			dropContextSSE(t, w)
+		case 2:
+			writeContextSSE(t, w, "legacy retry final")
+		default:
+			t.Errorf("unexpected retry request %d", requestNumber)
+		}
+	}))
+	defer server.Close()
+	model, implementation := contextRetryProvider(t, server.URL)
+	coordinator, err := agent.New(agent.Config{
+		Provider: implementation, Transcript: transcript, Model: model,
+		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
+		Now:   func() time.Time { return agentTestEpoch },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Run(context.Background(), "new retry prompt")
+	if err != nil || !result.Succeeded() {
+		t.Fatalf("legacy retry run = (%#v, %v)", result, err)
+	}
+
+	requestMu.Lock()
+	requests := append([]map[string]any(nil), payloads...)
+	requestMu.Unlock()
+	if len(requests) != 2 {
+		t.Fatalf("legacy retry requests = %d", len(requests))
+	}
+	for index, payload := range requests {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire := string(encoded)
+		if strings.Count(wire, "legacy context") != 1 || strings.Count(wire, "new retry prompt") != 1 {
+			t.Fatalf("retry request %d rebuilt wrong migrated context: %s", index+1, wire)
+		}
+	}
+	if entries := transcript.Entries(); len(entries) != 3 {
+		t.Fatalf("legacy retry durable entries = %d, want 3", len(entries))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"version":3`) {
+		t.Fatalf("legacy retry session was not v3: %v / %s", err, data)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := session.Open(path, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if messages := reopened.BuildContext().Messages(); len(messages) != 3 {
+		t.Fatalf("reopened legacy retry context = %#v", messages)
+	}
+}
+
 // This is the final local production-shape oracle across trusted resources,
 // Responses rich/tool replay, parallel Agent execution, durable Session state,
 // and a transient provider retry. The failed attempt must reconstruct the

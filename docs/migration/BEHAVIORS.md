@@ -74,7 +74,7 @@ context/retry lifecycle 由最终联合 integration gate 固定。
 | `B-SESSION-005` | unknown header/entry/message/content round-trip；foreign/future signature raw 保留，仅安全 unsigned 内容进入 provider context | coding append-only behavior；Harness base-envelope parser | `ported` | R-SESSION-002；rich signature projection R-BASE-003 |
 | `B-SESSION-006` | future version、middle malformed、trailing partial、duplicate/broken parent 拒绝并禁止 append | coding permissive tests；Harness strict tests | `ported` | R-SESSION-002 |
 | `B-SESSION-007` | 同 session concurrent append 串行成一条 parent chain | `packages/agent/test/harness/session-backends.test.ts` 的 `serializes concurrent appends into one parent chain` | `ported` | R-SESSION-002 |
-| `B-SESSION-008` | coding-agent v1/v2 自动迁移到 v3 | coding migration tests/fixtures | `deferred` | v0.1 v3 writer/reader 稳定 |
+| `B-SESSION-008` | coding-agent v1/v2 自动迁移到 v3；trailing partial 只能经显式 backup-first recovery 截断 | coding migration tests/fixtures；Go recovery strengthening | `ported` | R-SESSION-005；真实 Windows `FileRenameInfoEx` runtime 未执行，平台债务见 SESSION_STORAGE |
 | `B-SESSION-009` | Harness `leaf`/retained-tail 与 coding JSONL reconciliation | Harness/coding session docs | `deferred` | branch/compaction 模块取证；不能假定互通 |
 | `B-SESSION-010` | 显式 leaf select/reset；append 从选中 leaf 加 child，reset 产生合法新 root；reopen 选择 physical tail | `session-manager.ts::branch/resetLeaf/_appendEntry/_buildIndex`；tree traversal tests | `ported` | R-SESSION-003 |
 | `B-SESSION-011` | tree、path、context 仅沿 selected leaf，siblings 不进入 context；malformed parent graph 仍拒绝 | `session-manager.ts::getBranch/getTree/buildSessionContext`；tree/build-context tests | `ported` | R-SESSION-003；summary/compaction projection deferred |
@@ -84,7 +84,7 @@ context/retry lifecycle 由最终联合 integration gate 固定。
 | `B-SESSION-015` | context estimate and tool-result-safe cut point support manual preparation；all token additions fail explicitly on overflow；threshold predicate is available but not automatically invoked | coding/Harness `compaction.ts::{estimateContextTokens,findCutPoint,shouldCompact}` | `ported` | R-SESSION-004；automatic trigger/retry policy is M-AGENT/M-APP |
 | `B-SESSION-016` | compaction v3 envelope validates parent, ancestor `firstKeptEntryId`, timestamp, token/cost usage and survives reopen/fork/extract/raw unknown handling | `session-manager.ts::CompactionEntry`; compaction serialization tests | `ported` | R-SESSION-004 |
 | `B-SESSION-017` | stale/cancel/provider-failed compaction cannot append; post-write uncertainty poisons the aggregate | Harness operation settlement + project durable-write strengthening | `ported` | R-SESSION-004 |
-| `B-SESSION-018` | branch-summary generation/cache/invalidation is intentionally not exposed; unknown branch_summary records remain durable but non-projecting | both `branch-summarization.ts`; tree navigation tests | `deferred` | M-SESSION/v0.4 requires navigation/cache contract |
+| `B-SESSION-018` | branch-summary generation/cache/invalidation is intentionally not exposed; unknown branch_summary records remain durable but non-projecting | both `branch-summarization.ts`; tree navigation tests | `deferred` | M-SESSION/v0.5 requires navigation/cache contract |
 
 ## M-TOOL
 
