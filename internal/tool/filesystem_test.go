@@ -140,10 +140,9 @@ func TestMutationQueueSerializesAliasesAndHonorsQueuedCancellation(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	second := make(chan error, 1)
 	go func() { second <- queue.with(ctx, "same", func() error { close(secondStarted); return nil }) }()
+	waitForQueueState(t, queue, 2, 0)
 	cancel()
-	if err := <-second; !errors.Is(err, context.Canceled) {
-		t.Fatalf("queued cancellation = %v", err)
-	}
+	waitForQueueState(t, queue, 2, 1)
 	select {
 	case <-secondStarted:
 		t.Fatal("cancelled queued operation started")
@@ -152,6 +151,12 @@ func TestMutationQueueSerializesAliasesAndHonorsQueuedCancellation(t *testing.T)
 	close(release)
 	if err := <-first; err != nil {
 		t.Fatal(err)
+	}
+	if err := <-second; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued cancellation = %v", err)
+	}
+	if nodes, keys, settling := queue.pendingState(); nodes != 0 || keys != 0 || settling != 0 {
+		t.Fatalf("queue retained nodes=%d keys=%d settling=%d", nodes, keys, settling)
 	}
 	mu.Lock()
 	defer mu.Unlock()

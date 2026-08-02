@@ -14,7 +14,7 @@
 - relative/absolute/`~`/`@` path 解析，及 read 的 macOS screenshot curly-quote/AM-PM fallback；
 - UTF-8 文本读取、binary 显式拒绝、line/range 与 UTF-8-safe head truncation；
 - deterministic directory/tree search、basic `.gitignore`、glob、regex/literal grep 与 context；
-- follow-symlink atomic temp-write/rename、target mode preservation、同 canonical target mutation serialization、queued cancellation barrier；
+- follow-symlink atomic temp-write/rename、target mode/effective writability preservation、同 canonical target mutation serialization、queued cancellation synchronous barrier；
 - BOM/CRLF-preserving exact replacement、non-overlap/unique validation 与 display/unified diff metadata。
 
 ### 明确不负责
@@ -27,7 +27,7 @@
 ### Contract 与 ownership
 
 - `FilesystemSuite` 是 immutable cwd/limit owner；每次 execution 接收 `context.Context`，不保存 context、tool-call ID 或 session state。
-- write/edit 在同 target（含 existing/dangling symlink alias）内串行；queued cancel node 等 predecessor 完成后才转发 barrier。提交固定解析 real target，复核 alias/target identity 与 mode，保留 writable target mode，显式拒绝 `0000` write bits 的 target；操作在 atomic rename 前观察 cancellation，rename 后按已线性化的成功结果返回。
+- write/edit 在同 target（含 existing/dangling symlink alias）内串行；queued cancel node 同步等待 predecessor 完成后才返回并转发 barrier，调用结算后不保留 relay goroutine 或 queue node。提交固定解析 real target，复核 alias/target identity 与 mode，保留 writable target mode；existing target 在 prepare 与 rename 前都执行 identity-checked、无 truncation/append/write 的 `O_WRONLY` effective permission probe，同时保留无 write bit 显式拒绝策略。操作在 atomic rename 前观察 cancellation，rename 后按已线性化的成功结果返回。
 - Read/search 是 best-effort snapshot；read/edit 遇到 NUL 或 invalid UTF-8 返回 `ErrBinaryFile`，不会用 replacement rune 污染模型上下文。
 - read fallback 使用 canonical NFD 与 case-insensitive AM/PM；find/grep 的 ignore rules 从 git boundary 到 search root 加载并随 walk 增量编译，malformed/unsupported/I/O error typed fail。所有入口与 discovery/walk/read boundary 传播 cancellation。
 - Grep match limit 与 output byte limit 独立；context lines 不使用通用 2,000-line ceiling。Edit patch 是 4-line context、准确 count 的可应用多-hunk unified diff。
@@ -40,7 +40,7 @@
 - `packages/coding-agent/test/file-mutation-queue.test.ts`；
 - `packages/coding-agent/test/path-utils.test.ts`。
 
-所有 v0.2 条目在独立 review 前保持 `in-progress`/`deferred`，不因本地 gate 通过标为 `ported`。
+所有 v0.2 条目在最终独立 review 通过前保持 `in-progress`/`deferred`，不因本地 gate 通过标为 `ported`。
 
 ### v0.2 behavior slice
 

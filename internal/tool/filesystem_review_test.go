@@ -15,11 +15,14 @@ import (
 	"unicode/utf8"
 )
 
-func TestMutationQueueCancelledMiddleNodeKeepsSuccessorBehindPredecessor(t *testing.T) {
+func TestMutationQueueCancelledNodesSettleBehindPredecessorWithoutResidualBarriers(t *testing.T) {
+	const cancelledCount = 32
+
 	queue := newMutationQueue()
 	firstStarted := make(chan struct{})
 	thirdStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
+	var cancelledStarted atomic.Int32
 	var orderMu sync.Mutex
 	var order []string
 	first := make(chan error, 1)
@@ -37,19 +40,22 @@ func TestMutationQueueCancelledMiddleNodeKeepsSuccessorBehindPredecessor(t *test
 		})
 	}()
 	<-firstStarted
-	queue.mu.Lock()
-	firstBarrier := queue.tails["target"]
-	queue.mu.Unlock()
+	waitForQueueState(t, queue, 1, 0)
 
-	middleContext, cancelMiddle := context.WithCancel(context.Background())
-	middle := make(chan error, 1)
-	go func() {
-		middle <- queue.with(middleContext, "target", func() error { t.Error("cancelled B started"); return nil })
-	}()
-	waitForQueueTailChange(t, queue, "target", firstBarrier)
-	cancelMiddle()
-	if err := <-middle; !errors.Is(err, context.Canceled) {
-		t.Fatalf("B error = %v", err)
+	cancelled := make([]chan error, 0, cancelledCount)
+	for index := 0; index < cancelledCount; index++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		result := make(chan error, 1)
+		cancelled = append(cancelled, result)
+		go func() {
+			result <- queue.with(ctx, "target", func() error {
+				cancelledStarted.Add(1)
+				return nil
+			})
+		}()
+		waitForQueueState(t, queue, index+2, index)
+		cancel()
+		waitForQueueState(t, queue, index+2, index+1)
 	}
 
 	third := make(chan error, 1)
@@ -62,14 +68,27 @@ func TestMutationQueueCancelledMiddleNodeKeepsSuccessorBehindPredecessor(t *test
 			return nil
 		})
 	}()
+	waitForQueueState(t, queue, cancelledCount+2, cancelledCount)
+	for index, result := range cancelled {
+		select {
+		case err := <-result:
+			t.Fatalf("cancelled node %d settled before predecessor: %v", index, err)
+		default:
+		}
+	}
 	select {
 	case <-thirdStarted:
-		t.Fatal("C crossed cancelled B while A was still running")
-	case <-time.After(30 * time.Millisecond):
+		t.Fatal("C crossed cancelled nodes while A was still running")
+	default:
 	}
 	close(releaseFirst)
 	if err := <-first; err != nil {
 		t.Fatal(err)
+	}
+	for index, result := range cancelled {
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled node %d error = %v", index, err)
+		}
 	}
 	select {
 	case <-thirdStarted:
@@ -79,6 +98,12 @@ func TestMutationQueueCancelledMiddleNodeKeepsSuccessorBehindPredecessor(t *test
 	if err := <-third; err != nil {
 		t.Fatal(err)
 	}
+	if got := cancelledStarted.Load(); got != 0 {
+		t.Fatalf("%d cancelled operations started", got)
+	}
+	if nodes, keys, settling := queue.pendingState(); nodes != 0 || keys != 0 || settling != 0 {
+		t.Fatalf("queue retained nodes=%d keys=%d settling=%d", nodes, keys, settling)
+	}
 	orderMu.Lock()
 	defer orderMu.Unlock()
 	if got := strings.Join(order, ","); got != "A:start,A:end,C:start" {
@@ -86,19 +111,18 @@ func TestMutationQueueCancelledMiddleNodeKeepsSuccessorBehindPredecessor(t *test
 	}
 }
 
-func waitForQueueTailChange(t *testing.T, queue *mutationQueue, key string, previous chan struct{}) {
+func waitForQueueState(t *testing.T, queue *mutationQueue, expectedNodes, expectedSettling int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		queue.mu.Lock()
-		current := queue.tails[key]
-		queue.mu.Unlock()
-		if current != nil && current != previous {
+		nodes, _, settling := queue.pendingState()
+		if nodes == expectedNodes && settling == expectedSettling {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("queue tail did not change")
+	nodes, keys, settling := queue.pendingState()
+	t.Fatalf("queue nodes = %d, keys = %d, settling = %d; want nodes = %d, settling = %d", nodes, keys, settling, expectedNodes, expectedSettling)
 }
 
 func TestAtomicWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) {
@@ -157,6 +181,64 @@ func TestAtomicWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) 
 	data, _ = os.ReadFile(target)
 	if string(data) != "new" {
 		t.Fatalf("readonly target changed to %q", data)
+	}
+}
+
+func TestEffectiveWritabilityProbeDoesNotChangeContentsOrModTime(t *testing.T) {
+	root := t.TempDir()
+	target := writeTestFile(t, root, "probe.txt", "unchanged")
+	expected, err := snapshotPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyEffectiveWritability(target, expected); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "unchanged" {
+		t.Fatalf("probe changed contents to %q", data)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("probe changed mtime from %v to %v", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestAtomicWriteRechecksTargetPermissionsBeforeCommit(t *testing.T) {
+	root := t.TempDir()
+	target := writeTestFile(t, root, "recheck.txt", "old")
+	key, err := mutationKey(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := prepareAtomicWrite(context.Background(), target, key, []byte("new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plan.cleanup()
+	if err := os.Chmod(target, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(target, 0o600) }()
+	if err := plan.commit(context.Background()); !errors.Is(err, ErrFilesystemPath) {
+		t.Fatalf("commit error = %v, want changed permission snapshot", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("target changed to %q", data)
 	}
 }
 

@@ -296,12 +296,12 @@ func prepareAtomicWrite(ctx context.Context, destination, expectedKey string, co
 	if err != nil {
 		return nil, err
 	}
+	if err := verifyEffectiveWritability(target, targetSnapshot); err != nil {
+		return nil, err
+	}
 	mode := fs.FileMode(0o644)
 	if targetSnapshot.exists {
 		mode = targetSnapshot.info.Mode().Perm()
-		if mode&0o222 == 0 {
-			return nil, fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
-		}
 	}
 	targetDirectory := filepath.Dir(target)
 	temporary, err := os.CreateTemp(targetDirectory, ".pi-go-write-*")
@@ -358,8 +358,8 @@ func (p *atomicWritePlan) commit(ctx context.Context) error {
 	if err := verifyPathSnapshot(p.target, p.targetSnapshot); err != nil {
 		return fmt.Errorf("%w: destination changed before commit: %v", ErrFilesystemPath, err)
 	}
-	if p.targetSnapshot.exists && p.targetSnapshot.info.Mode().Perm()&0o222 == 0 {
-		return fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
+	if err := verifyEffectiveWritability(p.target, p.targetSnapshot); err != nil {
+		return err
 	}
 	if err := os.Rename(p.temporaryName, p.target); err != nil {
 		return fmt.Errorf("atomically replace destination: %w", err)
@@ -466,6 +466,37 @@ func verifyPathSnapshot(path string, expected pathSnapshot) error {
 	}
 	if current.info.Mode().Perm() != expected.info.Mode().Perm() {
 		return errors.New("path permissions changed")
+	}
+	return nil
+}
+
+// verifyEffectiveWritability supplements the stable mode/identity snapshot
+// with the OS account's effective permission decision. Opening without
+// O_TRUNC, O_APPEND, or a write keeps file contents and mtime unchanged while
+// still exercising owner-class permissions and platform ACLs.
+func verifyEffectiveWritability(path string, expected pathSnapshot) error {
+	if !expected.exists {
+		return nil
+	}
+	if expected.info.Mode().Perm()&0o222 == 0 {
+		return fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
+	}
+	handle, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("destination is not effectively writable: %w", err)
+	}
+	current, statErr := handle.Stat()
+	closeErr := handle.Close()
+	if statErr != nil {
+		return fmt.Errorf("inspect writability probe: %w", statErr)
+	}
+	if current.Mode().Type() != expected.info.Mode().Type() ||
+		!os.SameFile(current, expected.info) ||
+		current.Mode().Perm() != expected.info.Mode().Perm() {
+		return fmt.Errorf("%w: destination changed during writability probe", ErrFilesystemPath)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close writability probe: %w", closeErr)
 	}
 	return nil
 }
