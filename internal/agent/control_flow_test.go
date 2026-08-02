@@ -295,3 +295,236 @@ func TestMixedToolBatchPreservesEverySourceResultAndOnlyAllTerminateStops(t *tes
 		t.Fatalf("missing/failure were not durable errors")
 	}
 }
+
+func TestTerminatingBatchStillDrainsSteeringThenFollowUp(t *testing.T) {
+	transcript := newSession(t)
+	first, err := llm.NewToolCallBlock("first", "terminate", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := llm.NewToolCallBlock("second", "terminate", []byte(`{"x":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "steered"), mustTextTerminal(t, "followed"))
+	runtime := newAgent(t, transcript, scripted, mixedTool{})
+	if err := runtime.Steer("steer after terminate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.FollowUp("follow after terminate"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Run(context.Background(), "start"); err != nil {
+		t.Fatal(err)
+	}
+	if scripted.CallCount() != 3 {
+		t.Fatalf("provider calls = %d, want terminating batch plus steering/follow-up drain", scripted.CallCount())
+	}
+	if got := messageRoles(transcript.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{
+		llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult,
+		llm.RoleUser, llm.RoleAssistant, llm.RoleUser, llm.RoleAssistant,
+	}) {
+		t.Fatalf("terminating batch transcript roles = %v", got)
+	}
+}
+
+func TestSequentialCancellationAssociatesUnstartedCallsAndStopsProvider(t *testing.T) {
+	transcript := newSession(t)
+	first, err := llm.NewToolCallBlock("first", "slow", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := llm.NewToolCallBlock("second", "fast", []byte(`{"x":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "must not run"))
+	tool := &namedBatchTool{
+		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+	}
+	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.New(agent.Config{
+		Provider:      scripted,
+		Transcript:    transcript,
+		Model:         model,
+		Tool:          tool,
+		ToolExecution: agent.ToolExecutionSequential,
+		Now:           func() time.Time { return agentTestEpoch },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { _, err := runtime.Run(context.Background(), "go"); runDone <- err }()
+	waitClosed(t, tool.started["slow"], "first sequential tool start")
+	select {
+	case <-tool.started["fast"]:
+		t.Fatal("second sequential tool started before cancellation")
+	default:
+	}
+	if err := runtime.Abort(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+	if scripted.CallCount() != 1 {
+		t.Fatalf("provider calls after sequential cancellation = %d", scripted.CallCount())
+	}
+	select {
+	case <-tool.started["fast"]:
+		t.Fatal("second sequential tool started after cancellation")
+	default:
+	}
+	messages := transcript.Context().Messages()
+	if got := []string{toolResultAt(t, messages, 2).ToolCallID(), toolResultAt(t, messages, 3).ToolCallID()}; !reflect.DeepEqual(got, []string{"first", "second"}) {
+		t.Fatalf("cancelled result associations = %v", got)
+	}
+	if !toolResultAt(t, messages, 2).IsError() || !toolResultAt(t, messages, 3).IsError() {
+		t.Fatalf("cancelled batch results must be durable errors")
+	}
+	if failure := failureAt(t, messages, 4); failure.FinishReason() != llm.FinishAborted {
+		t.Fatalf("terminal finish = %s, want aborted", failure.FinishReason())
+	}
+}
+
+func TestCancelledSequentialBatchCommitFaultStopsBeforeSuccessor(t *testing.T) {
+	base := newSession(t)
+	transcript := &selectiveFailingTranscript{
+		base: base,
+		fail: func(message llm.ConversationMessage) bool {
+			result, ok := message.(llm.ToolResultMessage)
+			return ok && result.ToolCallID() == "second"
+		},
+	}
+	first, err := llm.NewToolCallBlock("first", "slow", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := llm.NewToolCallBlock("second", "fast", []byte(`{"x":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "must not run"))
+	tool := &namedBatchTool{
+		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
+	}
+	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.New(agent.Config{
+		Provider:      scripted,
+		Transcript:    transcript,
+		Model:         model,
+		Tool:          tool,
+		ToolExecution: agent.ToolExecutionSequential,
+		Now:           func() time.Time { return agentTestEpoch },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { _, err := runtime.Run(context.Background(), "go"); runDone <- err }()
+	waitClosed(t, tool.started["slow"], "first sequential tool start")
+	if err := runtime.Abort(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-runDone; !errors.Is(err, agent.ErrTranscriptCommit) {
+		t.Fatalf("Run error = %v, want transcript commit fault", err)
+	}
+	if scripted.CallCount() != 1 {
+		t.Fatalf("provider calls after tool-result fault = %d", scripted.CallCount())
+	}
+	if got := messageRoles(base.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult}) {
+		t.Fatalf("durable messages after second result fault = %v", got)
+	}
+	if result := toolResultAt(t, base.Context().Messages(), 2); result.ToolCallID() != "first" || !result.IsError() {
+		t.Fatalf("first durable cancellation result = id %q error %t", result.ToolCallID(), result.IsError())
+	}
+}
+
+func TestBatchCompletionClearsPendingToolBeforeNextTurnStarted(t *testing.T) {
+	transcript := newSession(t)
+	scripted := newScriptedProvider(t,
+		mustToolUseTerminal(t, "call", "bash", []byte(`{"command":"one"}`)),
+		mustTextTerminal(t, "done"),
+	)
+	runtime := newAgent(t, transcript, scripted, &fakeTool{name: "bash"})
+	var observed bool
+	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+		if event.Kind != agent.EventTurnStarted || event.Turn != 2 {
+			return
+		}
+		observed = true
+		state := runtime.State()
+		if state.Phase() != agent.PhaseProvider {
+			t.Errorf("phase at next turn start = %s, want provider", state.Phase())
+		}
+		if pending, ok := state.PendingToolCall(); ok || pending != "" {
+			t.Errorf("pending call at next turn start = %q/%t", pending, ok)
+		}
+	})
+	if _, err := runtime.Run(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if !observed {
+		t.Fatal("did not observe second turn start")
+	}
+}
+
+func TestContinueBusyAdmissionDoesNotDrainQueuedMessage(t *testing.T) {
+	transcript := newSession(t)
+	scripted := newScriptedProvider(t,
+		mustTextTerminal(t, "first"),
+		mustTextTerminal(t, "second"),
+		mustTextTerminal(t, "drained"),
+	)
+	runtime := newAgent(t, transcript, scripted, nil)
+	if _, err := runtime.Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	blockNextRun := true
+	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+		if !blockNextRun || event.Kind != agent.EventRunStarted {
+			return
+		}
+		close(blocked)
+		<-release
+	})
+	if err := runtime.Steer("must remain queued"); err != nil {
+		t.Fatal(err)
+	}
+	runDone := make(chan error, 1)
+	go func() { _, err := runtime.Run(context.Background(), "second"); runDone <- err }()
+	waitClosed(t, blocked, "second run admission before prompt commit")
+	if _, err := runtime.Continue(context.Background()); !errors.Is(err, agent.ErrBusy) {
+		t.Fatalf("Continue while active error = %v, want busy", err)
+	}
+	if steering, followUp := runtime.Queues(); len(steering) != 1 || len(followUp) != 0 {
+		t.Fatalf("failed Continue drained queues: steering=%d follow-up=%d", len(steering), len(followUp))
+	}
+	close(release)
+	if err := <-runDone; err != nil {
+		t.Fatal(err)
+	}
+}
