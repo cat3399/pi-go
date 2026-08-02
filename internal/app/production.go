@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,9 +39,9 @@ type ProductionConfig struct {
 	OpenAIHTTPClient provider.HTTPDoer
 	OpenAIClock      provider.Clock
 	// OpenAIOAuthHTTPClient/BaseURL are test and embedding seams for OAuth
-	// token exchange. Empty values use the normal OpenAI HTTP client and the
-	// fixed auth.openai.com endpoint.
-	OpenAIOAuthHTTPClient auth.HTTPClient
+	// token exchange. Empty values use a separately cloned no-redirect default
+	// HTTP client and the fixed auth.openai.com endpoint.
+	OpenAIOAuthHTTPClient *http.Client
 	OpenAIOAuthBaseURL    string
 	OpenAIOAuthClock      func() time.Time
 
@@ -254,11 +255,7 @@ func resolveOpenAIAPIKey(
 			return auth.OpenAIAuthResult{}, productionAuthError(err)
 		}
 	}
-	oauthClient := config.OpenAIOAuthHTTPClient
-	if oauthClient == nil {
-		oauthClient = config.OpenAIHTTPClient
-	}
-	flow, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{HTTPClient: oauthClient, AuthBaseURL: config.OpenAIOAuthBaseURL, Clock: config.OpenAIOAuthClock})
+	flow, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{HTTPClient: config.OpenAIOAuthHTTPClient, AuthBaseURL: config.OpenAIOAuthBaseURL, Clock: config.OpenAIOAuthClock})
 	if err != nil {
 		return auth.OpenAIAuthResult{}, productionAuthError(err)
 	}

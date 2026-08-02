@@ -10,10 +10,12 @@ import (
 	"errors"
 	"io"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -31,11 +33,6 @@ const (
 	openAICodexClaim           = "https://api.openai.com/auth"
 )
 
-// HTTPClient is deliberately the same narrow seam as the OpenAI adapter.
-// It makes token requests fixtureable without giving auth a provider import.
-type HTTPClient interface {
-	Do(*http.Request) (*http.Response, error)
-}
 type Sleep func(context.Context, time.Duration) error
 type BrowserOpener func(context.Context, string) error
 
@@ -44,7 +41,7 @@ type BrowserOpener func(context.Context, string) error
 // upstream localhost callback endpoint. Browser opening is deliberately left
 // to a caller; this service only emits a URL.
 type OpenAICodexOAuthConfig struct {
-	HTTPClient       HTTPClient
+	HTTPClient       *http.Client
 	Clock            func() time.Time
 	AuthBaseURL      string
 	CallbackHost     string
@@ -59,7 +56,7 @@ type OpenAICodexOAuthConfig struct {
 // OpenAICodexOAuth implements browser/device login and token refresh. It owns
 // no auth.json state; callers persist a successful login through Store.
 type OpenAICodexOAuth struct {
-	client   HTTPClient
+	client   *http.Client
 	now      func() time.Time
 	base     string
 	host     string
@@ -80,10 +77,7 @@ func NewOpenAICodexOAuth(config OpenAICodexOAuthConfig) (*OpenAICodexOAuth, erro
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, failure(KindInvalid, "initialize OpenAI Codex OAuth", "openai", nil)
 	}
-	client := config.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := cloneOAuthHTTPClient(config.HTTPClient)
 	now := config.Clock
 	if now == nil {
 		now = time.Now
@@ -117,6 +111,17 @@ func NewOpenAICodexOAuth(config OpenAICodexOAuthConfig) (*OpenAICodexOAuth, erro
 	return &OpenAICodexOAuth{client: client, now: now, base: strings.TrimRight(base, "/"), host: host, port: port, listener: config.CallbackListener, opener: config.BrowserOpener, sleep: sleep, random: random, maxBody: max}, nil
 }
 
+var errOAuthRedirect = errors.New("OAuth redirects are disabled")
+
+func cloneOAuthHTTPClient(input *http.Client) *http.Client {
+	if input == nil {
+		input = http.DefaultClient
+	}
+	clone := *input
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return errOAuthRedirect }
+	return &clone
+}
+
 func (o *OpenAICodexOAuth) endpoint(path string) string { return o.base + path }
 func (o *OpenAICodexOAuth) callbackURL() string {
 	return "http://localhost:" + strconv.Itoa(o.port) + "/auth/callback"
@@ -130,16 +135,65 @@ type Authorization struct {
 	flow        *OpenAICodexOAuth
 	verifier    string
 	redirectURI string
+	ctx         context.Context
+	cancel      context.CancelCauseFunc
+	stopContext func() bool
+	closeOnce   sync.Once
+	stateMu     sync.Mutex
+	closed      bool
+	waitMu      sync.Mutex
+	waitStarted bool
 }
+
+// Close and Cancel are idempotent. Either one unblocks Wait and shuts down the
+// callback listener even when the caller never starts Wait.
+func (a *Authorization) Close() {
+	if a == nil {
+		return
+	}
+	a.closeOnce.Do(func() {
+		a.stateMu.Lock()
+		a.closed = true
+		a.stateMu.Unlock()
+		if a.stopContext != nil {
+			a.stopContext()
+		}
+		if a.callback != nil {
+			a.callback.Close()
+		}
+		if a.cancel != nil {
+			a.cancel(context.Canceled)
+		}
+	})
+}
+func (a *Authorization) Cancel() { a.Close() }
 
 // Open invokes the caller-provided browser adapter explicitly. BeginBrowserLogin
 // never calls it on its own, keeping this package suitable for headless CLI
 // and future TUI callers.
 func (a *Authorization) Open(ctx context.Context) error {
+	if err := contextFailure(ctx, "open OAuth browser"); err != nil {
+		if a != nil {
+			a.Close()
+		}
+		return err
+	}
+	if a != nil {
+		a.stateMu.Lock()
+		closed := a.closed
+		a.stateMu.Unlock()
+		if closed {
+			return failure(KindCancelled, "open OAuth browser", "openai", context.Canceled)
+		}
+	}
 	if a == nil || a.flow == nil || a.flow.opener == nil {
+		if a != nil {
+			a.Close()
+		}
 		return failure(KindUnsupported, "open OAuth browser", "openai", nil)
 	}
 	if err := a.flow.opener(ctx, a.URL); err != nil {
+		a.Close()
 		return requestFailure(ctx, "open OAuth browser", err)
 	}
 	return nil
@@ -167,7 +221,14 @@ func (o *OpenAICodexOAuth) BeginBrowserLogin(ctx context.Context) (*Authorizatio
 		"scope": {openAICodexScope}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
 		"state": {state}, "id_token_add_organizations": {"true"}, "codex_cli_simplified_flow": {"true"}, "originator": {"pi"},
 	}
-	return &Authorization{URL: o.endpoint("/oauth/authorize") + "?" + query.Encode(), callback: waiter, flow: o, verifier: verifier, redirectURI: redirect}, nil
+	txContext, cancel := context.WithCancelCause(context.Background())
+	authorization := &Authorization{URL: o.endpoint("/oauth/authorize") + "?" + query.Encode(), callback: waiter, flow: o, verifier: verifier, redirectURI: redirect, ctx: txContext, cancel: cancel}
+	authorization.stopContext = context.AfterFunc(ctx, authorization.Close)
+	if cause := context.Cause(ctx); cause != nil {
+		authorization.Close()
+		return nil, failure(KindCancelled, "start OpenAI Codex browser login", "openai", cause)
+	}
+	return authorization, nil
 }
 
 // Wait accepts either a validated local callback or a manually supplied code.
@@ -177,28 +238,47 @@ func (a *Authorization) Wait(ctx context.Context, manual <-chan string) (OAuthCr
 	if a == nil || a.callback == nil {
 		return OAuthCredential{}, failure(KindInvalid, "wait for OAuth callback", "openai", nil)
 	}
-	defer a.callback.Close()
-	select {
-	case result := <-a.callback.result:
-		if result.err != nil {
-			return OAuthCredential{}, result.err
+	a.waitMu.Lock()
+	if a.waitStarted {
+		a.waitMu.Unlock()
+		return OAuthCredential{}, failure(KindInvalid, "wait for OAuth callback", "openai", nil)
+	}
+	a.waitStarted = true
+	a.waitMu.Unlock()
+	if ctx == nil {
+		a.Close()
+		return OAuthCredential{}, failure(KindInvalid, "wait for OAuth callback", "openai", nil)
+	}
+	waitCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(context.Canceled)
+	defer a.Close()
+	go func() {
+		select {
+		case <-a.ctx.Done():
+			cancel(context.Cause(a.ctx))
+		case <-waitCtx.Done():
 		}
-		return a.flow.ExchangeCode(ctx, result.code, a.verifier, a.redirectURI)
-	case input, ok := <-manual:
-		if !ok {
-			manual = nil
-			return a.Wait(ctx, nil)
+	}()
+	for {
+		select {
+		case result := <-a.callback.result:
+			if result.err != nil {
+				return OAuthCredential{}, result.err
+			}
+			return a.flow.ExchangeCode(waitCtx, result.code, a.verifier, a.redirectURI)
+		case input, ok := <-manual:
+			if !ok {
+				manual = nil
+				continue
+			}
+			code, state := parseAuthorizationInput(input)
+			if len(input) > callbackMaxQueryBytes || (state != "" && state != a.callback.state) || code == "" || len(code) > callbackMaxCodeBytes {
+				return OAuthCredential{}, failure(KindOAuth, "validate manual OAuth callback", "openai", nil)
+			}
+			return a.flow.ExchangeCode(waitCtx, code, a.verifier, a.redirectURI)
+		case <-waitCtx.Done():
+			return OAuthCredential{}, failure(KindCancelled, "wait for OAuth callback", "openai", context.Cause(waitCtx))
 		}
-		code, state := parseAuthorizationInput(input)
-		if state != "" && state != a.callback.state {
-			return OAuthCredential{}, failure(KindOAuth, "validate manual OAuth callback", "openai", nil)
-		}
-		if code == "" {
-			return OAuthCredential{}, failure(KindOAuth, "validate manual OAuth callback", "openai", nil)
-		}
-		return a.flow.ExchangeCode(ctx, code, a.verifier, a.redirectURI)
-	case <-ctx.Done():
-		return OAuthCredential{}, failure(KindCancelled, "wait for OAuth callback", "openai", context.Cause(ctx))
 	}
 }
 
@@ -248,17 +328,15 @@ func (o *OpenAICodexOAuth) token(ctx context.Context, operation string, form url
 		return OAuthCredential{}, failure(KindOAuth, operation+" OpenAI Codex token", "openai", err)
 	}
 	defer response.Body.Close()
+	body, root, admissionErr := readJSONDocument(response, o.maxBody, response.StatusCode < 200 || response.StatusCode > 299)
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		_, _ = boundedRead(response.Body, o.maxBody)
+		if admissionErr != nil {
+			return OAuthCredential{}, failure(KindMalformed, operation+" OpenAI Codex token", "openai", admissionErr)
+		}
 		return OAuthCredential{}, failure(KindOAuth, operation+" OpenAI Codex token", "openai", nil)
 	}
-	body, err := boundedRead(response.Body, o.maxBody)
-	if err != nil || !utf8.Valid(body) {
-		return OAuthCredential{}, failure(KindMalformed, operation+" OpenAI Codex token", "openai", err)
-	}
-	root, err := decodeObject(body)
-	if err != nil {
-		return OAuthCredential{}, failure(KindMalformed, operation+" OpenAI Codex token", "openai", err)
+	if admissionErr != nil {
+		return OAuthCredential{}, failure(KindMalformed, operation+" OpenAI Codex token", "openai", admissionErr)
 	}
 	var raw struct {
 		Access  string          `json:"access_token"`
@@ -296,16 +374,15 @@ func (o *OpenAICodexOAuth) StartDeviceLogin(ctx context.Context) (DeviceCode, er
 		return DeviceCode{}, requestFailure(ctx, "start OpenAI Codex device login", err)
 	}
 	defer response.Body.Close()
-	body, readErr := boundedRead(response.Body, o.maxBody)
+	body, _, admissionErr := readJSONDocument(response, o.maxBody, response.StatusCode < 200 || response.StatusCode > 299)
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return DeviceCode{}, failure(KindOAuth, "start OpenAI Codex device login", "openai", readErr)
+		if admissionErr != nil {
+			return DeviceCode{}, failure(KindMalformed, "start OpenAI Codex device login", "openai", admissionErr)
+		}
+		return DeviceCode{}, failure(KindOAuth, "start OpenAI Codex device login", "openai", nil)
 	}
-	if readErr != nil || !utf8.Valid(body) {
-		return DeviceCode{}, failure(KindMalformed, "start OpenAI Codex device login", "openai", readErr)
-	}
-	root, err := decodeObject(body)
-	if err != nil {
-		return DeviceCode{}, failure(KindMalformed, "start OpenAI Codex device login", "openai", err)
+	if admissionErr != nil {
+		return DeviceCode{}, failure(KindMalformed, "start OpenAI Codex device login", "openai", admissionErr)
 	}
 	var value struct {
 		ID       string          `json:"device_auth_id"`
@@ -319,7 +396,6 @@ func (o *OpenAICodexOAuth) StartDeviceLogin(ctx context.Context) (DeviceCode, er
 	if err != nil {
 		return DeviceCode{}, failure(KindMalformed, "start OpenAI Codex device login", "openai", err)
 	}
-	_ = root
 	return DeviceCode{DeviceAuthID: value.ID, UserCode: value.UserCode, VerificationURI: o.endpoint("/codex/device"), Interval: interval, ExpiresIn: defaultDeviceTimeout}, nil
 }
 
@@ -329,13 +405,18 @@ type DeviceCode struct {
 }
 
 func (o *OpenAICodexOAuth) CompleteDeviceLogin(ctx context.Context, device DeviceCode) (OAuthCredential, error) {
+	if err := contextFailure(ctx, "complete OpenAI Codex device login"); err != nil {
+		return OAuthCredential{}, err
+	}
 	if !validOAuthText(device.DeviceAuthID) || !validOAuthText(device.UserCode) {
 		return OAuthCredential{}, failure(KindInvalid, "complete OpenAI Codex device login", "openai", nil)
 	}
-	deadline := o.now().Add(device.ExpiresIn)
-	if device.ExpiresIn <= 0 {
-		deadline = o.now().Add(defaultDeviceTimeout)
+	expiresIn := device.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = defaultDeviceTimeout
 	}
+	pollContext, cancel := context.WithTimeout(ctx, expiresIn)
+	defer cancel()
 	interval := device.Interval
 	if interval <= 0 {
 		interval = defaultDeviceInterval
@@ -344,73 +425,126 @@ func (o *OpenAICodexOAuth) CompleteDeviceLogin(ctx context.Context, device Devic
 		interval = minimumDeviceInterval
 	}
 	for first := true; ; first = false {
-		if err := contextFailure(ctx, "complete OpenAI Codex device login"); err != nil {
-			return OAuthCredential{}, err
+		if cause := context.Cause(pollContext); cause != nil {
+			return OAuthCredential{}, deviceContextFailure(cause)
 		}
 		if !first {
-			if err := o.sleep(ctx, interval); err != nil {
-				return OAuthCredential{}, requestFailure(ctx, "complete OpenAI Codex device login", err)
+			delay := interval
+			if deadline, ok := pollContext.Deadline(); ok && time.Until(deadline) < delay {
+				delay = time.Until(deadline)
+			}
+			if delay <= 0 {
+				return OAuthCredential{}, failure(KindTimeout, "complete OpenAI Codex device login", "openai", context.DeadlineExceeded)
+			}
+			if err := o.sleep(pollContext, delay); err != nil {
+				if cause := context.Cause(pollContext); cause != nil {
+					return OAuthCredential{}, deviceContextFailure(cause)
+				}
+				return OAuthCredential{}, failure(KindOAuth, "wait to poll OpenAI Codex device login", "openai", err)
 			}
 		}
-		if !o.now().Before(deadline) {
-			return OAuthCredential{}, failure(KindTimeout, "complete OpenAI Codex device login", "openai", nil)
-		}
-		code, pending, slow, err := o.pollDevice(ctx, device)
+		result, err := o.pollDevice(pollContext, device)
 		if err != nil {
 			return OAuthCredential{}, err
 		}
-		if code != "" {
-			return o.ExchangeCode(ctx, code, pending, o.endpoint("/deviceauth/callback"))
+		if result.status == devicePollComplete {
+			return o.ExchangeCode(pollContext, result.code, result.verifier, o.endpoint("/deviceauth/callback"))
 		}
-		if slow {
+		if result.status == devicePollSlowDown {
 			interval += 5 * time.Second
 		}
 	}
 }
 
-// pollDevice returns authorization code, verifier, whether poll is pending,
-// and slow_down. 403/404 and deviceauth_authorization_pending are pending as
-// in the fixed upstream flow.
-func (o *OpenAICodexOAuth) pollDevice(ctx context.Context, device DeviceCode) (string, string, bool, error) {
+// pollDevice returns an explicit pending/slow_down/complete state. 403/404 and
+// deviceauth_authorization_pending are pending as in the fixed upstream flow.
+type devicePollStatus uint8
+
+const (
+	devicePollPending devicePollStatus = iota
+	devicePollSlowDown
+	devicePollComplete
+)
+
+type devicePollResult struct {
+	status         devicePollStatus
+	code, verifier string
+}
+
+func (o *OpenAICodexOAuth) pollDevice(ctx context.Context, device DeviceCode) (devicePollResult, error) {
 	body := `{"device_auth_id":` + strconv.Quote(device.DeviceAuthID) + `,"user_code":` + strconv.Quote(device.UserCode) + `}`
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint("/api/accounts/deviceauth/token"), strings.NewReader(body))
 	if err != nil {
-		return "", "", false, failure(KindInvalid, "poll OpenAI Codex device login", "openai", err)
+		return devicePollResult{}, failure(KindInvalid, "poll OpenAI Codex device login", "openai", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := o.client.Do(request)
 	if err != nil {
-		return "", "", false, requestFailure(ctx, "poll OpenAI Codex device login", err)
+		return devicePollResult{}, requestFailure(ctx, "poll OpenAI Codex device login", err)
 	}
 	defer response.Body.Close()
-	payload, readErr := boundedRead(response.Body, o.maxBody)
+	payload, root, admissionErr := readJSONDocument(response, o.maxBody, response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound)
 	if response.StatusCode >= 200 && response.StatusCode <= 299 {
-		if readErr != nil || !utf8.Valid(payload) {
-			return "", "", false, failure(KindMalformed, "poll OpenAI Codex device login", "openai", readErr)
+		if admissionErr != nil {
+			return devicePollResult{}, failure(KindMalformed, "poll OpenAI Codex device login", "openai", admissionErr)
 		}
 		var value struct {
 			Code     string `json:"authorization_code"`
 			Verifier string `json:"code_verifier"`
 		}
 		if err := json.Unmarshal(payload, &value); err != nil || !validOAuthText(value.Code) || !validOAuthText(value.Verifier) {
-			return "", "", false, failure(KindMalformed, "poll OpenAI Codex device login", "openai", err)
+			return devicePollResult{}, failure(KindMalformed, "poll OpenAI Codex device login", "openai", err)
 		}
-		return value.Code, value.Verifier, false, nil
+		return devicePollResult{status: devicePollComplete, code: value.Code, verifier: value.Verifier}, nil
 	}
 	if response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusNotFound {
-		return "", "", true, nil
+		if admissionErr != nil {
+			return devicePollResult{}, failure(KindMalformed, "poll OpenAI Codex device login", "openai", admissionErr)
+		}
+		return devicePollResult{status: devicePollPending}, nil
 	}
-	var value struct {
-		Error any `json:"error"`
+	if admissionErr != nil {
+		return devicePollResult{}, failure(KindMalformed, "poll OpenAI Codex device login", "openai", admissionErr)
 	}
-	_ = json.Unmarshal(payload, &value)
-	if code, _ := value.Error.(string); code == "deviceauth_authorization_pending" {
-		return "", "", true, nil
+	var code string
+	if raw, ok := root["error"]; ok {
+		if json.Unmarshal(raw, &code) != nil {
+			var nested struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal(raw, &nested)
+			code = nested.Code
+		}
 	}
-	if code, _ := value.Error.(string); code == "slow_down" {
-		return "", "", false, nil
+	if code == "deviceauth_authorization_pending" {
+		return devicePollResult{status: devicePollPending}, nil
 	}
-	return "", "", false, failure(KindOAuth, "poll OpenAI Codex device login", "openai", readErr)
+	if code == "slow_down" {
+		return devicePollResult{status: devicePollSlowDown}, nil
+	}
+	return devicePollResult{}, failure(KindOAuth, "poll OpenAI Codex device login", "openai", nil)
+}
+
+func readJSONDocument(response *http.Response, maximum int64, allowEmpty bool) ([]byte, map[string]json.RawMessage, error) {
+	body, err := boundedRead(response.Body, maximum)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(body) == 0 && allowEmpty {
+		return body, nil, nil
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		return nil, nil, errors.New("response content type is not application/json")
+	}
+	if !utf8.Valid(body) {
+		return nil, nil, errors.New("response is not valid UTF-8")
+	}
+	root, err := decodeObject(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, root, nil
 }
 
 func boundedRead(reader io.Reader, maximum int64) ([]byte, error) {
@@ -463,9 +597,19 @@ func contextFailure(ctx context.Context, operation string) error {
 }
 func requestFailure(ctx context.Context, operation string, err error) error {
 	if ctx != nil && context.Cause(ctx) != nil {
+		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			return failure(KindTimeout, operation, "openai", context.Cause(ctx))
+		}
 		return failure(KindCancelled, operation, "openai", context.Cause(ctx))
 	}
 	return failure(KindOAuth, operation, "openai", err)
+}
+
+func deviceContextFailure(cause error) error {
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return failure(KindTimeout, "complete OpenAI Codex device login", "openai", cause)
+	}
+	return failure(KindCancelled, "complete OpenAI Codex device login", "openai", cause)
 }
 
 func parseAuthorizationInput(input string) (code, state string) {
@@ -474,7 +618,8 @@ func parseAuthorizationInput(input string) (code, state string) {
 		return "", ""
 	}
 	if parsed, err := url.Parse(value); err == nil && parsed.IsAbs() {
-		return parsed.Query().Get("code"), parsed.Query().Get("state")
+		query := parsed.Query()
+		return singleQueryValue(query, "code"), singleQueryValue(query, "state")
 	}
 	if before, after, found := strings.Cut(value, "#"); found {
 		return before, after
@@ -482,10 +627,16 @@ func parseAuthorizationInput(input string) (code, state string) {
 	if strings.Contains(value, "code=") {
 		parsed, err := url.ParseQuery(value)
 		if err == nil {
-			return parsed.Get("code"), parsed.Get("state")
+			return singleQueryValue(parsed, "code"), singleQueryValue(parsed, "state")
 		}
 	}
 	return value, ""
+}
+func singleQueryValue(values url.Values, name string) string {
+	if len(values[name]) != 1 {
+		return ""
+	}
+	return values[name][0]
 }
 func accountIDFromJWT(token string) (string, error) {
 	parts := strings.Split(token, ".")

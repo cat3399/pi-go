@@ -85,6 +85,7 @@ and no-secret diagnostics tests.
 - `Store` remains the only durable owner. OAuth refresh re-reads expiry under its existing process-local and cross-process locks; exchange or atomic write failure never replaces the old credential.
 - Explicit/runtime API keys beat stored OAuth. A selected malformed, failed-refresh or failed-persist OAuth record never falls through to models.json or ambient keys.
 - Callback accepts only matching-state `GET /auth/callback` with code; bind/state/error/cancel/late callback cannot settle another transaction. The returned authorization transaction owns listener lifecycle.
+- OAuth HTTP uses a caller-client clone with an unconditional no-redirect policy, bounded UTF-8 recursively strict JSON and exact `application/json` media admission. Device polling has explicit pending/slow-down states and a real context deadline that caps sleeps, polls, and the final exchange.
 - OAuth bodies, codes, verifier and refresh token never enter errors/logs. Windows keeps v0.1's fail-closed persistent-store admission; it does not fake a DACL guarantee.
 
 Fixed upstream evidence: `a116523434806910336b9de3e38a41aa5860030b`,

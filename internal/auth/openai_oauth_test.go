@@ -50,7 +50,7 @@ func TestBrowserAuthorizationUsesPKCEStateCallbackAndExplicitOpener(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer authorization.callback.Close()
+	defer authorization.Close()
 	if opened != "" || listener.address != "127.0.0.1:1455" {
 		t.Fatalf("unexpected implicit opener/bind: opened %q bind %q", opened, listener.address)
 	}
@@ -70,6 +70,7 @@ func TestBrowserAuthorizationUsesPKCEStateCallbackAndExplicitOpener(t *testing.T
 func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 	var exchanges atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		exchanges.Add(1)
 		if request.URL.Path != "/oauth/token" {
 			t.Errorf("token path = %s", request.URL.Path)
@@ -87,7 +88,15 @@ func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "http://" + listener.listener.Addr().String() + "/auth/callback"
-	bad, err := http.Get(base + "?state=wrong&code=bad-code")
+	callbackRequest := func(rawURL string) (*http.Response, error) {
+		request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		request.Host = "localhost:1455"
+		return http.DefaultClient.Do(request)
+	}
+	bad, err := callbackRequest(base + "?state=wrong&code=bad-code")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +104,7 @@ func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 		t.Fatalf("bad state status = %d", bad.StatusCode)
 	}
 	bad.Body.Close()
-	good, err := http.Get(base + "?state=" + authz.callback.state + "&code=authorization-code")
+	good, err := callbackRequest(base + "?state=" + authz.callback.state + "&code=authorization-code")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +119,7 @@ func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 	if exchanges.Load() != 1 {
 		t.Fatalf("exchanges = %d", exchanges.Load())
 	}
-	late, err := http.Get(base + "?state=" + authz.callback.state + "&code=late-code")
+	late, err := callbackRequest(base + "?state=" + authz.callback.state + "&code=late-code")
 	if err == nil {
 		late.Body.Close()
 		t.Fatalf("late callback unexpectedly reached closed listener")
@@ -133,6 +142,7 @@ func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 func TestDeviceFlowPollsPendingSlowDownAndExchanges(t *testing.T) {
 	var polls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		switch request.URL.Path {
 		case "/api/accounts/deviceauth/usercode":
 			if request.Header.Get("Content-Type") != "application/json" {
@@ -157,8 +167,8 @@ func TestDeviceFlowPollsPendingSlowDownAndExchanges(t *testing.T) {
 	}))
 	defer server.Close()
 	var sleeps []time.Duration
-	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, Sleep: func(context.Context, time.Duration) error {
-		sleeps = append(sleeps, time.Duration(len(sleeps)+1)*time.Second)
+	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, Sleep: func(_ context.Context, delay time.Duration) error {
+		sleeps = append(sleeps, delay)
 		return nil
 	}})
 	if err != nil {
@@ -169,7 +179,7 @@ func TestDeviceFlowPollsPendingSlowDownAndExchanges(t *testing.T) {
 		t.Fatalf("StartDeviceLogin = %#v, %v", device, err)
 	}
 	credential, err := flow.CompleteDeviceLogin(context.Background(), device)
-	if err != nil || credential.AccountID != "device-account" || polls.Load() != 3 || len(sleeps) != 2 {
+	if err != nil || credential.AccountID != "device-account" || polls.Load() != 3 || len(sleeps) != 2 || sleeps[0] != time.Second || sleeps[1] != 6*time.Second {
 		t.Fatalf("CompleteDeviceLogin = %#v, %v polls=%d sleeps=%v", credential, err, polls.Load(), sleeps)
 	}
 }
@@ -178,6 +188,7 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 	requirePersistentAuth(t)
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		refreshes.Add(1)
 		_, _ = io.WriteString(writer, oauthJSON(oauthJWT("fresh-account"), "fresh-refresh"))
 	}))
@@ -237,13 +248,14 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 func TestTokenFailuresAreBoundedUTF8AndSecretSafe(t *testing.T) {
 	secret := "refresh-never-leak"
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(writer, secret+strings.Repeat("x", 1024))
+		_, _ = io.WriteString(writer, `{"error":`+strconvQuote(secret+strings.Repeat("x", 1024))+`}`)
 	}))
 	defer server.Close()
 	flow, _ := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, MaxResponseBytes: 256})
 	_, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: secret})
-	if !IsKind(err, KindOAuth) || strings.Contains(err.Error(), secret) {
+	if !IsKind(err, KindMalformed) || strings.Contains(err.Error(), secret) {
 		t.Fatalf("status failure = %v", err)
 	}
 }
@@ -259,20 +271,230 @@ func TestDeviceFlowCancellationAndTimeoutAreTyped(t *testing.T) {
 	if !IsKind(err, KindCancelled) {
 		t.Fatalf("cancel device login = %v", err)
 	}
-	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	var calls atomic.Int32
-	timeoutFlow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{Clock: func() time.Time {
-		if calls.Add(1) == 1 {
-			return start
-		}
-		return start.Add(2 * time.Minute)
-	}})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { writer.WriteHeader(http.StatusForbidden) }))
+	defer server.Close()
+	timeoutFlow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = timeoutFlow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "device", UserCode: "code", ExpiresIn: time.Minute})
+	started := time.Now()
+	_, err = timeoutFlow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "device", UserCode: "code", Interval: time.Hour, ExpiresIn: 20 * time.Millisecond})
 	if !IsKind(err, KindTimeout) {
 		t.Fatalf("timeout device login = %v", err)
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("timeout exceeded deadline: %s", time.Since(started))
+	}
+}
+
+func TestOAuthHTTPRejects307BeforeAnySecretReachesCollector(t *testing.T) {
+	var collectorCalls atomic.Int32
+	var collectorBody atomic.Value
+	collector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		collectorCalls.Add(1)
+		body, _ := io.ReadAll(request.Body)
+		collectorBody.Store(string(body))
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{}`)
+	}))
+	defer collector.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Location", collector.URL+request.URL.Path)
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	var callerPolicyCalls atomic.Int32
+	callerClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { callerPolicyCalls.Add(1); return nil }}
+	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: redirector.URL, HTTPClient: callerClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: "refresh-redirect-secret"}); !IsKind(err, KindOAuth) {
+		t.Fatalf("refresh redirect = %v", err)
+	}
+	if _, err := flow.StartDeviceLogin(context.Background()); !IsKind(err, KindOAuth) {
+		t.Fatalf("device start redirect = %v", err)
+	}
+	if _, err := flow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "device-redirect-secret", UserCode: "user-redirect-secret", ExpiresIn: time.Second}); !IsKind(err, KindOAuth) {
+		t.Fatalf("device poll redirect = %v", err)
+	}
+	if collectorCalls.Load() != 0 {
+		t.Fatalf("collector received %d requests, last body %q", collectorCalls.Load(), collectorBody.Load())
+	}
+	if callerPolicyCalls.Load() != 0 {
+		t.Fatalf("caller redirect policy was used/mutated: %d", callerPolicyCalls.Load())
+	}
+	request, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
+	_ = callerClient.CheckRedirect(request, nil)
+	if callerPolicyCalls.Load() != 1 {
+		t.Fatal("caller client policy was mutated")
+	}
+}
+
+func TestDeviceHungPollIsBoundedByExpiryContext(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		close(entered)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() { close(release); server.Close() }()
+	flow, _ := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL})
+	started := time.Now()
+	_, err := flow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "device", UserCode: "code", ExpiresIn: 30 * time.Millisecond})
+	if !IsKind(err, KindTimeout) {
+		t.Fatalf("hung poll = %v", err)
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("hung poll exceeded expiry: %s", time.Since(started))
+	}
+	select {
+	case <-entered:
+	default:
+		t.Fatal("poll was not issued")
+	}
+}
+
+func TestOAuthJSONAndMediaAdmission(t *testing.T) {
+	tests := []struct {
+		name, path, contentType, body string
+		status                        int
+		invoke                        func(*OpenAICodexOAuth) error
+		want                          Kind
+	}{
+		{name: "token duplicate", path: "/oauth/token", contentType: "application/json", body: `{"access_token":"a","access_token":"b","refresh_token":"r","expires_in":1}`, invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: "secret"})
+			return err
+		}, want: KindMalformed},
+		{name: "token media", path: "/oauth/token", contentType: "text/plain", body: oauthJSON(oauthJWT("account"), "refresh"), invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: "secret"})
+			return err
+		}, want: KindMalformed},
+		{name: "token UTF-8", path: "/oauth/token", contentType: "application/json", body: string([]byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}), invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: "secret"})
+			return err
+		}, want: KindMalformed},
+		{name: "token status", path: "/oauth/token", contentType: "application/json; charset=utf-8", body: `{"error":{"code":"denied"}}`, status: http.StatusTeapot, invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.Refresh(context.Background(), OAuthCredential{Refresh: "secret"})
+			return err
+		}, want: KindOAuth},
+		{name: "start nested duplicate", path: "/api/accounts/deviceauth/usercode", contentType: "application/json", body: `{"device_auth_id":"d","user_code":"u","interval":1,"future":{"x":1,"x":2}}`, invoke: func(flow *OpenAICodexOAuth) error { _, err := flow.StartDeviceLogin(context.Background()); return err }, want: KindMalformed},
+		{name: "poll media", path: "/api/accounts/deviceauth/token", contentType: "application/problem+json", body: `{"authorization_code":"c","code_verifier":"v"}`, invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "d", UserCode: "u", ExpiresIn: time.Second})
+			return err
+		}, want: KindMalformed},
+		{name: "pending duplicate error", path: "/api/accounts/deviceauth/token", contentType: "application/json", body: `{"error":"deviceauth_authorization_pending","error":"slow_down"}`, status: http.StatusBadRequest, invoke: func(flow *OpenAICodexOAuth) error {
+			_, err := flow.CompleteDeviceLogin(context.Background(), DeviceCode{DeviceAuthID: "d", UserCode: "u", ExpiresIn: time.Second})
+			return err
+		}, want: KindMalformed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != test.path {
+					t.Errorf("path = %s", request.URL.Path)
+				}
+				writer.Header().Set("Content-Type", test.contentType)
+				status := test.status
+				if status == 0 {
+					status = http.StatusOK
+				}
+				writer.WriteHeader(status)
+				_, _ = io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+			flow, _ := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL})
+			if err := test.invoke(flow); !IsKind(err, test.want) {
+				t.Fatalf("error = %v, want %s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBrowserTransactionCloseContextOpenerAndRequestLimits(t *testing.T) {
+	newAuthorization := func(t *testing.T, begin context.Context, opener BrowserOpener) (*Authorization, string) {
+		t.Helper()
+		listener := &ephemeralListener{}
+		flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: "https://fixture.test", CallbackListener: listener, BrowserOpener: opener})
+		if err != nil {
+			t.Fatal(err)
+		}
+		authz, err := flow.BeginBrowserLogin(begin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return authz, "http://" + listener.listener.Addr().String() + "/auth/callback"
+	}
+	request := func(method, rawURL, host string) (*http.Response, error) {
+		req, err := http.NewRequest(method, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Host = host
+		return http.DefaultClient.Do(req)
+	}
+	authz, base := newAuthorization(t, context.Background(), nil)
+	for _, input := range []struct {
+		method, target, host string
+		status               int
+	}{
+		{http.MethodPost, base, "localhost:1455", http.StatusNotFound},
+		{http.MethodGet, base + "?state=" + authz.callback.state + "&code=x", "evil.example", http.StatusBadRequest},
+		{http.MethodGet, base + "?state=" + authz.callback.state + "&code=" + strings.Repeat("x", callbackMaxCodeBytes+1), "localhost:1455", http.StatusBadRequest},
+		{http.MethodGet, base + "?state=" + authz.callback.state + "&code=x&padding=" + strings.Repeat("y", callbackMaxQueryBytes), "localhost:1455", http.StatusRequestURITooLong},
+		{http.MethodGet, base + "?state=" + authz.callback.state + "&error=" + strings.Repeat("z", callbackMaxErrorBytes+1), "localhost:1455", http.StatusBadRequest},
+		{http.MethodGet, base + "?state=" + authz.callback.state + "&state=" + authz.callback.state + "&code=x", "localhost:1455", http.StatusBadRequest},
+	} {
+		response, err := request(input.method, input.target, input.host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != input.status {
+			t.Fatalf("%s status = %d", input.target, response.StatusCode)
+		}
+	}
+	authz.Close()
+	authz.Close()
+	authz.Cancel()
+	if _, err := request(http.MethodGet, base, "localhost:1455"); err == nil {
+		t.Fatal("closed transaction still accepted a request")
+	}
+
+	begin, cancel := context.WithCancel(context.Background())
+	authz, base = newAuthorization(t, begin, nil)
+	cancel()
+	select {
+	case <-authz.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("begin cancellation did not close transaction")
+	}
+	if _, err := request(http.MethodGet, base, "localhost:1455"); err == nil {
+		t.Fatal("context-cancelled transaction still listening")
+	}
+
+	authz, base = newAuthorization(t, context.Background(), func(context.Context, string) error { return errors.New("opener failed") })
+	if err := authz.Open(context.Background()); !IsKind(err, KindOAuth) {
+		t.Fatalf("opener failure = %v", err)
+	}
+	if _, err := request(http.MethodGet, base, "localhost:1455"); err == nil {
+		t.Fatal("opener failure leaked listener")
+	}
+
+	authz, _ = newAuthorization(t, context.Background(), nil)
+	done := make(chan error, 1)
+	go func() { _, err := authz.Wait(context.Background(), nil); done <- err }()
+	authz.Close()
+	select {
+	case err := <-done:
+		if !IsKind(err, KindCancelled) {
+			t.Fatalf("Wait/Close race = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait/Close race hung")
 	}
 }
 
