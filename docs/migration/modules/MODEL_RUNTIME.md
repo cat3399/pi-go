@@ -1,6 +1,6 @@
 # M-MODEL：settings 与 model catalog runtime charter
 
-状态：`implemented; independent review pending`
+状态：`ported`（`M-MODEL/v0.1-settings-catalog-runtime`；`R-MODEL-001`）
 
 ## 职责与边界
 
@@ -33,11 +33,11 @@ metadata 的显式字段；production 仅装配 `openai/openai-responses`，其�
 
 | ID | 行为 | 状态 |
 | --- | --- | --- |
-| B-MODEL-001 | JSON/JSONC strict admission、duplicate 与 secret-safe diagnostic | ported/strengthened |
-| B-MODEL-002 | provider/model overlay、custom model 与最小 OpenAI baseline | ported/strengthened |
-| B-MODEL-003 | CLI/provider-prefixed、settings default、ordered enabled scope | ported (exact only) |
-| B-MODEL-004 | transactional reload、snapshot clone、settings/store atomic persistence | strengthened |
-| B-MODEL-005 | production preflight only supported provider/API and selected-route unsupported/unknown fields | in-progress (independent review pending) |
+| B-MODEL-001 | JSON/JSONC strict admission、duplicate 与 secret-safe diagnostic | ported |
+| B-MODEL-002 | provider/model overlay、custom model 与最小 OpenAI baseline | ported |
+| B-MODEL-003 | CLI/provider-prefixed、settings default、ordered enabled scope | ported |
+| B-MODEL-004 | transactional reload、snapshot clone、settings/store atomic persistence | ported |
+| B-MODEL-005 | production preflight only supported provider/API and selected-route unsupported/unknown fields | ported |
 
 ## 明确债务
 
