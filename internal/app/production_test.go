@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -244,9 +245,10 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 		mu.Unlock()
 		writer.Header().Set("Content-Type", "text/event-stream")
 		if turn == 1 {
-			reasoning := map[string]any{"type": "reasoning", "id": "rs_persist", "encrypted_content": "cipher"}
-			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
-			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoning}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoning, text}}})
+			reasoningDone := map[string]any{"type": "reasoning", "id": "rs_persist"}
+			reasoningTerminal := map[string]any{"type": "reasoning", "id": "rs_persist", "encrypted_content": "cipher"}
+			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
+			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoningDone}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoningTerminal, text}}})
 			return
 		}
 		text := map[string]any{"type": "message", "id": "msg_next", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "second"}}}
@@ -268,14 +270,18 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 		t.Fatalf("requests=%d", len(received))
 	}
 	input := received[1]["input"].([]any)
-	found := false
+	foundReasoning := false
+	foundText := false
 	for _, item := range input {
 		wire := item.(map[string]any)
 		if wire["type"] == "reasoning" {
-			found = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher"
+			foundReasoning = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher"
+		}
+		if wire["type"] == "message" && wire["id"] == "msg_persist" {
+			foundText = wire["phase"] == "final_answer"
 		}
 	}
-	if !found {
+	if !foundReasoning || !foundText {
 		t.Fatalf("resumed input=%#v", input)
 	}
 	transcript, err := session.Open(sessionPath, session.OpenOptions{})
@@ -292,6 +298,76 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 	}
 	if replay, ok := messages[1].(llm.AssistantRichMessage).OpenAIResponsesMetadata(); !ok || replay.RawStopReason != "completed" {
 		t.Fatalf("response replay=%#v", replay)
+	}
+}
+
+func TestRunProductionReplaysDurableImageAfterRestart(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(workingDir, "image-restart.jsonl")
+	entryIDs := []string{"seed-image", "new-user", "assistant"}
+	transcript, err := session.Create(sessionPath, session.CreateOptions{
+		ID:         "image-restart",
+		WorkingDir: workingDir,
+		Now:        func() time.Time { return productionTestTime },
+		NewEntryID: func() (string, error) {
+			id := entryIDs[0]
+			entryIDs = entryIDs[1:]
+			return id, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	png, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := llm.NewImageDataBlock("image/png", png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caption, err := llm.NewTextBlock("seed image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := llm.NewUserContentMessage([]llm.UserContentBlock{caption, image}, productionTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), seed, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "image resumed")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	config.NewSessionEntryID = func() (string, error) {
+		id := entryIDs[0]
+		entryIDs = entryIDs[1:]
+		return id, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-image", "--session", sessionPath, "-p", "continue"}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	if len(input) < 2 {
+		t.Fatalf("resumed input = %#v", input)
+	}
+	seedWire := input[0].(map[string]any)
+	content := seedWire["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("seed content = %#v", content)
+	}
+	imageWire := content[1].(map[string]any)
+	if imageWire["type"] != "input_image" || imageWire["image_url"] != "data:image/png;base64,"+pngBase64 {
+		t.Fatalf("durable image replay = %#v", imageWire)
 	}
 }
 

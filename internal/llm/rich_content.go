@@ -104,6 +104,31 @@ func (r OpenAIResponsesResponse) validate() error {
 	return nil
 }
 
+// AssistantProvenance identifies the provider dialect and model that produced
+// replay metadata. Opaque IDs are usable only when this exactly matches the
+// next request target.
+type AssistantProvenance struct{ Provider, API, Model string }
+
+func (p AssistantProvenance) validate() error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "provider", value: p.Provider},
+		{name: "api", value: p.API},
+		{name: "model", value: p.Model},
+	} {
+		if !utf8.ValidString(field.value) || strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("%w: assistant provenance %s", ErrInvalidRichContent, field.name)
+		}
+	}
+	return nil
+}
+
+func (p AssistantProvenance) Matches(provider, api, model string) bool {
+	return p.Provider == provider && p.API == api && p.Model == model
+}
+
 func (r OpenAIResponsesReasoning) validate() error {
 	if !utf8.ValidString(r.ItemID) || strings.TrimSpace(r.ItemID) == "" || len(r.ItemID) > 256 {
 		return fmt.Errorf("%w: reasoning item id", ErrInvalidRichContent)

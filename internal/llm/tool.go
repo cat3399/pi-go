@@ -94,13 +94,17 @@ func (c ToolCallBlock) ArgumentsJSON() []byte {
 // AssistantToolUseMessage is a successful terminal assistant message with at
 // least one complete tool call. Text and tool blocks retain provider order.
 type AssistantToolUseMessage struct {
-	content   []AssistantBlock
-	usage     Usage
-	timestamp time.Time
-	responses *OpenAIResponsesResponse
+	content    []AssistantBlock
+	usage      Usage
+	timestamp  time.Time
+	responses  *OpenAIResponsesResponse
+	provenance *AssistantProvenance
 }
 
 func NewAssistantToolUseMessageWithResponsesReplay(content []AssistantBlock, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantToolUseMessage, error) {
+	return NewAssistantToolUseMessageWithReplay(content, usage, timestamp, nil, replay)
+}
+func NewAssistantToolUseMessageWithReplay(content []AssistantBlock, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantToolUseMessage, error) {
 	m, err := NewAssistantToolUseMessage(content, usage, timestamp)
 	if err != nil {
 		return AssistantToolUseMessage{}, err
@@ -111,6 +115,13 @@ func NewAssistantToolUseMessageWithResponsesReplay(content []AssistantBlock, usa
 			return AssistantToolUseMessage{}, err
 		}
 		m.responses = &copy
+	}
+	if provenance != nil {
+		copy := *provenance
+		if err := copy.validate(); err != nil {
+			return AssistantToolUseMessage{}, err
+		}
+		m.provenance = &copy
 	}
 	return m, nil
 }
@@ -172,14 +183,18 @@ func NewAssistantToolUseMessage(
 // contain interleaved thinking and text. It is kept distinct from the legacy
 // text-only value so existing callers cannot accidentally accept reasoning.
 type AssistantRichMessage struct {
-	content   []AssistantBlock
-	finish    FinishReason
-	usage     Usage
-	timestamp time.Time
-	responses *OpenAIResponsesResponse
+	content    []AssistantBlock
+	finish     FinishReason
+	usage      Usage
+	timestamp  time.Time
+	responses  *OpenAIResponsesResponse
+	provenance *AssistantProvenance
 }
 
 func NewAssistantRichMessageWithResponsesReplay(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantRichMessage, error) {
+	return NewAssistantRichMessageWithReplay(content, finish, usage, timestamp, nil, replay)
+}
+func NewAssistantRichMessageWithReplay(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantRichMessage, error) {
 	m, err := NewAssistantRichMessage(content, finish, usage, timestamp)
 	if err != nil {
 		return AssistantRichMessage{}, err
@@ -190,6 +205,13 @@ func NewAssistantRichMessageWithResponsesReplay(content []AssistantBlock, finish
 			return AssistantRichMessage{}, err
 		}
 		m.responses = &copy
+	}
+	if provenance != nil {
+		copy := *provenance
+		if err := copy.validate(); err != nil {
+			return AssistantRichMessage{}, err
+		}
+		m.provenance = &copy
 	}
 	return m, nil
 }
@@ -224,7 +246,16 @@ func (m AssistantRichMessage) validate() error {
 	if err == nil && m.responses != nil {
 		err = m.responses.validate()
 	}
+	if err == nil && m.provenance != nil {
+		err = m.provenance.validate()
+	}
 	return err
+}
+func (m AssistantRichMessage) AssistantProvenance() (AssistantProvenance, bool) {
+	if m.provenance == nil {
+		return AssistantProvenance{}, false
+	}
+	return *m.provenance, true
 }
 func (m AssistantRichMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
 	if m.responses == nil {
@@ -294,7 +325,16 @@ func (m AssistantToolUseMessage) validate() error {
 	if err == nil && m.responses != nil {
 		err = m.responses.validate()
 	}
+	if err == nil && m.provenance != nil {
+		err = m.provenance.validate()
+	}
 	return err
+}
+func (m AssistantToolUseMessage) AssistantProvenance() (AssistantProvenance, bool) {
+	if m.provenance == nil {
+		return AssistantProvenance{}, false
+	}
+	return *m.provenance, true
 }
 func (m AssistantToolUseMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
 	if m.responses == nil {

@@ -326,6 +326,10 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if err != nil {
 		return nil, nil, err
 	}
+	provenance, err := decodeLLMAssistantProvenance(object)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	switch stopReason {
 	case "stop", "length":
@@ -335,9 +339,9 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		var message llm.AssistantTerminal
 		if hasThinking(blocks) {
-			message, err = llm.NewAssistantRichMessageWithResponsesReplay(blocks, finish, usage, timestamp, replay)
+			message, err = llm.NewAssistantRichMessageWithReplay(blocks, finish, usage, timestamp, provenance, replay)
 		} else {
-			message, err = llm.NewAssistantTextMessageWithResponsesReplay(textBlocks(blocks), finish, usage, timestamp, replay)
+			message, err = llm.NewAssistantTextMessageWithReplay(textBlocks(blocks), finish, usage, timestamp, provenance, replay)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -347,7 +351,7 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		return message, diagnostics, nil
 	case "toolUse":
-		message, err := llm.NewAssistantToolUseMessageWithResponsesReplay(blocks, usage, timestamp, replay)
+		message, err := llm.NewAssistantToolUseMessageWithReplay(blocks, usage, timestamp, provenance, replay)
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 			return nil, diagnostics, nil
@@ -372,6 +376,22 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 		return nil, diagnostics, nil
 	}
+}
+
+func decodeLLMAssistantProvenance(object map[string]json.RawMessage) (*llm.AssistantProvenance, error) {
+	provider, err := requiredString(object, "provider")
+	if err != nil {
+		return nil, err
+	}
+	api, err := requiredString(object, "api")
+	if err != nil {
+		return nil, err
+	}
+	model, err := requiredString(object, "model")
+	if err != nil {
+		return nil, err
+	}
+	return &llm.AssistantProvenance{Provider: provider, API: api, Model: model}, nil
 }
 
 func decodeResponsesMetadata(object map[string]json.RawMessage) (*llm.OpenAIResponsesResponse, error) {
@@ -541,14 +561,33 @@ func decodeTextReplay(object map[string]json.RawMessage) (*llm.TextReplay, error
 	if json.Unmarshal(raw, &encoded) != nil {
 		return nil, fmt.Errorf("not string")
 	}
-	var value llm.TextReplay
-	if json.Unmarshal([]byte(encoded), &value) != nil {
+	if !strings.HasPrefix(strings.TrimSpace(encoded), "{") {
+		return &llm.TextReplay{MessageID: encoded}, nil
+	}
+	var upstream struct {
+		Version *int   `json:"v"`
+		ID      string `json:"id"`
+		Phase   string `json:"phase"`
+	}
+	if err := json.Unmarshal([]byte(encoded), &upstream); err != nil {
 		return nil, fmt.Errorf("not envelope")
 	}
-	if value.MessageID == "" { // compatibility with upstream legacy plain id
-		value.MessageID = encoded
+	if upstream.Version != nil || upstream.ID != "" {
+		if upstream.Version == nil || *upstream.Version != 1 || upstream.ID == "" {
+			return nil, fmt.Errorf("unsupported text replay envelope")
+		}
+		return &llm.TextReplay{MessageID: upstream.ID, Phase: upstream.Phase}, nil
 	}
-	return &value, nil
+	// pi-go briefly emitted Go field names before adopting the coding-agent v3
+	// envelope. Accept those durable sessions without continuing the format.
+	var legacy struct {
+		MessageID string `json:"MessageID"`
+		Phase     string `json:"Phase"`
+	}
+	if err := json.Unmarshal([]byte(encoded), &legacy); err != nil || legacy.MessageID == "" {
+		return nil, fmt.Errorf("not typed text replay")
+	}
+	return &llm.TextReplay{MessageID: legacy.MessageID, Phase: legacy.Phase}, nil
 }
 func decodeReasoningReplay(object map[string]json.RawMessage) (*llm.OpenAIResponsesReasoning, error) {
 	raw, ok := object["thinkingSignature"]

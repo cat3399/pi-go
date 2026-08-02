@@ -703,7 +703,7 @@ func FuzzScriptedTextRoundTrip(f *testing.F) {
 			t.Fatalf("round trip type = %T, want AssistantTextMessage", result)
 		}
 		if len(message.Content()) != 1 || message.Content()[0].Text() != text {
-			t.Fatalf("round trip text = %q, want %q", message.Content(), text)
+			t.Fatalf("round trip text = %v, want %q", message.Content(), text)
 		}
 	})
 }

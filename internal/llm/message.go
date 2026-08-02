@@ -155,14 +155,18 @@ func (m UserTextMessage) Timestamp() time.Time {
 // only text blocks. Tool-use and failed terminal messages have separate
 // constructors in their behavior slices.
 type AssistantTextMessage struct {
-	content   []TextBlock
-	finish    FinishReason
-	usage     Usage
-	timestamp time.Time
-	responses *OpenAIResponsesResponse
+	content    []TextBlock
+	finish     FinishReason
+	usage      Usage
+	timestamp  time.Time
+	responses  *OpenAIResponsesResponse
+	provenance *AssistantProvenance
 }
 
 func NewAssistantTextMessageWithResponsesReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
+	return NewAssistantTextMessageWithReplay(content, finish, usage, timestamp, nil, replay)
+}
+func NewAssistantTextMessageWithReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
 	m, err := NewAssistantTextMessage(content, finish, usage, timestamp)
 	if err != nil {
 		return AssistantTextMessage{}, err
@@ -173,6 +177,13 @@ func NewAssistantTextMessageWithResponsesReplay(content []TextBlock, finish Fini
 			return AssistantTextMessage{}, err
 		}
 		m.responses = &copy
+	}
+	if provenance != nil {
+		copy := *provenance
+		if err := copy.validate(); err != nil {
+			return AssistantTextMessage{}, err
+		}
+		m.provenance = &copy
 	}
 	return m, nil
 }
@@ -225,7 +236,18 @@ func (m AssistantTextMessage) validate() error {
 			return err
 		}
 	}
+	if m.provenance != nil {
+		if err := m.provenance.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+func (m AssistantTextMessage) AssistantProvenance() (AssistantProvenance, bool) {
+	if m.provenance == nil {
+		return AssistantProvenance{}, false
+	}
+	return *m.provenance, true
 }
 func (m AssistantTextMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
 	if m.responses == nil {

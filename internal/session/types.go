@@ -47,8 +47,9 @@ type OpenOptions struct {
 	NewEntryID IDGenerator
 }
 
-// AssistantProvenance supplies the coding-agent v3 fields that belong to the
-// selected provider/model, not to the shared llm message domain.
+// AssistantProvenance supplies the coding-agent v3 storage fields for the
+// selected provider/model. Provider/API/model are also projected into the
+// typed llm replay provenance; Cost remains a session-boundary value.
 type AssistantProvenance struct {
 	API      string
 	Provider string

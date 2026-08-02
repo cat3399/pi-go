@@ -386,13 +386,34 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			),
 		},
 		{
-			name: "message phase replay is explicit", contentType: "text/event-stream", wantCause: provider.ErrOpenAIResponsesUnsupported,
+			name: "unknown message phase", contentType: "text/event-stream",
 			body: responsesSSE(map[string]any{
 				"type": "response.output_item.added", "output_index": 0,
 				"item": map[string]any{
-					"type": "message", "id": "msg", "role": "assistant", "phase": "final_answer", "content": []any{},
+					"type": "message", "id": "msg", "role": "assistant", "phase": "analysis", "content": []any{},
 				},
 			}),
+		},
+		{
+			name: "message phase changes while open", contentType: "text/event-stream",
+			body: responsesSSE(
+				map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "commentary", "content": []any{}}},
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "x"}}}},
+			),
+		},
+		{
+			name: "output follows final answer", contentType: "text/event-stream",
+			body: responsesSSE(
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg_final", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "done"}}}},
+				map[string]any{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_late", "role": "assistant", "phase": "commentary", "content": []any{}}},
+			),
+		},
+		{
+			name: "terminal message phase mismatch", contentType: "text/event-stream",
+			body: responsesSSE(
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "commentary", "content": []any{map[string]any{"type": "output_text", "text": "working"}}}},
+				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "final_answer"}}}},
+			),
 		},
 		{name: "bounded SSE event", contentType: "text/event-stream", body: "data: " + strings.Repeat("x", 128) + "\n\n", maxEvent: 32},
 	}
@@ -803,7 +824,7 @@ func TestOpenAIResponsesCancellationStopsHTTPAndRetainsPartialText(t *testing.T)
 	}
 	failure := terminalFailure(t, terminal)
 	if failure.FinishReason() != llm.FinishAborted || len(failure.Content()) != 1 || failure.Content()[0].Text() != "partial" {
-		t.Fatalf("cancel terminal = %v/%q", failure.FinishReason(), failure.Content())
+		t.Fatalf("cancel terminal = %v/%v", failure.FinishReason(), failure.Content())
 	}
 	assertProviderFailure(t, failure, provider.FailureCancelled, cause)
 	select {

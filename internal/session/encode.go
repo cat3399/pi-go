@@ -37,15 +37,24 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 		encoded = strconv.AppendInt(encoded, message.Timestamp().UnixMilli(), 10)
 		return append(encoded, '}'), nil
 	case llm.AssistantTextMessage:
+		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
+			return nil, err
+		}
 		replay, _ := message.OpenAIResponsesMetadata()
 		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &replay)
 	case llm.AssistantToolUseMessage:
+		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
+			return nil, err
+		}
 		replay, ok := message.OpenAIResponsesMetadata()
 		if !ok {
 			replay = llm.OpenAIResponsesResponse{}
 		}
 		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &replay)
 	case llm.AssistantRichMessage:
+		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
+			return nil, err
+		}
 		replay, ok := message.OpenAIResponsesMetadata()
 		if !ok {
 			replay = llm.OpenAIResponsesResponse{}
@@ -100,6 +109,21 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 	default:
 		return nil, fmt.Errorf("invalid conversation message %T", message)
 	}
+}
+
+type llmAssistantProvenanceCarrier interface {
+	AssistantProvenance() (llm.AssistantProvenance, bool)
+}
+
+func validateMessageAssistantProvenance(message llmAssistantProvenanceCarrier, identity AssistantProvenance) error {
+	provenance, ok := message.AssistantProvenance()
+	if !ok {
+		return nil
+	}
+	if provenance.Provider != identity.Provider || provenance.API != identity.API || provenance.Model != identity.Model {
+		return fmt.Errorf("%w: assistant message provenance does not match append provenance", ErrInvalidEntry)
+	}
+	return nil
 }
 
 func encodeAssistant(
@@ -271,9 +295,20 @@ func encodeImageBlock(block llm.ImageBlock) (json.RawMessage, error) {
 	}
 	return json.Marshal(wire)
 }
-func encodeTextReplay(value llm.TextReplay) string { raw, _ := json.Marshal(value); return string(raw) }
+func encodeTextReplay(value llm.TextReplay) string {
+	raw, _ := json.Marshal(struct {
+		Version int    `json:"v"`
+		ID      string `json:"id"`
+		Phase   string `json:"phase,omitempty"`
+	}{Version: 1, ID: value.MessageID, Phase: value.Phase})
+	return string(raw)
+}
 func encodeReasoningReplay(value llm.OpenAIResponsesReasoning) string {
-	raw, _ := json.Marshal(value)
+	raw, _ := json.Marshal(struct {
+		Type             string `json:"type"`
+		ID               string `json:"id"`
+		EncryptedContent string `json:"encrypted_content,omitempty"`
+	}{Type: "reasoning", ID: value.ItemID, EncryptedContent: value.EncryptedContent})
 	return string(raw)
 }
 

@@ -109,6 +109,7 @@ func (e TextDeltaEvent) Delta() string {
 type TextEndEvent struct {
 	contentIndex int
 	content      string
+	replay       *TextReplay
 }
 
 // Thinking events mirror text events but retain their opaque replay handle at
@@ -171,7 +172,14 @@ func (e ThinkingEndEvent) ContentIndex() int      { return e.contentIndex }
 func (e ThinkingEndEvent) Content() ThinkingBlock { return e.content }
 
 func NewTextEndEvent(contentIndex int, content string) (TextEndEvent, error) {
+	return NewTextEndEventWithReplay(contentIndex, content, nil)
+}
+func NewTextEndEventWithReplay(contentIndex int, content string, replay *TextReplay) (TextEndEvent, error) {
 	event := TextEndEvent{contentIndex: contentIndex, content: content}
+	if replay != nil {
+		copy := *replay
+		event.replay = &copy
+	}
 	if err := event.validate(); err != nil {
 		return TextEndEvent{}, err
 	}
@@ -187,6 +195,11 @@ func (e TextEndEvent) validate() error {
 	if !utf8.ValidString(e.content) {
 		return fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidStreamEvent)
 	}
+	if e.replay != nil {
+		if err := e.replay.validate(); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidStreamEvent, err)
+		}
+	}
 	return nil
 }
 
@@ -196,6 +209,12 @@ func (e TextEndEvent) ContentIndex() int {
 
 func (e TextEndEvent) Content() string {
 	return e.content
+}
+func (e TextEndEvent) TextReplay() (TextReplay, bool) {
+	if e.replay == nil {
+		return TextReplay{}, false
+	}
+	return *e.replay, true
 }
 
 type ToolCallStartEvent struct {
@@ -306,13 +325,17 @@ func (e ToolCallEndEvent) ToolCall() ToolCallBlock {
 }
 
 type DoneEvent struct {
-	reason    FinishReason
-	usage     Usage
-	timestamp time.Time
-	responses *OpenAIResponsesResponse
+	reason     FinishReason
+	usage      Usage
+	timestamp  time.Time
+	responses  *OpenAIResponsesResponse
+	provenance *AssistantProvenance
 }
 
 func NewDoneEventWithResponsesReplay(reason FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (DoneEvent, error) {
+	return NewDoneEventWithReplay(reason, usage, timestamp, nil, replay)
+}
+func NewDoneEventWithReplay(reason FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (DoneEvent, error) {
 	event, err := NewDoneEvent(reason, usage, timestamp)
 	if err != nil {
 		return DoneEvent{}, err
@@ -323,6 +346,13 @@ func NewDoneEventWithResponsesReplay(reason FinishReason, usage Usage, timestamp
 			return DoneEvent{}, err
 		}
 		event.responses = &copy
+	}
+	if provenance != nil {
+		copy := *provenance
+		if err := copy.validate(); err != nil {
+			return DoneEvent{}, err
+		}
+		event.provenance = &copy
 	}
 	return event, nil
 }
@@ -360,6 +390,12 @@ func (e DoneEvent) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
 		return OpenAIResponsesResponse{}, false
 	}
 	return *e.responses, true
+}
+func (e DoneEvent) AssistantProvenance() (AssistantProvenance, bool) {
+	if e.provenance == nil {
+		return AssistantProvenance{}, false
+	}
+	return *e.provenance, true
 }
 
 type ErrorEvent struct {
@@ -708,7 +744,11 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		if event.content != c.current.String() {
 			return c.fail(nil, "text_end content does not match accumulated deltas")
 		}
-		block, err := NewTextBlock(event.content)
+		var replayPointer *TextReplay
+		if replay, ok := event.TextReplay(); ok {
+			replayPointer = &replay
+		}
+		block, err := NewTextBlockWithReplay(event.content, replayPointer)
 		if err != nil {
 			return c.fail(err, "text_end produced invalid text")
 		}
@@ -815,10 +855,15 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 			if _, ok := event.OpenAIResponsesMetadata(); ok {
 				replayPointer = &replay
 			}
+			provenance, _ := event.AssistantProvenance()
+			var provenancePointer *AssistantProvenance
+			if _, ok := event.AssistantProvenance(); ok {
+				provenancePointer = &provenance
+			}
 			if hasThinking {
-				message, err = NewAssistantRichMessageWithResponsesReplay(c.blocks, event.reason, event.usage, event.timestamp, replayPointer)
+				message, err = NewAssistantRichMessageWithReplay(c.blocks, event.reason, event.usage, event.timestamp, provenancePointer, replayPointer)
 			} else {
-				message, err = NewAssistantTextMessageWithResponsesReplay(text, event.reason, event.usage, event.timestamp, replayPointer)
+				message, err = NewAssistantTextMessageWithReplay(text, event.reason, event.usage, event.timestamp, provenancePointer, replayPointer)
 			}
 		case FinishToolUse:
 			replay, _ := event.OpenAIResponsesMetadata()
@@ -826,7 +871,12 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 			if _, ok := event.OpenAIResponsesMetadata(); ok {
 				replayPointer = &replay
 			}
-			message, err = NewAssistantToolUseMessageWithResponsesReplay(c.blocks, event.usage, event.timestamp, replayPointer)
+			provenance, _ := event.AssistantProvenance()
+			var provenancePointer *AssistantProvenance
+			if _, ok := event.AssistantProvenance(); ok {
+				provenancePointer = &provenance
+			}
+			message, err = NewAssistantToolUseMessageWithReplay(c.blocks, event.usage, event.timestamp, provenancePointer, replayPointer)
 		}
 		if err != nil {
 			return c.fail(err, "done is not a valid terminal")

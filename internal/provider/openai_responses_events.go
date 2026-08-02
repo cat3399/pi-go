@@ -201,21 +201,21 @@ func (s *openAIResponsesStream) addResponsesOutputItem(event responsesOutputEven
 	if index != s.nextOutputIndex {
 		return invalidResponsesEventFailure(fmt.Errorf("output item index %d, want %d", index, s.nextOutputIndex))
 	}
+	if s.sawFinalAnswer {
+		return invalidResponsesEventFailure(errors.New("output item arrived after a final_answer message"))
+	}
 	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("output item started before previous item completed"))
 	}
 	switch event.Item.Type {
 	case "message":
-		if event.Item.Phase != "" {
-			return unsupportedResponsesOutputFailure("message phase")
-		}
 		if event.Item.Role != "assistant" {
 			return invalidResponsesEventFailure(fmt.Errorf("output message role is %q", event.Item.Role))
 		}
 		if len(event.Item.Content) != 0 {
 			return invalidResponsesEventFailure(errors.New("added output message already contains content"))
 		}
-		return s.startResponsesTextSlot(index, event.Item.ID)
+		return s.startResponsesTextSlot(index, event.Item.ID, event.Item.Phase)
 	case "function_call":
 		return s.startResponsesToolSlot(index, event.Item.ID, event.Item.CallID, event.Item.Name, event.Item.Arguments)
 	case "reasoning":
@@ -237,7 +237,7 @@ func (s *openAIResponsesStream) startResponsesReasoningSlot(index int, itemID st
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, start)
+	s.enqueueResponsesEvent(start)
 	return nil
 }
 func (s *openAIResponsesStream) addResponsesReasoningDelta(event responsesOutputEvent) *responsesFailureSpec {
@@ -260,7 +260,7 @@ func (s *openAIResponsesStream) addResponsesReasoningDelta(event responsesOutput
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, delta)
+	s.enqueueResponsesEvent(delta)
 	return nil
 }
 func (s *openAIResponsesStream) addResponsesReasoningSeparator(event responsesOutputEvent) *responsesFailureSpec {
@@ -277,24 +277,33 @@ func (s *openAIResponsesStream) addResponsesReasoningSeparator(event responsesOu
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, delta)
+	s.enqueueResponsesEvent(delta)
 	return nil
 }
 
-func (s *openAIResponsesStream) startResponsesTextSlot(index int, itemID string) *responsesFailureSpec {
+func (s *openAIResponsesStream) startResponsesTextSlot(index int, itemID, phase string) *responsesFailureSpec {
 	if !utf8.ValidString(itemID) || strings.TrimSpace(itemID) == "" {
 		return invalidResponsesEventFailure(fmt.Errorf("output message at index %d has no valid id", index))
+	}
+	if failure := validateResponsesMessagePhase(phase); failure != nil {
+		return failure
+	}
+	if s.sawFinalAnswer {
+		return invalidResponsesEventFailure(errors.New("output message arrived after a final_answer message"))
 	}
 	if _, exists := s.slots[index]; exists {
 		return invalidResponsesEventFailure(fmt.Errorf("output index %d was added twice", index))
 	}
-	slot := &responsesTextSlot{contentIndex: s.nextContentIndex, itemID: itemID}
+	slot := &responsesTextSlot{contentIndex: s.nextContentIndex, itemID: itemID, phase: phase}
 	s.slots[index] = slot
+	if phase == "final_answer" {
+		s.sawFinalAnswer = true
+	}
 	start, err := llm.NewTextStartEvent(slot.contentIndex)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, start)
+	s.enqueueResponsesEvent(start)
 	return nil
 }
 
@@ -314,14 +323,14 @@ func (s *openAIResponsesStream) startResponsesToolSlot(index int, itemID, callID
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, start)
+	s.enqueueResponsesEvent(start)
 	if arguments != "" {
 		slot.arguments = append(slot.arguments, arguments...)
 		delta, err := llm.NewToolCallDeltaEvent(slot.contentIndex, []byte(arguments))
 		if err != nil {
 			return invalidResponsesEventFailure(err)
 		}
-		s.queue = append(s.queue, delta)
+		s.enqueueResponsesEvent(delta)
 	}
 	return nil
 }
@@ -346,7 +355,7 @@ func (s *openAIResponsesStream) addResponsesTextDelta(event responsesOutputEvent
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, delta)
+	s.enqueueResponsesEvent(delta)
 	return nil
 }
 
@@ -370,7 +379,7 @@ func (s *openAIResponsesStream) addResponsesToolDelta(event responsesOutputEvent
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, delta)
+	s.enqueueResponsesEvent(delta)
 	return nil
 }
 
@@ -395,7 +404,7 @@ func (s *openAIResponsesStream) finishResponsesToolArguments(event responsesOutp
 		if err != nil {
 			return invalidResponsesEventFailure(err)
 		}
-		s.queue = append(s.queue, delta)
+		s.enqueueResponsesEvent(delta)
 	}
 	call, err := llm.NewToolCallBlock(slot.callID+"|"+slot.itemID, slot.name, slot.arguments)
 	if err != nil {
@@ -405,7 +414,7 @@ func (s *openAIResponsesStream) finishResponsesToolArguments(event responsesOutp
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.queue = append(s.queue, end)
+	s.enqueueResponsesEvent(end)
 	slot.argumentsDone = true
 	return nil
 }
@@ -421,22 +430,43 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 	if index != s.nextOutputIndex {
 		return invalidResponsesEventFailure(fmt.Errorf("completed output item index %d, want %d", index, s.nextOutputIndex))
 	}
+	if s.sawFinalAnswer && s.slots[index] == nil && s.toolSlots[index] == nil && s.reasoningSlots[index] == nil {
+		return invalidResponsesEventFailure(errors.New("output item arrived after a final_answer message"))
+	}
 	switch event.Item.Type {
 	case "message":
-		if event.Item.Phase != "" {
-			return unsupportedResponsesOutputFailure("message phase")
+		if failure := validateResponsesMessagePhase(event.Item.Phase); failure != nil {
+			return failure
 		}
 		if event.Item.Role != "assistant" {
 			return invalidResponsesEventFailure(fmt.Errorf("completed output message role is %q", event.Item.Role))
 		}
 		slot := s.slots[index]
 		if slot == nil {
-			if failure := s.startResponsesTextSlot(index, event.Item.ID); failure != nil {
+			if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
+				return invalidResponsesEventFailure(fmt.Errorf("completed message at index %d does not match the open output item", index))
+			}
+			if failure := s.startResponsesTextSlot(index, event.Item.ID, event.Item.Phase); failure != nil {
 				return failure
 			}
 			slot = s.slots[index]
 		} else if event.Item.ID != "" && event.Item.ID != slot.itemID {
 			return invalidResponsesEventFailure(fmt.Errorf("completed item id %q does not match %q", event.Item.ID, slot.itemID))
+		}
+		if event.Item.Phase != "" {
+			if slot.phase != "" && event.Item.Phase != slot.phase {
+				return invalidResponsesEventFailure(fmt.Errorf(
+					"completed message phase %q does not match %q",
+					event.Item.Phase,
+					slot.phase,
+				))
+			}
+			if slot.phase == "" {
+				slot.phase = event.Item.Phase
+				if slot.phase == "final_answer" {
+					s.sawFinalAnswer = true
+				}
+			}
 		}
 		finalText, failure := responsesOutputItemText(event.Item)
 		if failure != nil {
@@ -452,16 +482,21 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 			if err != nil {
 				return invalidResponsesEventFailure(err)
 			}
-			s.queue = append(s.queue, delta)
+			s.enqueueResponsesEvent(delta)
 		}
-		end, err := llm.NewTextEndEvent(slot.contentIndex, finalText)
+		end, err := llm.NewTextEndEventWithReplay(slot.contentIndex, finalText, &llm.TextReplay{
+			MessageID: slot.itemID,
+			Phase:     slot.phase,
+		})
 		if err != nil {
 			return invalidResponsesEventFailure(err)
 		}
-		s.queue = append(s.queue, end)
+		s.enqueueResponsesEvent(end)
 		delete(s.slots, index)
 		s.nextContentIndex++
 		s.completedOutputs[index] = struct{}{}
+		s.completedItemIDs[index] = slot.itemID
+		s.completedPhases[index] = slot.phase
 		s.nextOutputIndex++
 
 	case "function_call":
@@ -478,11 +513,15 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 		delete(s.toolSlots, index)
 		s.nextContentIndex++
 		s.completedOutputs[index] = struct{}{}
+		s.completedItemIDs[index] = slot.itemID
 		s.nextOutputIndex++
 		s.sawFunctionCall = true
 	case "reasoning":
 		slot := s.reasoningSlots[index]
 		if slot == nil {
+			if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
+				return invalidResponsesEventFailure(fmt.Errorf("completed reasoning at index %d does not match the open output item", index))
+			}
 			if failure := s.startResponsesReasoningSlot(index, event.Item.ID); failure != nil {
 				return failure
 			}
@@ -502,22 +541,33 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 				if err != nil {
 					return invalidResponsesEventFailure(err)
 				}
-				s.queue = append(s.queue, d)
+				s.enqueueResponsesEvent(d)
 			}
 		}
-		replay := &llm.OpenAIResponsesReasoning{ItemID: slot.itemID, EncryptedContent: event.Item.EncryptedContent}
-		block, err := llm.NewThinkingBlock(slot.text.String(), replay)
-		if err != nil {
-			return invalidResponsesEventFailure(err)
+		completedReasoning := &responsesCompletedReasoning{
+			contentIndex:     slot.contentIndex,
+			itemID:           slot.itemID,
+			text:             slot.text.String(),
+			encryptedContent: event.Item.EncryptedContent,
 		}
-		end, err := llm.NewThinkingEndEvent(slot.contentIndex, block)
-		if err != nil {
-			return invalidResponsesEventFailure(err)
+		if event.Item.EncryptedContent == "" {
+			s.deferResponsesReasoningEnd(index, completedReasoning)
+		} else {
+			replay := &llm.OpenAIResponsesReasoning{ItemID: slot.itemID, EncryptedContent: event.Item.EncryptedContent}
+			block, err := llm.NewThinkingBlock(slot.text.String(), replay)
+			if err != nil {
+				return invalidResponsesEventFailure(err)
+			}
+			end, err := llm.NewThinkingEndEvent(slot.contentIndex, block)
+			if err != nil {
+				return invalidResponsesEventFailure(err)
+			}
+			s.enqueueResponsesEvent(end)
 		}
-		s.queue = append(s.queue, end)
 		delete(s.reasoningSlots, index)
 		s.nextContentIndex++
 		s.completedOutputs[index] = struct{}{}
+		s.completedItemIDs[index] = slot.itemID
 		s.nextOutputIndex++
 	case "custom_tool_call":
 		return unsupportedResponsesOutputFailure(event.Item.Type)
@@ -525,6 +575,18 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 		return unsupportedResponsesOutputFailure(event.Item.Type)
 	}
 	return nil
+}
+
+func validateResponsesMessagePhase(phase string) *responsesFailureSpec {
+	if !utf8.ValidString(phase) {
+		return invalidResponsesEventFailure(errors.New("message phase is not valid UTF-8"))
+	}
+	switch phase {
+	case "", "commentary", "final_answer":
+		return nil
+	default:
+		return invalidResponsesEventFailure(fmt.Errorf("unknown message phase %q", phase))
+	}
 }
 
 func responsesReasoningText(item responsesOutputItem) string {
@@ -584,11 +646,26 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if event.Response.Error != nil {
 		return invalidResponsesEventFailure(fmt.Errorf("%s unexpectedly carries an error", event.Type))
 	}
+	type terminalReasoning struct {
+		index            int
+		encryptedContent string
+	}
+	terminalReasoningByID := make(map[string]terminalReasoning)
 	for outputIndex, item := range event.Response.Output {
+		if item.ID != "" {
+			expectedID, completed := s.completedItemIDs[outputIndex]
+			if !completed || item.ID != expectedID {
+				return invalidResponsesEventFailure(fmt.Errorf(
+					"terminal output item id %q at index %d does not match completed item",
+					item.ID,
+					outputIndex,
+				))
+			}
+		}
 		switch item.Type {
 		case "message":
-			if item.Phase != "" {
-				return unsupportedResponsesOutputFailure("message phase")
+			if failure := validateResponsesMessagePhase(item.Phase); failure != nil {
+				return failure
 			}
 			if item.Role != "" && item.Role != "assistant" {
 				return invalidResponsesEventFailure(fmt.Errorf(
@@ -597,15 +674,23 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 					item.Role,
 				))
 			}
+			if _, completed := s.completedOutputs[outputIndex]; !completed {
+				return invalidResponsesEventFailure(fmt.Errorf(
+					"terminal output message at index %d was not completed by output_item events",
+					outputIndex,
+				))
+			}
+			if item.Phase != "" && item.Phase != s.completedPhases[outputIndex] {
+				return invalidResponsesEventFailure(fmt.Errorf(
+					"terminal output message phase %q at index %d does not match %q",
+					item.Phase,
+					outputIndex,
+					s.completedPhases[outputIndex],
+				))
+			}
 			if len(item.Content) != 0 {
 				if _, failure := responsesOutputItemText(item); failure != nil {
 					return failure
-				}
-				if _, completed := s.completedOutputs[outputIndex]; !completed {
-					return invalidResponsesEventFailure(fmt.Errorf(
-						"terminal output message at index %d was not completed by output_item events",
-						outputIndex,
-					))
 				}
 			}
 		case "function_call":
@@ -616,14 +701,36 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 			if _, completed := s.completedOutputs[outputIndex]; !completed {
 				return invalidResponsesEventFailure(fmt.Errorf("terminal reasoning item at index %d was not completed", outputIndex))
 			}
+			if item.ID != "" {
+				if previous, duplicate := terminalReasoningByID[item.ID]; duplicate {
+					return invalidResponsesEventFailure(fmt.Errorf(
+						"terminal reasoning item id %q is duplicated at indexes %d and %d",
+						item.ID,
+						previous.index,
+						outputIndex,
+					))
+				}
+				terminalReasoningByID[item.ID] = terminalReasoning{
+					index:            outputIndex,
+					encryptedContent: item.EncryptedContent,
+				}
+			}
 		case "custom_tool_call":
 			return unsupportedResponsesOutputFailure(item.Type)
 		default:
 			return unsupportedResponsesOutputFailure(item.Type)
 		}
 	}
+	for _, pending := range s.pendingReasoning {
+		if terminal, ok := terminalReasoningByID[pending.itemID]; ok {
+			pending.encryptedContent = terminal.encryptedContent
+		}
+	}
 	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("terminal response arrived with an open output item"))
+	}
+	if err := s.flushResponsesDeferredEvents(); err != nil {
+		return invalidResponsesEventFailure(fmt.Errorf("seal deferred reasoning: %w", err))
 	}
 	usage, failure := normalizeResponsesUsage(event.Response.Usage)
 	if failure != nil {
@@ -635,7 +742,8 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 		reason = llm.FinishToolUse
 	}
 	replay := &llm.OpenAIResponsesResponse{ResponseID: event.Response.ID, RawStopReason: wantStatus}
-	done, err := llm.NewDoneEventWithResponsesReplay(reason, usage, s.timestamp, replay)
+	provenance := &llm.AssistantProvenance{Provider: s.model.Provider(), API: s.model.API(), Model: s.model.ID()}
+	done, err := llm.NewDoneEventWithReplay(reason, usage, s.timestamp, provenance, replay)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}

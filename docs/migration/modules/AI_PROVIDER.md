@@ -128,10 +128,11 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 ## v0.3 OpenAI tools/replay 边界
 
 - `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，重复/非 object/可变 caller bytes 在 admission 失败。
-- replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID；item ID 仅在可证明的 `fc_*` 形状时保留，否则稳定规范化。
+- replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。opaque reasoning、text phase/ID 与 function item ID 只在 source/target provider、API、model 全等时原样重放；foreign readable reasoning 降级 text，redacted reasoning 丢弃，foreign tool ID 安全规范化。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID。
 - SSE 支持 source-order mixed text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
-- 本里程碑覆盖 function tools、Responses reasoning/reasoning-summary SSE、encrypted-content
-  backfill、text message identity 和 user/tool-result `input_image` replay。custom tool、prompt
+- 本里程碑覆盖 function tools、Responses reasoning/reasoning-summary SSE、按 reasoning item ID
+  匹配的 terminal encrypted-content backfill、commentary/final_answer message identity 和
+  user/tool-result `input_image` replay。custom tool、prompt
   cache、image generation/resize/vision executor 仍延期；不创建无界 metadata map。
 - M-AGENT/v0.1 只消费一个 call，但 adapter/replay 可表达多个完整 calls；并行 dispatch 属 M-AGENT/v0.2。M-APP 的 local HTTP/SSE scenario 验证一个 bash call、durable ToolResult 和第二 request replay。
 

@@ -34,7 +34,7 @@
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
 | `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；awaiting module review |
-| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `strengthened` | Go request immutability, local SSE tool start/delta/done, malformed/order failure and replay fixture；awaiting module review |
+| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `strengthened` | local SSE tool/reasoning/text reducer；same/foreign provider+API+model restart matrix；Azure terminal encrypted backfill、phase/order failure、valid PNG production replay；awaiting module review |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。

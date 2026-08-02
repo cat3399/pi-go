@@ -59,6 +59,7 @@ type Request struct {
 	systemPrompt string
 	messages     []llm.ConversationMessage
 	tools        []ToolDefinition
+	replayTarget llm.AssistantProvenance
 }
 
 func NewRequest(
@@ -82,6 +83,7 @@ func NewRequestWithTools(
 		systemPrompt: systemPrompt,
 		messages:     append([]llm.ConversationMessage(nil), messages...),
 		tools:        append([]ToolDefinition(nil), tools...),
+		replayTarget: llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -131,6 +133,8 @@ func (r Request) Messages() []llm.ConversationMessage {
 func (r Request) Tools() []ToolDefinition {
 	return append([]ToolDefinition(nil), r.tools...)
 }
+
+func (r Request) ReplayTarget() llm.AssistantProvenance { return r.replayTarget }
 
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.
