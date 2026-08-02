@@ -1,42 +1,62 @@
 # pi-go
 
-pi-go 是 [pi](https://github.com/cat3399/pi) 的 Go 重写项目。首要目标是实现一个
-能够独立运行、独立测试、独立发布的 Pi，而不是先把它建设成某个外部项目的
-backend。
+pi-go 的目标是用 Go 完整重写 [pi](https://github.com/cat3399/pi)，保留其核心产品
+行为，并在核心稳定后让 pi-web 通过少量启动与传输层修改接入 Go runtime。
 
-当前处于 standalone core 实现阶段：deterministic WF-001、标准 OpenAI Responses text/SSE
-adapter 和 production text-print assembly 均已通过整模块复审。发布入口可从显式 CLI、
-只读 auth/models 配置或环境变量装配 OpenAI；尚未迁移的能力明确失败，不包含 scripted
-provider 或 TypeScript fallback。
+产品运行时只使用 Go，不嵌入、代理或 fallback 到 TypeScript 版 pi。原版 pi 的实际
+实现和测试是行为参考；文档只记录当前共识，不能代替源码成为设计依据。
 
-## 项目目标
+## 当前阶段
 
-- 以 Go 为一等实现语言，逐步完整迁移 pi 的产品功能。
-- 同步迁移上游测试，并根据 Go 的风险模型补充 race、fuzz、恢复和 E2E test。
-- 允许早期版本功能较少，但每项已实现功能都必须是清晰、可维护的纯 Go 实现。
-- 建立可持续的上游同步机制，使尚未迁移和有意不同的行为始终可见。
-- 在 standalone pi-go 成熟后，再从真实需求中提炼稳定的 extension surface 和
-  外部接入方式。
+仓库已经具备一批经过测试的底层能力，包括 OpenAI Responses streaming、tool loop、
+内置工具、JSONL session、auth/model/resource 加载，以及 agent 的队列、重试和压缩
+相关实现。
 
-## 基本立场
+但当前还不是完整的 Pi，也不适合直接作为 pi-web backend：
 
-- 产品 runtime 只使用 Go，不维护 TypeScript/Go 双实现和 runtime fallback。
-- TypeScript 版 pi 只作为迁移参考、fixture 来源和隔离的 test oracle。
-- 行为和数据兼容优先于源码结构兼容；不机械复制 TypeScript package 或 class。
-- 初期不为 plugin、extension、pi-web 或其他外部使用者冻结 public API。
-- pi-go 未来提供通用、可适配的能力；具体兼容逻辑由外部项目或 adapter 负责。
-- transport、protocol 和进程边界必须由已经稳定的产品能力与实际需求决定，当前
-  不预设 HTTP、SSE、CBOR 或其他方案。
+- 缺少产品级 `AgentSession`，模型、system prompt 和 tools 在一次 Agent 创建后固化；
+- 通用 model/provider/message 边界仍受 OpenAI Responses 数据形状影响；
+- 图片和富工具结果只在部分底层类型中存在，没有贯通产品运行路径；
+- 重试、自动压缩、队列和 TUI 等已实现能力没有全部进入实际 executable；
+- CLI 目前只是单次 `-p` headless 运行，没有长期运行的 RPC/session runtime。
 
-整体顺序是：先完成 pi-go 产品本体，再提炼 extension 能力，最后处理 pi-web
-等外部集成。完整目标和验收口径见 [docs/PROJECT.md](docs/PROJECT.md)。
+详细事实见 [当前状态](docs/STATUS.md)，目标边界见
+[核心架构](docs/ARCHITECTURE.md)。
+
+## 当前可运行入口
+
+现有 executable 只支持显式的 print prompt：
+
+```sh
+OPENAI_API_KEY=... go run ./cmd/pi-go -p "检查当前目录"
+```
+
+也可以显式选择 model 或 session 文件：
+
+```sh
+go run ./cmd/pi-go --model gpt-5.5 --session /absolute/path/session.jsonl -p "继续处理"
+```
+
+当前 production assembly 只支持 OpenAI Responses。配置、credential 或模型不可用时会
+明确失败，不会切换到其他 runtime。
+
+## 开发检查
+
+```sh
+gofmt -w <changed-go-files>
+go test ./...
+go vet ./...
+go build ./...
+```
+
+涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。测试应
+默认使用 deterministic fake，不依赖真实 credential 或网络。
 
 ## 文档
 
-- [项目目标与约束](docs/PROJECT.md)
-- [架构边界](docs/ARCHITECTURE.md)
-- [pi 上游源码地图与迁移模块](docs/SOURCE_MAP.md)
-- [迁移执行台账](docs/migration/README.md)
-- [迁移路线](docs/ROADMAP.md)
-- [测试与回归策略](docs/TESTING.md)
-- [上游基线](docs/UPSTREAM.md)
+- [核心架构](docs/ARCHITECTURE.md)：下一阶段必须形成的长期边界。
+- [当前状态](docs/STATUS.md)：已经实现、已经接入和仍然缺失的能力。
+- [近期路线](docs/ROADMAP.md)：核心重构与集成顺序。
+
+不再为每个小模块维护 charter、behavior ledger、test ledger 或 review 流水账。重要
+行为由代码和测试证明；影响整体方向的差异才写入上述文档。

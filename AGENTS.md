@@ -1,63 +1,50 @@
-# pi-go 仓库协作规则
+# pi-go 协作规则
 
-开始修改前，先阅读 README.md、docs/PROJECT.md、docs/ARCHITECTURE.md、
-docs/SOURCE_MAP.md、docs/ROADMAP.md、docs/TESTING.md、docs/UPSTREAM.md 和
-docs/migration/README.md。实现或审查模块里程碑时，还必须读取对应 module charter、
-behavior/test ledger、workflow 和数据清单。
+## 开始前
 
-## 架构硬约束
+修改核心代码前读取 `README.md`、`docs/ARCHITECTURE.md` 和 `docs/STATUS.md`。制定近期
+任务时再读取 `docs/ROADMAP.md`，不需要读取历史迁移台账。
 
-- Go 是一等实现语言。生产 runtime 只能使用 Go，产品代码不得启动、导入、proxy
-  到 TypeScript 版 pi，也不得在失败时 runtime fallback 到它。
-- 首要目标是独立可用的 pi-go 产品。先迁移 core、CLI 和 TUI，再考虑 extension
-  与 pi-web 等外部集成。
-- 固定版本的 TypeScript 实现只能由隔离的 migration test 或 differential test
-  调用，不能成为默认 test suite 和发布产物的依赖。
-- 初期实现默认保持 internal。没有真实、稳定的使用需求时，不得提前冻结 public
-  API、extension protocol 或 transport。
-- 不得增加只对 pi-web 或某个 plugin 有意义的 route、DTO、字段、状态分支或
-  package。具体兼容逻辑由外部项目或独立 adapter 负责。
-- 当前不预设 HTTP、SSE、WebSocket、CBOR 等接入方案。迁移上游 protocol 时，
-  根据其产品行为和数据兼容需要重新决策。
-- 持久化数据必须支持向前兼容。不能仅因当前版本无法解释 unknown field 或
-  event，就在读取和写回时破坏它们。
-- 除非 TypeScript 的 package 或 class 边界同时也是合理的 Go domain boundary，
-  否则不要照搬其结构。
-- 领域模块里程碑是实现和独立 review 单位，behavior slice 是需求与测试追踪单位，
-  完整用户 workflow 是跨模块验收单位。不得把上游 package、目录或热点文件直接
-  当成迁移任务。
-- 实现领域模块前，必须明确职责、依赖、state ownership、关键 invariant、上游
-  证据、首批 behavior slice 和验收 workflow；module charter 不等于 public API。
-- interface 必须来自实际使用者的需要并保持窄小，不得为模拟 TypeScript class
-  或想象中的 extension 创建空泛 abstraction。
-- 在新的设计决策明确批准之前，不得嵌入 JavaScript runtime，也不得为了
-  extension source compatibility 而扭曲核心设计。
+事实优先级如下：
 
-## 迁移与测试纪律
+1. 原版 pi 的实际调用链、行为和测试；
+2. pi-go 当前实现、production assembly 和测试；
+3. 本仓库文档中的阶段总结。
 
-- 每个迁移行为都必须能够追溯到 docs/UPSTREAM.md 固定的 pi commit 中的上游源码
-  或测试。
-- 每个相关上游测试都要分类为 ported、strengthened、deferred、
-  intentionally-incompatible 或 not-applicable。不得用大范围 skip 隐藏缺口。
-- 一个模块里程碑内的相关行为和测试应一起实现；小组件只做过程自检，不逐项停下来
-  做独立 review。不得根据翻译文件数或源码行数宣称完成。
-- 调研热点文件时必须沿调用者、数据和行为边界读取相关证据。不得把
-  `interactive-mode.ts`、`agent-session.ts` 等聚合文件作为一次整体翻译任务。
-- 默认测试使用确定性的 fake provider。真实 provider 测试必须显式启用，
-  且不能成为默认测试套件的依赖。
-- 一个模块里程碑完成前，必须运行 gofmt、go test ./...、go vet ./...，以及相关的
-  race 或 fuzz 测试。
-- 每个领域模块里程碑在标记完成、或允许依赖它的下一模块扩大实现范围前，必须由
-  未参与该里程碑实现的 reviewer 独立审查。审查至少覆盖上游行为证据、规则与
-  module charter 符合性、实现正确性、测试缺口、依赖方向、state ownership、
-  并发与数据安全，以及当前设计能否继续承载后续迁移。
-- 独立审查发现的 blocker 必须先关闭；允许延期的问题必须写入 ledger，明确影响、
-  owner module 和重新评估条件。严重阻塞不得静默降级或以兼容分支绕过。
-- 只有在独立的上游同步变更中，才能更新 docs/UPSTREAM.md；同时必须更新
-  behavior ledger、test ledger 和受影响的 fixture。
+如果三者冲突，先调查实现，不得为了符合文档维持错误架构；确认后同步更新文档。
+
+## 核心方向
+
+- 产品 runtime 只使用 Go，不启动、代理或 fallback 到 TypeScript pi。
+- 首要任务是形成 `AgentLoop -> AgentSession -> Runtime/RPC` 的完整核心。
+- Model、Message、Provider 和 AgentSession 默认移植原版已经工作的语义边界，不另造
+  平行抽象。Go 化调整必须有具体的类型安全、并发或资源生命周期理由。
+- 图片和富 tool result 属于 Agent 核心消息链路，不是以后再补的 UI 功能。
+- pi-web 是核心完成后的重要验收目标；优先复用原版 RPC 行为，让 pi-web 修改启动和
+  transport，不在 core 中加入页面专用状态。
+- 完整旧 session 兼容、TUI、plugin 和 extension 可以暂缓，但当前设计不得主动阻塞
+  这些能力。
+- 初期 API 保持 internal，只有真实调用者稳定后才冻结 public boundary。
+
+## 文档纪律
+
+- 不为每个 package、小功能或 review 建立 charter、ledger 和流水账。
+- `docs/STATUS.md` 只记录影响整体判断的事实；实现状态变化时直接更新。
+- 重要行为由代码、测试和端到端 scenario 证明，不能用文档状态宣称完成。
+- 上游 commit 变化时更新 `docs/STATUS.md` 中的参考版本即可；只有行为差异需要说明。
+
+## 修改与测试
+
+- 先沿调用链调查现状，再修改；明显与预期不符时不要猜测。
+- 默认测试不得依赖 network、真实 credential 或 TypeScript runtime。
+- Go 代码变更至少运行 gofmt、`go test ./...`、`go vet ./...` 和 `go build ./...`。
+- 涉及 agent、streaming、session、tool 并发或取消时运行相关 race test。
+- 端到端行为优先于孤立 package 的局部完成度。
 
 ## 工作区安全
 
-- 保留用户无关的修改，绝不对这些修改使用 Git 回退命令。
-- 永远不要删除文件。确实需要移出仓库时，移动到 /tmp 并明确说明。
-- 委派子 agent 时，任务说明必须明确禁止其继续派生子 agent。
+- 不相关修改属于用户，保留并忽略，绝不使用 Git 回退命令。
+- 永远不要删除文件；确实需要移出仓库时移动到 `/tmp` 并说明位置。
+- 临时文件放在 `/tmp`，不要污染仓库。
+- 搜索必须针对工作区或明确目录，不做全局 filesystem 搜索。
+- 委派子 agent 时必须明确禁止其继续派生子 agent。

@@ -1,242 +1,118 @@
-# 架构边界
+# 核心架构
 
-## 架构中心
+## 目标
 
-pi-go 的中心是 standalone coding agent 产品，而不是 remote API。CLI、TUI 和
-其他内置运行模式直接使用同一套 Go application 与 domain 能力，不要求经过
-network 或 serialization boundary。
+pi-go 要重现原版 Pi 的产品行为，而不是围绕现有 Go package 为缺失能力寻找补丁。
+Agent、AgentSession、Model、Provider 和 Message 已经在原版中形成了可工作的语义边界；
+默认策略是移植这些边界和行为，只对语言运行时相关的实现方式做 Go 化调整。
 
-初始依赖方向如下，具体目录名称可以随实现演进：
+如果文档描述、当前 Go 抽象和原版实际调用链冲突，应重新检查原版实现与测试，并更新
+Go 代码和本文。不能因为旧迁移计划已经写下某种架构，就继续维持错误边界。
 
-~~~text
-            pi-go executable
-          /        |         \
-       CLI     print mode     TUI
-          \        |         /
-        coding-agent application
-                   |
-          agent / session runtime
-             /       |       \
-           AI       tool    storage
-             \       |       /
-        provider and platform adapters
-~~~
+## 目标分层
 
-上层负责产品 workflow，下层负责可复用语义和外部系统接入。依赖方向不能因为
-未来某个 plugin 或 pi-web 的需求而倒置。
+```mermaid
+flowchart TB
+    Surface["CLI / RPC / future TUI"] --> Runtime["Application Runtime"]
+    Runtime --> AgentSession["AgentSession"]
+    AgentSession --> AgentLoop["AgentLoop"]
+    AgentSession --> SessionStore["Session Store"]
+    AgentSession --> Services["Model / Auth / Prompt services"]
+    AgentLoop --> Provider["Provider boundary"]
+    AgentLoop --> Tools["Tool runtime"]
+    Provider --> Adapters["OpenAI / Anthropic / Gemini / ... adapters"]
+```
 
-## 迁移组织模型
+### AgentLoop
 
-pi-go 不按上游文件、package 或 class 机械迁移。迁移工作使用三个层次：
+`AgentLoop` 只负责一次运行中的推理和工具控制流：
 
-1. **领域模块里程碑是实现与 review 单位**：一次完成一组相互关联的职责、invariant、
-   state ownership 和依赖方向，再做联合审查。
-2. **Behavior feature slice 是追踪单位**：记录每个可观察行为及其正常、错误、取消
-   和数据路径，但不要求逐项停工或独立 review。
-3. **完整用户 workflow 是验收单位**：尽早把多个模块组成可执行闭环，不能等各
-   模块分别“完成”后才验证集成。
+- 接收已有上下文和新的富消息；
+- 调用 provider 并转发规范化 stream event；
+- 执行一批 tool call，追加 tool result，再发起下一次推理；
+- 处理取消、结束原因和单次运行的错误；
+- 在每次 provider 请求前使用调用者提供的最新 turn snapshot。
 
-一个领域模块可以跨越多个上游 package，也可以由多个 Go internal package 实现。
-反过来，一个上游热点文件通常包含多个行为，必须拆成多个 slice。源码行数、文件
-存在或编译通过都不是模块完成条件。
+它不拥有产品设置、长期队列、session 文件、模型选择或压缩策略。
 
-开始实现模块前，需要建立 module charter，至少记录：
+### AgentSession
 
-- 负责和明确不负责的职责；
-- 上游源码、测试、fixture、文档与固定 commit 依据；
-- 输入、输出、错误、取消、并发和 durable data invariant；
-- 依赖方向、state ownership 和允许的并发边界；
-- TypeScript 与 Go 之间需要重新决策的语义；
-- 首批 behavior slice 和验收 workflow。
+`AgentSession` 是 coding agent 的产品核心，也是当前 pi-go 最主要的缺口。它长期拥有：
 
-Module charter 是当前设计假设，可以随行为证据演进，不是 public API 或 wire
-compatibility 承诺。上游源码分布、热点与这些模块的证据映射见
-[SOURCE_MAP.md](SOURCE_MAP.md)。
+- 当前 model、thinking level、system prompt 和 tool 集合；
+- conversation state、steering/follow-up queue 和 active run；
+- retry、context window、compaction 和恢复策略；
+- session 持久化、分支选择以及有序事件；
+- 运行期间的 model/settings/resource reload。
 
-## 初始领域模块
+每次 provider 推理前，AgentSession 都必须重新准备 turn snapshot。这样在 tool chain
+期间发生的模型切换、thinking 调整、prompt reload 或 tool 变更才能影响下一轮，而不必
+销毁整个 session。
 
-下面的模块是迁移起点，不预设最终目录名称。
+### Model 与 Provider
 
-### 基础语义
+Model 应移植原版的通用模型语义，包括 provider、API dialect、模型标识、能力、context
+window、max tokens、reasoning、cost 和必要 request metadata。它不是只有三个字符串的
+route key。
 
-承载 message、content、tool call、usage、finish reason、model metadata、stream
-event 和稳定错误类别。只共享已经稳定且被多个真实场景需要的语义，不能演变为
-无边界的 common package。
+Provider boundary 接收通用 Model、上下文和调用选项，并返回通用 stream。各 adapter
+负责厂商请求转换、认证、错误映射和后续轮次需要的 provider metadata：
 
-### AI 与 provider runtime
+```text
+AgentLoop -> generic provider request -> provider adapter -> vendor API
+```
 
-承载 provider auth、request conversion、stream parsing、error mapping、retry 和
-必要 vendor metadata。Provider adapter 位于 domain 外侧；先由 deterministic fake
-与一个真实 API dialect 验证边界，再按行为族增加 adapter。
+OpenAI Responses 的 response ID、encrypted reasoning 或 item replay 不能成为通用消息
+接口本身。必须保留的厂商数据应由对应 adapter 识别，并带有明确 provenance；增加新
+Provider 不应要求修改 AgentLoop 的控制流。
 
-### Agent runtime
+这里不需要重新发明一套抽象。以原版 `packages/ai` 的实际类型、调用点和测试为基准，
+把语义直接移植到 Go；只有明确的 Go 类型安全、并发或资源生命周期问题才需要改变实现。
 
-承载 turn lifecycle、model stream、tool-call loop、下一轮推理、steering/follow-up、
-abort 和结束状态。它依赖基础语义、provider、tool 与 session，但不拥有 terminal
-展示或持久化 record 格式。
+### 富消息与 Tool Result
 
-### Session 与 storage
+核心消息链路从一开始就必须支持：
 
-承载 durable conversation state、append、tree、resume、branch、compaction record、
-历史格式兼容、恢复和写入一致性。Domain state、storage record 与具体 filesystem/
-SQLite adapter 分离，相同 durable invariant 只实现一次。
+- user：text、image；
+- assistant：text、thinking、tool call；
+- tool result：text、image，以及不发送给模型但供 UI/runtime 使用的结构化 details。
 
-### Tool 与系统能力
+Agent 输入、队列、上下文构建、provider adapter、tool executor、session persistence、
+event 和 RPC 必须使用同一组富内容语义。不能在中间层把内容提前压成字符串。
 
-承载 read、write、edit、bash 等内置 tool 的语义和执行生命周期。Filesystem、
-subprocess、environment 与 platform adapter 位于边界处；root、permission、timeout、
-output limit 和 cancellation 是模块 contract 的一部分。
+### Session Store
 
-### Coding-agent application 与 headless CLI
+Session Store 负责可靠保存，不负责决定 Agent 的运行策略。它应继续保留现有的原子
+追加、锁、tree/branch、恢复和 unknown data 安全能力。
 
-组合 agent、session、provider 与 tool，形成 prompt、stream、tool execution、保存、
-恢复和退出的用户 workflow。CLI、print mode、signal、exit code 和诊断属于这一层；
-下层 domain 不反向依赖命令行或 serialization。
+完整的旧会话兼容可以晚于 Agent 核心重构，但当前数据模型必须能表达 model change、
+thinking level change、compaction 和 branch summary，避免以后再次更换格式。Provider
+adapter 的临时请求对象不能直接成为 durable state。
 
-### 产品服务
+### Runtime 与 pi-web
 
-按实际 workflow 提供 model selection、auth storage、settings、system prompt、prompt
-template、skill、resource loading、package management、context management、retry 和
-高级 compaction。不同能力不因同属“配置”或“资源”而被塞进巨大统一 service。
+CLI、长期运行进程和未来 TUI 都使用同一个 AgentSession。对 pi-web 的首选接入方式是
+实现原版已有的 JSONL RPC 命令与事件语义，让 pi-web 主要修改进程启动和 transport
+adapter，而不是让 pi-go 核心理解页面状态。
 
-### Interactive 与 TUI
+RPC 是 AgentSession 的外部控制面，不是 Agent 核心的数据模型。
 
-承载 terminal lifecycle、input、editor、keybinding、autocomplete、layout、overlay、
-incremental rendering、image、IME 和 selector。Interactive mode 直接组合 application
-能力，展示状态不得进入 agent/session domain。
+## 核心不变量
 
-### Extension
-
-在 standalone core 稳定后，从真实内部能力中提炼最小 extension surface。上游
-extension type 和 loader 是需求证据，不是 source-compatible contract。
-
-### Remote 能力
-
-承载上游 protocol、client 和 server 中确属产品行为的部分。普通 storage adapter
-属于 Session 与 storage 模块；只有 transport-specific persistence 才随 remote 能力
-评估。进入该模块时重新决定 domain boundary、wire compatibility 和 transport；
-早期 core 不得为了它建立统一 remote API。
-
-初始依赖主线可以概括为：
-
-~~~text
-              CLI / print / interactive TUI
-                         |
-              coding-agent application
-                  /              \
-          product services    agent runtime
-                              /     |      \
-                    AI/provider    tool   session/storage
-                              \     |      /
-                              base semantics
-
-           extension and remote capabilities are later boundaries
-~~~
-
-## Go package 策略
-
-- 迁移早期的大多数实现默认放在 `internal` 范围，保留调整 package 和类型的空间。
-- interface 应由实际使用者需要的行为定义，并尽量小；不为每个 TypeScript class
-  创建对应 interface。
-- 共享类型只承载确实稳定的语义，不能形成无边界的 common package。
-- 错误应保留可判断的类别和 cause，同时提供清楚的用户信息。
-- `context.Context` 用于调用生命周期、deadline 和 cancellation，不作为任意数据
-  容器，也不能被长期保存。
-- 只有被多个真实场景反复使用且职责稳定的能力，才考虑提升为 public package。
-
-上游的 `ai`、`agent`、`coding-agent`、`tui`、`protocol`、`server` 和 `client`
-package 是迁移清单，不是必须照抄的 Go module 结构。
-
-固定上游基线还同时包含 coding-agent 自己的 `AgentSession` 产品路径和 `agent`
-package 导出的独立 `AgentHarness`。二者在 session、tool、compaction 与 resource 上
-存在相邻职责，当前 coding-agent executable 仍直接使用低层 `Agent`，没有直接
-实例化 `AgentHarness`。阶段 0 必须先分类两条路径的产品行为和共享 invariant；
-不得仅因上游有两套 class，就在 Go 中预设两套 runtime。
-
-## Agent 与 session
-
-Agent loop 负责 model stream、tool call 和下一轮推理的控制流程；session 负责
-可持久化的对话状态和恢复语义。二者可以协作，但不能把 provider 的临时对象直接
-作为 durable state。
-
-每个活跃 session 必须有明确的 state ownership。provider stream 和 tool 可以
-并发执行，但所有影响 session 的变化必须按可解释的顺序提交。取消后遗留的
-goroutine 不得继续修改已结束的 turn 或 session。
-
-Steering、retry、compaction、branch、resume 等高级行为应在基本 agent loop 和
-session invariant 稳定后逐步加入，不能一开始设计一个覆盖所有未来状态的巨大
-state machine。
-
-## AI 与 provider
-
-内部 message、content、tool call、usage 和 finish reason 只表达 pi-go 所需语义，
-不复制任一 vendor SDK 的全部类型。
-
-每个 provider adapter 负责认证、请求转换、stream parsing、错误映射以及必要的
-vendor metadata 保留。跨 provider 的 normalize 必须有 fixture 和 regression
-test；不能为了统一表面类型而丢失后续 turn 需要的数据。
-
-Provider interface 应在至少一个真实 adapter 和一个 deterministic fake 中得到
-验证，再根据新增 provider 的差异演进。
-
-## Tool 与系统能力
-
-内置 tool 是 pi-go 产品功能，不依赖 extension system 才能工作。read、write、
-edit、bash 等能力应直接实现并测试，其 root、environment、output limit、timeout
-和 cancellation 必须明确。
-
-Tool 执行不能隐式扩大进程已有权限。项目 trust、credential 和工作目录规则属于
-产品安全边界，需要在 CLI 与非交互模式中保持一致。
-
-## CLI、TUI 与运行模式
-
-CLI 参数解析、interactive mode、print/headless mode 和 TUI 都属于 standalone
-验收范围。它们可以共享 application service，但展示状态和 terminal rendering
-不能进入 agent domain。
-
-TUI 按键、布局、宽度计算、增量渲染、图片和输入法等行为需要独立测试。为了先打通
-agent 闭环，可以先交付 print mode，但不能把 TUI 永久降级为外部 client。
-
-## 持久化与兼容数据
-
-现有 pi session 和配置数据属于用户迁移能力，应在 core 阶段考虑，而不是归入
-plugin 或 pi-web 兼容。
-
-- domain state 与 storage record 分离，转换位置明确。
-- reader、writer 和 migration 分别测试。
-- 需要 round-trip 的 unknown field 或 record 必须保留。
-- corrupt、partial write 和不支持的版本必须返回可诊断错误，不能 silent truncate。
-- 写入策略必须考虑 crash consistency 和多进程访问。
-
-## Extension surface
-
-Extension boundary 不在迁移初期预先设计。完成 core 后，先调查现有 extension
-实际使用了哪些能力，再从已经稳定的内部语义中提炼最小边界。
-
-pi-go 的责任是提供通用功能、清晰生命周期和可靠错误语义。现有 plugin 如何映射
-自己的 API、如何兼容旧配置、是否需要独立 adapter，由 plugin 或其维护者决定。
-
-不同能力可以采用不同方式：某些场景适合 Go interface，某些场景可能需要受控的
-subprocess 或 protocol。除非届时的需求和测试支持，不统一预设一种 extension
-机制，也不嵌入 JavaScript runtime。
-
-## 外部集成与 transport
-
-pi-web 和其他外部项目在 standalone pi-go 完成后接入。接入时先识别它们所需的
-通用能力，再决定是否复用上游 protocol、增加独立 adapter，或采用其他进程边界。
-
-任何公开 transport 都必须与内部 domain 解耦，但“解耦”不等于现在就必须创建
-统一的 remote API。HTTP、SSE、WebSocket、CBOR、stdio 和 Unix socket 当前都
-不是既定方案。
-
-pi-go 不接受仅服务某个页面、frontend state 或 pi-web workflow 的字段和分支。
-如果外部项目需要转换，应由其 client、BFF 或独立 adapter 完成。
-
-## Public API 与版本控制
-
-初期内部 API 可以随迁移调整。一个能力成为 public package、extension contract
-或 wire protocol 后，才需要明确 versioning、compatibility window 和 breaking
-change policy。
-
-公开边界必须有自己的 conformance test，并记录调用者应如何处理新增字段、未知
-event、取消、错误和版本不匹配。不能用过早冻结整个 core 的方式换取未来兼容性。
+- 一个 active session 只有一个明确的状态 owner。
+- provider、tool 和 observer 回调不在 session 锁内执行。
+- 取消或结束后，遗留 goroutine 不得继续提交消息或事件。
+- tool call、tool result、message commit 和可见 event 的顺序可解释且可测试。
+- 每个 provider turn 使用不可变 snapshot，但 snapshot 在 turn 之间可以变化。
+- 通用层不依赖某个 vendor wire type。
+- 持久化读取遇到未知数据时不静默破坏原文件。
+
+## 对现有代码的处理
+
+现有 stream collector、tool scheduler、取消与 settlement、session storage/tree、内置工具、
+auth 和 resource 实现都可以继续使用。核心重构的重点不是推倒重来，而是：
+
+1. 将 `internal/agent` 中纯单次运行的部分收敛为 AgentLoop；
+2. 把动态产品状态和策略放入新的 AgentSession；
+3. 用原版语义重整 model/provider/message 边界；
+4. 再把已有高级能力接入实际 Runtime。
