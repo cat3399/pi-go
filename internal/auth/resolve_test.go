@@ -43,6 +43,14 @@ func TestResolveOpenAIKeyPrecedenceAndStoredOwnership(t *testing.T) {
 	if err != nil || value != "cli" {
 		t.Fatalf("CLI = %q, %v", value, err)
 	}
+	if err := runtime.SetAPIKey("openai", "runtime-key"); err != nil {
+		t.Fatal(err)
+	}
+	value, err = ResolveOpenAIKey(context.Background(), runtime, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient"})
+	if err != nil || value != "runtime-key" {
+		t.Fatalf("runtime = %q, %v", value, err)
+	}
+	runtime.RemoveAPIKey("openai")
 	value, err = ResolveOpenAIKey(context.Background(), runtime, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient"})
 	if err != nil || value != "stored-scoped" {
 		t.Fatalf("stored = %q, %v", value, err)

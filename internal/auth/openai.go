@@ -19,12 +19,12 @@ func ResolveOpenAIKey(ctx context.Context, runtime *Runtime, explicit *string, c
 	}
 	if exists {
 		if credential.Type != "api_key" {
-			return "", failure(KindUnsupported, "resolve stored credential", "openai", nil)
+			return "", failure(KindUnsupported, "resolve stored credential", "openai", ErrCredentialType)
 		}
-		return ResolveValue(ctx, credential.Key, "stored API key", credential.Env, ambient)
+		return ResolveValue(ctx, credential.Key, "stored OpenAI API key", credential.Env, ambient)
 	}
 	if configured != nil {
-		return ResolveValue(ctx, *configured, "configured API key", nil, ambient)
+		return ResolveValue(ctx, *configured, "configured OpenAI API key", nil, ambient)
 	}
 	if value := ambient["OPENAI_API_KEY"]; value != "" {
 		if !validAPIKey(value) {

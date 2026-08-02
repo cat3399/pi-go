@@ -77,7 +77,7 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-APP-003` | SIGINT/SIGTERM/SIGHUP cancel、reap、flush，退出后无 late output/commit | print signal source；上游缺完整 SIGINT/process test | `ported` | R-APP-001；signal lifecycle 为 Go strengthening |
 | `B-APP-004` | 新 application 实例按显式 path resume WF-001 session | session invalid-file test + WF-001 | `ported` | R-APP-001 |
 | `B-APP-005` | production entry 装配标准 OpenAI Responses，text print 全程只运行 Go | `main.ts` runtime assembly；OpenAI Responses basic text/stream intent | `ported` | R-APP-002 |
-| `B-APP-006` | `--api-key` > stored OpenAI credential > configured models key > `OPENAI_API_KEY`；选中来源失败不 ambient fallback，secret 不进诊断 | `runtime-credentials.ts`；`auth/resolve.ts`；`provider-composer.ts` | `ported` | R-APP-002；写入/login/command value 后续重评 |
+| `B-APP-006` | `--api-key` > stored OpenAI credential > configured models key > `OPENAI_API_KEY`；选中来源失败不 ambient fallback，secret 不进诊断 | `runtime-credentials.ts`；`auth/resolve.ts`；`provider-composer.ts` | `ported` | R-APP-002；login/command value 后续重评 |
 | `B-APP-007` | `--provider openai --model <id>`、`--model openai/<id>` 与默认 OpenAI model；未知 route 在副作用前失败 | `cli/args.ts`；`model-resolver.ts::resolveCliModel` | `ported` | R-APP-002；完整 catalog/fuzzy/cycling 后续重评 |
 | `B-APP-008` | 无 `--session` 时在 agent dir/sessions 下按 cwd 隔离创建 durable session，显式 path 优先 | `config.ts::getAgentDir`；`session-manager.ts::getDefaultSessionDirPath/newSession` | `ported` | R-APP-002 |
 
@@ -85,9 +85,11 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 
 | ID | 行为 | 上游证据 | 状态 | 备注 |
 | --- | --- | --- | --- | --- |
-| `B-AUTH-001` | auth.json API-key read/set/delete，未知 provider 保留，malformed 不覆盖 | `auth-storage.ts`；`auth-storage.test.ts` | `ported` | strict parse/0600/atomic replacement strengthened |
-| `B-AUTH-002` | runtime override 与 stored credential ownership | `runtime-credentials.ts`；`runtime-credentials.test.ts`；`auth/resolve.ts` | `ported` | request-lifetime key never persists |
-| `B-AUTH-003` | literal/environment config value resolution | `resolve-config-value.ts`；`resolve-config-value.test.ts` | `ported` | command values intentionally rejected pending security/process slice |
+| `B-AUTH-001` | auth.json API-key read/set/delete，unknown provider 保留，malformed 不覆盖 | `auth-storage.ts`；`auth-storage.test.ts` | `ported` | strict duplicate/UTF-8/root admission strengthened |
+| `B-AUTH-002` | private admission 与 atomic/durable replacement | `auth-storage.ts`；`auth-storage.test.ts` | `ported` | Unix 0600；Windows persistent auth fail-closed |
+| `B-AUTH-003` | context-aware same-process 与 cross-process serialization | `auth-storage.ts`；concurrent modification tests | `ported` | same/different Store、取消、release/merge、re-exec、race |
+| `B-AUTH-004` | runtime override 及 stored/configured/environment source ownership | `runtime-credentials.ts`；`runtime-credentials.test.ts`；`auth/resolve.ts` | `ported` | production 使用同一 resolver，request key 不持久化 |
+| `B-AUTH-005` | literal/environment template 与 command safe refusal | `resolve-config-value.ts`；`resolve-config-value.test.ts` | `ported` | command process 不启动，待安全/process slice 重评 |
 
 ## 首个 workflow 之外的明确分类
 

@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"unicode/utf8"
 )
@@ -19,8 +18,11 @@ func (s *Store) Read(ctx context.Context, provider string) (Credential, bool, er
 	if cause := context.Cause(ctx); cause != nil {
 		return Credential{}, false, failure(KindCancelled, "read credential", provider, cause)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.acquireLocal(ctx, "read credential", provider)
+	if err != nil {
+		return Credential{}, false, err
+	}
+	defer release()
 	root, exists, err := s.readRoot()
 	if err != nil || !exists {
 		return Credential{}, false, err
@@ -37,8 +39,11 @@ func (s *Store) List(ctx context.Context) ([]Info, error) {
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, failure(KindCancelled, "list credentials", "", cause)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.acquireLocal(ctx, "list credentials", "")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	root, exists, err := s.readRoot()
 	if err != nil || !exists {
 		return nil, err
@@ -86,8 +91,14 @@ func (s *Store) mutate(ctx context.Context, operation, provider string, change f
 	if cause := context.Cause(ctx); cause != nil {
 		return failure(KindCancelled, operation, provider, cause)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.platform == "windows" {
+		return failure(KindUnsupported, operation, provider, ErrPersistentAuthUnavailable)
+	}
+	releaseLocal, err := s.acquireLocal(ctx, operation, provider)
+	if err != nil {
+		return err
+	}
+	defer releaseLocal()
 	if err := os.MkdirAll(lockPathParent(s.path), 0o700); err != nil {
 		return failure(KindIO, operation, provider, err)
 	}
@@ -128,7 +139,10 @@ func (s *Store) readRoot() (map[string]json.RawMessage, bool, error) {
 	if !info.Mode().IsRegular() {
 		return nil, false, failure(KindInvalid, "read auth file", "", nil)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+	if s.platform == "windows" {
+		return nil, false, failure(KindPermission, "read auth file", "", ErrPrivateAdmissionUnavailable)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
 		return nil, false, failure(KindPermission, "read auth file", "", nil)
 	}
 	if info.Size() > s.maxFileBytes {
@@ -188,9 +202,9 @@ func (s *Store) atomicWrite(data []byte, operation, provider string) error {
 		return failure(KindIO, operation, provider, err)
 	}
 	completed = true
-	// fsync of a directory is unavailable on Windows; rename still gives its
-	// platform atomic-replacement guarantee, while durable directory metadata is
-	// best-effort there.
+	// Persistent Windows auth is fail-closed before this path because v0.1 has
+	// no DACL admission/creation implementation. On supported platforms the
+	// directory sync makes the rename as durable as the filesystem allows.
 	if directoryFile, err := os.Open(directory); err == nil {
 		_ = directoryFile.Sync()
 		_ = directoryFile.Close()

@@ -84,7 +84,7 @@ v0.1 的 deterministic application path 已完成；fake 只存在于 `_test.go`
 - 当前只装配固定的 `openai/openai-responses` dialect；未知 provider、非法 model route 和
   unsupported stored credential 明确失败，不 fallback 到 scripted 或其他 runtime。
 - 默认 session 位于 agent dir 下按 cwd 隔离的 sessions 目录；`--session` 仍显式覆盖。
-- OAuth/login、credential 写入、命令型 config value、完整 models/catalog、settings/project
+- OAuth/login、credential 写入的产品命令、命令型 config value、完整 models/catalog、settings/project
   trust、完整 system prompt 与真实 credential smoke 分别延期；selected OpenAI 配置中的
   非投影字段会明确失败，不能被静默忽略。
 

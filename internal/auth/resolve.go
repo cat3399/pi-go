@@ -18,7 +18,7 @@ func ResolveValue(ctx context.Context, raw, description string, scoped, ambient 
 		return "", failure(KindInvalid, "resolve "+description, "", nil)
 	}
 	if strings.HasPrefix(raw, "!") {
-		return "", failure(KindUnsupported, "resolve command-backed "+description, "", nil)
+		return "", failure(KindUnsupported, "resolve command-backed "+description, "", ErrCommandBacked)
 	}
 	var output strings.Builder
 	for index := 0; index < len(raw); {

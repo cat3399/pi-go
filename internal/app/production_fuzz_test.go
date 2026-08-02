@@ -1,8 +1,11 @@
 package app
 
 import (
+	"context"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/cat3399/pi-go/internal/auth"
 )
 
 func FuzzProductionConfigAdmissionNeverPanics(f *testing.F) {
@@ -22,7 +25,8 @@ func FuzzProductionConfigAdmissionNeverPanics(f *testing.F) {
 		}
 		normalized := normalizeJSONWithLineComments(input)
 		_, _ = decodeStrictJSON(normalized)
-		_, _ = resolveProductionConfigValue(
+		_, _ = auth.ResolveValue(
+			context.Background(),
 			string(input),
 			"fuzz value",
 			map[string]string{"SCOPED_KEY": "scoped"},

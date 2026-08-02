@@ -12,7 +12,7 @@
 | `D-SETTINGS-001` | global/project `settings.json` | `packages/coding-agent/src/core/settings-manager.ts` | source precedence、project trust、unknown setting preservation | `classified` |
 | `D-TRUST-001` | `~/.pi/agent/trust.json` project trust decisions | `packages/coding-agent/src/core/trust-manager.ts::ProjectTrustStore` | 安全关键；path normalization、nearest ancestor、lock/merge、unknown/malformed preservation | `classified` |
 | `D-KEYBINDING-001` | `~/.pi/agent/keybindings.json` | `packages/coding-agent/src/core/keybindings.ts`；`packages/coding-agent/src/migrations.ts::migrateKeybindingsConfigFile` | TUI 前实现；unknown/malformed 不覆盖，alias migration 可重复 | `deferred` |
-| `D-AUTH-001` | `auth.json` provider credential map | `packages/coding-agent/src/core/auth-storage.ts`；`packages/ai/src/auth/types.ts` | mode 0600、lock/merge、malformed 不覆盖、secret 不进入 log | `ported-api-key-v0.1`；OAuth deferred |
+| `D-AUTH-001` | `auth.json` provider credential map | `packages/coding-agent/src/core/auth-storage.ts`；`packages/ai/src/auth/types.ts` | mode 0600、lock/merge、malformed 不覆盖、secret 不进入 log | `ported-api-key-v0.1-unix`；Windows fail-closed；OAuth deferred |
 | `D-AUTH-002` | legacy `oauth.json` 与 settings API keys | `packages/coding-agent/src/migrations.ts` | 后续 one-way migration，保留原文件直至成功 | `deferred` |
 | `D-MODEL-001` | user `models.json` | `packages/coding-agent/src/core/model-config.ts` | comments/schema、provider overrides、错误诊断和 reload | `classified` |
 | `D-MODEL-002` | dynamic `models-store.json` | `packages/coding-agent/src/core/models-store.ts`；`packages/ai/src/models-store.ts` | provider-scoped merge、etag/checkedAt、malformed 不覆盖 | `classified` |
@@ -68,7 +68,9 @@ credential source precedence。Deterministic fake 不读取该文件；真实 pr
 
 M-AUTH/v0.1 实现 OpenAI 及其他 provider API-key entry 的 read/write/delete runtime service；unknown
 provider entry 保留，malformed 或不支持的已选 credential 明确失败且不得回退环境变量。OAuth/login/
-refresh 和 legacy migration 仍未迁移，故 D-AUTH-001 不代表完整 credential-format migration。
+refresh 和 legacy migration 仍未迁移，故 D-AUTH-001 不代表完整 credential-format migration。Windows
+尚无可靠 DACL admission/creation，persistent read/write/delete fail-closed；missing file 不阻塞 runtime、
+models.json configured key 或 ambient environment source。
 
 ## D-MODEL-001 / D-MODEL-002
 

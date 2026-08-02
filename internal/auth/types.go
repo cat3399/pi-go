@@ -2,8 +2,8 @@ package auth
 
 import (
 	"context"
+	"runtime"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 )
@@ -36,7 +36,8 @@ type Store struct {
 	path         string
 	maxFileBytes int64
 	lockPoll     func(context.Context) error
-	mu           sync.Mutex
+	local        chan struct{}
+	platform     string
 	// beforeRename is a package-private fault-injection seam. Production leaves
 	// it nil; tests use it to prove a failed replacement preserves old bytes.
 	beforeRename func() error
@@ -53,10 +54,27 @@ func NewStore(options Options) (*Store, error) {
 	if max < 2 || options.Path == "." {
 		return nil, failure(KindInvalid, "open store", "", nil)
 	}
-	return &Store{path: options.Path, maxFileBytes: max, lockPoll: options.LockPoll}, nil
+	local := make(chan struct{}, 1)
+	local <- struct{}{}
+	return &Store{
+		path: options.Path, maxFileBytes: max, lockPoll: options.LockPoll,
+		local: local, platform: runtime.GOOS,
+	}, nil
 }
 
 func (s *Store) Path() string { return s.path }
+
+func (s *Store) acquireLocal(ctx context.Context, operation, provider string) (func(), error) {
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, failure(KindCancelled, operation, provider, cause)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, failure(KindCancelled, operation, provider, context.Cause(ctx))
+	case <-s.local:
+		return func() { s.local <- struct{}{} }, nil
+	}
+}
 
 func validProviderID(provider string) bool {
 	return utf8.ValidString(provider) && strings.TrimSpace(provider) == provider && provider != "" &&

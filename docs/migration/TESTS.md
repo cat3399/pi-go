@@ -101,10 +101,11 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
-| `T-AUTH-001` | B-AUTH-001 | `auth-storage.test.ts` read/modify/delete/malformed | `strengthened` | unknown record, strict duplicate rejection, fault-injected replacement, mode |
-| `T-AUTH-002` | B-AUTH-001 | `auth-storage.test.ts` concurrent modifications | `strengthened` | two Store instances, separate re-exec process, cancellation, `-race` |
-| `T-AUTH-003` | B-AUTH-002 | `runtime-credentials.test.ts`; `models-runtime.test.ts` ownership | `ported` | nonpersistent override and no lower-source fallback |
-| `T-AUTH-004` | B-AUTH-003 | `resolve-config-value.test.ts` templates/commands | `intentionally-incompatible` | command side effect is rejected until security/process contract exists |
+| `T-AUTH-001` | B-AUTH-001 | `auth-storage.test.ts` read/modify/delete/malformed | `strengthened` | unknown record、duplicate/UTF-8/root matrix、malformed preservation |
+| `T-AUTH-002` | B-AUTH-002 | `auth-storage.ts` mode 0600 intent；上游无 atomic durability/Windows ACL evidence | `strengthened` | permission、pre-rename fault/temp cleanup、Windows fail-closed policy/cross-compile |
+| `T-AUTH-003` | B-AUTH-003 | `auth-storage.test.ts` concurrent modifications | `strengthened` | same/different Store、local/file wait cancellation、release/merge、re-exec、`-race` |
+| `T-AUTH-004` | B-AUTH-004 | `runtime-credentials.test.ts`；`models-runtime.test.ts` ownership | `strengthened` | nonpersistent override、四层 precedence、统一 production resolver、不 lower fallback |
+| `T-AUTH-005` | B-AUTH-005 | `resolve-config-value.test.ts` templates/commands | `intentionally-incompatible` | template/fuzz；command side effect rejected until security/process contract exists |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

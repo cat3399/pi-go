@@ -22,7 +22,15 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
+func requirePersistentAuth(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("v0.1 persistent auth is intentionally fail-closed on Windows")
+	}
+}
+
 func TestStoreRoundTripPreservesUnknownProviderAndPermissions(t *testing.T) {
+	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -57,6 +65,7 @@ func TestStoreRoundTripPreservesUnknownProviderAndPermissions(t *testing.T) {
 }
 
 func TestStoreMalformedAndUnsafeFilesAreNeverOverwritten(t *testing.T) {
+	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -76,25 +85,24 @@ func TestStoreMalformedAndUnsafeFilesAreNeverOverwritten(t *testing.T) {
 			}
 		})
 	}
-	if runtime.GOOS != "windows" {
-		if err := os.WriteFile(store.Path(), []byte(`{}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(store.Path(), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		err := store.SetAPIKey(context.Background(), "openai", "new-key", nil)
-		if !IsKind(err, KindPermission) {
-			t.Fatalf("unsafe mode error = %v", err)
-		}
-		data, _ := os.ReadFile(store.Path())
-		if string(data) != `{}` {
-			t.Fatalf("unsafe file changed: %q", data)
-		}
+	if err := os.WriteFile(store.Path(), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(store.Path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := store.SetAPIKey(context.Background(), "openai", "new-key", nil)
+	if !IsKind(err, KindPermission) {
+		t.Fatalf("unsafe mode error = %v", err)
+	}
+	data, _ := os.ReadFile(store.Path())
+	if string(data) != `{}` {
+		t.Fatalf("unsafe file changed: %q", data)
 	}
 }
 
 func TestStoreFailureBeforeRenamePreservesOriginalAndCleansTemporary(t *testing.T) {
+	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -123,6 +131,7 @@ func TestStoreFailureBeforeRenamePreservesOriginalAndCleansTemporary(t *testing.
 }
 
 func TestStoreSerializesConcurrentStoresAndLockContentionIsCancellable(t *testing.T) {
+	requirePersistentAuth(t)
 	directory := t.TempDir()
 	first, err := NewStore(Options{Path: filepath.Join(directory, "auth.json")})
 	if err != nil {
@@ -133,12 +142,16 @@ func TestStoreSerializesConcurrentStoresAndLockContentionIsCancellable(t *testin
 		t.Fatal(err)
 	}
 	var wait sync.WaitGroup
-	for _, input := range []struct{ provider, key string }{{"openai", "one"}, {"anthropic", "two"}} {
+	for index, input := range []struct{ provider, key string }{{"openai", "one"}, {"anthropic", "two"}} {
 		input := input
+		writer := first
+		if index == 1 {
+			writer = second
+		}
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			if err := first.SetAPIKey(context.Background(), input.provider, input.key, nil); err != nil {
+			if err := writer.SetAPIKey(context.Background(), input.provider, input.key, nil); err != nil {
 				t.Errorf("write %s: %v", input.provider, err)
 			}
 		}()
@@ -166,6 +179,110 @@ func TestStoreSerializesConcurrentStoresAndLockContentionIsCancellable(t *testin
 	}
 }
 
+func TestStoreSameInstanceWaitIsContextAwareAndReleasesAfterCancellation(t *testing.T) {
+	requirePersistentAuth(t)
+	directory := t.TempDir()
+	path := filepath.Join(directory, "auth.json")
+	if err := os.Mkdir(path+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	enteredFileWait := make(chan struct{})
+	var once sync.Once
+	store, err := NewStore(Options{
+		Path: path,
+		LockPoll: func(ctx context.Context) error {
+			once.Do(func() { close(enteredFileWait) })
+			<-ctx.Done()
+			return context.Cause(ctx)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- store.SetAPIKey(firstCtx, "openai", "first", nil) }()
+	select {
+	case <-enteredFileWait:
+	case <-time.After(time.Second):
+		t.Fatal("first mutation did not reach the file lock")
+	}
+
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancelSecond()
+	started := time.Now()
+	err = store.SetAPIKey(secondCtx, "anthropic", "second", nil)
+	if !IsKind(err, KindCancelled) {
+		t.Fatalf("same-Store wait error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("same-Store cancellation took %s", elapsed)
+	}
+
+	cancelFirst()
+	if err := <-firstDone; !IsKind(err, KindCancelled) {
+		t.Fatalf("first mutation error = %v", err)
+	}
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	store.lockPoll = nil
+	if err := store.SetAPIKey(context.Background(), "google", "after-cancel", nil); err != nil {
+		t.Fatalf("local/file locks were not released: %v", err)
+	}
+}
+
+func TestStoreFailClosedWindowsPolicyAndEphemeralFallback(t *testing.T) {
+	store := newTestStore(t)
+	store.platform = "windows"
+	if _, exists, err := store.Read(context.Background(), "openai"); err != nil || exists {
+		t.Fatalf("missing Windows auth file = exists %t, error %v", exists, err)
+	}
+	if err := store.SetAPIKey(context.Background(), "openai", "persistent-secret", nil); !errors.Is(err, ErrPersistentAuthUnavailable) || !IsKind(err, KindUnsupported) {
+		t.Fatalf("Windows persistent write error = %v", err)
+	}
+	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
+		t.Fatalf("Windows fail-closed write created a file: %v", err)
+	}
+
+	runtimeCredentials := NewRuntime(store)
+	if err := runtimeCredentials.SetAPIKey("openai", "ephemeral-key"); err != nil {
+		t.Fatal(err)
+	}
+	credential, exists, err := runtimeCredentials.Read(context.Background(), "openai")
+	if err != nil || !exists || credential.Key != "ephemeral-key" {
+		t.Fatalf("Windows runtime override = %#v, %t, %v", credential, exists, err)
+	}
+	runtimeCredentials.RemoveAPIKey("openai")
+	configured := "configured-key"
+	value, err := ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient-key"})
+	if err != nil || value != "configured-key" {
+		t.Fatalf("Windows configured fallback = %q, %v", value, err)
+	}
+	value, err = ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, nil, map[string]string{"OPENAI_API_KEY": "ambient-key"})
+	if err != nil || value != "ambient-key" {
+		t.Fatalf("Windows ambient fallback = %q, %v", value, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.Path(), []byte(`{"openai":{"type":"api_key","key":"stored-secret"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = store.Read(context.Background(), "openai")
+	if !errors.Is(err, ErrPrivateAdmissionUnavailable) || !IsKind(err, KindPermission) {
+		t.Fatalf("existing Windows auth admission error = %v", err)
+	}
+	if strings.Contains(err.Error(), "stored-secret") {
+		t.Fatalf("Windows admission leaked secret: %v", err)
+	}
+	_, err = ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient-key"})
+	if !errors.Is(err, ErrPrivateAdmissionUnavailable) {
+		t.Fatalf("existing Windows file fell through to lower source: %v", err)
+	}
+}
+
 func TestAuthProcessHelper(t *testing.T) {
 	if os.Getenv("PI_GO_AUTH_HELPER") != "1" {
 		return
@@ -183,6 +300,7 @@ func TestAuthProcessHelper(t *testing.T) {
 }
 
 func TestRuntimeOverlayDoesNotPersistAndDeleteClearsBoth(t *testing.T) {
+	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := store.SetAPIKey(context.Background(), "openai", "stored", nil); err != nil {
 		t.Fatal(err)
