@@ -265,13 +265,16 @@
 ## R-AGENT-003：M-AGENT/v0.3 context-retry-lifecycle 独立复审
 
 - 范围：`5d0099d` 的 threshold/manual/overflow compaction、provider/Summarizer bounded retry、
-  OpenAI classification/Retry-After 与 lifecycle 初版，以及 `eff0ad7` 后续修订；reviewer 未参与实现。
-- 最新结论仍为 `changes-required`，0 Blocker / 3 Major / 3 Minor：message-only overflow admission
+  OpenAI classification/Retry-After 与 lifecycle 初版，以及修订 `eff0ad7`、`a419519`；reviewer 未参与实现。
+- 首轮结论：`changes-required`，0 Blocker / 3 Major / 2 Minor。`eff0ad7` 补齐 explicit overflow
+  compact-and-retry/no-loop、共享 retry controller/Retry-After、Summarizer bounded retry、secret-safe
+  lifecycle 与 no-duplicate/no-write 回归。
+- 第二轮结论：`changes-required`，0 Blocker / 3 Major / 3 Minor。message-only overflow admission
   仍可能把 output/parameter 400 误当 input overflow；Summarizer retry 未显式映射到 Agent-scoped
   lifecycle；compaction event 缺 #5217 typed reason；普通 retry 的 request reconstruction/cancel 早退
   可能留下未闭合 scheduled；Retry-After delta 接受 signed decimal；manual Compact failure 的
   `RunSettled` 未携带与 `CompactionSettled` 一致的 safe error。
-- 当前修订：400 分类改为 structured-first 和 input/prompt phrase allowlist，并以 output/max-output/
+- `a419519` 将 400 分类改为 structured-first 和 input/prompt phrase allowlist，并以 output/max-output/
   parameter adversarial matrix fail-closed；provider-owned `RetryObserver` 由 Agent 映射
   `summarization_retry_scheduled/attempt/finished`，每个 scheduled 对 success/failure/cancel/exhaustion
   闭合且不形成 provider→Agent 依赖；compaction start/settled 统一携带 manual/threshold/overflow 与
@@ -280,11 +283,12 @@
   failure、Abort 与 concurrent stale conflict 的 compaction/run settlement 使用同一 safe Session
   sentinel 且各自唯一。
 - 候选验证：全仓 test/vet/build/race、Agent/Provider 定点回归重复 20 次、Linux/Windows amd64 与
-  Darwin arm64 test compile，以及累计 diff check 均通过；这些 gate 是 rereview 输入，不替代 reviewer
-  结论。
-- 状态：上述修订与相邻 adversarial/concurrency/cancellation regression 已实现，等待独立 rereview；
-  在 reviewer 给出新结论前不得标为 `passed`，`B/T-AGENT-015..017` 与 `B/T-PROVIDER-006/012`
-  继续保持 awaiting-rereview。
+  Darwin arm64 test compile，以及累计 diff check 均通过。
+- 边界：production CLI context/retry/manual-compact 配置 surface 与真实 credential smoke 仍 deferred；
+  core integration `c8d1d1c` 与 rich integration 尚待合并，本复审只覆盖上述三提交链，不声称
+  combined tree 已验证。
+- 最终结论：`passed`，0 Blocker / 0 Major / 0 Minor；`B-AGENT-015..017`、`B-PROVIDER-006`
+  标为 `ported`，`T-AGENT-014`、`T-PROVIDER-012` 标为 `strengthened`。
 
 ## R-APP-001：M-APP/v0.1 与 WF-001 完整联合审查
 

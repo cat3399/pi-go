@@ -130,7 +130,7 @@ request/stream/error 与 custom fetch transport，再运行显式启用的
 arguments cleanup，不属于 text-only slice，保留到 `B-PROVIDER-002` 与真实 tool-call
 adapter milestone。Tool、thinking、cache 和完整 compat matrix 分别进入后续 slice。
 
-M-AGENT/v0.3 在该 adapter 上新增 adjacent、尚待 rereview 的 failure-policy seam：OpenAI
+M-AGENT/v0.3 在该 adapter 上新增并由 `R-AGENT-003` 复审通过的 adjacent failure-policy seam：OpenAI
 HTTP 400 优先按 allowlisted type/code 归一 secret-safe `contextOverflow`；message-only fallback
 只接受明确 input/prompt-context 短语，并排除 output/completion/max-output 和 parameter errors，
 因此模糊 context wording 与普通 400 不进入 compact/retry。`Retry-After` 支持 unsigned ASCII
@@ -139,6 +139,9 @@ HTTP 400 优先按 allowlisted type/code 归一 secret-safe `contextOverflow`；
 `Session.Compact` admission 和 summarization-scoped lifecycle，Summarizer/turn 才拥有各自有限
 attempt budget；provider 不反向依赖 Agent。这不改变 R-PROVIDER-004 对既有 text adapter 的
 review 范围。
+
+CLI 配置 surface 与真实 credential smoke 仍 deferred；core integration `c8d1d1c` 与 rich
+integration 尚待合并，本结论不声称 combined tree 已验证。
 
 选择该入口是为了先验证一个专用、边界清楚的 adapter；它不改变完整迁移需要覆盖
 其他九个 dialect 和上述 provider policy 的目标。

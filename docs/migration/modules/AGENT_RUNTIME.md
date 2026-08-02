@@ -1,10 +1,10 @@
 # M-AGENT：Agent runtime charter
 
-状态：`implemented, awaiting rereview`（`M-AGENT/v0.3-context-retry-lifecycle`；最新复审 0B/3M/3m 修订完成，v0.1/v0.2 均已复审）
+状态：`ported`（`M-AGENT/v0.3-context-retry-lifecycle`；`R-AGENT-003` 最终 `passed`，0B/0M/0m）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
-最近完成里程碑：`M-AGENT/v0.2-multi-tool-queues`
+最近完成里程碑：`M-AGENT/v0.3-context-retry-lifecycle`
 
 ## v0.3 context-retry-lifecycle
 
@@ -73,7 +73,8 @@
 - 真实 credential smoke 仍显式延期；production CLI 尚未暴露 context window/retry/manual compact
   flags，后续 M-APP 只负责配置/用户 surface，不得绕过本 coordinator 和 `Session.Compact`。
 - 不实现 TUI、tool wire replay、mixed length/tool terminal 或 Harness 独立 runtime；这些保持原有
-  deferred behavior。最新 0B/3M/3m findings 已修订但尚待 rereview，不得把 v0.1/v0.2 review 结论延伸到本 milestone。
+  deferred behavior。`R-AGENT-003` 只覆盖 `5d0099d`、`eff0ad7`、`a419519`；core integration
+  `c8d1d1c` 与 rich integration 尚待合并，不声称 combined tree 已验证。
 
 ## v0.2 multi-tool queues
 

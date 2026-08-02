@@ -104,7 +104,7 @@ Prompt-cache simulation、multiple model registry、thinking/image/multiple-tool
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error 与 pre/mid-stream cancellation | WF-001 | `ported` |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown/missing adapter 归一 error stream | 后续装配 slice | `deferred` |
 | `B-PROVIDER-005` | 标准 `openai-responses` 基础 text streaming 与 terminal handling | 阶段 2 真实 dialect 验证 | `ported` |
-| `B-PROVIDER-006` | OpenAI 400 structured/input-only context-overflow safe classification、strict Retry-After normalization 与共享 retry controller/observer | M-AGENT/v0.3 | `implemented-awaiting-rereview` |
+| `B-PROVIDER-006` | OpenAI 400 structured/input-only context-overflow safe classification、strict Retry-After normalization 与共享 retry controller/observer | M-AGENT/v0.3 | `ported` |
 
 M-BASE 的 stream/message contract 是前三项的直接依赖。真实 adapter 首选标准
 `openai-responses`，先用本地 HTTP/SSE fixture 验证 text/terminal，再运行显式启用的
@@ -144,3 +144,6 @@ exhaustion 都有 finished closure。
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005
 replay metadata 仍分别验收，不能用本地 fixture 冒充。
+
+相邻的 `B-PROVIDER-006` 已由 `R-AGENT-003` 最终复审通过；CLI 配置 surface 与真实 credential
+smoke 仍 deferred，core integration `c8d1d1c` 与 rich integration 尚待合并，不属于本次 combined 验证。
