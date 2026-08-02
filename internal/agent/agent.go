@@ -32,6 +32,7 @@ type activeRun struct {
 	providerTurns    uint32
 	toolExecutions   uint32
 	terminalAccepted bool
+	queueReservation *queueReservation
 }
 
 type observerEntry struct {
@@ -60,6 +61,10 @@ type Agent struct {
 
 	steeringQueue []llm.UserTextMessage
 	followUpQueue []llm.UserTextMessage
+	// Reserved entries are always a prefix. Clear operations preserve this
+	// prefix; durable per-message acknowledgements remove it one entry at a time.
+	steeringReserved int
+	followUpReserved int
 }
 
 func New(config Config) (*Agent, error) {
@@ -252,6 +257,7 @@ func (a *Agent) beginRun(
 func (a *Agent) finishRun(active *activeRun) {
 	a.mu.Lock()
 	if a.active == active {
+		a.releaseQueueReservationLocked(active)
 		a.active = nil
 		active.cancel(context.Canceled)
 		close(active.done)
@@ -304,6 +310,15 @@ func (a *Agent) notify(ctx context.Context, event Event) {
 }
 
 func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) error {
+	return a.commitAfterAppend(active, turn, message, nil)
+}
+
+func (a *Agent) commitAfterAppend(
+	active *activeRun,
+	turn uint32,
+	message llm.ConversationMessage,
+	afterAppend func() error,
+) error {
 	settlementBase := context.WithoutCancel(active.ctx)
 	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
 	options := session.AppendOptions{}
@@ -319,6 +334,11 @@ func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationM
 	cancel()
 	if err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
+	}
+	if afterAppend != nil {
+		if err := afterAppend(); err != nil {
+			return err
+		}
 	}
 	a.notify(active.ctx, Event{
 		Kind:    EventMessageCommitted,

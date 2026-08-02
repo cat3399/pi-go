@@ -12,6 +12,11 @@ import (
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
+type queueReservation struct {
+	steering  bool
+	remaining int
+}
+
 // Steer accepts a user message while a run is active or idle. It is injected
 // after the current tool batch and before the next provider request. A queue
 // is deliberately not a second run: it cannot bypass the active-run barrier.
@@ -60,7 +65,7 @@ func (a *Agent) ClearSteeringQueue() {
 		return
 	}
 	a.mu.Lock()
-	a.steeringQueue = nil
+	clearUnreservedQueue(&a.steeringQueue, a.steeringReserved)
 	a.mu.Unlock()
 }
 func (a *Agent) ClearFollowUpQueue() {
@@ -68,7 +73,7 @@ func (a *Agent) ClearFollowUpQueue() {
 		return
 	}
 	a.mu.Lock()
-	a.followUpQueue = nil
+	clearUnreservedQueue(&a.followUpQueue, a.followUpReserved)
 	a.mu.Unlock()
 }
 func (a *Agent) ClearAllQueues() {
@@ -76,9 +81,19 @@ func (a *Agent) ClearAllQueues() {
 		return
 	}
 	a.mu.Lock()
-	a.steeringQueue = nil
-	a.followUpQueue = nil
+	clearUnreservedQueue(&a.steeringQueue, a.steeringReserved)
+	clearUnreservedQueue(&a.followUpQueue, a.followUpReserved)
 	a.mu.Unlock()
+}
+
+func clearUnreservedQueue(queue *[]llm.UserTextMessage, reserved int) {
+	for index := reserved; index < len(*queue); index++ {
+		(*queue)[index] = llm.UserTextMessage{}
+	}
+	*queue = (*queue)[:reserved]
+	if reserved == 0 {
+		*queue = nil
+	}
 }
 
 // Continue starts from a durable user/tool-result tail. If the transcript ends
@@ -151,47 +166,72 @@ func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTe
 			return nil, nil, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
 		}
 		var initial []llm.UserTextMessage
-		var selected *[]llm.UserTextMessage
+		var reservation *queueReservation
 		if messages[len(messages)-1].Role() == llm.RoleAssistant {
-			selected = &a.steeringQueue
-			mode := a.config.steeringMode
-			if len(*selected) == 0 {
-				selected = &a.followUpQueue
-				mode = a.config.followUpMode
+			var err error
+			initial, reservation, err = a.reserveQueueLocked(true)
+			if err != nil {
+				return nil, nil, err
 			}
-			if len(*selected) == 0 {
+			if reservation == nil {
+				initial, reservation, err = a.reserveQueueLocked(false)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			if reservation == nil {
 				return nil, nil, fmt.Errorf("%w: assistant tail", ErrCannotContinue)
 			}
-			initial = queuePrefix(*selected, mode)
 		}
 		a.nextID++
 		runCtx, cancel := context.WithCancelCause(ctx)
-		active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
+		active := &activeRun{
+			id:               a.nextID,
+			ctx:              runCtx,
+			cancel:           cancel,
+			done:             make(chan struct{}),
+			phase:            PhaseProvider,
+			turn:             1,
+			queueReservation: reservation,
+		}
 		a.active = active
 		a.starting = false
-		if selected != nil {
-			discardQueuePrefix(selected, len(initial))
-		}
 		reserved = false
 		return active, initial, nil
 	}()
 	return active, initial, err
 }
 
-func (a *Agent) drainQueue(steering bool) []llm.UserTextMessage {
+func (a *Agent) reserveQueue(active *activeRun, steering bool) ([]llm.UserTextMessage, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.active != active || active.queueReservation != nil {
+		return nil, fmt.Errorf("%w: queue reservation belongs to an inactive or already-reserved run", ErrInvariant)
+	}
+	messages, reservation, err := a.reserveQueueLocked(steering)
+	if err != nil {
+		return nil, err
+	}
+	active.queueReservation = reservation
+	return messages, nil
+}
+
+func (a *Agent) reserveQueueLocked(steering bool) ([]llm.UserTextMessage, *queueReservation, error) {
 	queue := &a.followUpQueue
+	reserved := &a.followUpReserved
 	mode := a.config.followUpMode
 	if steering {
-		queue, mode = &a.steeringQueue, a.config.steeringMode
+		queue, reserved, mode = &a.steeringQueue, &a.steeringReserved, a.config.steeringMode
+	}
+	if *reserved != 0 || *reserved > len(*queue) {
+		return nil, nil, fmt.Errorf("%w: invalid queue reservation state", ErrInvariant)
 	}
 	if len(*queue) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 	items := queuePrefix(*queue, mode)
-	discardQueuePrefix(queue, len(items))
-	return items
+	*reserved = len(items)
+	return items, &queueReservation{steering: steering, remaining: len(items)}, nil
 }
 
 func queuePrefix(queue []llm.UserTextMessage, mode QueueMode) []llm.UserTextMessage {
@@ -225,10 +265,8 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 	turn := uint32(1)
 	if len(initial) > 0 {
 		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
-		for _, message := range initial {
-			if err := a.commit(active, turn, message); err != nil {
-				return result, err
-			}
+		if err := a.commitQueued(active, turn, initial); err != nil {
+			return result, err
 		}
 	}
 	for {
@@ -248,7 +286,11 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 			if terminal.FinishReason() == llm.FinishError || terminal.FinishReason() == llm.FinishAborted {
 				return a.acceptFinalV2(active, result, terminal)
 			}
-			if queued := a.drainQueue(true); len(queued) > 0 {
+			queued, err := a.reserveQueue(active, true)
+			if err != nil {
+				return result, err
+			}
+			if len(queued) > 0 {
 				turn++
 				initial = queued
 				if err := a.startQueuedTurnV2(active, turn, queued); err != nil {
@@ -256,7 +298,11 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 				}
 				continue
 			}
-			if queued := a.drainQueue(false); len(queued) > 0 {
+			queued, err = a.reserveQueue(active, false)
+			if err != nil {
+				return result, err
+			}
+			if len(queued) > 0 {
 				turn++
 				initial = queued
 				if err := a.startQueuedTurnV2(active, turn, queued); err != nil {
@@ -299,9 +345,15 @@ func (a *Agent) runV2(active *activeRun, initial []llm.UserTextMessage) (result 
 			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: failure})
 			return a.acceptFinalV2(active, result, failure)
 		}
-		queued := a.drainQueue(true)
+		queued, err := a.reserveQueue(active, true)
+		if err != nil {
+			return result, err
+		}
 		if len(queued) == 0 && batch.terminate {
-			queued = a.drainQueue(false)
+			queued, err = a.reserveQueue(active, false)
+			if err != nil {
+				return result, err
+			}
 		}
 		if len(queued) > 0 {
 			turn++
@@ -347,12 +399,69 @@ func (a *Agent) completeToolBatchV2(active *activeRun, turn uint32) error {
 }
 
 func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.UserTextMessage) error {
+	a.mu.Lock()
+	queueBacked := active.queueReservation != nil
+	if queueBacked && (a.active != active || active.queueReservation.remaining != len(messages)) {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: queued commit does not match its reservation", ErrInvariant)
+	}
+	a.mu.Unlock()
 	for _, message := range messages {
+		if queueBacked {
+			if err := a.commitAfterAppend(active, turn, message, func() error {
+				return a.ackQueueReservation(active)
+			}); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := a.commit(active, turn, message); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (a *Agent) ackQueueReservation(active *activeRun) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active || active.queueReservation == nil || active.queueReservation.remaining <= 0 {
+		return fmt.Errorf("%w: missing queue acknowledgement reservation", ErrInvariant)
+	}
+	reservation := active.queueReservation
+	queue, reserved := a.queueStateLocked(reservation.steering)
+	if *reserved != reservation.remaining || len(*queue) < *reserved {
+		return fmt.Errorf("%w: queue acknowledgement state mismatch", ErrInvariant)
+	}
+	discardQueuePrefix(queue, 1)
+	*reserved--
+	reservation.remaining--
+	if reservation.remaining == 0 {
+		active.queueReservation = nil
+	}
+	return nil
+}
+
+func (a *Agent) releaseQueueReservationLocked(active *activeRun) {
+	if active == nil || active.queueReservation == nil {
+		return
+	}
+	reservation := active.queueReservation
+	_, reserved := a.queueStateLocked(reservation.steering)
+	if reservation.remaining <= *reserved {
+		*reserved -= reservation.remaining
+	} else {
+		// Preserve every queued message if an invariant failure reaches teardown.
+		*reserved = 0
+	}
+	active.queueReservation = nil
+}
+
+func (a *Agent) queueStateLocked(steering bool) (*[]llm.UserTextMessage, *int) {
+	if steering {
+		return &a.steeringQueue, &a.steeringReserved
+	}
+	return &a.followUpQueue, &a.followUpReserved
 }
 
 func (a *Agent) commitAssistantV2(active *activeRun, turn uint32, terminal llm.AssistantTerminal) error {

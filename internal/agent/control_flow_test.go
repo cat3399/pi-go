@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +33,78 @@ type admissionTranscript struct {
 	entered chan struct{}
 	release chan struct{}
 	reenter func()
+}
+
+type queuedAppendFaultTranscript struct {
+	base *session.Session
+
+	mu      sync.Mutex
+	attempt int
+	blockAt int
+	failAt  int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (t *queuedAppendFaultTranscript) Context() session.Context { return t.base.Context() }
+
+func (t *queuedAppendFaultTranscript) Append(
+	ctx context.Context,
+	message llm.ConversationMessage,
+	options session.AppendOptions,
+) (session.Entry, error) {
+	text, queued := queuedUserText(message)
+	if !queued {
+		return t.base.Append(ctx, message, options)
+	}
+	t.mu.Lock()
+	t.attempt++
+	attempt := t.attempt
+	block := attempt == t.blockAt
+	fail := attempt == t.failAt
+	t.mu.Unlock()
+	if block {
+		close(t.entered)
+		<-t.release
+	}
+	if fail {
+		return session.Entry{}, errors.New("injected queued append failure for " + text)
+	}
+	return t.base.Append(ctx, message, options)
+}
+
+func queuedUserText(message llm.ConversationMessage) (string, bool) {
+	user, ok := message.(llm.UserTextMessage)
+	if !ok {
+		return "", false
+	}
+	content := user.Content()
+	if len(content) != 1 {
+		return "", false
+	}
+	text := content[0].Text()
+	return text, strings.HasPrefix(text, "queue:")
+}
+
+func queuedTexts(messages []llm.ConversationMessage) []string {
+	texts := make([]string, 0)
+	for _, message := range messages {
+		if text, ok := queuedUserText(message); ok {
+			texts = append(texts, text)
+		}
+	}
+	return texts
+}
+
+func queueSnapshotTexts(messages []llm.UserTextMessage) []string {
+	texts := make([]string, len(messages))
+	for index, message := range messages {
+		content := message.Content()
+		if len(content) == 1 {
+			texts[index] = content[0].Text()
+		}
+	}
+	return texts
 }
 
 func (t *admissionTranscript) arm(reenter func()) {
@@ -100,6 +173,181 @@ func (t *namedBatchTool) ExecuteNamed(ctx context.Context, name string, _ []byte
 	}
 	report(agent.ToolUpdate{Text: name + " done"})
 	return agent.ToolOutput{Text: name}, nil
+}
+
+func newQueueAgent(
+	t *testing.T,
+	transcript agent.Transcript,
+	providerImpl provider.Provider,
+	steeringMode agent.QueueMode,
+	followUpMode agent.QueueMode,
+) *agent.Agent {
+	t.Helper()
+	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.New(agent.Config{
+		Provider:          providerImpl,
+		Transcript:        transcript,
+		Model:             model,
+		SteeringMode:      steeringMode,
+		FollowUpMode:      followUpMode,
+		Now:               func() time.Time { return agentTestEpoch },
+		SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runtime
+}
+
+func TestContinueQueueAllAcknowledgesDurablePrefixAndPreservesFaultRemainder(t *testing.T) {
+	base := newSession(t)
+	transcript := &queuedAppendFaultTranscript{
+		base:    base,
+		blockAt: 1,
+		failAt:  2,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	scripted := newScriptedProvider(t,
+		mustTextTerminal(t, "first"),
+		mustTextTerminal(t, "prefix accepted"),
+		mustTextTerminal(t, "remainder accepted"),
+	)
+	runtime := newQueueAgent(t, transcript, scripted, agent.QueueAll, agent.QueueOneAtATime)
+	if _, err := runtime.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"queue:a", "queue:b"} {
+		if err := runtime.Steer(text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ackSnapshot := make(chan []string, 1)
+	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+		text, queued := queuedUserText(event.Message)
+		if event.Kind != agent.EventMessageCommitted || !queued || text != "queue:a" {
+			return
+		}
+		steering, _ := runtime.Queues()
+		ackSnapshot <- queueSnapshotTexts(steering)
+	})
+	continueDone := make(chan error, 1)
+	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
+	waitClosed(t, transcript.entered, "first reserved queue append")
+	if err := runtime.Steer("queue:cleared"); err != nil {
+		t.Fatal(err)
+	}
+	runtime.ClearSteeringQueue()
+	if err := runtime.Steer("queue:after-clear"); err != nil {
+		t.Fatal(err)
+	}
+	steering, followUp := runtime.Queues()
+	if got := queueSnapshotTexts(steering); !reflect.DeepEqual(got, []string{"queue:a", "queue:b", "queue:after-clear"}) || len(followUp) != 0 {
+		t.Fatalf("queue during reservation/clear = %v / %d", got, len(followUp))
+	}
+	close(transcript.release)
+	if err := <-continueDone; !errors.Is(err, agent.ErrTranscriptCommit) {
+		t.Fatalf("Continue error = %v, want queued append fault", err)
+	}
+	if got := <-ackSnapshot; !reflect.DeepEqual(got, []string{"queue:b", "queue:after-clear"}) {
+		t.Fatalf("queue at durable commit event = %v", got)
+	}
+	steering, followUp = runtime.Queues()
+	if got := queueSnapshotTexts(steering); !reflect.DeepEqual(got, []string{"queue:b", "queue:after-clear"}) || len(followUp) != 0 {
+		t.Fatalf("queue after middle append fault = %v / %d", got, len(followUp))
+	}
+	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a"}) {
+		t.Fatalf("durable prefix after fault = %v", got)
+	}
+	if _, err := runtime.Continue(context.Background()); err != nil {
+		t.Fatalf("Continue retry error = %v", err)
+	}
+	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a", "queue:b", "queue:after-clear"}) {
+		t.Fatalf("durable queued messages after retry = %v", got)
+	}
+	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
+		t.Fatalf("queues after retry = %d/%d", len(steering), len(followUp))
+	}
+}
+
+func TestActiveFollowUpQueueOneFirstAppendFaultRetainsFIFOForContinue(t *testing.T) {
+	base := newSession(t)
+	transcript := &queuedAppendFaultTranscript{base: base, failAt: 1}
+	scripted := newScriptedProvider(t,
+		mustTextTerminal(t, "first"),
+		mustTextTerminal(t, "first follow-up"),
+		mustTextTerminal(t, "second follow-up"),
+	)
+	runtime := newQueueAgent(t, transcript, scripted, agent.QueueOneAtATime, agent.QueueOneAtATime)
+	for _, text := range []string{"queue:one", "queue:two"} {
+		if err := runtime.FollowUp(text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runtime.Run(context.Background(), "initial"); !errors.Is(err, agent.ErrTranscriptCommit) {
+		t.Fatalf("Run error = %v, want first follow-up append fault", err)
+	}
+	steering, followUp := runtime.Queues()
+	if got := queueSnapshotTexts(followUp); len(steering) != 0 || !reflect.DeepEqual(got, []string{"queue:one", "queue:two"}) {
+		t.Fatalf("queues after first follow-up fault = %d / %v", len(steering), got)
+	}
+	if got := queuedTexts(base.Context().Messages()); len(got) != 0 {
+		t.Fatalf("failed first follow-up became durable: %v", got)
+	}
+	if _, err := runtime.Continue(context.Background()); err != nil {
+		t.Fatalf("Continue retry error = %v", err)
+	}
+	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:one", "queue:two"}) {
+		t.Fatalf("follow-up FIFO after retry = %v", got)
+	}
+	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
+		t.Fatalf("queues after follow-up retry = %d/%d", len(steering), len(followUp))
+	}
+}
+
+func TestAbortAndClearPreserveReservedQueueUntilDurableAcknowledgement(t *testing.T) {
+	base := newSession(t)
+	transcript := &queuedAppendFaultTranscript{
+		base:    base,
+		blockAt: 1,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "unused"))
+	runtime := newQueueAgent(t, transcript, scripted, agent.QueueAll, agent.QueueOneAtATime)
+	if _, err := runtime.Run(context.Background(), "initial"); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"queue:a", "queue:b"} {
+		if err := runtime.Steer(text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	continueDone := make(chan error, 1)
+	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
+	waitClosed(t, transcript.entered, "reserved queue append before abort")
+	runtime.ClearAllQueues()
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
+	if err := runtime.Abort(waitCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Abort bounded wait error = %v", err)
+	}
+	if steering, followUp := runtime.Queues(); !reflect.DeepEqual(queueSnapshotTexts(steering), []string{"queue:a", "queue:b"}) || len(followUp) != 0 {
+		t.Fatalf("clear removed reserved queue: %v/%d", queueSnapshotTexts(steering), len(followUp))
+	}
+	close(transcript.release)
+	if err := <-continueDone; err != nil {
+		t.Fatalf("aborted Continue error = %v", err)
+	}
+	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a", "queue:b"}) {
+		t.Fatalf("aborted reserved queue durable messages = %v", got)
+	}
+	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
+		t.Fatalf("queues after aborted durable acknowledgement = %d/%d", len(steering), len(followUp))
+	}
 }
 
 func TestContinueAdmissionReservationLeavesTranscriptPortReentrant(t *testing.T) {
