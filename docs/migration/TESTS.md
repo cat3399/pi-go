@@ -11,7 +11,7 @@
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
 | `T-BASE-001` | B-BASE-001 | `packages/coding-agent/test/suite/agent-session-prompt.test.ts` — `prompts while idle and records a single text response`，只提供 user normalization/role happy path | `deferred` | B-BASE-001 unit + later agent scenario；不把它误作 finish/usage 裁判 |
-| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `strengthened` | immutable rich values, alias/fuzz, mixed stream and session replay；independent review pending |
+| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `strengthened` | immutable rich values, alias/fuzz, mixed stream/session replay、Anthropic/Google opaque 与 future/malformed v3 round-trip/fork safety；independent rereview pending |
 | `T-BASE-003` | B-BASE-002 | `packages/agent/test/agent-loop.test.ts` — `should handle tool calls and results` | `deferred` | B-BASE-002 validation + agent scenario；目标 `strengthened` |
 | `T-BASE-004` | B-BASE-001 | `packages/ai/test/faux-provider.test.ts` — `registers a custom provider and estimates usage`；`packages/ai/test/total-tokens.test.ts` — `totalTokens field` | `deferred` | checked total 与真实 provider sum；目标 `strengthened` |
 | `T-BASE-005` | B-BASE-003 | `packages/ai/test/faux-provider.test.ts` — `streams an exact event order for fixed-size chunks` | `strengthened` | strict state machine 同时覆盖 mixed tool、顺序和 snapshot |

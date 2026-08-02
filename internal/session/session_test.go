@@ -24,6 +24,13 @@ var testAssistantProvenance = AssistantProvenance{
 	Cost:     ZeroUsageCost(),
 }
 
+var testResponsesAssistantProvenance = AssistantProvenance{
+	API:      "openai-responses",
+	Provider: "openai",
+	Model:    "gpt-test",
+	Cost:     ZeroUsageCost(),
+}
+
 func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) {
 	directory := t.TempDir()
 	transcript, err := Create(filepath.Join(directory, "rich.jsonl"), CreateOptions{ID: "rich", WorkingDir: directory, Now: func() time.Time { return time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC) }, NewEntryID: sequenceIDs("u", "a", "r")})
@@ -58,7 +65,7 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 		llm.FinishStop,
 		llm.Usage{},
 		time.UnixMilli(2),
-		&llm.AssistantProvenance{Provider: testAssistantProvenance.Provider, API: testAssistantProvenance.API, Model: testAssistantProvenance.Model},
+		&llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model},
 		nil,
 	)
 	if err != nil {
@@ -71,7 +78,7 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 	for _, message := range []llm.ConversationMessage{user, assistant, result} {
 		options := AppendOptions{}
 		if message.Role() == llm.RoleAssistant {
-			options.Assistant = testAssistantProvenance
+			options.Assistant = testResponsesAssistantProvenance
 		}
 		if _, err := transcript.Append(context.Background(), message, options); err != nil {
 			t.Fatal(err)
@@ -102,7 +109,7 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 		t.Fatalf("text=%#v", storedAssistant[1])
 	}
 	provenance, ok := messages[1].(llm.AssistantRichMessage).AssistantProvenance()
-	if !ok || provenance != (llm.AssistantProvenance{Provider: testAssistantProvenance.Provider, API: testAssistantProvenance.API, Model: testAssistantProvenance.Model}) {
+	if !ok || provenance != (llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model}) {
 		t.Fatalf("assistant provenance = (%#v, %t)", provenance, ok)
 	}
 	raw, err := os.ReadFile(filepath.Join(directory, "rich.jsonl"))
@@ -142,6 +149,54 @@ func TestAppendRejectsAssistantMessageProvenanceMismatch(t *testing.T) {
 	}
 	if len(transcript.Context().Messages()) != 0 {
 		t.Fatalf("mismatched provenance append mutated transcript: %#v", transcript.Context().Messages())
+	}
+}
+
+func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		finish llm.FinishReason
+	}{
+		{name: "error", finish: llm.FinishError},
+		{name: "aborted", finish: llm.FinishAborted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			transcript, err := Create(filepath.Join(directory, "failure.jsonl"), CreateOptions{
+				ID:         "failure",
+				WorkingDir: directory,
+				NewEntryID: sequenceIDs("assistant"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = transcript.Close() })
+			partial, err := llm.NewTextBlockWithReplay("partial", &llm.TextReplay{MessageID: "msg_partial", Phase: "commentary"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure, err := llm.NewAssistantFailureMessage([]llm.TextBlock{partial}, tt.finish, "request failed", llm.Usage{}, time.UnixMilli(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, err := transcript.Append(context.Background(), failure, AppendOptions{Assistant: testResponsesAssistantProvenance})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(entry.RawJSON(), []byte("textSignature")) {
+				t.Fatalf("failed assistant persisted replay metadata: %s", entry.RawJSON())
+			}
+			stored := transcript.Context().Messages()[0].(llm.AssistantFailureMessage)
+			if replay, ok := stored.Blocks()[0].(llm.TextBlock).TextReplay(); ok {
+				t.Fatalf("failed assistant projected replay metadata: %#v", replay)
+			}
+			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
+				t.Fatalf("locally encoded failure diagnostics = %#v", diagnostics)
+			}
+		})
 	}
 }
 

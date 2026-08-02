@@ -142,7 +142,7 @@ func encodeAssistant(
 		switch block := block.(type) {
 		case llm.TextBlock:
 			wire := textBlockWire{Type: "text", Text: block.Text()}
-			if replay, ok := block.TextReplay(); ok {
+			if replay, ok := block.TextReplay(); ok && errorMessage == "" {
 				wire.TextSignature = encodeTextReplay(replay)
 			}
 			raw, err := json.Marshal(wire)

@@ -147,6 +147,8 @@ content 及 image-capable user/tool-result message。image media type、source�
 size和 defensive copy 在 admission 处裁判。Responses 仅保存可重放的 reasoning item ID/
 encrypted content、text message ID/phase、response ID/raw stop reason；不保存 SDK object、任意
 raw map、header/body 或 diagnostic。error/aborted assistant 永不 replay；readable unsigned
-thinking 仅可降级为 text。session v3 同时保留这些 typed fields 和 unknown 原始 JSON。
+thinking 仅可降级为 text。session v3 只有明确 `openai/openai-responses` provenance 才把
+对应 envelope 投影为 typed replay；foreign、malformed 与未来 metadata 原字节保留，但只投影
+无签名可读内容，redacted/opaque-only 内容省略并产生受控 diagnostic。
 
 完成实现不等同独立 review：本里程碑仍须由未参与者审查，不能覆盖 v0.1 的通过结论。
