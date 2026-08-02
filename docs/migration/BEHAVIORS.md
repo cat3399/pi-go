@@ -40,11 +40,11 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-AGENT-007` | 复制 Agent、AgentSession、AgentHarness 三套 class/runtime 结构 | [AGENT_PATHS.md](AGENT_PATHS.md) | `not-applicable` | 只提取 behavior/invariant，永不按 class 完成度迁移 |
 | `B-AGENT-008` | tool 中途 cancel 后 commit error ToolResult 和 synthesized aborted assistant，不发第二次 provider call | `packages/agent/src/agent-loop.ts::executeToolCalls*`；pi-go strengthened lifecycle matrix | `intentionally-incompatible` | R-AGENT-001；上游 post-cancel provider call 明确 incompatible |
 | `B-AGENT-009` | `length + toolCall` 截断不执行，并形成关联 error ToolResult 后继续 | `packages/agent/test/agent-loop.test.ts` length tool-call case | `deferred` | M-BASE 支持 mixed length/tool terminal 后重评 |
-| `B-AGENT-010` | 同一 assistant turn 的 multiple tool call、global parallel/sequential 与 tool-level sequential override；durable result source order | `packages/agent/src/agent-loop.ts::executeToolCalls*`；`types.ts::ToolExecutionMode` | `in-progress` | M-AGENT/v0.2 implementation + independent review |
-| `B-AGENT-011` | parallel completion event 与 source-order artifact 分离；missing/failure/terminate/cancel batch 和 settled late update isolation | `agent-loop.ts::executeToolCallsParallel/prepare/finalize`；agent loop tests | `in-progress` | M-AGENT/v0.2 implementation + independent review |
-| `B-AGENT-012` | steering/follow-up FIFO queue drain mode、snapshot/clear、Continue assistant-tail admission | `agent.ts::PendingMessageQueue/steer/followUp/continue`；agent tests | `in-progress` | M-AGENT/v0.2 implementation + independent review |
-| `B-AGENT-013` | provider 前 immutable context transform；error/cancel 不静默 fallback | `agent-loop.ts::streamAssistantResponse`；agent-loop transform tests | `in-progress` | M-AGENT/v0.2 implementation + independent review |
-| `B-AGENT-014` | multi-worker Abort/settlement、single active run、unique terminal/usage commit | `agent.ts::runWithLifecycle`；AgentSession settlement regressions | `in-progress` | M-AGENT/v0.2 implementation + independent review |
+| `B-AGENT-010` | 同一 assistant turn 的 multiple tool call、global parallel/sequential 与 tool-level sequential override；durable result source order | `packages/agent/src/agent-loop.ts::executeToolCalls*`；`types.ts::ToolExecutionMode` | `ported` | R-AGENT-002 |
+| `B-AGENT-011` | parallel completion event 与 source-order artifact 分离；missing/failure/terminate/cancel batch 和 settled late update isolation | `agent-loop.ts::executeToolCallsParallel/prepare/finalize`；agent loop tests | `ported` | R-AGENT-002 |
+| `B-AGENT-012` | steering/follow-up FIFO queue drain mode、snapshot/clear、Continue assistant-tail admission 与 durable queue ack | `agent.ts::PendingMessageQueue/steer/followUp/continue`；agent tests | `ported` | R-AGENT-002 |
+| `B-AGENT-013` | provider 前 immutable context transform；error/cancel 不静默 fallback | `agent-loop.ts::streamAssistantResponse`；agent-loop transform tests | `ported` | R-AGENT-002 |
+| `B-AGENT-014` | multi-worker Abort/settlement、single active run、unique terminal/usage commit | `agent.ts::runWithLifecycle`；AgentSession settlement regressions | `ported` | R-AGENT-002 |
 
 ## M-SESSION
 

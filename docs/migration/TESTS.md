@@ -51,10 +51,10 @@ Prompt cache、multiple model、unregister 以外的 compat/global registry test
 | `T-AGENT-007` | B-AGENT-006 | `packages/agent/test/harness/agent-harness.test.ts` 的 save-point、shutdown、queue 和 listener cases | `deferred` | 真实独立 caller 或后续 upstream scope 要求时重评 |
 | `T-AGENT-008` | B-AGENT-008 | `packages/agent/src/agent-loop.ts::executeToolCalls*` 上游会形成 error ToolResult 后可能再次调用 cancelled provider | `intentionally-incompatible` | Go scenario 固定四条 transcript、provider call count=1、zero usage 与 settlement |
 | `T-AGENT-009` | B-AGENT-009 | `packages/agent/test/agent-loop.test.ts` — `should not execute tool calls from a length-truncated assistant message` | `deferred` | 当前 M-BASE 拒绝 mixed length/tool terminal；不能以 text-only length 代替 |
-| `T-AGENT-010` | B-AGENT-010 | `packages/agent/test/agent-loop.test.ts` — multi-tool sequential/parallel and source-order result cases | `deferred` | Go batch normal/error/override scenario; await M-AGENT/v0.2 review |
-| `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `deferred` | completion-order event + source-order durable oracle, cancel and late update race; await review |
-| `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `deferred` | queue snapshot/clear/Continue/busy matrix; await review |
-| `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `deferred` | immutable provider request, transform error/cancel, multi-worker abort/race; await review |
+| `T-AGENT-010` | B-AGENT-010 | `packages/agent/test/agent-loop.test.ts` — multi-tool sequential/parallel and source-order result cases | `strengthened` | R-AGENT-002；Go normal/error/override、completion/source-order 双 oracle 与 repeated agent suite |
+| `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `strengthened` | R-AGENT-002；cancel/terminate/missing/failure、late update、fault barrier 与 race |
+| `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `strengthened` | R-AGENT-002；one/all、Continue admission、reentrant storage、durable prefix ack、clear/enqueue/Abort fault/race |
+| `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `strengthened` | R-AGENT-002；immutable request、transform error/cancel、multi-worker abort、pending state 与 settlement race |
 
 AgentSession 与低层 Agent 中重复证明相同 invariant 的测试，在 Go 中由一套
 contract/scenario suite 覆盖，不复制两套 runtime test。

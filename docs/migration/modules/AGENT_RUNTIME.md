@@ -1,10 +1,10 @@
 # M-AGENT：Agent runtime charter
 
-状态：`in-progress`（`M-AGENT/v0.2-multi-tool-queues`；v0.1 已复审）
+状态：`ported`（`M-AGENT/v0.2-multi-tool-queues`；v0.1/v0.2 均已复审）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
-当前里程碑：`M-AGENT/v0.2-multi-tool-queues`
+最近完成里程碑：`M-AGENT/v0.2-multi-tool-queues`
 
 ## v0.2 multi-tool queues
 
@@ -19,32 +19,36 @@
 ### 不负责
 
 - M-BASE 尚未表达的 `length + toolCall` 混合 terminal、tool schema wire、before/after extension hooks、retry、compaction 或 Harness storage；
-- filesystem tool 的实现或其仍待独立复审的状态；v0.2 只消费 named execution port。
+- filesystem tool 的实现；v0.2 只消费 named execution port。M-TOOL/v0.2 已由主线
+  `R-TOOL-005` 独立复审，不与 Agent review 合并计数。
 
 ### v0.2 contract
 
 - 先 durable commit assistant tool-use，才开始任一副作用 worker；所有 worker settle 后，ToolResult 严格按 assistant block 的 source order append，下一 provider request 因此永远读取可解释顺序。
 - 并行 `tool_settled` 是 completion order；它绝不决定 transcript order。任一个 requested tool 声明 sequential 时，整批 downgrade 为 sequential，避免隐蔽依赖竞争。
 - worker 和 report closure 都不拥有 transcript。`Execute` 返回后的 update 被 gate 丢弃；Abort 取消 worker context 并等待全部 worker 结算，之后由 coordinator durable 记录各 call 的已知 outcome 和唯一 aborted assistant。
-- steering 只在一个 assistant/tool batch完整结束后、下一 provider request 前 drain；follow-up 只在本来会停止时 drain。两队列均 FIFO，默认 `one-at-a-time`，可显式 `all`；clear 只影响尚未 drain 的项目。
-- `Continue` 只接受 durable user/tool-result tail；assistant tail 必须先由 queued steering/follow-up 形成新的 user tail。busy admission、Abort 与 WaitForIdle 仍由同一个 active run slot 管辖。
+- steering 只在一个 assistant/tool batch 完整结束后、下一 provider request 前 reserve；follow-up 只在本来会停止时 reserve。两队列均 FIFO，默认 `one-at-a-time`，可显式 `all`；每条 user Append durable 后才逐条 ack/remove，失败项与后继保持原 FIFO，clear 只影响未 reserved 项。
+- `Continue` 只接受 durable user/tool-result tail；assistant tail 必须先由 queued steering/follow-up 形成新的 user tail。admission 先在 mutex 内 reserve single-run slot，锁外读取 transcript，再在 mutex 内验证 tail/queue 并安装 active run；busy admission、Abort 与 WaitForIdle 仍由同一个 active run slot 管辖。
 - Transform 输入和输出都复制；它仅改变本次 provider request，绝不修改 session transcript。transform error 是 `ErrContextTransform` 并在 provider 调用前 fail；cancel 在 seam 后形成 aborted terminal。
 
 ### v0.2 behavior slice
 
-| ID | 行为 | Workflow | 初始状态 |
+| ID | 行为 | Workflow | 状态 |
 | --- | --- | --- | --- |
-| `B-AGENT-010` | multiple tool calls、global/tool override 与 source-order durable result | WF-003 | `in-progress` |
-| `B-AGENT-011` | parallel completion event、mixed missing/failure/terminate 与 late-update isolation | WF-003 | `in-progress` |
-| `B-AGENT-012` | steering/follow-up queues、snapshot/clear、Continue and busy/idle | WF-003 | `in-progress` |
-| `B-AGENT-013` | immutable transform before every provider call; error/cancel contract | WF-003 | `in-progress` |
-| `B-AGENT-014` | multi-worker Abort, settlement barrier, unique usage/terminal | WF-003 | `in-progress` |
+| `B-AGENT-010` | multiple tool calls、global/tool override 与 source-order durable result | WF-003 | `ported` |
+| `B-AGENT-011` | parallel completion event、mixed missing/failure/terminate 与 late-update isolation | WF-003 | `ported` |
+| `B-AGENT-012` | steering/follow-up queues、snapshot/clear、Continue and busy/idle | WF-003 | `ported` |
+| `B-AGENT-013` | immutable transform before every provider call; error/cancel contract | WF-003 | `ported` |
+| `B-AGENT-014` | multi-worker Abort, settlement barrier, unique usage/terminal | WF-003 | `ported` |
 
 ### v0.2 review gate
 
-- 定点 normal/error/cancel/concurrency tests、`go test -race ./...`、fuzz 和 cross-platform compile 全部通过；
-- M-TOOL filesystem 的 `R-TOOL-004` 仍是独立 pending review，v0.2 不改变也不替其宣布通过；
-- behavior/test 在未参与实现的 reviewer 联合审查前均保持 `in-progress`/`deferred`，不得标 `ported`。
+- `R-AGENT-002` 最终结论为 `passed`，0 Blocker / 0 Major / 0 Minor；实现与修订候选为
+  `80d4094`、`84a8c93`、`7e587b9`、`7cbc1c5`。
+- 定点 normal/error/cancel/fault/concurrency tests、`go test -race ./...`、llm/session fuzz、
+  Linux/Windows amd64 与 Darwin arm64 compile 及累计 diff check 全部通过。
+- M-TOOL filesystem 的最终独立结论属于主线 `R-TOOL-005`；本里程碑只核验 named-tool
+  consumer，不替代或重复该 review。
 
 ## 负责
 

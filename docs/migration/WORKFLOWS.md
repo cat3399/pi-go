@@ -108,7 +108,7 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 ## WF-003：multi-tool control flow
 
-状态：`in-progress`
+状态：`ported`（R-AGENT-002）
 
 ~~~text
 user -> assistant(tool A, tool B, ...)
@@ -117,10 +117,11 @@ user -> assistant(tool A, tool B, ...)
      -> terminal assistant -> follow-up drain -> Continue admission
 ~~~
 
-验收要求并行 completion 与 transcript source order 有独立 oracle；missing/failure/terminate/cancel
-混合批次不越过 durable barrier；transform 只影响 provider snapshot；Abort/WaitForIdle 在所有
-worker、append 与 observer settle 后才公开 idle。该 workflow 归属 M-AGENT/v0.2，等待独立 review，
-不依赖或替代 filesystem pending review。
+验收以并行 completion 与 transcript source order 的独立 oracle、missing/failure/terminate/cancel
+混合批次 durable barrier、provider-only transform、queue reservation/逐条 durable ack，以及
+Abort/WaitForIdle 在所有 worker、append 与 observer settle 后才公开 idle 为准。实现与修订
+`80d4094`、`84a8c93`、`7e587b9`、`7cbc1c5` 经 `R-AGENT-002` 最终复审通过；filesystem
+基线已由主线 `R-TOOL-005` 独立复审，本 workflow 不重复其结论。
 
 ## 后续 workflow 规则
 
