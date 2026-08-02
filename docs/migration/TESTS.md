@@ -70,6 +70,10 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-SESSION-009` | B-SESSION-005/006 | `packages/coding-agent/docs/session-format.md` tree contract 与 `SessionManager._buildIndex/buildSessionPath` physical-tail behavior | `strengthened` | branch-tail/forest root 接受；forward/broken/cycle 拒绝；Open→Append 原 byte prefix 不变 |
 | `T-SESSION-010` | B-SESSION-010/011 | `packages/coding-agent/test/session-manager/tree-traversal.test.ts` branch/reset/tree/path/context cases | `ported` | selection+append serialization、forest reopen、tree snapshot、race 与 graph property fuzz；R-SESSION-003 |
 | `T-SESSION-011` | B-SESSION-012 | `tree-traversal.test.ts::createBranchedSession` 与 `custom-session-id.test.ts::forkFrom` | `ported` | atomic no-replace、active-source snapshot、commit-unknown poison quarantine、external strict open、source-byte preservation、cancel/publication fault 与 race；R-SESSION-003 |
+| `T-SESSION-012` | B-SESSION-013/014/016 | `compaction.test.ts`, `compaction-serialization.test.ts`, `session-manager/build-context.test.ts` 的 manual prepare、latest summary、retained tail、wire intent | `ported` | v3 checkpoint/reopen/fork、selected sibling isolation、prompt snapshot、usage/cost and malformed first-kept matrix；R-SESSION-004 |
+| `T-SESSION-013` | B-SESSION-013/017 | Harness `agent-harness.test.ts::compact` 与 coding `agent-session-compaction.test.ts` 的 cancel/error/settlement intent | `strengthened` | unlocked summarizer + append/select conflict, duplicate request, provider failure/cancel, pre/post-write fault and poison；R-SESSION-004 |
+| `T-SESSION-014` | B-SESSION-015 | coding/Harness `compaction.ts::{estimateContextTokens,findCutPoint,shouldCompact}` | `strengthened` | assistant-usage/trailing estimate, tool-result-safe cut, MaxUint64 usage+tail/cut-prefix overflow、no-write regression and fuzz；R-SESSION-004；automatic trigger remains deferred |
+| `T-SESSION-015` | B-SESSION-018 | `branch-summarization.ts`, `branch-summary-extensions.test.ts`, tree navigation paths | `deferred` | requires M-SESSION/v0.4 navigation owner + cache/invalidation + cancel/publication contract; no partial API |
 
 ## M-TOOL
 

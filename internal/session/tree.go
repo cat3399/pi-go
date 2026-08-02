@@ -44,6 +44,7 @@ func (s *Session) SelectLeaf(id string) error {
 		return fmt.Errorf("%w: %s", ErrEntryNotFound, id)
 	}
 	s.leaf = index
+	s.generation++
 	return nil
 }
 
@@ -58,6 +59,7 @@ func (s *Session) ResetLeaf() error {
 		return ErrClosed
 	}
 	s.leaf = -1
+	s.generation++
 	return nil
 }
 

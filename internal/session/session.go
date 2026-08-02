@@ -32,6 +32,7 @@ type Session struct {
 	entries        []Entry
 	byID           map[string]int
 	leaf           int
+	generation     uint64
 	needsSeparator bool
 	runtime        runtimeConfig
 	poisoned       bool
@@ -209,8 +210,20 @@ func (s *Session) LeafID() (string, bool) {
 }
 
 func (s *Session) Context() Context {
+	return s.BuildContext()
+}
+
+// BuildContext projects only the selected root-to-leaf path. The newest
+// compaction on that path replaces its summarized prefix with one explicit
+// checkpoint message; siblings and older summarized messages never leak into
+// provider context.
+func (s *Session) BuildContext() Context {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.buildContextLocked()
+}
+
+func (s *Session) buildContextLocked() Context {
 	if s.leaf < 0 {
 		return Context{}
 	}
@@ -226,7 +239,49 @@ func (s *Session) Context() Context {
 		current = s.byID[entry.parentID]
 	}
 
+	compactionIndex := -1
+	for index := 0; index < len(path); index++ {
+		entry := s.entries[path[index]]
+		if entry.compaction != nil {
+			compactionIndex = index
+			break
+		}
+	}
+
 	context := Context{}
+	if compactionIndex >= 0 {
+		compaction := s.entries[path[compactionIndex]]
+		summary, err := llm.NewUserTextMessage(CompactionSummaryPrefix+compaction.compaction.Summary+CompactionSummarySuffix, compaction.timestamp)
+		if err == nil {
+			context.messages = append(context.messages, summary)
+		}
+		firstKeptIndex := -1
+		for index := 0; index < len(path); index++ {
+			if s.entries[path[index]].id == compaction.compaction.FirstKeptEntryID {
+				firstKeptIndex = index
+				break
+			}
+		}
+		// path is leaf-to-root. From firstKept down to the leaf this includes the
+		// retained pre-checkpoint segment and post-checkpoint successors; only the
+		// checkpoint record itself is replaced by the summary above.
+		for index := firstKeptIndex; index >= 0; index-- {
+			if index == compactionIndex {
+				continue
+			}
+			entry := s.entries[path[index]]
+			if entry.message != nil {
+				context.messages = append(context.messages, entry.message)
+			}
+			if entry.hasAssistant {
+				context.assistant = entry.assistant
+				context.hasAssistant = true
+			}
+			context.diagnostics = append(context.diagnostics, entry.diagnostics...)
+		}
+		return context
+	}
+
 	for index := len(path) - 1; index >= 0; index-- {
 		entry := s.entries[path[index]]
 		if entry.message != nil {
@@ -331,6 +386,7 @@ func (s *Session) Append(ctx context.Context, message llm.ConversationMessage, o
 	s.leaf = len(s.entries) - 1
 	s.byID[entry.id] = s.leaf
 	s.needsSeparator = false
+	s.generation++
 	return entry.clone(), nil
 }
 

@@ -9,6 +9,7 @@
 | `D-SESSION-002` | AgentHarness JSONL v3 | `packages/agent/src/harness/session/jsonl-store.ts` | 只提取 strict parse/storage invariant；不能假定与 D-SESSION-001 wire 等价 | `classified` |
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |
+| `D-SESSION-005` | v3 `compaction` / `branch_summary` session entries | coding `session-manager.ts`；coding/Harness compaction modules | compaction envelope/parent/first-kept/usage 可严格读取写入；branch summary raw-preserved but not projected until navigation/cache contract | `compaction implemented; branch_summary deferred` |
 | `D-SETTINGS-001` | global/project `settings.json` | `packages/coding-agent/src/core/settings-manager.ts` | source precedence、project trust、unknown setting preservation | `classified` |
 | `D-TRUST-001` | `~/.pi/agent/trust.json` project trust decisions | `packages/coding-agent/src/core/trust-manager.ts::ProjectTrustStore` | 安全关键；path normalization、nearest ancestor、lock/merge、unknown/malformed preservation | `classified` |
 | `D-KEYBINDING-001` | `~/.pi/agent/keybindings.json` | `packages/coding-agent/src/core/keybindings.ts`；`packages/coding-agent/src/migrations.ts::migrateKeybindingsConfigFile` | TUI 前实现；unknown/malformed 不覆盖，alias migration 可重复 | `deferred` |

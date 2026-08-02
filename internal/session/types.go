@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -10,21 +11,34 @@ import (
 )
 
 var (
-	ErrInvalidSession     = errors.New("invalid session")
-	ErrUnsupportedVersion = errors.New("unsupported session version")
-	ErrInvalidEntry       = errors.New("invalid session entry")
-	ErrUnsupportedTree    = errors.New("unsupported session tree")
-	ErrStorage            = errors.New("session storage failure")
-	ErrDurabilityUnknown  = errors.New("session creation durability unknown")
-	ErrCommitUnknown      = errors.New("session append commit outcome unknown")
-	ErrAppendCanceled     = errors.New("session append canceled before commit")
-	ErrPoisoned           = errors.New("session writer is poisoned")
-	ErrClosed             = errors.New("session is closed")
-	ErrWriterActive       = errors.New("session already has an active writer")
-	ErrIDGeneration       = errors.New("session id generation failed")
-	ErrEntryIDExhausted   = errors.New("unique session entry id exhausted")
-	ErrEntryNotFound      = errors.New("session entry not found")
-	ErrSourceEqualsTarget = errors.New("session extraction source and target are the same file")
+	ErrInvalidSession        = errors.New("invalid session")
+	ErrUnsupportedVersion    = errors.New("unsupported session version")
+	ErrInvalidEntry          = errors.New("invalid session entry")
+	ErrUnsupportedTree       = errors.New("unsupported session tree")
+	ErrStorage               = errors.New("session storage failure")
+	ErrDurabilityUnknown     = errors.New("session creation durability unknown")
+	ErrCommitUnknown         = errors.New("session append commit outcome unknown")
+	ErrAppendCanceled        = errors.New("session append canceled before commit")
+	ErrPoisoned              = errors.New("session writer is poisoned")
+	ErrClosed                = errors.New("session is closed")
+	ErrWriterActive          = errors.New("session already has an active writer")
+	ErrIDGeneration          = errors.New("session id generation failed")
+	ErrEntryIDExhausted      = errors.New("unique session entry id exhausted")
+	ErrEntryNotFound         = errors.New("session entry not found")
+	ErrSourceEqualsTarget    = errors.New("session extraction source and target are the same file")
+	ErrNothingToCompact      = errors.New("session has no compactable context")
+	ErrAlreadyCompacted      = errors.New("session leaf is already a compaction entry")
+	ErrCompactionConflict    = errors.New("session changed while compaction summary was in progress")
+	ErrSummaryFailed         = errors.New("session compaction summary failed")
+	ErrTokenEstimateOverflow = errors.New("session token estimate overflow")
+)
+
+// CompactionSummaryPrefix and CompactionSummarySuffix are the v3 context
+// representation of a durable compaction record. They make the checkpoint an
+// explicit user-context message without changing the sealed llm message union.
+const (
+	CompactionSummaryPrefix = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n"
+	CompactionSummarySuffix = "\n</summary>"
 )
 
 // Clock and IDGenerator are injected at the module boundary so session tests
@@ -75,6 +89,61 @@ type AppendOptions struct {
 	Assistant AssistantProvenance
 }
 
+// CompactionUsage keeps the provider-normalized usage and the coding-agent v3
+// cost object together. Pricing remains outside Session; the value is only
+// validated and durably preserved here.
+type CompactionUsage struct {
+	Usage llm.Usage
+	Cost  UsageCost
+}
+
+// SummaryInput is an immutable, selected-branch snapshot delivered to the
+// injected summarizer. The conversation is already serialized so a provider
+// cannot mistake it for a continuation request.
+type SummaryInput struct {
+	SystemPrompt     string
+	Prompt           string
+	Instructions     string
+	PreviousSummary  string
+	Messages         []llm.ConversationMessage
+	RetainedTail     []llm.ConversationMessage
+	FirstKeptEntryID string
+	TokensBefore     uint64
+	Generation       uint64
+	SelectedLeafID   string
+}
+
+// SummaryOutput is the only data a summarizer may contribute to durable
+// session state. Empty or invalid text is rejected before any file write.
+type SummaryOutput struct {
+	Text  string
+	Usage *CompactionUsage
+}
+
+// Summarizer is deliberately narrow: provider routing, retries and UI events
+// belong to a later agent/application integration layer.
+type Summarizer interface {
+	Summarize(context.Context, SummaryInput) (SummaryOutput, error)
+}
+
+// CompactRequest starts one manual context-compaction operation. A zero keep
+// budget selects the standard 20k-token retention policy; callers can pass a
+// smaller explicit value for deterministic/manual control.
+type CompactRequest struct {
+	KeepRecentTokens uint64
+	Instructions     string
+	Summarizer       Summarizer
+}
+
+// CompactResult reports the durable record and the immutable request snapshot
+// that produced it. It never implies that an external provider ran under the
+// session lock.
+type CompactResult struct {
+	Entry     Entry
+	Input     SummaryInput
+	Committed bool
+}
+
 type Header struct {
 	id               string
 	workingDir       string
@@ -120,7 +189,18 @@ type Entry struct {
 	message      llm.ConversationMessage
 	assistant    AssistantProvenance
 	hasAssistant bool
+	compaction   *CompactionRecord
 	diagnostics  []Diagnostic
+}
+
+// CompactionRecord is the recognized v3 compaction entry payload. Details and
+// future fields remain in Entry.RawJSON; this typed view contains only the
+// fields needed for safe context projection.
+type CompactionRecord struct {
+	Summary          string
+	FirstKeptEntryID string
+	TokensBefore     uint64
+	Usage            *CompactionUsage
 }
 
 // TreeNode is an immutable snapshot of the durable forest. Children preserve
@@ -162,12 +242,31 @@ func (e Entry) Message() (llm.ConversationMessage, bool) {
 func (e Entry) AssistantProvenance() (AssistantProvenance, bool) {
 	return e.assistant, e.hasAssistant
 }
+func (e Entry) Compaction() (CompactionRecord, bool) {
+	if e.compaction == nil {
+		return CompactionRecord{}, false
+	}
+	value := *e.compaction
+	if value.Usage != nil {
+		usage := *value.Usage
+		value.Usage = &usage
+	}
+	return value, true
+}
 func (e Entry) Diagnostics() []Diagnostic {
 	return append([]Diagnostic(nil), e.diagnostics...)
 }
 func (e Entry) clone() Entry {
 	e.raw = bytes.Clone(e.raw)
 	e.diagnostics = append([]Diagnostic(nil), e.diagnostics...)
+	if e.compaction != nil {
+		compaction := *e.compaction
+		if compaction.Usage != nil {
+			usage := *compaction.Usage
+			compaction.Usage = &usage
+		}
+		e.compaction = &compaction
+	}
 	return e
 }
 
