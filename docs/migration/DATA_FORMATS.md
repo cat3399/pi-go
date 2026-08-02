@@ -5,7 +5,7 @@
 
 | ID | 数据 | 固定上游证据 | 兼容要求 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v3 首个目标；v1/v2 后续 migration；unknown/corrupt 不破坏 | `classified` |
+| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v1/v2 Open migration → strict v3 rewrite；unknown 保留；corrupt/partial 不自动破坏 | `implemented-awaiting-review` |
 | `D-SESSION-002` | AgentHarness JSONL v3 | `packages/agent/src/harness/session/jsonl-store.ts` | 只提取 strict parse/storage invariant；不能假定与 D-SESSION-001 wire 等价 | `classified` |
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |

@@ -31,6 +31,9 @@ var (
 	ErrCompactionConflict    = errors.New("session changed while compaction summary was in progress")
 	ErrSummaryFailed         = errors.New("session compaction summary failed")
 	ErrTokenEstimateOverflow = errors.New("session token estimate overflow")
+	ErrRecoveryNotApplicable = errors.New("session recovery is not applicable")
+	ErrRecoveryBackupExists  = errors.New("session recovery backup already exists")
+	ErrSessionTooLarge       = errors.New("session exceeds safety limit")
 )
 
 // CompactionSummaryPrefix and CompactionSummarySuffix are the v3 context
@@ -59,6 +62,14 @@ type CreateOptions struct {
 type OpenOptions struct {
 	Now        Clock
 	NewEntryID IDGenerator
+}
+
+// RecoveryResult describes an explicit, user-requested repair. Ordinary Open
+// never calls this operation: malformed history is evidence, not disposable
+// whitespace. Recovery only removes one unterminated, non-JSON final line.
+type RecoveryResult struct {
+	BackupPath     string
+	TruncatedBytes int64
 }
 
 // AssistantProvenance supplies the coding-agent v3 fields that belong to the

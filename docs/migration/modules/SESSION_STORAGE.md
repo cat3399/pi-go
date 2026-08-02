@@ -270,3 +270,26 @@ key/invalidation、cancel/fault publication 与 selected-path context，才可�
 - 独立 review 已复核 v3 foreign fixture compatibility、concurrent select/append/compact race、
   usage/cost wire、token overflow fail-explicit 修订及上述 deferred integration gate；结论见
   [../REVIEWS.md](../REVIEWS.md) 的 `R-SESSION-004`。
+
+## M-SESSION/v0.4-legacy-migration-recovery
+
+状态：`implemented-awaiting-independent-review`
+
+`Session.Open` 是唯一的 legacy consumer：v1 header（缺少 `version`）严格要求所有 entry
+都没有 `id`/`parentId`，按物理顺序生成唯一 id 与 parent chain；v1 compaction 的
+`firstKeptEntryIndex` 按上游规则转为 id。v2 必须已有完整 tree envelope，并将
+`hookMessage` 改为 `custom`。两者都写成 v3；未知 header、entry 和 payload value 保留为
+`json.RawMessage`，不被投影的语义仍不进入 provider context。
+
+Open 先持有同路径的进程内及 Unix 跨进程 writer claim，读取 source byte snapshot，执行纯
+migration，再以同目录 private temp/file fsync/atomic replace/directory sync 发布。rename 或
+directory sync 后的错误返回 durability-unknown 且不发布可写 aggregate；原文件可由下一次
+严格 Open reconcile。普通 Open 对 future version、UTF-8、duplicate/graph、middle malformed
+和 trailing partial 一律拒绝且不改写。64 MiB、100 万行、4 MiB/line 是明确 admission
+上限；超过上限 fail-explicit。
+
+`RecoverTrailingPartial(path)` 是唯一的显式恢复 API。它只在最后一行无换行且不是完整 JSON、
+此前完整 v3 prefix 可严格 decode 时工作；先 no-clobber 创建 `.partial-recovery.backup`，再
+atomic replace 截断。它绝不处理 middle corruption 或完整 tail，且不会由 Open/Application
+自动调用。Unix 使用 kernel-released `flock`，Windows 使用 `LockFileEx`；两者都不采用会在
+crash 后变成安全风险的 stale-directory sentinel。

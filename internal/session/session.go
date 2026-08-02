@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -150,6 +151,46 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 	data, err := storage.read(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read %s: %w", ErrStorage, resolvedPath, err)
+	}
+	if err := checkSessionLimits(data); err != nil {
+		return nil, fmt.Errorf("%w: %s", err, resolvedPath)
+	}
+	version, err := sessionVersion(data)
+	if err != nil {
+		return nil, err
+	}
+	if version < 3 {
+		migrated, err := migrateLegacySession(resolvedPath, data, version, normalizeRuntime(options.Now, options.NewEntryID).newEntryID)
+		if err != nil {
+			return nil, err
+		}
+		// Migration is pure, but it is not trusted merely because it encoded.
+		// Validate the exact candidate against every current v3 invariant before
+		// any rename can replace evidence from the legacy source.
+		if _, _, _, _, err := decodeSessionFile(resolvedPath, migrated); err != nil {
+			return nil, err
+		}
+		// A cooperating writer is excluded by the process lock held with the
+		// claim. Re-read the source snapshot so a non-cooperating mutation is
+		// never silently overwritten.
+		current, readErr := storage.read(resolvedPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: reread migration source %s: %w", ErrStorage, resolvedPath, readErr)
+		}
+		if !bytes.Equal(current, data) {
+			return nil, fmt.Errorf("%w: migration source changed before publication", ErrStorage)
+		}
+		replaced, replaceErr := storage.replace(resolvedPath, migrated)
+		if replaceErr != nil {
+			if replaced {
+				return nil, fmt.Errorf("%w: legacy migration publication: %w", ErrDurabilityUnknown, replaceErr)
+			}
+			return nil, fmt.Errorf("%w: legacy migration publication: %w", ErrStorage, replaceErr)
+		}
+		data = migrated
+		if err := refreshSessionWriterAfterRewrite(claim, resolvedPath); err != nil {
+			return nil, err
+		}
 	}
 	header, entries, byID, needsSeparator, err := decodeSessionFile(resolvedPath, data)
 	if err != nil {

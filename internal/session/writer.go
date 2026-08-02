@@ -13,8 +13,9 @@ import (
 // path catches aliases before a file exists; os.SameFile catches hard links,
 // symlinks, and platform-specific aliases once it does.
 type writerClaim struct {
-	paths map[string]struct{}
-	info  os.FileInfo
+	paths  map[string]struct{}
+	info   os.FileInfo
+	unlock func()
 }
 
 var activeSessionWriters = struct {
@@ -37,7 +38,11 @@ func claimSessionWriter(path string) (*writerClaim, error) {
 	if conflict := conflictingWriterLocked(nil, key, info); conflict != nil {
 		return nil, fmt.Errorf("%w: %s", ErrWriterActive, path)
 	}
-	claim := &writerClaim{paths: map[string]struct{}{key: {}}, info: info}
+	unlock, err := claimProcessWriter(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrWriterActive, path)
+	}
+	claim := &writerClaim{paths: map[string]struct{}{key: {}}, info: info, unlock: unlock}
 	activeSessionWriters.paths[key] = claim
 	activeSessionWriters.claims[claim] = struct{}{}
 	return claim, nil
@@ -68,6 +73,32 @@ func refreshSessionWriter(claim *writerClaim, path string) error {
 	return nil
 }
 
+// refreshSessionWriterAfterRewrite adopts the new inode produced by this
+// claim's own atomic replacement. It is intentionally narrower than refresh:
+// a normal Open must reject a changed file, while a successful migration has
+// just made exactly that change under the same process lock.
+func refreshSessionWriterAfterRewrite(claim *writerClaim, path string) error {
+	key, info, err := sessionWriterDescriptor(path)
+	if err != nil {
+		return fmt.Errorf("%w: identify rewritten session %s: %v", ErrStorage, path, err)
+	}
+	if info == nil {
+		return fmt.Errorf("%w: rewritten session disappeared: %s", ErrStorage, path)
+	}
+	activeSessionWriters.Lock()
+	defer activeSessionWriters.Unlock()
+	if _, active := activeSessionWriters.claims[claim]; !active {
+		return fmt.Errorf("%w: writer claim for %s is inactive", ErrStorage, path)
+	}
+	if conflict := conflictingWriterLocked(claim, key, info); conflict != nil {
+		return fmt.Errorf("%w: %s", ErrWriterActive, path)
+	}
+	claim.paths[key] = struct{}{}
+	activeSessionWriters.paths[key] = claim
+	claim.info = info
+	return nil
+}
+
 func releaseSessionWriter(claim *writerClaim) {
 	if claim == nil {
 		return
@@ -80,6 +111,10 @@ func releaseSessionWriter(claim *writerClaim) {
 			}
 		}
 		delete(activeSessionWriters.claims, claim)
+		if claim.unlock != nil {
+			claim.unlock()
+			claim.unlock = nil
+		}
 	}
 	activeSessionWriters.Unlock()
 }

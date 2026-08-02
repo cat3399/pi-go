@@ -16,11 +16,19 @@ type sessionStorage interface {
 	read(path string) ([]byte, error)
 	create(path string, data []byte) (created bool, err error)
 	append(ctx context.Context, path string, data []byte) (writeStarted bool, err error)
+	replace(path string, data []byte) (replaced bool, err error)
 }
 
 type osSessionStorage struct{}
 
 func (osSessionStorage) read(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxSessionBytes {
+		return nil, fmt.Errorf("%w: %d bytes exceeds %d", ErrSessionTooLarge, info.Size(), maxSessionBytes)
+	}
 	return os.ReadFile(path)
 }
 
@@ -103,6 +111,45 @@ func (osSessionStorage) append(ctx context.Context, path string, data []byte) (b
 		return started, closeErr
 	}
 	return started, nil
+}
+
+// replace writes a complete private sibling, syncs it, atomically swaps it in
+// place, then syncs the directory. The boolean means that the visible name may
+// already point to the replacement, so callers must fail closed on an error.
+func (osSessionStorage) replace(path string, data []byte) (bool, error) {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".pi-go-session-rewrite-*")
+	if err != nil {
+		return false, err
+	}
+	temporaryPath := temporary.Name()
+	cleanup := func() error {
+		if temporary != nil {
+			err := temporary.Close()
+			temporary = nil
+			return err
+		}
+		return nil
+	}
+	if err := temporary.Chmod(0o600); err != nil {
+		return false, errors.Join(err, cleanup())
+	}
+	if err := writeAll(temporary, data); err != nil {
+		return false, errors.Join(err, cleanup())
+	}
+	if err := temporary.Sync(); err != nil {
+		return false, errors.Join(err, cleanup())
+	}
+	if err := temporary.Close(); err != nil {
+		temporary = nil
+		return false, err
+	}
+	temporary = nil
+	replaced, err := replaceTemporary(temporaryPath, path)
+	if err != nil {
+		return replaced, err
+	}
+	return true, nil
 }
 
 func writeAll(writer io.Writer, data []byte) error {

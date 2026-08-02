@@ -471,6 +471,28 @@ func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 	}
 }
 
+func TestRunProductionPreservesInvalidExplicitSessionBeforeProviderCall(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("fixture-key"), nil)
+	sessionPath := filepath.Join(workingDir, "invalid.jsonl")
+	original := []byte(`{"type":"event","data":"not a session"}` + "\n")
+	if err := os.WriteFile(sessionPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-invalid", "--session", sessionPath, "-p", "must not call provider",
+	}, &stdout, &stderr)
+	if exitCode != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "open session "+sessionPath) {
+		t.Fatalf("RunProduction = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(sessionPath)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatalf("production changed invalid session: %v / %q", err, after)
+	}
+}
+
 func productionTestConfig(workingDir, agentDir string, environment []string) app.ProductionConfig {
 	var entryIDs atomic.Uint64
 	environmentCopy := make([]string, len(environment))

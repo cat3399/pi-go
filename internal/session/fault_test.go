@@ -22,6 +22,10 @@ type fakeStorage struct {
 	createCalls   [][]byte
 	appendCalls   [][]byte
 	appendFunc    func(context.Context, []byte) (bool, error)
+	replaceCalled int
+	replaceDone   bool
+	replaceErr    error
+	replaceData   []byte
 }
 
 type poisonedSnapshotStorage struct {
@@ -56,6 +60,10 @@ func (storage *poisonedSnapshotStorage) append(ctx context.Context, path string,
 	return storage.base.append(ctx, path, data)
 }
 
+func (storage *poisonedSnapshotStorage) replace(path string, data []byte) (bool, error) {
+	return storage.base.replace(path, data)
+}
+
 func (storage *fakeStorage) read(string) ([]byte, error) {
 	return append([]byte(nil), storage.readData...), storage.readErr
 }
@@ -71,6 +79,12 @@ func (storage *fakeStorage) append(ctx context.Context, _ string, data []byte) (
 		return storage.appendFunc(ctx, data)
 	}
 	return storage.appendStarted, storage.appendErr
+}
+
+func (storage *fakeStorage) replace(_ string, data []byte) (bool, error) {
+	storage.replaceCalled++
+	storage.replaceData = append([]byte(nil), data...)
+	return storage.replaceDone, storage.replaceErr
 }
 
 func TestCreateClassifiesKnownAndUnknownDurabilityFailures(t *testing.T) {
