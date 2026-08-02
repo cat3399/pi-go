@@ -98,6 +98,16 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-APP-006` | B-APP-005/007 | `args.test.ts` provider/model/api-key cases；`model-resolver.test.ts` provider-prefixed/custom model cases | `strengthened` | production request/model/exit integration；R-APP-002 |
 | `T-APP-007` | B-APP-006 | `models-runtime.test.ts` explicit/stored/ambient 与 wrong-handler cases；`auth-storage.test.ts` read/malformed intent | `strengthened` | 四层 precedence、secret-safe、无 session/network 副作用 matrix；R-APP-002 |
 | `T-APP-008` | B-APP-008 | `session-manager.ts` default cwd-encoded directory/new filename；上游缺同等 crash-safe create test | `strengthened` | filename/header ID/time、explicit resume advancing clock；R-APP-002 |
+
+## M-AUTH
+
+| ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
+| --- | --- | --- | --- | --- |
+| `T-AUTH-001` | B-AUTH-001 | `auth-storage.test.ts` read/modify/delete/malformed | `strengthened` | unknown record、duplicate/UTF-8/root matrix、malformed preservation；R-AUTH-001 |
+| `T-AUTH-002` | B-AUTH-002 | `auth-storage.ts` mode 0600 intent；上游无 atomic durability/Windows ACL evidence | `strengthened` | permission、pre-rename fault/temp cleanup、Windows-only fail-closed suite/cross-compile；R-AUTH-001 |
+| `T-AUTH-003` | B-AUTH-003 | `auth-storage.test.ts` concurrent modifications | `strengthened` | same/different Store、local/file wait cancellation、two contending process writers、failure release/merge、`-race`；R-AUTH-001 |
+| `T-AUTH-004` | B-AUTH-004 | `runtime-credentials.test.ts`；`models-runtime.test.ts` ownership | `strengthened` | nonpersistent override、四层 precedence、统一 production resolver、不 lower fallback；R-AUTH-001 |
+| `T-AUTH-005` | B-AUTH-005 | `resolve-config-value.test.ts` templates/commands | `intentionally-incompatible` | template/fuzz；command side effect rejected until security/process contract exists；R-AUTH-001 |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

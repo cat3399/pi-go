@@ -10,6 +10,7 @@ review gate；随着新行为证据调整时，必须同步更新 ledger 与受�
 - [SESSION_STORAGE.md](SESSION_STORAGE.md) — M-SESSION v3 JSONL 与 durable invariant；
 - [TOOL_SYSTEM.md](TOOL_SYSTEM.md) — M-TOOL 首个 Bash tool；
 - [APPLICATION_CLI.md](APPLICATION_CLI.md) — M-APP text print 与 WF-001 装配。
+- [AUTH_STORAGE.md](AUTH_STORAGE.md) — M-AUTH API-key storage、runtime overlay 与 config resolution。
 
 阶段 0 之后的产品服务、Interactive/TUI、Extension 和 Remote 模块仍以
 [../../ARCHITECTURE.md](../../ARCHITECTURE.md) 与 [../../ROADMAP.md](../../ROADMAP.md)

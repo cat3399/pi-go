@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/auth"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
@@ -102,7 +104,7 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, err
 	}
-	apiKey, err := resolveOpenAIAPIKey(parsed, agentDir, modelConfig, ambientEnvironment)
+	apiKey, err := resolveOpenAIAPIKey(ctx, parsed, agentDir, modelConfig, ambientEnvironment)
 	if err != nil {
 		return Dependencies{}, err
 	}
@@ -229,50 +231,65 @@ func resolveProductionModel(parsed options) (provider.ModelRef, error) {
 }
 
 func resolveOpenAIAPIKey(
+	ctx context.Context,
 	parsed options,
 	agentDir string,
 	modelConfig openAIModelConfig,
 	ambientEnvironment map[string]string,
 ) (string, error) {
-	if parsed.hasAPIKey {
-		return validateResolvedAPIKey(parsed.apiKey, "CLI OpenAI API key")
-	}
-	stored, exists, err := loadStoredOpenAICredential(agentDir)
+	store, err := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: initialize auth storage", ErrInvalidProductionConfig)
 	}
-	if exists {
-		key, err := resolveProductionConfigValue(
-			stored.key,
-			"stored OpenAI API key",
-			stored.environment,
-			ambientEnvironment,
-		)
-		if err != nil {
-			return "", err
+	runtime := auth.NewRuntime(store)
+	if parsed.hasAPIKey {
+		if err := runtime.SetAPIKey(openAIProviderID, parsed.apiKey); err != nil {
+			return "", productionAuthError(err)
 		}
-		return validateResolvedAPIKey(key, "stored OpenAI API key")
 	}
-	if modelConfig.apiKey != nil {
-		key, err := resolveProductionConfigValue(
-			*modelConfig.apiKey,
-			"configured OpenAI API key",
-			nil,
-			ambientEnvironment,
-		)
-		if err != nil {
-			return "", err
+	key, err := auth.ResolveOpenAIKey(ctx, runtime, nil, modelConfig.apiKey, ambientEnvironment)
+	if err != nil {
+		return "", productionAuthError(err)
+	}
+	return validateResolvedAPIKey(key, "resolved OpenAI API key")
+}
+
+// productionAuthError maps service categories to the existing product error
+// vocabulary without including the rejected value, raw file bytes, or a key.
+func productionAuthError(err error) error {
+	var typed *auth.Error
+	_ = errors.As(err, &typed)
+	description := "OpenAI API key"
+	if typed != nil && strings.Contains(typed.Operation, "stored") {
+		description = "stored OpenAI API key"
+	} else if typed != nil && strings.Contains(typed.Operation, "configured") {
+		description = "configured OpenAI API key"
+	}
+	switch {
+	case errors.Is(err, auth.ErrCredentialType):
+		return fmt.Errorf("%w: auth.json OpenAI credential type is not migrated", ErrUnsupportedProductionValue)
+	case errors.Is(err, auth.ErrCommandBacked):
+		return fmt.Errorf("%w: command-backed %s is not migrated", ErrUnsupportedProductionValue, description)
+	case errors.Is(err, auth.ErrPersistentAuthUnavailable):
+		return fmt.Errorf("%w: persistent auth storage is unavailable on this platform", ErrUnsupportedProductionValue)
+	case auth.IsKind(err, auth.KindNotConfigured):
+		if typed != nil && typed.Operation == "resolve OpenAI API key" {
+			return fmt.Errorf(
+				"%w: OpenAI API key is not configured by --api-key, auth.json, models.json, or %s",
+				ErrInvalidProductionConfig,
+				openAIKeyEnvironment,
+			)
 		}
-		return validateResolvedAPIKey(key, "configured OpenAI API key")
+		return fmt.Errorf("%w: %s references missing environment variable", ErrInvalidProductionConfig, description)
+	case auth.IsKind(err, auth.KindPermission):
+		return fmt.Errorf("%w: auth.json credential file permissions are unsafe", ErrInvalidProductionConfig)
+	case auth.IsKind(err, auth.KindMalformed):
+		return fmt.Errorf("%w: auth.json is malformed", ErrInvalidProductionConfig)
+	case auth.IsKind(err, auth.KindCancelled):
+		return fmt.Errorf("%w: resolve %s cancelled", ErrInvalidProductionConfig, description)
+	default:
+		return fmt.Errorf("%w: cannot resolve %s", ErrInvalidProductionConfig, description)
 	}
-	if key := ambientEnvironment[openAIKeyEnvironment]; strings.TrimSpace(key) != "" {
-		return validateResolvedAPIKey(key, openAIKeyEnvironment)
-	}
-	return "", fmt.Errorf(
-		"%w: OpenAI API key is not configured by --api-key, auth.json, models.json, or %s",
-		ErrInvalidProductionConfig,
-		openAIKeyEnvironment,
-	)
 }
 
 func validateResolvedAPIKey(value string, description string) (string, error) {

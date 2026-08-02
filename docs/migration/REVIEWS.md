@@ -205,3 +205,22 @@
   Plan 9 build 和 app test compile 通过。
 - 最终结论：`passed`，0 Blocker、0 Major、0 Minor；OAuth/auth 写入、command config value、
   完整 models/catalog、system prompt、tool wire 与真实 credential smoke 保留为后续里程碑。
+
+## R-AUTH-001：M-AUTH/v0.1 联合审查与定点复审
+
+- 范围：`internal/auth` 的 API-key storage、runtime overlay、config resolution、OpenAI production
+  接入、相邻测试与 ledger；实现和闭环 commits 为 `4078ace`、`55fa34a`、`7a04595`，reviewer
+  未参与实现。
+- 修订：首轮 1 Blocker/2 Major/1 Minor 已关闭，包括 Windows private guarantee fail-closed、
+  context-aware local serialization、稳定 B/T-AUTH ID 和统一 production resolver；定点复审新增的
+  2 Major 由 Windows-only 相邻 suite、两个真实 contention process writers 与 failure-release
+  证据关闭。
+- 验证：全仓 test/vet/race/build、重复跨进程/锁取消定点测试、auth 与 production config fuzz、
+  Linux/Windows cross-build、Windows auth/app vet 和 test-binary compile 均通过；PE symbol 核对确认
+  Windows-only tests 已编入。
+- 平台边界：审查主机没有 Windows runtime 或 Wine，Windows-only tests 尚未实机执行；v0.1
+  不实现 DACL-backed persistent auth，在 Windows 对 existing/set/delete 保持明确 fail-closed，
+  不能把 cross-compile 写成 DACL 或实机验证完成。
+- 明确延期：OAuth login/refresh、command-backed config execution、Windows DACL persistence；
+  未知 stale lock 不自动回收仍是明确 contract，不由本里程碑静默改变。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
