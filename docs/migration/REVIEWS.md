@@ -221,6 +221,30 @@
   `Session.Compact` 的 snapshot/commit gate。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
 
+## R-SESSION-005：M-SESSION/v0.4-legacy-migration-recovery 独立复审
+
+- 范围：v1/v2 `Open` migration、显式 trailing-partial recovery、atomic rewrite durability、
+  alias-aware multi-process writer claim、Windows replacement 与相邻 application preservation；
+  实现及闭环 commits 为 `7590f3d`、`730155c`、`67dc682`、`0e62c0d`、`a3be277`。
+- 首轮 finding 由 `730155c` 关闭：hardlink rewrite 分裂、final symlink destination、rewrite 后
+  新旧 inode claim，以及 temporary cleanup/publication fault 边界均改为 fail-closed 并补回归。
+- Windows 两轮 finding 由 `67dc682`、`0e62c0d` 关闭：先补 share-delete identity handle 与
+  write-through durability，再确认 `MoveFileExW` 不能满足 open-destination atomic replacement，
+  最终只接受 `SetFileInformationByHandle(FileRenameInfoEx)` 的 replace + POSIX semantics。
+- 末轮 finding 由 `a3be277` 关闭：publication 后 writer adoption 失败同时保留
+  `ErrDurabilityUnknown` 与底层 typed cause；新 identity lock 必须用 locked-handle stat 对照锁前、
+  锁后 path stat；Windows mandatory byte lock 移至 `1<<62`，不再阻塞 session data read/append。
+- 最终核验：定点 migration/recovery/adoption/writer tests 重复 20 次，`go test ./...`、
+  `go vet ./...`、`go build ./...`、`go test -race ./...`、legacy migration/recovery fuzz、Linux
+  amd64/arm64 与 Windows 386/amd64/arm64 cross-compile、Windows 386/amd64 vet 及 diff check 通过。
+- 平台债务：审查主机没有真实 Windows runtime 或 Wine，Windows-only read/append、alias、
+  open-destination replacement、migration/recovery tests 尚未实机执行。`FileRenameInfoEx` 的最低
+  product behavior 是 Windows 10 v1607 / Windows Server 2016；不支持该 information class 或
+  POSIX flag 的系统/文件系统以 `ErrAtomicReplaceUnsupported` 在 publication 前 fail-closed，
+  不使用较弱 fallback。
+- 最终结论：`passed`，0 Blocker / 0 Major / 0 Minor；`B-SESSION-008` 与 `D-SESSION-001` 标为
+  `ported`，`T-SESSION-008` 标为 `strengthened`。
+
 ## R-AGENT-001：M-AGENT/v0.1 完整模块联合审查
 
 - 范围：`internal/agent` 的完整 single-tool loop、provider/tool/session 因果 barrier、

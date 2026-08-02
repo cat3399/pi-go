@@ -5,7 +5,7 @@
 
 | ID | 数据 | 固定上游证据 | 兼容要求 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v1/v2 Open migration → strict v3 rewrite；unknown 保留；corrupt/partial 不自动破坏 | `implemented-awaiting-review` |
+| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v1/v2 Open migration → strict v3 rewrite；unknown 保留；corrupt/partial 不自动破坏 | `ported`（R-SESSION-005） |
 | `D-SESSION-002` | AgentHarness JSONL v3 | `packages/agent/src/harness/session/jsonl-store.ts` | 只提取 strict parse/storage invariant；不能假定与 D-SESSION-001 wire 等价 | `classified` |
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |
@@ -45,6 +45,12 @@ selected path 的原始 entry bytes，并写 new header 的 `parentSession`；fo
 必须 no-replace/atomic，任一失败不得改 source。若活跃 source 已因 append
 commit-unknown poisoned，Fork/Extract 必须先返回 `ErrPoisoned`，不能用可能落后磁盘的
 内存 snapshot 创建目标；调用者仍须 close/reopen/reconcile。
+
+M-SESSION/v0.4 将同一 inventory 的 v1/v2 作为 `Open` 的 legacy 输入：v1 物理链与
+compaction index、v2 tree envelope 与 hook rename 转成 strict v3，同时保留 unknown raw JSON。
+普通 Open 不修改 corrupt 或 trailing-partial v3；后者只能经显式 `RecoverTrailingPartial`
+先建立 no-clobber backup，再发布已严格校验的完整 prefix。migration/recovery 的完整 rewrite、
+writer-lock 与平台债务 contract 见 `R-SESSION-005` 和 SESSION_STORAGE charter。
 
 ## D-SETTINGS-001
 

@@ -1,6 +1,7 @@
 # M-SESSION：Session 与 storage charter
 
-状态：`ported`（`M-SESSION/v0.1-linear-v3`）
+状态：`ported`（`M-SESSION/v0.1-linear-v3` 至
+`M-SESSION/v0.4-legacy-migration-recovery`；v0.4 见 `R-SESSION-005`）
 
 首个里程碑：`M-SESSION/v0.1-linear-v3`
 
@@ -255,11 +256,11 @@ Session。自动阈值触发、retry 和 UI events 留给 M-AGENT/M-APP integrat
 
 `branch_summary` 的生成、cache/invalidation 与 tree-navigation atomicity 不能在不引入第二个
 agent/session coordinator 的前提下形成完整 contract；本里程碑仍将其作为 unknown entry 安全保留，
-不投影也不声称已支持。后续 `M-SESSION/v0.4-branch-summary` 必须同时定义 navigation owner、cache
+不投影也不声称已支持。后续 `M-SESSION/v0.5-branch-summary` 必须同时定义 navigation owner、cache
 key/invalidation、cancel/fault publication 与 selected-path context，才可将 wire type 升格。
 
-同样延期：v1/v2 migration、automatic threshold invocation、provider retry 和 extension hooks。它们
-不得绕过 `Session.Compact` 的 snapshot/commit gate。
+v1/v2 migration 已由 v0.4 / `R-SESSION-005` ported；仍延期 automatic threshold invocation、
+provider retry 和 extension hooks。它们不得绕过 `Session.Compact` 的 snapshot/commit gate。
 
 ### 验收与 integration gate
 
@@ -274,7 +275,7 @@ key/invalidation、cancel/fault publication 与 selected-path context，才可�
 
 ## M-SESSION/v0.4-legacy-migration-recovery
 
-状态：`implemented-awaiting-independent-review`
+状态：`ported`（`R-SESSION-005`：0 Blocker / 0 Major / 0 Minor）
 
 `Session.Open` 是唯一的 legacy consumer：v1 header（缺少 `version`）严格要求所有 entry
 都没有 `id`/`parentId`，按物理顺序生成唯一 id 与 parent chain；v1 compaction 的
@@ -342,7 +343,9 @@ Windows-only runtime suite 必须实际执行 high-range identity lock 下的第
 hardlink alias writer rejection、open-destination replacement、migration 与 recovery，并验证旧
 open handle 仍读到旧 identity、target name 已读到新 identity；非 Windows ABI seam
 明确只验证 32/64-bit buffer/flags/handle 参数 contract，不能当作 runtime 通过证据。当前 macOS
-工作机只做 Windows 386/amd64/arm64 compile，真实 runtime 结果仍是 independent review gate。
+工作机只完成 Windows 386/amd64/arm64 cross-compile 与 Windows vet，未执行真实 Windows
+runtime；该项保留为平台验证债务，不能把 compile/ABI seam 记成实机通过，但不阻塞
+`R-SESSION-005` 的里程碑结论。
 
 rewrite 在 chmod/write/fsync/close 或
 pre-rename failure 时关闭并移除 private temp，cleanup error 与主错误一起返回；rename 后的
