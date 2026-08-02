@@ -2,6 +2,7 @@ package resource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,14 +21,14 @@ type Service struct {
 	snapshot *Snapshot
 }
 
+// afterDirectoryLstat is a package-private fault seam. It is only set by
+// deterministic tests to model a parent-directory replacement in the narrow
+// interval between name inspection and descriptor acquisition.
+var afterDirectoryLstat func(string)
+
 func New(config Config) (*Service, error) {
 	config, err := validateConfig(config)
 	if err != nil {
-		return nil, err
-	}
-	// Keep filesystem discovery and trust lookup on the same physical cwd.  This
-	// also makes an ancestor decision stable when callers entered via a symlink.
-	if config.CWD, err = normalize(config.CWD); err != nil {
 		return nil, err
 	}
 	trust, err := NewTrustStore(config.AgentDir)
@@ -59,7 +60,14 @@ func (s *Service) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	next, err := load(ctx, s.config, decision)
+	config := s.config
+	if decision.Known && decision.Trusted {
+		config.CWD, decision.Root, err = admitTrustedPath(config.CWD, decision.Root)
+		if err != nil {
+			return err
+		}
+	}
+	next, err := load(ctx, config, decision)
 	if err != nil {
 		return err
 	}
@@ -69,11 +77,79 @@ func (s *Service) Reload(ctx context.Context) error {
 	return nil
 }
 
+// admitTrustedPath is intentionally called only after a lexical trust match.
+// Canonicalization makes the subsequent filesystem walk stable, and the
+// ancestor check prevents an in-anchor symlink from escaping to an unrelated
+// physical tree.
+func admitTrustedPath(cwd, root string) (string, string, error) {
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: resolve trusted anchor", ErrUnsafePath)
+	}
+	physicalCWD, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: resolve trusted cwd", ErrUnsafePath)
+	}
+	rootInfo, err := os.Stat(physicalRoot)
+	if err != nil || !rootInfo.IsDir() {
+		return "", "", fmt.Errorf("%w: trusted anchor", ErrUnsafePath)
+	}
+	cwdInfo, err := os.Stat(physicalCWD)
+	if err != nil || !cwdInfo.IsDir() {
+		return "", "", fmt.Errorf("%w: trusted cwd", ErrUnsafePath)
+	}
+	relative, err := filepath.Rel(physicalRoot, physicalCWD)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", "", fmt.Errorf("%w: trusted cwd escapes anchor", ErrUnsafePath)
+	}
+	return filepath.Clean(physicalCWD), filepath.Clean(physicalRoot), nil
+}
+
+// verifyTrustedPath rejects every symlink component under a trusted anchor.
+// It is repeated immediately before descriptor acquisition: if a parent is
+// swapped after this check, the Lstat/Open identity comparison below rejects
+// the newly opened directory or file instead.
+func verifyTrustedPath(anchor, path string) error {
+	if anchor == "" {
+		return nil
+	}
+	relative, err := filepath.Rel(anchor, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return fmt.Errorf("%w: resource escapes trusted anchor", ErrUnsafePath)
+	}
+	current := anchor
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		if part == "." || part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: trusted resource path", ErrUnsafePath)
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: trusted resource path", ErrUnsafePath)
+	}
+	relative, err = filepath.Rel(anchor, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return fmt.Errorf("%w: resource escapes trusted anchor", ErrUnsafePath)
+	}
+	return nil
+}
+
 func load(ctx context.Context, c Config, decision trustDecision) (Snapshot, error) {
 	trusted := decision.Known && decision.Trusted
 	out := Snapshot{Trusted: trusted}
 	var err error
-	if out.Instructions, err = loadInstructions(ctx, c.AgentDir, ScopeGlobal, c.MaxFileBytes); err != nil {
+	if out.Instructions, err = loadInstructions(ctx, c.AgentDir, ScopeGlobal, c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	}
 	if trusted {
@@ -83,11 +159,11 @@ func load(ctx context.Context, c Config, decision trustDecision) (Snapshot, erro
 		}
 		out.Instructions = append(out.Instructions, project...)
 	}
-	if out.SystemPrompt, err = optionalFile(ctx, filepath.Join(c.AgentDir, "SYSTEM.md"), c.MaxFileBytes); err != nil {
+	if out.SystemPrompt, err = optionalFile(ctx, filepath.Join(c.AgentDir, "SYSTEM.md"), c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	}
 	if trusted {
-		value, err := optionalFile(ctx, filepath.Join(c.CWD, ".pi", "SYSTEM.md"), c.MaxFileBytes)
+		value, err := optionalFile(ctx, filepath.Join(c.CWD, ".pi", "SYSTEM.md"), c.MaxFileBytes, decision.Root)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -95,35 +171,35 @@ func load(ctx context.Context, c Config, decision trustDecision) (Snapshot, erro
 			out.SystemPrompt = value
 		}
 	}
-	if value, err := optionalFile(ctx, filepath.Join(c.AgentDir, "APPEND_SYSTEM.md"), c.MaxFileBytes); err != nil {
+	if value, err := optionalFile(ctx, filepath.Join(c.AgentDir, "APPEND_SYSTEM.md"), c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	} else if value != "" {
 		out.AppendSystem = append(out.AppendSystem, value)
 	}
 	if trusted {
-		value, err := optionalFile(ctx, filepath.Join(c.CWD, ".pi", "APPEND_SYSTEM.md"), c.MaxFileBytes)
+		value, err := optionalFile(ctx, filepath.Join(c.CWD, ".pi", "APPEND_SYSTEM.md"), c.MaxFileBytes, decision.Root)
 		if err != nil {
 			return Snapshot{}, err
 		} else if value != "" {
 			out.AppendSystem = append(out.AppendSystem, value)
 		}
 	}
-	if out.Templates, err = loadTemplates(ctx, filepath.Join(c.AgentDir, "prompts"), ScopeGlobal, c.MaxFileBytes); err != nil {
+	if out.Templates, err = loadTemplates(ctx, filepath.Join(c.AgentDir, "prompts"), ScopeGlobal, c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	}
 	if trusted {
-		project, err := loadTemplates(ctx, filepath.Join(c.CWD, ".pi", "prompts"), ScopeProject, c.MaxFileBytes)
+		project, err := loadTemplates(ctx, filepath.Join(c.CWD, ".pi", "prompts"), ScopeProject, c.MaxFileBytes, decision.Root)
 		if err != nil {
 			return Snapshot{}, err
 		}
 		out.Templates, out.Diagnostics = mergeTemplates(out.Templates, project, out.Diagnostics)
 	}
-	if out.Skills, err = loadSkills(ctx, filepath.Join(c.AgentDir, "skills"), ScopeGlobal, c.MaxFileBytes); err != nil {
+	if out.Skills, err = loadSkills(ctx, filepath.Join(c.AgentDir, "skills"), ScopeGlobal, c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	}
 	if trusted {
 		for _, dir := range []string{filepath.Join(c.CWD, ".pi", "skills"), filepath.Join(c.CWD, ".agents", "skills")} {
-			project, err := loadSkills(ctx, dir, ScopeProject, c.MaxFileBytes)
+			project, err := loadSkills(ctx, dir, ScopeProject, c.MaxFileBytes, decision.Root)
 			if err != nil {
 				return Snapshot{}, err
 			}
@@ -143,7 +219,7 @@ func check(ctx context.Context) error {
 	}
 	return nil
 }
-func safeRead(ctx context.Context, path string, max int64) (string, error) {
+func safeRead(ctx context.Context, path string, max int64, anchor string) (string, error) {
 	if err := check(ctx); err != nil {
 		return "", err
 	}
@@ -156,6 +232,9 @@ func safeRead(ctx context.Context, path string, max int64) (string, error) {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: %s", ErrUnsafePath, filepath.Base(path))
+	}
+	if err := verifyTrustedPath(anchor, path); err != nil {
+		return "", err
 	}
 	if info.Size() > max {
 		return "", fmt.Errorf("%w: %s", ErrTooLarge, filepath.Base(path))
@@ -178,10 +257,10 @@ func safeRead(ctx context.Context, path string, max int64) (string, error) {
 	}
 	return string(data), nil
 }
-func optionalFile(ctx context.Context, path string, max int64) (string, error) {
-	return safeRead(ctx, path, max)
+func optionalFile(ctx context.Context, path string, max int64, anchor string) (string, error) {
+	return safeRead(ctx, path, max, anchor)
 }
-func directory(ctx context.Context, path string) ([]os.DirEntry, error) {
+func directory(ctx context.Context, path string, anchor string) ([]os.DirEntry, error) {
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
@@ -195,16 +274,31 @@ func directory(ctx context.Context, path string) ([]os.DirEntry, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return nil, fmt.Errorf("%w: resource directory", ErrUnsafePath)
 	}
-	entries, err := os.ReadDir(path)
+	if err := verifyTrustedPath(anchor, path); err != nil {
+		return nil, err
+	}
+	if afterDirectoryLstat != nil {
+		afterDirectoryLstat(path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read resource directory", ErrMalformed)
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.IsDir() || !os.SameFile(info, opened) {
+		return nil, fmt.Errorf("%w: resource directory", ErrUnsafePath)
+	}
+	entries, err := f.ReadDir(-1)
 	if err != nil {
 		return nil, fmt.Errorf("%w: read resource directory", ErrMalformed)
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	return entries, nil
 }
-func loadInstructions(ctx context.Context, dir string, scope Scope, max int64) ([]Instruction, error) {
+func loadInstructions(ctx context.Context, dir string, scope Scope, max int64, anchor string) ([]Instruction, error) {
 	for _, name := range []string{"AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"} {
-		value, err := safeRead(ctx, filepath.Join(dir, name), max)
+		value, err := safeRead(ctx, filepath.Join(dir, name), max, anchor)
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +327,7 @@ func loadProjectInstructions(ctx context.Context, cwd, trustRoot string, max int
 	}
 	var out []Instruction
 	for _, dir := range dirs {
-		got, err := loadInstructions(ctx, dir, ScopeProject, max)
+		got, err := loadInstructions(ctx, dir, ScopeProject, max, trustRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -241,8 +335,8 @@ func loadProjectInstructions(ctx context.Context, cwd, trustRoot string, max int
 	}
 	return out, nil
 }
-func loadTemplates(ctx context.Context, dir string, scope Scope, max int64) ([]Template, error) {
-	entries, err := directory(ctx, dir)
+func loadTemplates(ctx context.Context, dir string, scope Scope, max int64, anchor string) ([]Template, error) {
+	entries, err := directory(ctx, dir, anchor)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +346,7 @@ func loadTemplates(ctx context.Context, dir string, scope Scope, max int64) ([]T
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
-		raw, err := safeRead(ctx, path, max)
+		raw, err := safeRead(ctx, path, max, anchor)
 		if err != nil {
 			return nil, err
 		}
@@ -279,17 +373,17 @@ func loadTemplates(ctx context.Context, dir string, scope Scope, max int64) ([]T
 	}
 	return out, nil
 }
-func loadSkills(ctx context.Context, dir string, scope Scope, max int64) ([]Skill, error) {
+func loadSkills(ctx context.Context, dir string, scope Scope, max int64, anchor string) ([]Skill, error) {
 	var out []Skill
 	var visit func(string) error
 	visit = func(current string) error {
-		entries, err := directory(ctx, current)
+		entries, err := directory(ctx, current, anchor)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
 			if entry.Name() == "SKILL.md" {
-				raw, err := safeRead(ctx, filepath.Join(current, entry.Name()), max)
+				raw, err := safeRead(ctx, filepath.Join(current, entry.Name()), max, anchor)
 				if err != nil {
 					return err
 				}

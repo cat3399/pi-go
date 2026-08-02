@@ -62,11 +62,7 @@ func TestUntrustedProjectAssetsCannotChangeFailureOrSnapshot(t *testing.T) {
 		t.Fatalf("untrusted assets affected reload: %v", err)
 	}
 	first, _ := s.Snapshot()
-	physicalCWD, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Trusted || first.SystemPrompt != "global\n\n<available_tools>\n- read: Read files\n</available_tools>\n\nCurrent working directory: "+strings.ReplaceAll(physicalCWD, "\\", "/") {
+	if first.Trusted || first.SystemPrompt != "global\n\n<available_tools>\n- read: Read files\n</available_tools>\n\nCurrent working directory: "+strings.ReplaceAll(cwd, "\\", "/") {
 		t.Fatalf("snapshot = %#v", first)
 	}
 	if err := s.Reload(context.Background()); err != nil {
@@ -75,6 +71,54 @@ func TestUntrustedProjectAssetsCannotChangeFailureOrSnapshot(t *testing.T) {
 	second, _ := s.Snapshot()
 	if second.SystemPrompt != first.SystemPrompt || len(second.Diagnostics) != 0 {
 		t.Fatalf("untrusted snapshot changed: %#v", second)
+	}
+}
+
+func TestUntrustedMissingLoopAndAliasedCWDDoNotProbeOrAuthorize(t *testing.T) {
+	root := t.TempDir()
+	agent := filepath.Join(root, "agent")
+	if err := os.MkdirAll(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(agent, "SYSTEM.md"), "global")
+	loop := filepath.Join(root, "loop")
+	if err := os.Symlink("loop", loop); err != nil {
+		t.Fatal(err)
+	}
+	for _, cwd := range []string{loop, filepath.Join(root, "does-not-exist")} {
+		s, err := New(Config{CWD: cwd, AgentDir: agent})
+		if err != nil {
+			t.Fatalf("New(%q) = %v", cwd, err)
+		}
+		if err := s.Reload(context.Background()); err != nil {
+			t.Fatalf("untrusted Reload(%q) = %v", cwd, err)
+		}
+		got, _ := s.Snapshot()
+		if got.Trusted || !strings.Contains(got.SystemPrompt, "global") {
+			t.Fatalf("untrusted snapshot for %q = %#v", cwd, got)
+		}
+	}
+	anchor := filepath.Join(root, "anchor")
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(anchor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(outside, "AGENTS.md"), "must not escape")
+	if err := os.Symlink(outside, filepath.Join(anchor, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{CWD: filepath.Join(anchor, "escape"), AgentDir: agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Trust().Set(context.Background(), anchor, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("trusted symlink escape = %v", err)
 	}
 }
 
@@ -319,6 +363,111 @@ func TestTrustOptionsAndClearingRestoreParentDecision(t *testing.T) {
 	}
 	if trusted, known, err := s.Trust().Get(context.Background(), cwd); err != nil || !known || !trusted {
 		t.Fatalf("cleared child inherits parent = %t,%t,%v", trusted, known, err)
+	}
+}
+
+func TestTrustNullAndFutureValuesRoundTripWithoutBlockingOtherDecision(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, agent, cwd := newService(t)
+	parent := filepath.Dir(cwd)
+	content := "{\n  \"/future\": {\"version\": 2},\n  \"" + parent + "\": true,\n  \"" + cwd + "\": null\n}\n"
+	write(t, filepath.Join(agent, "trust.json"), content)
+	if trusted, known, err := s.Trust().Get(context.Background(), cwd); err != nil || !known || !trusted {
+		t.Fatalf("null entry should inherit parent = %t,%t,%v", trusted, known, err)
+	}
+	child := filepath.Join(cwd, "child")
+	no := false
+	if err := s.Trust().Set(context.Background(), child, no); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agent, "trust.json"))
+	if err != nil || !strings.Contains(string(data), `"/future": {"version": 2}`) || !strings.Contains(string(data), `"`+cwd+`": null`) {
+		t.Fatalf("future/null preservation = %q %v", data, err)
+	}
+	if trusted, known, err := s.Trust().Get(context.Background(), child); err != nil || !known || trusted {
+		t.Fatalf("new explicit decision = %t,%t,%v", trusted, known, err)
+	}
+}
+
+func TestTrustSerializationCancellationAndCommitUnknownReconcile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, _, cwd := newService(t)
+	store := s.Trust()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	store.beforeRename = func() error {
+		close(entered)
+		<-release
+		return nil
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- store.Set(context.Background(), cwd, true) }()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, _, err := store.Get(ctx, cwd); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Get during slow publication = %v", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Set = %v", err)
+	}
+	store.beforeRename = nil
+	store.syncDir = func(string) error { return errors.New("injected directory sync") }
+	if err := store.Set(context.Background(), filepath.Join(cwd, "next"), false); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("post-rename sync failure = %v", err)
+	}
+	// Rename has already happened, so a fresh read is the only authoritative
+	// reconciliation operation; no cached decision was advanced by Set.
+	store.syncDir = syncDirectory
+	if trusted, known, err := store.Get(context.Background(), filepath.Join(cwd, "next")); err != nil || !known || trusted {
+		t.Fatalf("reconciled post-rename decision = %t,%t,%v", trusted, known, err)
+	}
+}
+
+func TestDirectoryReplacementBetweenLstatAndOpenFailsClosed(t *testing.T) {
+	s, agent, _ := newService(t)
+	prompts := filepath.Join(agent, "prompts")
+	write(t, filepath.Join(prompts, "safe.md"), "safe")
+	outside := t.TempDir()
+	write(t, filepath.Join(outside, "outside.md"), "outside")
+	afterDirectoryLstat = func(path string) {
+		if path != prompts {
+			return
+		}
+		afterDirectoryLstat = nil
+		if err := os.Rename(prompts, filepath.Join(agent, "prompts-held")); err != nil {
+			t.Fatalf("move original prompts: %v", err)
+		}
+		if err := os.Symlink(outside, prompts); err != nil {
+			t.Fatalf("replace prompts with link: %v", err)
+		}
+	}
+	defer func() { afterDirectoryLstat = nil }()
+	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("directory swap = %v", err)
+	}
+}
+
+func TestTrustedProjectResourceParentSymlinkFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, _, cwd := newService(t)
+	outside := t.TempDir()
+	write(t, filepath.Join(outside, "SYSTEM.md"), "outside prompt")
+	if err := os.Symlink(outside, filepath.Join(cwd, ".pi")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("project resource parent symlink = %v", err)
 	}
 }
 

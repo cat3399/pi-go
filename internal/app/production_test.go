@@ -455,6 +455,48 @@ func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
 	}
 }
 
+func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(agentDir, "prompts"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompts", "review.md"), []byte("review $1 ${2:-all}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	path := filepath.Join(workingDir, "expanded.jsonl")
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "/review file.go", "--session", path,
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	user := input[1].(map[string]any)
+	content, ok := user["content"].([]any)
+	if !ok || len(content) != 1 || content[0].(map[string]any)["text"] != "review file.go all" {
+		t.Fatalf("provider user prompt = %#v", user)
+	}
+	transcript, err := session.Open(path, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) == 0 {
+		t.Fatalf("durable expanded prompt = %#v", messages)
+	}
+	stored, ok := messages[0].(llm.UserTextMessage)
+	if !ok || textBlocks(stored.Content()) != "review file.go all" {
+		t.Fatalf("durable expanded prompt = %#v", messages)
+	}
+}
+
 func TestRunProductionHTTPFailureIsDurable(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()

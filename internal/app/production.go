@@ -179,6 +179,9 @@ func assembleProductionDependencies(
 		BashArtifactDirectory: config.BashArtifactDirectory,
 		BashMaxOutputLines:    config.BashMaxOutputLines,
 		BashMaxOutputBytes:    config.BashMaxOutputBytes,
+		ExpandPrompt: func(prompt string) string {
+			return resource.ExpandTemplate(prompt, resourceSnapshot.Templates)
+		},
 	}, nil
 }
 

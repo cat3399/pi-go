@@ -17,6 +17,10 @@ var (
 	ErrTooLarge      = errors.New("resource exceeds size limit")
 	ErrUnsafePath    = errors.New("unsafe resource path")
 	ErrTrustStore    = errors.New("project trust store error")
+	// ErrCommitUnknown means a replacement was renamed but directory durability
+	// could not be confirmed. Callers must reopen/reconcile rather than assume
+	// either the old or new decision survived a crash.
+	ErrCommitUnknown = errors.New("trust decision commit durability is unknown")
 	ErrUnavailable   = errors.New("resource snapshot unavailable")
 )
 

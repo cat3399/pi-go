@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -21,9 +20,11 @@ import (
 type TrustStore struct {
 	path         string
 	max          int64
-	mu           sync.Mutex
+	gate         chan struct{}
 	poll         time.Duration
 	beforeRename func() error
+	afterRename  func() error
+	syncDir      func(string) error
 }
 type trustDecision struct {
 	Trusted bool
@@ -44,9 +45,15 @@ func NewTrustStore(agentDir string) (*TrustStore, error) {
 	if agentDir == "" || !utf8.ValidString(agentDir) {
 		return nil, fmt.Errorf("%w: invalid trust directory", ErrTrustStore)
 	}
-	return &TrustStore{path: filepath.Join(agentDir, "trust.json"), max: DefaultMaxFileBytes, poll: 20 * time.Millisecond}, nil
+	gate := make(chan struct{}, 1)
+	gate <- struct{}{}
+	return &TrustStore{path: filepath.Join(agentDir, "trust.json"), max: DefaultMaxFileBytes, poll: 20 * time.Millisecond, gate: gate, syncDir: syncDirectory}, nil
 }
 func (s *TrustStore) Path() string { return s.path }
+
+// normalize is deliberately lexical: admission must not inspect an untrusted
+// cwd. A different symlink spelling therefore never inherits a decision until
+// its own lexical ancestor is explicitly trusted.
 func normalize(path string) (string, error) {
 	if path == "" || !utf8.ValidString(path) {
 		return "", fmt.Errorf("%w: invalid path", ErrTrustStore)
@@ -55,15 +62,19 @@ func normalize(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: normalize: %w", ErrTrustStore, err)
 	}
-	// A trust entry is an authority boundary, not merely a display string.  Use
-	// the physical path when it already exists so a trusted lexical parent
-	// cannot be used to admit a different directory through a symlink.
-	if resolved, resolveErr := filepath.EvalSymlinks(value); resolveErr == nil {
-		value = resolved
-	} else if !errors.Is(resolveErr, os.ErrNotExist) {
-		return "", fmt.Errorf("%w: normalize: %v", ErrTrustStore, resolveErr)
-	}
 	return filepath.Clean(value), nil
+}
+
+func (s *TrustStore) acquire(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return nil, contextErr(ctx)
+	case <-s.gate:
+		return func() { s.gate <- struct{}{} }, nil
+	}
 }
 
 func (s *TrustStore) Get(ctx context.Context, cwd string) (bool, bool, error) {
@@ -73,8 +84,11 @@ func (s *TrustStore) Get(ctx context.Context, cwd string) (bool, bool, error) {
 	if err := contextErr(ctx); err != nil {
 		return false, false, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	defer release()
 	root, _, err := s.read()
 	if err != nil {
 		return false, false, err
@@ -85,11 +99,9 @@ func (s *TrustStore) Get(ctx context.Context, cwd string) (bool, bool, error) {
 	}
 	for {
 		if raw, ok := root[current]; ok {
-			var value bool
-			if err := json.Unmarshal(raw, &value); err == nil && (bytes.Equal(bytes.TrimSpace(raw), []byte("true")) || bytes.Equal(bytes.TrimSpace(raw), []byte("false"))) {
+			if value, known := boolDecision(raw); known {
 				return value, true, nil
 			}
-			return false, false, fmt.Errorf("%w: invalid decision", ErrTrustStore)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -109,8 +121,11 @@ func (s *TrustStore) decision(ctx context.Context, cwd string) (trustDecision, e
 	if err := contextErr(ctx); err != nil {
 		return trustDecision{}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return trustDecision{}, err
+	}
+	defer release()
 	root, _, err := s.read()
 	if err != nil {
 		return trustDecision{}, err
@@ -121,11 +136,9 @@ func (s *TrustStore) decision(ctx context.Context, cwd string) (trustDecision, e
 	}
 	for {
 		if raw, ok := root[current]; ok {
-			value := bytes.Equal(bytes.TrimSpace(raw), []byte("true"))
-			if !value && !bytes.Equal(bytes.TrimSpace(raw), []byte("false")) {
-				return trustDecision{}, fmt.Errorf("%w: invalid decision", ErrTrustStore)
+			if value, known := boolDecision(raw); known {
+				return trustDecision{Trusted: value, Known: true, Root: current}, nil
 			}
-			return trustDecision{Trusted: value, Known: true, Root: current}, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -148,8 +161,11 @@ func (s *TrustStore) SetMany(ctx context.Context, changes []TrustUpdate) error {
 	if runtime.GOOS == "windows" {
 		return fmt.Errorf("%w: persistent private trust is unavailable on Windows", ErrTrustStore)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	releaseMemory, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseMemory()
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -261,13 +277,20 @@ func (s *TrustStore) read() (map[string]json.RawMessage, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: malformed trust store", ErrTrustStore)
 	}
-	for _, raw := range root {
-		trimmed := bytes.TrimSpace(raw)
-		if !bytes.Equal(trimmed, []byte("true")) && !bytes.Equal(trimmed, []byte("false")) {
-			return nil, false, fmt.Errorf("%w: malformed trust decision", ErrTrustStore)
-		}
-	}
 	return root, true, nil
+}
+
+func boolDecision(raw json.RawMessage) (bool, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("true")) {
+		return true, true
+	}
+	if bytes.Equal(trimmed, []byte("false")) {
+		return false, true
+	}
+	// null and future values are intentionally unknown. They neither authorize
+	// a cwd nor poison unrelated explicit decisions in the same durable object.
+	return false, false
 }
 func decodeStrictObject(data []byte) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -366,9 +389,26 @@ func (s *TrustStore) atomic(data []byte) error {
 		return fmt.Errorf("%w: replace", ErrTrustStore)
 	}
 	done = true
-	if f, err := os.Open(dir); err == nil {
-		_ = f.Sync()
-		_ = f.Close()
+	if s.afterRename != nil {
+		if err := s.afterRename(); err != nil {
+			return fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+		}
+	}
+	if err := s.syncDir(dir); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitUnknown, err)
 	}
 	return nil
+}
+
+func syncDirectory(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

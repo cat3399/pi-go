@@ -71,6 +71,12 @@ func runApplication(
 		flushOne(stderr)
 		return ExitFailure
 	}
+	prompt := parsed.prompt
+	if runtime.expandPrompt != nil {
+		// This is an admitted, pure transform. It must occur before the session
+		// path is resolved or a provider request can be started.
+		prompt = runtime.expandPrompt(prompt)
+	}
 
 	runContext, signals := startSignalController(ctx)
 	defer func() {
@@ -138,7 +144,7 @@ func runApplication(
 		return ExitFailure
 	}
 
-	result, runErr := coordinator.Run(runContext, parsed.prompt)
+	result, runErr := coordinator.Run(runContext, prompt)
 	if signalCode, caught := signals.exitCode(); caught {
 		if runErr != nil && !errors.Is(runErr, agent.ErrInvalidRun) {
 			writeDiagnostic(stderr, runErr)
