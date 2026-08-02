@@ -37,6 +37,12 @@ type ProductionConfig struct {
 
 	OpenAIHTTPClient provider.HTTPDoer
 	OpenAIClock      provider.Clock
+	// OpenAIOAuthHTTPClient/BaseURL are test and embedding seams for OAuth
+	// token exchange. Empty values use the normal OpenAI HTTP client and the
+	// fixed auth.openai.com endpoint.
+	OpenAIOAuthHTTPClient auth.HTTPClient
+	OpenAIOAuthBaseURL    string
+	OpenAIOAuthClock      func() time.Time
 
 	SessionID         string
 	SessionNow        session.Clock
@@ -104,13 +110,13 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, err
 	}
-	apiKey, err := resolveOpenAIAPIKey(ctx, parsed, agentDir, modelConfig, ambientEnvironment)
+	resolvedAuth, err := resolveOpenAIAPIKey(ctx, parsed, agentDir, modelConfig, ambientEnvironment, config)
 	if err != nil {
 		return Dependencies{}, err
 	}
 	implementation, err := provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{
 		BaseURL: modelConfig.baseURL,
-		APIKey:  apiKey,
+		APIKey:  resolvedAuth.APIKey,
 		Client:  config.OpenAIHTTPClient,
 		Clock:   config.OpenAIClock,
 	})
@@ -236,22 +242,36 @@ func resolveOpenAIAPIKey(
 	agentDir string,
 	modelConfig openAIModelConfig,
 	ambientEnvironment map[string]string,
-) (string, error) {
+	config ProductionConfig,
+) (auth.OpenAIAuthResult, error) {
 	store, err := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
 	if err != nil {
-		return "", fmt.Errorf("%w: initialize auth storage", ErrInvalidProductionConfig)
+		return auth.OpenAIAuthResult{}, fmt.Errorf("%w: initialize auth storage", ErrInvalidProductionConfig)
 	}
 	runtime := auth.NewRuntime(store)
 	if parsed.hasAPIKey {
 		if err := runtime.SetAPIKey(openAIProviderID, parsed.apiKey); err != nil {
-			return "", productionAuthError(err)
+			return auth.OpenAIAuthResult{}, productionAuthError(err)
 		}
 	}
-	key, err := auth.ResolveOpenAIKey(ctx, runtime, nil, modelConfig.apiKey, ambientEnvironment)
-	if err != nil {
-		return "", productionAuthError(err)
+	oauthClient := config.OpenAIOAuthHTTPClient
+	if oauthClient == nil {
+		oauthClient = config.OpenAIHTTPClient
 	}
-	return validateResolvedAPIKey(key, "resolved OpenAI API key")
+	flow, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{HTTPClient: oauthClient, AuthBaseURL: config.OpenAIOAuthBaseURL, Clock: config.OpenAIOAuthClock})
+	if err != nil {
+		return auth.OpenAIAuthResult{}, productionAuthError(err)
+	}
+	resolved, err := auth.ResolveOpenAIAuth(ctx, runtime, nil, modelConfig.apiKey, ambientEnvironment, auth.OpenAIResolveOptions{OAuth: flow, Clock: config.OpenAIOAuthClock})
+	if err != nil {
+		return auth.OpenAIAuthResult{}, productionAuthError(err)
+	}
+	key, err := validateResolvedAPIKey(resolved.APIKey, "resolved OpenAI API key")
+	if err != nil {
+		return auth.OpenAIAuthResult{}, err
+	}
+	resolved.APIKey = key
+	return resolved, nil
 }
 
 // productionAuthError maps service categories to the existing product error

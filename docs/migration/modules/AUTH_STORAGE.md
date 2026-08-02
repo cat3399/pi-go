@@ -1,8 +1,15 @@
 # M-AUTH：API-key storage 与 runtime charter
 
-状态：`ported`（`M-AUTH/v0.1-api-key-storage-runtime`）
+状态：`implemented; independent review pending`（`M-AUTH/v0.2-openai-codex-oauth`）
 
 最近通过里程碑：`M-AUTH/v0.1-api-key-storage-runtime`
+
+## v0.2 增量负责
+
+- OpenAI Codex（ChatGPT）OAuth 的 cryptographic PKCE/state、授权 URL、localhost callback、手工回贴和 device-code login service；服务只返回 URL 或接受显式注入的 browser opener，绝不在 production assembly 自动打开浏览器；
+- token authorization-code exchange / refresh 的 HTTP、strict bounded UTF-8 JSON、JWT account metadata 与 secret-safe typed failures；
+- OAuth expiry/skew、同 provider 双检 single-flight refresh、rotation 持久化和 delete/logout 与 runtime API-key override ownership；
+- stored OAuth 到 OpenAI Responses preflight 的 provider-ready bearer credential projection。
 
 ## 负责
 
@@ -15,7 +22,7 @@
 
 ## 不负责
 
-- OAuth login、refresh、token rotation 或 OAuth credential interpretation；
+- Anthropic、GitHub、Copilot 或其他 provider OAuth；真实浏览器 smoke、interactive TUI/CLI surface；
 - models catalog、provider request/auth protocol、settings/project trust；
 - command-backed configuration execution。固定上游使用 shell 执行，但当前产品没有可接受的
   command trust、cwd、environment disclosure 与 cross-platform process-tree contract。因此 v0.1
@@ -58,6 +65,10 @@
 | `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、two re-exec writers、cancel/failure release/merge、`-race`；R-AUTH-001 |
 | `B-AUTH-004` | runtime override 与 stored/configured/ambient source ownership | `ported` | overlay/precedence/error matrix；R-AUTH-001 |
 | `B-AUTH-005` | config template; command value safe refusal | `ported` | escapes, missing env, no-process-side-effect；R-AUTH-001 |
+| `B-AUTH-006` | PKCE/state, browser callback/manual code lifecycle | `implemented` | bind/state/error/cancel/late callback/opener seam |
+| `B-AUTH-007` | device code and bounded token exchange/refresh | `implemented` | pending/403/slow_down/status/UTF-8/size fixture |
+| `B-AUTH-008` | OAuth refresh locking, rotation durability and ownership | `implemented` | concurrent resolve, write fault, no fallback, runtime override |
+| `B-AUTH-009` | production OAuth→Responses preflight | `implemented` | local token + SSE fixture and rotated auth.json |
 
 ## v0.1 review gate
 
@@ -68,3 +79,15 @@ v0.1 在 Windows 保持上述 fail-closed contract。
 OAuth and bounded command execution are deferred to their own explicitly reviewed slices. Re-evaluate command
 execution only with a concrete trust decision, bounded process-tree implementation for each supported platform,
 and no-secret diagnostics tests.
+
+## v0.2 ownership, evidence and acceptance
+
+- `Store` remains the only durable owner. OAuth refresh re-reads expiry under its existing process-local and cross-process locks; exchange or atomic write failure never replaces the old credential.
+- Explicit/runtime API keys beat stored OAuth. A selected malformed, failed-refresh or failed-persist OAuth record never falls through to models.json or ambient keys.
+- Callback accepts only matching-state `GET /auth/callback` with code; bind/state/error/cancel/late callback cannot settle another transaction. The returned authorization transaction owns listener lifecycle.
+- OAuth bodies, codes, verifier and refresh token never enter errors/logs. Windows keeps v0.1's fail-closed persistent-store admission; it does not fake a DACL guarantee.
+
+Fixed upstream evidence: `a116523434806910336b9de3e38a41aa5860030b`,
+`packages/ai/src/auth/{types,resolve,helpers,context}.ts`,
+`auth/oauth/{openai-codex,pkce,device-code,oauth-page,load}.ts`, coding auth-storage and
+`openai-codex-oauth`/`oauth-auth`/`oauth-device-code` tests. Real-browser smoke remains `deferred` pending explicit credential and browser authorization; independent review is pending.

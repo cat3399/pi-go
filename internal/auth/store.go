@@ -81,6 +81,100 @@ func (s *Store) SetAPIKey(ctx context.Context, provider, key string, environment
 	return s.mutate(ctx, "set credential", provider, func(root map[string]json.RawMessage) { root[provider] = encoded })
 }
 
+// SetOAuth stores an already validated OpenAI Codex credential. It is used by
+// login only; refresh uses ModifyOAuth so the expiry check and rotation share
+// the durable lock.
+func (s *Store) SetOAuth(ctx context.Context, provider string, credential OAuthCredential) error {
+	if !validProviderID(provider) {
+		return failure(KindInvalid, "set OAuth credential", provider, nil)
+	}
+	encoded, err := encodeOAuthCredential(credential)
+	if err != nil {
+		return err
+	}
+	return s.mutate(ctx, "set OAuth credential", provider, func(root map[string]json.RawMessage) { root[provider] = encoded })
+}
+
+// ModifyOAuth runs fn while holding both auth-store locks. A returned persist
+// false keeps the exact current raw record, including future fields. Any fn or
+// durable-write error leaves the old credential on disk untouched.
+func (s *Store) ModifyOAuth(ctx context.Context, provider string, fn func(OAuthCredential) (next OAuthCredential, persist bool, err error)) (OAuthCredential, bool, error) {
+	if !validProviderID(provider) || fn == nil {
+		return OAuthCredential{}, false, failure(KindInvalid, "modify OAuth credential", provider, nil)
+	}
+	if runtime.GOOS == "windows" {
+		return OAuthCredential{}, false, failure(KindUnsupported, "modify OAuth credential", provider, ErrPersistentAuthUnavailable)
+	}
+	releaseLocal, err := s.acquireLocal(ctx, "modify OAuth credential", provider)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	defer releaseLocal()
+	if err := os.MkdirAll(lockPathParent(s.path), 0o700); err != nil {
+		return OAuthCredential{}, false, failure(KindIO, "modify OAuth credential", provider, err)
+	}
+	release, err := s.acquireFileLock(ctx)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	defer release()
+	root, exists, err := s.readRoot()
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	if !exists {
+		return OAuthCredential{}, false, nil
+	}
+	raw, exists := root[provider]
+	if !exists {
+		return OAuthCredential{}, false, nil
+	}
+	current, err := parseCredential(raw, provider)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	if current.Type != "oauth" {
+		return OAuthCredential{}, false, failure(KindUnsupported, "modify OAuth credential", provider, ErrCredentialType)
+	}
+	next, persist, err := fn(current.OAuth)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	if !persist {
+		return current.OAuth, true, nil
+	}
+	// A token endpoint may add metadata, but it is not authoritative for
+	// unrelated auth.json future fields. Preserve those across rotation.
+	next.Extra = mergeOAuthExtra(current.OAuth.Extra, next.Extra)
+	encoded, err := encodeOAuthCredential(next)
+	if err != nil {
+		return OAuthCredential{}, false, err
+	}
+	root[provider] = encoded
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return OAuthCredential{}, false, failure(KindIO, "modify OAuth credential", provider, err)
+	}
+	if err := s.atomicWrite(append(data, '\n'), "modify OAuth credential", provider); err != nil {
+		return OAuthCredential{}, false, err
+	}
+	return next, true, nil
+}
+
+func mergeOAuthExtra(current, next map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(current) == 0 && len(next) == 0 {
+		return nil
+	}
+	merged := make(map[string]json.RawMessage, len(current)+len(next))
+	for key, value := range current {
+		merged[key] = append(json.RawMessage(nil), value...)
+	}
+	for key, value := range next {
+		merged[key] = append(json.RawMessage(nil), value...)
+	}
+	return merged
+}
+
 func (s *Store) Delete(ctx context.Context, provider string) error {
 	if !validProviderID(provider) {
 		return failure(KindInvalid, "delete credential", provider, nil)

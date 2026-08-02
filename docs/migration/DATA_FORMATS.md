@@ -82,6 +82,8 @@ refresh 和 legacy migration 仍未迁移，故 D-AUTH-001 不代表完整 crede
 尚无可靠 DACL admission/creation，persistent read/write/delete fail-closed；missing file 不阻塞 runtime、
 models.json configured key 或 ambient environment source。
 
+M-AUTH/v0.2 增加 canonical OpenAI OAuth entry：`type:"oauth"`、`access`、`refresh`、Unix-millisecond `expires`、optional `accountId` 与 preserved future fields。reader 对已选择 OAuth 严格验证，refresh 在 existing auth-file lock 内 double-check 后 atomic replace；失败保留旧 bytes。其他 OAuth provider、legacy `oauth.json` migration 和 Windows DACL persistence 仍 deferred。
+
 ## D-MODEL-001 / D-MODEL-002
 
 `models.json` 是用户配置，dynamic store 是 provider catalog cache；二者职责不同，

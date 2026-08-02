@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -234,6 +235,59 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 	}
 }
 
+func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("persistent auth remains fail-closed on Windows")
+	}
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	access := productionOAuthJWT("refreshed-account")
+	var tokenCalls atomic.Int32
+	var responseAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/oauth/token":
+			tokenCalls.Add(1)
+			if err := request.ParseForm(); err != nil || request.Form.Get("grant_type") != "refresh_token" || request.Form.Get("refresh_token") != "old-refresh" {
+				t.Errorf("refresh form = %#v, %v", request.Form, err)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"access_token":`+jsonString(access)+`,"refresh_token":"new-refresh","expires_in":3600}`)
+		case "/v1/responses":
+			responseAuthorization = request.Header.Get("Authorization")
+			_, _ = io.Copy(io.Discard, request.Body)
+			writer.Header().Set("Content-Type", "text/event-stream")
+			item := map[string]any{"type": "message", "id": "oauth-message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "oauth answer"}}}
+			writeProductionSSE(t, writer,
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
+				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{item}, "usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}},
+			)
+		default:
+			t.Errorf("unexpected request %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", nil, nil)
+	writeAuthJSON(t, agentDir, `{"openai":{"type":"oauth","access":`+jsonString(productionOAuthJWT("old-account"))+`,"refresh":"old-refresh","expires":1,"accountId":"old-account"}}`)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	config.OpenAIOAuthBaseURL = server.URL
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-oauth", "--session", filepath.Join(workingDir, "oauth.jsonl"), "-p", "hello"}, &stdout, &stderr)
+	if code != app.ExitSuccess || stdout.String() != "oauth answer\n" || stderr.Len() != 0 || tokenCalls.Load() != 1 || responseAuthorization != "Bearer "+access {
+		t.Fatalf("RunProduction OAuth = code %d stdout %q stderr %q tokens %d authorization %q", code, stdout.String(), stderr.String(), tokenCalls.Load(), responseAuthorization)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "auth.json"))
+	if err != nil || !strings.Contains(string(data), `"refresh": "new-refresh"`) || strings.Contains(string(data), "old-refresh") {
+		t.Fatalf("rotated auth.json = %q, %v", data, err)
+	}
+}
+
+func productionOAuthJWT(account string) string {
+	payload, _ := json.Marshal(map[string]any{"https://api.openai.com/auth": map[string]string{"chatgpt_account_id": account}})
+	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+func jsonString(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }
+
 type countingProductionDoer struct {
 	calls atomic.Uint32
 }
@@ -261,7 +315,7 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, nil)
 				writeAuthJSON(t, agentDir, `{"openai":{"type":"oauth","access":"stored-secret"}}`)
 			},
-			want:       "credential type is not migrated",
+			want:       "auth.json is malformed",
 			secrets:    []string{"ambient-secret", "stored-secret"},
 			storedFile: true,
 		},

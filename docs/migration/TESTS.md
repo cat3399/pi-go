@@ -118,6 +118,10 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-AUTH-003` | B-AUTH-003 | `auth-storage.test.ts` concurrent modifications | `strengthened` | same/different Store、local/file wait cancellation、two contending process writers、failure release/merge、`-race`；R-AUTH-001 |
 | `T-AUTH-004` | B-AUTH-004 | `runtime-credentials.test.ts`；`models-runtime.test.ts` ownership | `strengthened` | nonpersistent override、四层 precedence、统一 production resolver、不 lower fallback；R-AUTH-001 |
 | `T-AUTH-005` | B-AUTH-005 | `resolve-config-value.test.ts` templates/commands | `intentionally-incompatible` | template/fuzz；command side effect rejected until security/process contract exists；R-AUTH-001 |
+| `T-AUTH-006` | B-AUTH-006 | `openai-codex-oauth.test.ts` browser URL/callback/manual intent | `strengthened` | PKCE/state, bind, route/error/state, cancellation, late callback and explicit opener |
+| `T-AUTH-007` | B-AUTH-007 | `openai-codex-oauth.test.ts` + `oauth-device-code.test.ts` | `strengthened` | device pending/403/slow_down, timeout/cancel, bounded status/JSON/UTF-8 and secret-safe errors |
+| `T-AUTH-008` | B-AUTH-008 | `resolve.ts` OAuth double-check refresh | `strengthened` | same-provider concurrent refresh, durable rotation write fault, no lower-source fallback and fuzz |
+| `T-AUTH-009` | B-AUTH-009 | `oauth-auth.test.ts` stored OAuth resolution | `strengthened` | production assembly local token→Responses SSE fixture and auth.json rotation |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

@@ -29,6 +29,13 @@ func (r *Runtime) RemoveAPIKey(provider string) {
 	defer r.mu.Unlock()
 	delete(r.overrides, provider)
 }
+
+func (r *Runtime) runtimeKey(provider string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	value, ok := r.overrides[provider]
+	return value, ok
+}
 func (r *Runtime) Read(ctx context.Context, provider string) (Credential, bool, error) {
 	r.mu.RLock()
 	key, ok := r.overrides[provider]

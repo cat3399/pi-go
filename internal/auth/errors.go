@@ -34,6 +34,8 @@ const (
 	KindUnsupported   Kind = "unsupported"
 	KindNotConfigured Kind = "not_configured"
 	KindCancelled     Kind = "cancelled"
+	KindOAuth         Kind = "oauth"
+	KindTimeout       Kind = "timeout"
 )
 
 // Error reports an operation without exposing sensitive input. Cause is kept

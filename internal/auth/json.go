@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -121,6 +123,9 @@ func parseCredential(raw json.RawMessage, provider string) (Credential, error) {
 	if value.Type == "" {
 		return Credential{}, failure(KindMalformed, "read credential", provider, nil)
 	}
+	if value.Type == "oauth" {
+		return parseOAuthCredential(raw, provider)
+	}
 	if value.Type != "api_key" {
 		return Credential{Type: value.Type}, nil
 	}
@@ -133,6 +138,78 @@ func parseCredential(raw json.RawMessage, provider string) (Credential, error) {
 		}
 	}
 	return Credential{Type: value.Type, Key: *value.Key, Env: cloneEnv(value.Env)}, nil
+}
+
+func parseOAuthCredential(raw json.RawMessage, provider string) (Credential, error) {
+	root, err := decodeObject(raw)
+	if err != nil {
+		return Credential{}, failure(KindMalformed, "read credential", provider, err)
+	}
+	var value struct {
+		Type      string `json:"type"`
+		Access    string `json:"access"`
+		Refresh   string `json:"refresh"`
+		Expires   int64  `json:"expires"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.Type != "oauth" ||
+		!validOAuthText(value.Access) || !validOAuthText(value.Refresh) || value.Expires <= 0 ||
+		(value.AccountID != "" && !validOAuthText(value.AccountID)) {
+		return Credential{}, failure(KindMalformed, "read credential", provider, err)
+	}
+	for _, key := range []string{"type", "access", "refresh", "expires", "accountId"} {
+		delete(root, key)
+	}
+	return Credential{Type: "oauth", OAuth: OAuthCredential{
+		Access: value.Access, Refresh: value.Refresh, Expires: value.Expires,
+		AccountID: value.AccountID, Extra: root,
+	}}, nil
+}
+
+func encodeOAuthCredential(value OAuthCredential) (json.RawMessage, error) {
+	if !validOAuthText(value.Access) || !validOAuthText(value.Refresh) || value.Expires <= 0 ||
+		(value.AccountID != "" && !validOAuthText(value.AccountID)) {
+		return nil, failure(KindInvalid, "set OAuth credential", "openai", nil)
+	}
+	root := make(map[string]json.RawMessage, len(value.Extra)+5)
+	for key, raw := range value.Extra {
+		if key == "type" || key == "access" || key == "refresh" || key == "expires" || key == "accountId" || !validJSONFieldName(key) {
+			continue
+		}
+		if err := validateRaw(raw); err != nil {
+			return nil, failure(KindInvalid, "set OAuth credential", "openai", err)
+		}
+		root[key] = append(json.RawMessage(nil), raw...)
+	}
+	put := func(key string, value any) error {
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			root[key] = encoded
+		}
+		return err
+	}
+	if err := put("type", "oauth"); err != nil {
+		return nil, err
+	}
+	if err := put("access", value.Access); err != nil {
+		return nil, err
+	}
+	if err := put("refresh", value.Refresh); err != nil {
+		return nil, err
+	}
+	if err := put("expires", value.Expires); err != nil {
+		return nil, err
+	}
+	if value.AccountID != "" {
+		if err := put("accountId", value.AccountID); err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(root)
+}
+
+func validJSONFieldName(value string) bool {
+	return utf8.ValidString(value) && value != "" && !strings.ContainsFunc(value, unicode.IsControl)
 }
 
 func utf8Valid(value string) bool { return utf8.ValidString(value) }
