@@ -376,11 +376,44 @@ func isOpenAIContextOverflow(status int, errorType, code, message string) bool {
 	if !utf8.ValidString(message) {
 		return false
 	}
-	lower := strings.ToLower(message)
-	over := strings.Contains(lower, "exceed") || strings.Contains(lower, "too long") || strings.Contains(lower, "too large")
-	contextLimit := strings.Contains(lower, "context length") || strings.Contains(lower, "context window") || strings.Contains(lower, "maximum context")
-	tokenLimit := strings.Contains(lower, "too many") && strings.Contains(lower, "token") && strings.Contains(lower, "maximum")
-	return over && contextLimit || tokenLimit
+	// Message-only classification is intentionally much narrower than the
+	// structured identifiers above. OpenAI 400s also describe output-token and
+	// parameter limits with context-related words; treating those as input
+	// overflow would make Agent compact an unrelated invalid request.
+	lower := strings.Join(strings.Fields(strings.ToLower(message)), " ")
+	for _, excluded := range []string{
+		"output token", "output-token", "max output", "maximum output", "max_output",
+		"completion token", "completion-token", "max completion", "maximum completion", "max_completion",
+		"response token", "response-token", "parameter", "invalid", "unsupported",
+		"max_tokens", "max tokens", "maximum_tokens", "must be less than", "must be at most",
+	} {
+		if strings.Contains(lower, excluded) {
+			return false
+		}
+	}
+	if strings.Contains(lower, "your input exceeds the context window") ||
+		strings.Contains(lower, "your input exceeds this model's context window") ||
+		strings.Contains(lower, "the input exceeds the context window") ||
+		strings.Contains(lower, "the input exceeds this model's context window") {
+		return true
+	}
+	if strings.Contains(lower, "input length") &&
+		(strings.Contains(lower, "exceeds model's maximum context length") ||
+			strings.Contains(lower, "exceeds the model's maximum context length") ||
+			strings.Contains(lower, "exceeds the context window")) {
+		return true
+	}
+	if strings.Contains(lower, "maximum context length is") &&
+		strings.Contains(lower, "your messages resulted in") &&
+		strings.Contains(lower, "token") {
+		return true
+	}
+	if strings.Contains(lower, "too many input tokens") &&
+		(strings.Contains(lower, "context window") || strings.Contains(lower, "maximum context length")) {
+		return true
+	}
+	return strings.Contains(lower, "prompt is too long") &&
+		(strings.Contains(lower, "context window") || strings.Contains(lower, "maximum context length"))
 }
 
 func (s *openAIResponsesStream) finishCancellation(cause error) (llm.StreamEvent, error) {

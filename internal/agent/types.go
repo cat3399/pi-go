@@ -186,6 +186,29 @@ func (m QueueMode) String() string {
 	}
 }
 
+// CompactionReason is the typed trigger carried by both start and settlement
+// events. It is policy metadata only; Session remains the durable owner.
+type CompactionReason uint8
+
+const (
+	CompactionManual CompactionReason = iota + 1
+	CompactionThreshold
+	CompactionContextOverflow
+)
+
+func (r CompactionReason) String() string {
+	switch r {
+	case CompactionManual:
+		return "manual"
+	case CompactionThreshold:
+		return "threshold"
+	case CompactionContextOverflow:
+		return "overflow"
+	default:
+		return "unknown"
+	}
+}
+
 // ContextTransform is called synchronously by the coordinator before each
 // provider request. Both input and output are copied at the boundary.
 type ContextTransform func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error)
@@ -378,6 +401,9 @@ const (
 	EventRetryScheduled
 	EventRetryAttempt
 	EventRetryFinished
+	EventSummarizationRetryScheduled
+	EventSummarizationRetryAttempt
+	EventSummarizationRetryFinished
 )
 
 func (k EventKind) String() string {
@@ -410,6 +436,12 @@ func (k EventKind) String() string {
 		return "retry_attempt"
 	case EventRetryFinished:
 		return "retry_finished"
+	case EventSummarizationRetryScheduled:
+		return "summarization_retry_scheduled"
+	case EventSummarizationRetryAttempt:
+		return "summarization_retry_attempt"
+	case EventSummarizationRetryFinished:
+		return "summarization_retry_finished"
 	default:
 		return "unknown"
 	}
@@ -430,12 +462,21 @@ type Event struct {
 	ToolError        error
 	Terminal         llm.AssistantTerminal
 	RunError         error
-	RetryAttempt     uint32
-	RetryDelay       time.Duration
-	RetryFailureKind provider.FailureKind
-	RetryHTTPStatus  int
-	RetrySucceeded   bool
-	Compaction       *session.CompactResult
+	// RetryAttempt identifies the request slot. EventRetryAttempt means request
+	// reconstruction begins; EventSummarizationRetryAttempt means provider
+	// redispatch begins. Cancellation observed earlier closes a scheduled slot
+	// without an attempt event.
+	RetryAttempt      uint32
+	RetryDelay        time.Duration
+	RetryFailureKind  provider.FailureKind
+	RetryHTTPStatus   int
+	RetrySucceeded    bool
+	RetryFinishReason provider.RetryFinishReason
+	// CompactionReason scopes compaction and summarization-retry events.
+	// CompactionWillRetry is true only for overflow recovery intent.
+	CompactionReason    CompactionReason
+	CompactionWillRetry bool
+	Compaction          *session.CompactResult
 }
 
 // Observer is invoked synchronously in subscription order. The Agent holds no

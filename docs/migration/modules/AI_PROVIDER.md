@@ -104,7 +104,7 @@ Prompt-cache simulation、multiple model registry、thinking/image/multiple-tool
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error 与 pre/mid-stream cancellation | WF-001 | `ported` |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown/missing adapter 归一 error stream | 后续装配 slice | `deferred` |
 | `B-PROVIDER-005` | 标准 `openai-responses` 基础 text streaming 与 terminal handling | 阶段 2 真实 dialect 验证 | `ported` |
-| `B-PROVIDER-006` | OpenAI 400 context-overflow safe classification、Retry-After normalization 与共享 retry controller | M-AGENT/v0.3 | `implemented-awaiting-rereview` |
+| `B-PROVIDER-006` | OpenAI 400 structured/input-only context-overflow safe classification、strict Retry-After normalization 与共享 retry controller/observer | M-AGENT/v0.3 | `implemented-awaiting-rereview` |
 
 M-BASE 的 stream/message contract 是前三项的直接依赖。真实 adapter 首选标准
 `openai-responses`，先用本地 HTTP/SSE fixture 验证 text/terminal，再运行显式启用的
@@ -123,15 +123,23 @@ Provider dispatch 与真实 adapter 分别形成后续独立里程碑和 review�
 通过结论掩盖。
 
 OpenAI Responses adapter 还会把 valid HTTP `Retry-After` delta-seconds/HTTP-date 归一为
-`ProviderFailure.RetryAfter`；malformed/past header 被忽略。共享 retry controller 在零配置时采用
+`ProviderFailure.RetryAfter`；delta-seconds 只接受 trim 后的 unsigned ASCII `1*DIGIT`，因此
+`+17`、`-0`、malformed/past header 被忽略。共享 retry controller 在零配置时采用
 60s `MaxRetryAfter` hard cap，并拒绝负 delay。具体 attempt budget、jitter、cancel
 和 retry admission 由 M-AGENT 的 active-run owner 决定，避免 provider adapter 重发有副作用
 的 Agent request。
 
 M-AGENT/v0.3 还消费 adapter 的 secret-safe `FailureContextOverflow`：只有 OpenAI HTTP 400 的
-allowlisted context type/code 或明确 limit message 才分类；普通 400 保持 `FailureHTTPStatus`。
+allowlisted context type/code，或缺少结构化标识时严格 allowlisted input/prompt-context message 才
+分类；message fallback 先排除 output/completion/max-output 与 parameter-validation 语义，模糊的
+context wording 和普通 400 保持 `FailureHTTPStatus`。
 overflow failure 的公开 message/cause/vendor code 均为固定 normalized 值，不保留可能回显 prompt/
 credential 的 response 文本。adapter 本身不 compact/retry；Agent 最多一次调用 `Session.Compact`。
+
+`ContextSummarizer` 的 bounded retry 通过本模块定义的同步 `RetryObserver` 报告 normalized
+scheduled/attempt/finished metadata；Agent 负责把它映射为 compaction-scoped lifecycle。本模块不
+import Agent，也不拥有 session/run state。每个 scheduled scope 对 success、failure、cancel 或
+exhaustion 都有 finished closure。
 
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005

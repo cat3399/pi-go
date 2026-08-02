@@ -26,6 +26,69 @@ type RetryPolicy struct {
 	Jitter        func(attempt uint32, delay time.Duration) time.Duration
 }
 
+// RetryEventKind and RetryFinishReason form a provider-owned, dependency-free
+// observer vocabulary. Agent maps these to its summarization-scoped lifecycle
+// events; provider never imports or calls agent types.
+type RetryEventKind uint8
+
+const (
+	RetryScheduled RetryEventKind = iota + 1
+	RetryAttempt
+	RetryFinished
+)
+
+func (k RetryEventKind) String() string {
+	switch k {
+	case RetryScheduled:
+		return "scheduled"
+	case RetryAttempt:
+		return "attempt"
+	case RetryFinished:
+		return "finished"
+	default:
+		return "unknown"
+	}
+}
+
+// RetryFinishReason is the normalized terminal state of one scheduled retry.
+type RetryFinishReason uint8
+
+const (
+	RetryFinishSucceeded RetryFinishReason = iota + 1
+	RetryFinishFailed
+	RetryFinishCancelled
+	RetryFinishExhausted
+)
+
+func (r RetryFinishReason) String() string {
+	switch r {
+	case RetryFinishSucceeded:
+		return "succeeded"
+	case RetryFinishFailed:
+		return "failed"
+	case RetryFinishCancelled:
+		return "cancelled"
+	case RetryFinishExhausted:
+		return "exhausted"
+	default:
+		return "unknown"
+	}
+}
+
+// RetryEvent contains only normalized, secret-safe retry metadata.
+type RetryEvent struct {
+	Kind         RetryEventKind
+	Attempt      uint32
+	Delay        time.Duration
+	FailureKind  FailureKind
+	HTTPStatus   int
+	FinishReason RetryFinishReason
+	Succeeded    bool
+}
+
+// RetryObserver synchronously observes one retry scope owned by its caller.
+type RetryObserver func(context.Context, RetryEvent)
+
 // RetryController is an immutable, validated retry policy. Its zero value is
 // not usable; construct it with NewRetryController.
 type RetryController struct {

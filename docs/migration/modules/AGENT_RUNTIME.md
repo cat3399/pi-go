@@ -1,6 +1,6 @@
 # M-AGENT：Agent runtime charter
 
-状态：`implemented, awaiting rereview`（`M-AGENT/v0.3-context-retry-lifecycle`；初审 0B/3M/2m 修订完成，v0.1/v0.2 均已复审）
+状态：`implemented, awaiting rereview`（`M-AGENT/v0.3-context-retry-lifecycle`；最新复审 0B/3M/3m 修订完成，v0.1/v0.2 均已复审）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
@@ -21,11 +21,15 @@
 - 仅对 transport 与 408/409/425/429/5xx provider failures 做 bounded exponential retry；server
   `Retry-After` 在 provider adapter 归一，并由 policy cap。cancel、auth/config/invalid request、
   invalid response、tool 与 storage failure 不重试。
-- OpenAI HTTP 400 只有在 allowlisted error type/code 或明确 context-limit message 同时成立时才归一
-  `contextOverflow`；active run 最多调用一次既有 `Session.Compact`，随后重新 `BuildContext` 并请求。
-  普通 400 不压缩/重试，第二次 overflow 成为唯一 final terminal，不能形成 compact loop。
+- OpenAI HTTP 400 优先按 allowlisted error type/code 归一 `contextOverflow`；缺少结构化标识时，
+  message fallback 只接受已固定的 input/prompt-context 短语，并先排除 output/completion/max-output
+  与 parameter validation 语义。active run 最多调用一次既有 `Session.Compact`，随后重新
+  `BuildContext` 并请求；无法明确分类的普通 400 宁可不压缩/重试，第二次 overflow 成为唯一
+  final terminal，不能形成 compact loop。
 - `ContextSummarizer` 复用同一个 retry controller，对 transport/drop 与 408/409/425/429/5xx 做
-  独立且有限的可取消 retry；summary attempts 全部失败时 `Session.Compact` 不 append checkpoint。
+  独立且有限的可取消 retry；provider-owned observer 只传 normalized metadata，由 Agent 映射为
+  summarization-scoped lifecycle，provider 不反向依赖 Agent。summary attempts 全部失败时
+  `Session.Compact` 不 append checkpoint。
 
 ### 关键不变量与取舍
 
@@ -38,11 +42,18 @@
 - steering/follow-up 可以在 compact/retry 期间入队，但只在既有 provider/tool boundary reserve；
   因而它们不会进入已经发出的 summary/request，也不会跨 retry 造成重复 durable user entry。
 - 普通 turn 默认 retry 为一次请求（关闭重试）；summarizer 默认三次。共享 controller 的 jitter/sleep
-  seam 尊重 active cancel，`MaxRetryAfter==0` 明确归一为 60s 硬 cap，负 delay 拒绝配置。past/malformed
+  seam 尊重 active cancel，`MaxRetryAfter==0` 明确归一为 60s 硬 cap，负 delay 拒绝配置。
+  `Retry-After` delta-seconds 仅接受 trim 后的 unsigned ASCII `1*DIGIT`；`+17`、`-0`、past/malformed
   HTTP-date 不产生 delay。adapter 只分类/归一，仍不持有 Agent queue、Session 或 run ownership。
-- `retry_scheduled -> retry_attempt -> retry_finished` 是完整 lifecycle；event 只暴露 normalized failure
-  kind/status、attempt、delay/success，不携带 vendor message/cause。context-overflow 分类也丢弃可能回显
-  request/secret 的原始 type/code/message，保留稳定 safe category。
+- `retry_scheduled -> [retry_attempt] -> retry_finished` 是闭合 lifecycle：attempt 表示 request
+  reconstruction 已开始；wait 中 cancel 可以无 attempt，但 transform/request build/cancel 等任一早退都
+  必须产生唯一 finished。event 只暴露 normalized failure kind/status、attempt、delay/success/finish
+  reason，不携带 vendor message/cause。summarizer 使用独立的 `summarization_retry_*` scope，每个
+  scheduled retry 最终闭合 finished，cancel/exhaustion 也是 typed safe reason。
+- compaction start/settled 均携带 `manual`、`threshold` 或 `overflow` typed reason；#5217 的
+  `willRetry` 语义固定为 manual/threshold=false、overflow=true。manual failure 的
+  `CompactionSettled` 与唯一 `RunSettled` 使用同一个 safe Session sentinel。context-overflow 分类也
+  丢弃可能回显 request/secret 的原始 type/code/message，只保留稳定 safe category。
 
 ### 验收与延期
 
@@ -50,15 +61,19 @@
   summary，chunked transient stream drop 后 retry，最终 text success，断言 session 无重复 prompt/
   assistant 且有一个 compaction checkpoint；另有 unit/race/fault gates。
 - 第二组 local HTTP/SSE fixture 覆盖 provider 400 overflow → summary durable → rebuilt request → success，
-  summarizer drop/503 retry、exhaustion no-write、second-overflow/ordinary-400 no-loop、Retry-After seconds/
-  future-date/past/malformed/default cap/jitter/cancel，以及 retry wait 中 Abort/queue/WaitForIdle settlement。
+  adversarial input/output/parameter 400 matrix、summarizer drop/503 retry scoped lifecycle、multi-retry
+  exhaustion no-write、second-overflow/ordinary-400 no-loop、Retry-After unsigned seconds/future-date/
+  signed/past/malformed/default cap/jitter/cancel，以及 retry wait 中 Abort/queue/WaitForIdle settlement。
+- manual/threshold/overflow compaction reason 与 willRetry 成对断言；manual summary failure、Abort 与
+  concurrent append stale conflict 均验证 settled/run-settled 唯一、safe 且无 checkpoint。普通 retry
+  还覆盖二次 transform/request reconstruction 失败和 redispatch 前 cancel 的 lifecycle 闭合。
 - 上游 coding-agent `AgentSession._checkCompaction` 的 pre-prompt threshold、overflow-triggered compact/
   retry 与 `compaction` reason，以及 Harness compact/retry event intent 作为 policy 证据；Go 仍将 durable
   snapshot/commit ownership 留在 `Session.Compact`，不复制第二套 session runtime。
 - 真实 credential smoke 仍显式延期；production CLI 尚未暴露 context window/retry/manual compact
   flags，后续 M-APP 只负责配置/用户 surface，不得绕过本 coordinator 和 `Session.Compact`。
 - 不实现 TUI、tool wire replay、mixed length/tool terminal 或 Harness 独立 runtime；这些保持原有
-  deferred behavior。初审 findings 已修订但尚待 rereview，不得把 v0.1/v0.2 review 结论延伸到本 milestone。
+  deferred behavior。最新 0B/3M/3m findings 已修订但尚待 rereview，不得把 v0.1/v0.2 review 结论延伸到本 milestone。
 
 ## v0.2 multi-tool queues
 

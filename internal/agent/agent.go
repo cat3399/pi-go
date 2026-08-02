@@ -183,7 +183,7 @@ func (a *Agent) WaitForIdle(ctx context.Context) error {
 // synthetic user message, and therefore cannot make a queued prompt appear to
 // have been processed. The real provider call happens inside Session.Compact
 // with no Agent or Session mutex held.
-func (a *Agent) Compact(ctx context.Context, instructions string) (session.CompactResult, error) {
+func (a *Agent) Compact(ctx context.Context, instructions string) (result session.CompactResult, compactErr error) {
 	if a == nil {
 		return session.CompactResult{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
 	}
@@ -213,20 +213,34 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (session.Compa
 	defer a.finishRun(active)
 	defer func() {
 		a.enterSettling(active)
-		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: 1})
+		var eventErr error
+		if compactErr != nil {
+			eventErr = safeCompactionEventError(compactErr)
+		}
+		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: 1, RunError: eventErr})
 	}()
 	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
-	a.notify(active.ctx, Event{Kind: EventCompactionStarted, RunID: active.id, Turn: 1})
-	result, err := a.config.compactor.Compact(active.ctx, session.CompactRequest{
+	a.notify(active.ctx, Event{
+		Kind: EventCompactionStarted, RunID: active.id, Turn: 1,
+		CompactionReason: CompactionManual, CompactionWillRetry: false,
+	})
+	result, compactErr = a.config.compactor.Compact(active.ctx, session.CompactRequest{
 		KeepRecentTokens: a.config.keepRecentTokens,
 		Instructions:     instructions,
-		Summarizer:       a.config.summarizer,
+		Summarizer:       a.observedSummarizer(active, 1, CompactionManual),
 	})
-	if err != nil {
-		a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: 1, RunError: err})
-		return session.CompactResult{}, err
+	if compactErr != nil {
+		eventErr := safeCompactionEventError(compactErr)
+		a.notify(active.ctx, Event{
+			Kind: EventCompactionSettled, RunID: active.id, Turn: 1, RunError: eventErr,
+			CompactionReason: CompactionManual, CompactionWillRetry: false,
+		})
+		return session.CompactResult{}, compactErr
 	}
-	a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: 1, Compaction: &result})
+	a.notify(active.ctx, Event{
+		Kind: EventCompactionSettled, RunID: active.id, Turn: 1, Compaction: &result,
+		CompactionReason: CompactionManual, CompactionWillRetry: false,
+	})
 	return result, nil
 }
 

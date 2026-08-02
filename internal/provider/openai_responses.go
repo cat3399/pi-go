@@ -249,8 +249,16 @@ func responsesRetryAfter(value string, now time.Time) *time.Duration {
 	if value == "" {
 		return nil
 	}
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds < 0 || seconds > int64(math.MaxInt64/time.Second) {
+	allASCIIDigits := true
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			allASCIIDigits = false
+			break
+		}
+	}
+	if allASCIIDigits {
+		seconds, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || seconds > uint64(math.MaxInt64/time.Second) {
 			return nil
 		}
 		delay := time.Duration(seconds) * time.Second

@@ -49,11 +49,16 @@ func TestOpenAIResponsesRetryAfterDeltaDatePastAndMalformed(t *testing.T) {
 		has    bool
 	}{
 		{name: "seconds", header: "17", want: 17 * time.Second, has: true},
+		{name: "zero seconds", header: "0", has: true},
 		{name: "future date", header: clock.Add(23 * time.Second).Format(http.TimeFormat), want: 23 * time.Second, has: true},
 		{name: "past date", header: clock.Add(-time.Second).Format(http.TimeFormat)},
 		{name: "equal date", header: clock.Format(http.TimeFormat)},
 		{name: "malformed", header: "tomorrow-ish"},
 		{name: "negative", header: "-1"},
+		{name: "signed positive", header: "+17"},
+		{name: "signed negative zero", header: "-0"},
+		{name: "embedded whitespace", header: "1 7"},
+		{name: "unit suffix", header: "17s"},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -152,10 +157,22 @@ func TestOpenAIContextOverflowClassificationIsSpecificAndSecretSafe(t *testing.T
 		message   string
 		want      provider.FailureKind
 	}{
-		{name: "code", status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", message: "request rejected " + secret, want: provider.FailureContextOverflow},
+		{name: "structured code takes priority", status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", message: "max_output_tokens parameter rejected " + secret, want: provider.FailureContextOverflow},
 		{name: "type", status: 400, errorType: "context_window_exceeded", message: "request rejected", want: provider.FailureContextOverflow},
-		{name: "known message", status: 400, errorType: "invalid_request_error", message: "This model's maximum context length is 100 tokens, but the request exceeded it", want: provider.FailureContextOverflow},
+		{name: "canonical messages result", status: 400, errorType: "invalid_request_error", message: "This model's maximum context length is 100 tokens. However, your messages resulted in 101 tokens. Please reduce the length of the messages.", want: provider.FailureContextOverflow},
+		{name: "explicit input context window", status: 400, errorType: "invalid_request_error", message: "Your input exceeds the context window of this model. Please adjust your input and try again.", want: provider.FailureContextOverflow},
+		{name: "explicit input length", status: 400, errorType: "invalid_request_error", message: "Input length (265330) exceeds model's maximum context length (262144).", want: provider.FailureContextOverflow},
+		{name: "too many input tokens", status: 400, errorType: "invalid_request_error", message: "Too many input tokens for the maximum context length.", want: provider.FailureContextOverflow},
+		{name: "prompt too long", status: 400, errorType: "invalid_request_error", message: "The prompt is too long for this model's context window.", want: provider.FailureContextOverflow},
 		{name: "ordinary 400", status: 400, errorType: "invalid_request_error", code: "invalid_value", message: "context field is malformed", want: provider.FailureHTTPStatus},
+		{name: "generic context wording", status: 400, errorType: "invalid_request_error", message: "This model's maximum context length is 100 tokens, but the request exceeded it", want: provider.FailureHTTPStatus},
+		{name: "output limit", status: 400, errorType: "invalid_request_error", message: "Maximum output tokens exceed the context window", want: provider.FailureHTTPStatus},
+		{name: "output token wording", status: 400, errorType: "invalid_request_error", message: "Your output tokens exceed the context window", want: provider.FailureHTTPStatus},
+		{name: "max output parameter", status: 400, errorType: "invalid_request_error", message: "Your input exceeds the context window because the max_output_tokens parameter is invalid", want: provider.FailureHTTPStatus},
+		{name: "max tokens parameter", status: 400, errorType: "invalid_request_error", message: "Invalid max_tokens parameter; maximum context length is 100", want: provider.FailureHTTPStatus},
+		{name: "completion limit", status: 400, errorType: "invalid_request_error", message: "Completion tokens exceed the maximum context length", want: provider.FailureHTTPStatus},
+		{name: "input parameter error", status: 400, errorType: "invalid_request_error", message: "The input exceeds the context window because parameter input is malformed", want: provider.FailureHTTPStatus},
+		{name: "output code is not overflow", status: 400, errorType: "invalid_request_error", code: "max_output_tokens", message: "maximum context length exceeded", want: provider.FailureHTTPStatus},
 		{name: "same code non-400", status: 429, code: "context_length_exceeded", message: "busy", want: provider.FailureHTTPStatus},
 	}
 	for _, testCase := range tests {
