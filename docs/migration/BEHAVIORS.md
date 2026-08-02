@@ -81,6 +81,14 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-APP-007` | `--provider openai --model <id>`、`--model openai/<id>` 与默认 OpenAI model；未知 route 在副作用前失败 | `cli/args.ts`；`model-resolver.ts::resolveCliModel` | `ported` | R-APP-002；完整 catalog/fuzzy/cycling 后续重评 |
 | `B-APP-008` | 无 `--session` 时在 agent dir/sessions 下按 cwd 隔离创建 durable session，显式 path 优先 | `config.ts::getAgentDir`；`session-manager.ts::getDefaultSessionDirPath/newSession` | `ported` | R-APP-002 |
 
+## M-AUTH
+
+| ID | 行为 | 上游证据 | 状态 | 备注 |
+| --- | --- | --- | --- | --- |
+| `B-AUTH-001` | auth.json API-key read/set/delete，未知 provider 保留，malformed 不覆盖 | `auth-storage.ts`；`auth-storage.test.ts` | `ported` | strict parse/0600/atomic replacement strengthened |
+| `B-AUTH-002` | runtime override 与 stored credential ownership | `runtime-credentials.ts`；`runtime-credentials.test.ts`；`auth/resolve.ts` | `ported` | request-lifetime key never persists |
+| `B-AUTH-003` | literal/environment config value resolution | `resolve-config-value.ts`；`resolve-config-value.test.ts` | `ported` | command values intentionally rejected pending security/process slice |
+
 ## 首个 workflow 之外的明确分类
 
 - Prompt cache、multiple models、thinking/image、parallel tools、steering/follow-up、retry、
