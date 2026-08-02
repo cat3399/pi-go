@@ -281,9 +281,14 @@ key/invalidation、cancel/fault publication 与 selected-path context，才可�
 `hookMessage` 改为 `custom`。两者都写成 v3；未知 header、entry 和 payload value 保留为
 `json.RawMessage`，不被投影的语义仍不进入 provider context。
 
-Open 先持有同路径的进程内及 Unix 跨进程 writer claim，读取 source byte snapshot，执行纯
-migration，再以同目录 private temp/file fsync/atomic replace/directory sync 发布。rename 或
-directory sync 后的错误返回 durability-unknown 且不发布可写 aggregate；原文件可由下一次
+Open 先持有进程内 claim、canonical path 的跨进程 sidecar lock 和现有 session inode lock，
+读取 source byte snapshot，执行纯 migration，再以同目录 private temp/file fsync/atomic
+replace/directory sync 发布。rewrite 后 claim 同时保留旧 inode lock 并取得新 inode lock，
+因此 hardlink alias 不能绕过仍活跃的 writer；final-component symlink 在 admission 时解析为
+同一 target。多 hardlink 的 migration/recovery 会以 `ErrUnsafeWriterAlias` fail-closed，因为
+atomic replace 会把各 link 分裂成不同历史；普通单路径以及不发生 rewrite 的 v3 resume
+不退化。rename 或 directory sync 后的错误返回 durability-unknown 且不发布可写 aggregate；
+原文件可由下一次
 严格 Open reconcile。普通 Open 对 future version、UTF-8、duplicate/graph、middle malformed
 和 trailing partial 一律拒绝且不改写。64 MiB、100 万行、4 MiB/line 是明确 admission
 上限；超过上限 fail-explicit。
@@ -292,4 +297,6 @@ directory sync 后的错误返回 durability-unknown 且不发布可写 aggregat
 此前完整 v3 prefix 可严格 decode 时工作；先 no-clobber 创建 `.partial-recovery.backup`，再
 atomic replace 截断。它绝不处理 middle corruption 或完整 tail，且不会由 Open/Application
 自动调用。Unix 使用 kernel-released `flock`，Windows 使用 `LockFileEx`；两者都不采用会在
-crash 后变成安全风险的 stale-directory sentinel。
+crash 后变成安全风险的 stale-directory sentinel。rewrite 在 chmod/write/fsync/close 或
+pre-rename failure 时关闭并移除 private temp，cleanup error 与主错误一起返回；rename 后的
+commit-unknown 路径绝不再按 temporary path 删除，避免误删已发布数据。

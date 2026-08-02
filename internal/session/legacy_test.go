@@ -229,6 +229,31 @@ func TestRecoveryRefusesMiddleCorruptionAndCompleteTail(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsHardlinkedSourceBeforeBackupOrRewrite(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "partial.jsonl")
+	original := []byte(testHeader + "\n" + userEntryJSON("root", "entry-1", "null", 1) + "\n{")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hardLink := filepath.Join(directory, "partial-hardlink.jsonl")
+	if err := os.Link(path, hardLink); err != nil {
+		t.Skipf("hardlink alias unavailable: %v", err)
+	}
+	if _, err := RecoverTrailingPartial(path); !errors.Is(err, ErrUnsafeWriterAlias) {
+		t.Fatalf("hardlinked recovery = %v, want unsafe alias", err)
+	}
+	if _, err := os.Stat(backupName(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe recovery created backup: %v", err)
+	}
+	for _, candidate := range []string{path, hardLink} {
+		after, err := os.ReadFile(candidate)
+		if err != nil || !bytes.Equal(after, original) {
+			t.Fatalf("unsafe recovery changed %s: %v / %q", candidate, err, after)
+		}
+	}
+}
+
 func TestLegacyMigrationPreservesJSONValuesRatherThanDecodingUnknownNumbers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "numbers.jsonl")
 	data := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace","future":900719925474099312345}` + "\n" +
@@ -250,7 +275,11 @@ func TestLegacyMigrationPreservesJSONValuesRatherThanDecodingUnknownNumbers(t *t
 func TestOpenClaimsWriterAcrossProcesses(t *testing.T) {
 	if os.Getenv("PI_GO_SESSION_LOCK_HELPER") == "1" {
 		_, err := Open(os.Getenv("PI_GO_SESSION_LOCK_PATH"), OpenOptions{})
-		if errors.Is(err, ErrWriterActive) {
+		want := ErrWriterActive
+		if os.Getenv("PI_GO_SESSION_LOCK_WANT") == "unsafe-alias" {
+			want = ErrUnsafeWriterAlias
+		}
+		if errors.Is(err, want) {
 			os.Exit(0)
 		}
 		os.Exit(1)
@@ -261,10 +290,85 @@ func TestOpenClaimsWriterAcrossProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
+	runWriterClaimHelper(t, path, "active")
+
+	t.Run("hardlink alias", func(t *testing.T) {
+		hardLink := filepath.Join(filepath.Dir(path), "locked-hardlink.jsonl")
+		if err := os.Link(path, hardLink); err != nil {
+			t.Skipf("hardlink alias unavailable: %v", err)
+		}
+		runWriterClaimHelper(t, hardLink, "active")
+	})
+
+	t.Run("symlink alias", func(t *testing.T) {
+		symlink := filepath.Join(filepath.Dir(path), "locked-symlink.jsonl")
+		if err := os.Symlink(path, symlink); err != nil {
+			t.Skipf("symlink alias unavailable: %v", err)
+		}
+		runWriterClaimHelper(t, symlink, "active")
+	})
+}
+
+func TestLegacyMigrationRejectsHardlinkAliasAcrossProcesses(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "legacy.jsonl")
+	original := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
+		`{"type":"message","timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}` + "\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hardLink := filepath.Join(directory, "legacy-hardlink.jsonl")
+	if err := os.Link(path, hardLink); err != nil {
+		t.Skipf("hardlink alias unavailable: %v", err)
+	}
+	if _, err := Open(path, OpenOptions{NewEntryID: sequenceIDs("one")}); !errors.Is(err, ErrUnsafeWriterAlias) {
+		t.Fatalf("legacy hardlink migration = %v, want unsafe alias", err)
+	}
+	runWriterClaimHelper(t, hardLink, "unsafe-alias")
+	for _, candidate := range []string{path, hardLink} {
+		after, err := os.ReadFile(candidate)
+		if err != nil || !bytes.Equal(after, original) {
+			t.Fatalf("rejected alias %s changed: %v / %q", candidate, err, after)
+		}
+	}
+}
+
+func TestLegacyMigrationThroughSymlinkKeepsAliasAndLocksCanonicalTarget(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "legacy-target.jsonl")
+	legacy := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(directory, "legacy-symlink.jsonl")
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Skipf("symlink alias unavailable: %v", err)
+	}
+	session, err := Open(symlink, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if info, err := os.Lstat(symlink); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("migration replaced symlink itself: %v / %v", info, err)
+	}
+	runWriterClaimHelper(t, path, "active")
+	data, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(data, []byte(`"version":3`)) {
+		t.Fatalf("canonical target was not migrated: %v / %q", err, data)
+	}
+}
+
+func runWriterClaimHelper(t *testing.T, path, want string) {
+	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=TestOpenClaimsWriterAcrossProcesses")
-	command.Env = append(os.Environ(), "PI_GO_SESSION_LOCK_HELPER=1", "PI_GO_SESSION_LOCK_PATH="+path)
+	command.Env = append(os.Environ(),
+		"PI_GO_SESSION_LOCK_HELPER=1",
+		"PI_GO_SESSION_LOCK_PATH="+path,
+		"PI_GO_SESSION_LOCK_WANT="+want,
+	)
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("cross-process Open unexpectedly acquired writer: %v: %s", err, output)
+		t.Fatalf("cross-process writer claim for %s (%s): %v: %s", path, want, err, output)
 	}
 }
 

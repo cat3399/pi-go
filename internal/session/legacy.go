@@ -265,6 +265,9 @@ func RecoverTrailingPartial(path string) (RecoveryResult, error) {
 		return RecoveryResult{}, fmt.Errorf("%w: prefix is not a complete v3 session: %w", ErrRecoveryNotApplicable, err)
 	}
 	backup := backupName(resolved)
+	if err := storage.validateReplace(resolved); err != nil {
+		return RecoveryResult{}, err
+	}
 	created, backupErr := storage.create(backup, data)
 	if backupErr != nil {
 		if created {

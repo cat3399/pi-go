@@ -19,7 +19,7 @@ var (
 	unlockFileEx = syscall.NewLazyDLL("kernel32.dll").NewProc("UnlockFileEx")
 )
 
-func claimProcessWriter(path string) (func(), error) {
+func claimProcessPathWriter(path string) (func(), error) {
 	file, err := os.OpenFile(path+".pi-go.lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -27,6 +27,21 @@ func claimProcessWriter(path string) (func(), error) {
 		}
 		return nil, err
 	}
+	return claimWindowsWriterFile(file)
+}
+
+func claimProcessIdentityWriter(path string) (func(), error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return claimWindowsWriterFile(file)
+}
+
+func claimWindowsWriterFile(file *os.File) (func(), error) {
 	overlapped := syscall.Overlapped{}
 	ok, _, callErr := lockFileEx.Call(
 		file.Fd(), lockfileExclusiveLock|lockfileFailImmediately, 0, 1, 0,

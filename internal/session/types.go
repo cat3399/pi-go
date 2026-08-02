@@ -22,6 +22,7 @@ var (
 	ErrPoisoned              = errors.New("session writer is poisoned")
 	ErrClosed                = errors.New("session is closed")
 	ErrWriterActive          = errors.New("session already has an active writer")
+	ErrUnsafeWriterAlias     = errors.New("session writer alias cannot be made safe")
 	ErrIDGeneration          = errors.New("session id generation failed")
 	ErrEntryIDExhausted      = errors.New("unique session entry id exhausted")
 	ErrEntryNotFound         = errors.New("session entry not found")

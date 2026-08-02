@@ -9,13 +9,13 @@ import (
 	"sync"
 )
 
-// A writer claim uses both a canonical path and the filesystem identity. The
-// path catches aliases before a file exists; os.SameFile catches hard links,
-// symlinks, and platform-specific aliases once it does.
+// A writer claim uses both a canonical path and kernel locks on every file
+// identity it has owned. The path lock survives atomic replacement; identity
+// locks make hard-link aliases conflict even when their path sidecars differ.
 type writerClaim struct {
-	paths  map[string]struct{}
-	info   os.FileInfo
-	unlock func()
+	paths   map[string]struct{}
+	info    os.FileInfo
+	unlocks []func()
 }
 
 var activeSessionWriters = struct {
@@ -28,7 +28,7 @@ var activeSessionWriters = struct {
 }
 
 func claimSessionWriter(path string) (*writerClaim, error) {
-	key, info, err := sessionWriterDescriptor(path)
+	key, lockPath, info, err := sessionWriterDescriptor(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: identify writer path %s: %v", ErrStorage, path, err)
 	}
@@ -38,18 +38,26 @@ func claimSessionWriter(path string) (*writerClaim, error) {
 	if conflict := conflictingWriterLocked(nil, key, info); conflict != nil {
 		return nil, fmt.Errorf("%w: %s", ErrWriterActive, path)
 	}
-	unlock, err := claimProcessWriter(path)
+	pathUnlock, err := claimProcessPathWriter(lockPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrWriterActive, path)
+		return nil, fmt.Errorf("%w: acquire path lock for %s: %v", ErrWriterActive, path, err)
 	}
-	claim := &writerClaim{paths: map[string]struct{}{key: {}}, info: info, unlock: unlock}
+	identityUnlock, err := claimProcessIdentityWriter(lockPath)
+	if err != nil {
+		pathUnlock()
+		return nil, fmt.Errorf("%w: acquire file identity lock for %s: %v", ErrWriterActive, path, err)
+	}
+	claim := &writerClaim{paths: map[string]struct{}{key: {}}, info: info, unlocks: []func(){pathUnlock}}
+	if identityUnlock != nil {
+		claim.unlocks = append(claim.unlocks, identityUnlock)
+	}
 	activeSessionWriters.paths[key] = claim
 	activeSessionWriters.claims[claim] = struct{}{}
 	return claim, nil
 }
 
 func refreshSessionWriter(claim *writerClaim, path string) error {
-	key, info, err := sessionWriterDescriptor(path)
+	key, lockPath, info, err := sessionWriterDescriptor(path)
 	if err != nil {
 		return fmt.Errorf("%w: identify writer path %s: %v", ErrStorage, path, err)
 	}
@@ -65,6 +73,15 @@ func refreshSessionWriter(claim *writerClaim, path string) error {
 	if conflict := conflictingWriterLocked(claim, key, info); conflict != nil {
 		return fmt.Errorf("%w: %s", ErrWriterActive, path)
 	}
+	if claim.info == nil && info != nil {
+		identityUnlock, lockErr := claimProcessIdentityWriter(lockPath)
+		if lockErr != nil {
+			return fmt.Errorf("%w: acquire created file identity lock for %s: %v", ErrWriterActive, path, lockErr)
+		}
+		if identityUnlock != nil {
+			claim.unlocks = append(claim.unlocks, identityUnlock)
+		}
+	}
 	claim.paths[key] = struct{}{}
 	activeSessionWriters.paths[key] = claim
 	if info != nil {
@@ -78,7 +95,7 @@ func refreshSessionWriter(claim *writerClaim, path string) error {
 // a normal Open must reject a changed file, while a successful migration has
 // just made exactly that change under the same process lock.
 func refreshSessionWriterAfterRewrite(claim *writerClaim, path string) error {
-	key, info, err := sessionWriterDescriptor(path)
+	key, lockPath, info, err := sessionWriterDescriptor(path)
 	if err != nil {
 		return fmt.Errorf("%w: identify rewritten session %s: %v", ErrStorage, path, err)
 	}
@@ -92,6 +109,16 @@ func refreshSessionWriterAfterRewrite(claim *writerClaim, path string) error {
 	}
 	if conflict := conflictingWriterLocked(claim, key, info); conflict != nil {
 		return fmt.Errorf("%w: %s", ErrWriterActive, path)
+	}
+	// The stable path lock remains held across replacement. Retain the old
+	// identity lock as well, and add a lock for the newly published inode so a
+	// hard-link alias to either generation cannot become a concurrent writer.
+	identityUnlock, lockErr := claimProcessIdentityWriter(lockPath)
+	if lockErr != nil {
+		return fmt.Errorf("%w: acquire rewritten file identity lock for %s: %v", ErrWriterActive, path, lockErr)
+	}
+	if identityUnlock != nil {
+		claim.unlocks = append(claim.unlocks, identityUnlock)
 	}
 	claim.paths[key] = struct{}{}
 	activeSessionWriters.paths[key] = claim
@@ -111,10 +138,10 @@ func releaseSessionWriter(claim *writerClaim) {
 			}
 		}
 		delete(activeSessionWriters.claims, claim)
-		if claim.unlock != nil {
-			claim.unlock()
-			claim.unlock = nil
+		for index := len(claim.unlocks) - 1; index >= 0; index-- {
+			claim.unlocks[index]()
 		}
+		claim.unlocks = nil
 	}
 	activeSessionWriters.Unlock()
 }
@@ -134,7 +161,7 @@ func conflictingWriterLocked(owner *writerClaim, key string, info os.FileInfo) *
 	return nil
 }
 
-func sessionWriterDescriptor(path string) (string, os.FileInfo, error) {
+func sessionWriterDescriptor(path string) (string, string, os.FileInfo, error) {
 	canonical := path
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		canonical = resolved
@@ -142,16 +169,17 @@ func sessionWriterDescriptor(path string) (string, os.FileInfo, error) {
 		canonical = filepath.Join(resolvedParent, filepath.Base(path))
 	}
 	canonical = filepath.Clean(canonical)
+	keyPath := canonical
 	if runtime.GOOS == "windows" {
-		canonical = strings.ToLower(canonical)
+		keyPath = strings.ToLower(keyPath)
 	}
 
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "path:" + canonical, nil, nil
+			return "path:" + keyPath, canonical, nil, nil
 		}
-		return "", nil, err
+		return "", "", nil, err
 	}
-	return "path:" + canonical, info, nil
+	return "path:" + keyPath, canonical, info, nil
 }

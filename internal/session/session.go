@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -168,6 +169,9 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 		// Validate the exact candidate against every current v3 invariant before
 		// any rename can replace evidence from the legacy source.
 		if _, _, _, _, err := decodeSessionFile(resolvedPath, migrated); err != nil {
+			return nil, err
+		}
+		if err := storage.validateReplace(resolvedPath); err != nil {
 			return nil, err
 		}
 		// A cooperating writer is excluded by the process lock held with the
@@ -548,7 +552,18 @@ func resolveSessionPath(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%w: resolve path: %w", ErrInvalidSession, err)
 	}
-	return filepath.Clean(resolved), nil
+	resolved = filepath.Clean(resolved)
+	// A final-component symlink names the target session, not an independent
+	// replacement destination. Resolve that component so migration/recovery do
+	// not replace the link itself. Preserve ordinary lexical paths (including
+	// platform aliases such as macOS /var -> /private/var) for API compatibility;
+	// the writer descriptor separately canonicalizes them for locking.
+	if info, lstatErr := os.Lstat(resolved); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil {
+			return filepath.Clean(target), nil
+		}
+	}
+	return resolved, nil
 }
 
 func resolveWorkingDir(path string) (string, error) {

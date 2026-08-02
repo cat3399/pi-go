@@ -2,5 +2,8 @@
 
 package session
 
-func claimProcessPathWriter(string) (func(), error)     { return func() {}, nil }
-func claimProcessIdentityWriter(string) (func(), error) { return nil, nil }
+import "fmt"
+
+func sessionLinkCount(string) (uint64, error) {
+	return 0, fmt.Errorf("platform does not expose hard-link count")
+}

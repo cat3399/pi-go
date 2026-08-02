@@ -11,7 +11,7 @@ import (
 // A flock is released by the kernel on process exit, unlike a mkdir sentinel.
 // The stable sidecar contains no user session data and is intentionally kept so
 // reopening never needs a racy delete/recreate sequence.
-func claimProcessWriter(path string) (func(), error) {
+func claimProcessPathWriter(path string) (func(), error) {
 	file, err := os.OpenFile(path+".pi-go.lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		// Create owns the more useful parent-directory diagnostic. There can be
@@ -21,6 +21,21 @@ func claimProcessWriter(path string) (func(), error) {
 		}
 		return nil, err
 	}
+	return claimUnixWriterFile(file)
+}
+
+func claimProcessIdentityWriter(path string) (func(), error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return claimUnixWriterFile(file)
+}
+
+func claimUnixWriterFile(file *os.File) (func(), error) {
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		return nil, err

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,19 +14,20 @@ import (
 )
 
 type fakeStorage struct {
-	readData      []byte
-	readErr       error
-	createCreated bool
-	createErr     error
-	appendStarted bool
-	appendErr     error
-	createCalls   [][]byte
-	appendCalls   [][]byte
-	appendFunc    func(context.Context, []byte) (bool, error)
-	replaceCalled int
-	replaceDone   bool
-	replaceErr    error
-	replaceData   []byte
+	readData           []byte
+	readErr            error
+	createCreated      bool
+	createErr          error
+	appendStarted      bool
+	appendErr          error
+	createCalls        [][]byte
+	appendCalls        [][]byte
+	appendFunc         func(context.Context, []byte) (bool, error)
+	replaceCalled      int
+	replaceDone        bool
+	replaceErr         error
+	replaceData        []byte
+	validateReplaceErr error
 }
 
 type poisonedSnapshotStorage struct {
@@ -34,6 +36,68 @@ type poisonedSnapshotStorage struct {
 	appendCalls  int
 	failAppendAt int
 	appendErr    error
+}
+
+type fakeRewriteTemporary struct {
+	name        string
+	data        []byte
+	chmodErr    error
+	writeErr    error
+	syncErr     error
+	closeErrors []error
+	closeCalls  int
+}
+
+func (temporary *fakeRewriteTemporary) Name() string { return temporary.name }
+func (temporary *fakeRewriteTemporary) Chmod(os.FileMode) error {
+	return temporary.chmodErr
+}
+func (temporary *fakeRewriteTemporary) Write(data []byte) (int, error) {
+	if temporary.writeErr != nil {
+		written := len(data) / 2
+		temporary.data = append(temporary.data, data[:written]...)
+		return written, temporary.writeErr
+	}
+	temporary.data = append(temporary.data, data...)
+	return len(data), nil
+}
+func (temporary *fakeRewriteTemporary) Sync() error { return temporary.syncErr }
+func (temporary *fakeRewriteTemporary) Close() error {
+	index := temporary.closeCalls
+	temporary.closeCalls++
+	if index < len(temporary.closeErrors) {
+		return temporary.closeErrors[index]
+	}
+	return nil
+}
+
+type fakeSessionRewriteOps struct {
+	temporary       *fakeRewriteTemporary
+	createErr       error
+	replaced        bool
+	replaceErr      error
+	removeErr       error
+	replaceCalls    int
+	removeCalls     int
+	replaceTempPath string
+	replaceTarget   string
+}
+
+func (ops *fakeSessionRewriteOps) createTemp(string, string) (rewriteTemporary, error) {
+	if ops.createErr != nil {
+		return nil, ops.createErr
+	}
+	return ops.temporary, nil
+}
+func (ops *fakeSessionRewriteOps) replaceTemporary(temporaryPath, targetPath string) (bool, error) {
+	ops.replaceCalls++
+	ops.replaceTempPath = temporaryPath
+	ops.replaceTarget = targetPath
+	return ops.replaced, ops.replaceErr
+}
+func (ops *fakeSessionRewriteOps) remove(string) error {
+	ops.removeCalls++
+	return ops.removeErr
 }
 
 func (storage *poisonedSnapshotStorage) read(path string) ([]byte, error) {
@@ -64,6 +128,10 @@ func (storage *poisonedSnapshotStorage) replace(path string, data []byte) (bool,
 	return storage.base.replace(path, data)
 }
 
+func (storage *poisonedSnapshotStorage) validateReplace(path string) error {
+	return storage.base.validateReplace(path)
+}
+
 func (storage *fakeStorage) read(string) ([]byte, error) {
 	return append([]byte(nil), storage.readData...), storage.readErr
 }
@@ -85,6 +153,92 @@ func (storage *fakeStorage) replace(_ string, data []byte) (bool, error) {
 	storage.replaceCalled++
 	storage.replaceData = append([]byte(nil), data...)
 	return storage.replaceDone, storage.replaceErr
+}
+
+func (storage *fakeStorage) validateReplace(string) error { return storage.validateReplaceErr }
+
+func TestRewriteTemporaryIsRemovedOnEveryPrePublicationFailure(t *testing.T) {
+	t.Parallel()
+	stageFailure := errors.New("stage failed")
+	tests := []struct {
+		name      string
+		configure func(*fakeRewriteTemporary, *fakeSessionRewriteOps)
+	}{
+		{name: "chmod", configure: func(file *fakeRewriteTemporary, _ *fakeSessionRewriteOps) { file.chmodErr = stageFailure }},
+		{name: "write", configure: func(file *fakeRewriteTemporary, _ *fakeSessionRewriteOps) { file.writeErr = stageFailure }},
+		{name: "sync", configure: func(file *fakeRewriteTemporary, _ *fakeSessionRewriteOps) { file.syncErr = stageFailure }},
+		{name: "close", configure: func(file *fakeRewriteTemporary, _ *fakeSessionRewriteOps) {
+			file.closeErrors = []error{stageFailure, nil}
+		}},
+		{name: "rename", configure: func(_ *fakeRewriteTemporary, ops *fakeSessionRewriteOps) { ops.replaceErr = stageFailure }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			temporary := &fakeRewriteTemporary{name: filepath.Join(t.TempDir(), ".pi-go-session-rewrite-fault")}
+			ops := &fakeSessionRewriteOps{temporary: temporary}
+			test.configure(temporary, ops)
+			replaced, err := replaceSessionFile(ops, filepath.Join(t.TempDir(), "session.jsonl"), []byte("secret session bytes"))
+			if replaced || !errors.Is(err, stageFailure) {
+				t.Fatalf("replace = (%t, %v), want pre-publication stage failure", replaced, err)
+			}
+			if ops.removeCalls != 1 {
+				t.Fatalf("temporary remove calls = %d, want 1", ops.removeCalls)
+			}
+			if test.name == "rename" && (ops.replaceCalls != 1 || ops.replaceTempPath != temporary.name) {
+				t.Fatalf("rename seam = calls %d path %q", ops.replaceCalls, ops.replaceTempPath)
+			}
+		})
+	}
+}
+
+func TestRewriteTemporaryCleanupFailurePreservesPrimaryCause(t *testing.T) {
+	t.Parallel()
+	primary := errors.New("sync failed")
+	cleanup := errors.New("remove failed")
+	temporary := &fakeRewriteTemporary{name: ".pi-go-session-rewrite-cleanup", syncErr: primary}
+	ops := &fakeSessionRewriteOps{temporary: temporary, removeErr: cleanup}
+	replaced, err := replaceSessionFile(ops, "session.jsonl", []byte("private session bytes"))
+	if replaced || !errors.Is(err, primary) || !errors.Is(err, cleanup) {
+		t.Fatalf("replace cleanup error = (%t, %v), want both causes", replaced, err)
+	}
+	if ops.removeCalls != 1 || !strings.Contains(err.Error(), "remove rewrite temporary") {
+		t.Fatalf("cleanup diagnostic = calls %d, error %q", ops.removeCalls, err)
+	}
+}
+
+func TestRewritePostPublicationFailureNeverRemovesByTemporaryPath(t *testing.T) {
+	t.Parallel()
+	postRename := errors.New("directory sync failed")
+	temporary := &fakeRewriteTemporary{name: ".pi-go-session-rewrite-published"}
+	ops := &fakeSessionRewriteOps{temporary: temporary, replaced: true, replaceErr: postRename}
+	replaced, err := replaceSessionFile(ops, "session.jsonl", []byte("published session bytes"))
+	if !replaced || !errors.Is(err, postRename) {
+		t.Fatalf("post-publication replace = (%t, %v)", replaced, err)
+	}
+	if ops.removeCalls != 0 {
+		t.Fatalf("post-publication cleanup removed via temporary path %d times", ops.removeCalls)
+	}
+}
+
+func TestRewriteRenameFailureLeavesNoRealTemporaryFile(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	target := filepath.Join(directory, "non-empty-target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "keep"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := replaceSessionFile(osSessionRewriteOps{}, target, []byte("session bytes must not remain"))
+	if replaced || err == nil {
+		t.Fatalf("rename over non-empty directory = (%t, %v)", replaced, err)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(directory, ".pi-go-session-rewrite-*"))
+	if globErr != nil || len(matches) != 0 {
+		t.Fatalf("rewrite temporaries after rename failure = %v, %v", matches, globErr)
+	}
 }
 
 func TestCreateClassifiesKnownAndUnknownDurabilityFailures(t *testing.T) {
