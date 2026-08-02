@@ -309,7 +309,7 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 					"headers": map[string]any{"X-Secret": "models-secret"},
 				})
 			},
-			want:    "field outside the migrated projection",
+			want:    "selected model configuration is not migrated",
 			secrets: []string{"ambient-secret", "models-secret"},
 		},
 		{
@@ -321,7 +321,7 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 					"futureRequestOption": "future-secret",
 				})
 			},
-			want:    "field outside the migrated projection",
+			want:    "selected model configuration is not migrated",
 			secrets: []string{"ambient-secret", "future-secret"},
 		},
 		{

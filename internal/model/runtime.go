@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +36,10 @@ var (
 	ErrNotFound      = errors.New("model not found")
 	ErrUnavailable   = errors.New("model is unavailable")
 	ErrUnsupported   = errors.New("unsupported model configuration")
+	ErrCancelled     = errors.New("model runtime operation cancelled")
+	ErrUnsafeMode    = errors.New("configuration file permissions are unsafe")
+	ErrPersistence   = errors.New("persistent model settings are unavailable")
+	ErrCommitUnknown = errors.New("configuration publication outcome is unknown")
 )
 
 // Diagnostic is intentionally value-only.  It never contains a configuration
@@ -44,9 +49,15 @@ type Diagnostic struct{ Source, Path, Message string }
 func (d Diagnostic) Error() string { return fmt.Sprintf("%s %s: %s", d.Source, d.Path, d.Message) }
 
 type Model struct {
-	Provider, ID, Name, API, BaseURL string
-	Headers                          map[string]string
-	Reasoning                        bool
+	Provider          string            `json:"provider"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	API               string            `json:"api"`
+	BaseURL           string            `json:"baseUrl"`
+	Headers           map[string]string `json:"headers,omitempty"`
+	Reasoning         bool              `json:"reasoning"`
+	UnsupportedFields []string          `json:"-"`
+	UnknownFields     []string          `json:"-"`
 }
 
 func (m Model) Ref() (provider.ModelRef, error) { return provider.NewModelRef(m.Provider, m.API, m.ID) }
@@ -56,18 +67,19 @@ type ProviderConfig struct {
 	Headers                map[string]string
 	// ConfiguredAPIKey is returned only to the in-process assembly that passes it
 	// to auth. It is never put in diagnostics or persisted by this package.
-	ConfiguredAPIKey *string
-	Models           []Model
-	UnknownFields    []string
-	overrides        map[string]modelOverride
+	ConfiguredAPIKey  *string
+	Models            []Model
+	UnknownFields     []string
+	UnsupportedFields []string
+	overrides         map[string]modelOverride
 }
 
 // modelOverride keeps presence separate from a zero value so config overlays do
 // not accidentally erase builtin metadata.
 type modelOverride struct {
-	Name      *string
-	Reasoning *bool
-	Headers   map[string]string
+	Name              *string
+	UnsupportedFields []string
+	UnknownFields     []string
 }
 
 type Settings struct {
@@ -86,16 +98,22 @@ type Snapshot struct {
 type Options struct {
 	AgentDir   string
 	WorkingDir string
+	// ModelsStorePath is the optional, local catalog cache. It is read into the
+	// snapshot, but never refreshed by this package.
+	ModelsStorePath string
 	// ProjectTrusted is deliberately opt-in. A project .pi/settings.json is not
 	// read merely because it exists; a formal trust decision is deferred.
 	ProjectTrusted bool
 }
 
 type Runtime struct {
-	options   Options
-	mu        sync.RWMutex
-	snapshot  Snapshot
-	providers map[string]ProviderConfig
+	options     Options
+	mu          sync.RWMutex
+	local       chan struct{}
+	snapshot    Snapshot
+	providers   map[string]ProviderConfig
+	storeErrors map[string]error
+	faults      atomicWriteFaults
 }
 
 func NewRuntime(options Options) (*Runtime, error) {
@@ -105,7 +123,10 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if options.WorkingDir == "" {
 		options.WorkingDir = "."
 	}
-	r := &Runtime{options: options}
+	if options.ModelsStorePath == "" {
+		options.ModelsStorePath = filepath.Join(options.AgentDir, "models-store.json")
+	}
+	r := &Runtime{options: options, local: newLocalGate(), storeErrors: make(map[string]error)}
 	if err := r.Reload(context.Background()); err != nil {
 		return nil, err
 	}
@@ -124,12 +145,41 @@ func (r *Runtime) Provider(id string) (ProviderConfig, bool) {
 	return cloneProvider(p), ok
 }
 
+// ValidateRoute is the selected-route consumption boundary. Future or known
+// but unimplemented fields are preserved in their source file and ignored for
+// unrelated providers, but they may not silently influence a production call.
+func (r *Runtime) ValidateRoute(selected Model) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	providerID := strings.ToLower(selected.Provider)
+	if err := r.storeErrors[providerID]; err != nil {
+		return fmt.Errorf("%w: selected provider has an invalid cached catalog", ErrUnsupported)
+	}
+	if configured, ok := r.providers[providerID]; ok {
+		if len(configured.UnsupportedFields) != 0 {
+			return fmt.Errorf("%w: selected provider contains unsupported configuration fields", ErrUnsupported)
+		}
+		if len(configured.UnknownFields) != 0 {
+			return fmt.Errorf("%w: selected provider contains unknown configuration fields", ErrUnsupported)
+		}
+	}
+	if len(selected.UnsupportedFields) != 0 {
+		return fmt.Errorf("%w: selected model contains unsupported configuration fields", ErrUnsupported)
+	}
+	if len(selected.UnknownFields) != 0 {
+		return fmt.Errorf("%w: selected model contains unknown configuration fields", ErrUnsupported)
+	}
+	return nil
+}
+
 // Reload is transactional: malformed replacement files leave the last healthy
 // snapshot published. A missing optional file is a healthy empty source.
 func (r *Runtime) Reload(ctx context.Context) error {
-	if err := contextCause(ctx); err != nil {
+	releaseLocal, err := acquireLocal(ctx, r.local)
+	if err != nil {
 		return err
 	}
+	defer releaseLocal()
 	settings, err := loadSettings(filepath.Join(r.options.AgentDir, "settings.json"), "global settings.json")
 	if err != nil {
 		return err
@@ -145,11 +195,16 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	snapshot := buildSnapshot(providers, settings)
+	cached, storeErrors, err := loadStoreCatalogs(r.options.ModelsStorePath)
+	if err != nil {
+		return err
+	}
+	snapshot := buildSnapshot(providers, cached, settings)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snapshot.Generation = r.snapshot.Generation + 1
 	r.providers = providers
+	r.storeErrors = storeErrors
 	r.snapshot = snapshot
 	return nil
 }
@@ -160,15 +215,18 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if change == nil {
 		return fmt.Errorf("%w: nil settings change", ErrInvalidConfig)
 	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("%w: global settings.json", ErrPersistence)
+	}
 	path := filepath.Join(r.options.AgentDir, "settings.json")
-	if err := contextCause(ctx); err != nil {
+	releaseLocal, err := acquireLocal(ctx, r.local)
+	if err != nil {
 		return err
 	}
+	defer releaseLocal()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("%w: create settings directory", ErrInvalidConfig)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	release, err := acquireFileLock(ctx, path)
 	if err != nil {
 		return err
@@ -191,6 +249,18 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if err := validateSettings(current, "global settings.json"); err != nil {
 		return err
 	}
+	settings := current
+	if r.options.ProjectTrusted {
+		project, e := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
+		if e != nil {
+			return e
+		}
+		settings = mergeSettings(settings, project)
+	}
+	cached, storeErrors, err := loadStoreCatalogs(r.options.ModelsStorePath)
+	if err != nil {
+		return err
+	}
 	putString(root, "defaultProvider", current.DefaultProvider)
 	putString(root, "defaultModel", current.DefaultModel)
 	if current.EnabledModels == nil {
@@ -203,20 +273,16 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if err != nil {
 		return fmt.Errorf("%w: encode global settings", ErrInvalidConfig)
 	}
-	if err := atomicWrite(path, append(encoded, '\n')); err != nil {
+	if err := atomicWrite(ctx, path, append(encoded, '\n'), "global settings.json", r.faults); err != nil {
 		return err
 	}
-	// Rebuild while holding the mutex but without calling Reload, which locks it.
-	settings := current
-	if r.options.ProjectTrusted {
-		project, e := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
-		if e != nil {
-			return e
-		}
-		settings = mergeSettings(settings, project)
-	}
-	r.snapshot = buildSnapshot(r.providers, settings)
-	r.snapshot.Generation++
+	// Rebuild without recursively acquiring the operation gate.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	generation := r.snapshot.Generation + 1
+	r.snapshot = buildSnapshot(r.providers, cached, settings)
+	r.snapshot.Generation = generation
+	r.storeErrors = storeErrors
 	return nil
 }
 
@@ -260,6 +326,7 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 			for _, base := range s.Models {
 				if strings.EqualFold(base.Provider, providerID) {
 					base.ID, base.Name = modelID, modelID
+					base = r.applyModelOverride(providerID, modelID, base)
 					return Resolution{Model: base}, nil
 				}
 			}
@@ -282,6 +349,7 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 			for _, base := range s.Models {
 				if strings.EqualFold(base.Provider, p) {
 					base.ID, base.Name = s.Settings.DefaultModel, s.Settings.DefaultModel
+					base = r.applyModelOverride(p, s.Settings.DefaultModel, base)
 					return Resolution{Model: base}, nil
 				}
 			}
@@ -361,13 +429,21 @@ func filterPattern(models []Model, pattern string) []Model {
 	return filterModels(models, "", pattern)
 }
 
-func buildSnapshot(providers map[string]ProviderConfig, settings Settings) Snapshot {
+func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings) Snapshot {
 	// The hand-written baseline is deliberately tiny because the fixed upstream
 	// catalog cannot be regenerated from its absent manifest/source data.
 	byKey := map[string]Model{OpenAIProviderID + "/" + DefaultOpenAIModel: {Provider: OpenAIProviderID, ID: DefaultOpenAIModel, Name: DefaultOpenAIModel, API: OpenAIResponsesAPI}}
-	ids := make([]string, 0, len(providers))
+	ids := make([]string, 0, len(providers)+len(cached))
 	for id := range providers {
 		ids = append(ids, id)
+	}
+	for id, entry := range cached {
+		if _, exists := providers[id]; !exists {
+			ids = append(ids, id)
+		}
+		for _, m := range entry.Models {
+			byKey[m.Provider+"/"+m.ID] = cloneModel(m)
+		}
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
@@ -383,7 +459,6 @@ func buildSnapshot(providers map[string]ProviderConfig, settings Settings) Snaps
 				m.Name = m.ID
 			}
 			m.Provider = p.ID
-			m.Headers = mergeHeaders(p.Headers, m.Headers)
 			byKey[m.Provider+"/"+m.ID] = m
 		}
 		if id == OpenAIProviderID {
@@ -395,7 +470,6 @@ func buildSnapshot(providers map[string]ProviderConfig, settings Settings) Snaps
 			if p.BaseURL != "" {
 				m.BaseURL = p.BaseURL
 			}
-			m.Headers = mergeHeaders(m.Headers, p.Headers)
 			byKey[key] = m
 		}
 		for modelID, override := range p.overrides {
@@ -404,14 +478,7 @@ func buildSnapshot(providers map[string]ProviderConfig, settings Settings) Snaps
 			if !ok {
 				continue
 			}
-			if override.Name != nil {
-				m.Name = *override.Name
-			}
-			if override.Reasoning != nil {
-				m.Reasoning = *override.Reasoning
-			}
-			m.Headers = mergeHeaders(m.Headers, override.Headers)
-			byKey[key] = m
+			byKey[key] = applyModelOverride(m, override)
 		}
 	}
 	keys := make([]string, 0, len(byKey))
@@ -424,6 +491,29 @@ func buildSnapshot(providers map[string]ProviderConfig, settings Settings) Snaps
 		models = append(models, cloneModel(byKey[key]))
 	}
 	return Snapshot{Models: models, Providers: ids, Settings: cloneSettings(settings)}
+}
+
+func (r *Runtime) applyModelOverride(providerID, modelID string, model Model) Model {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	provider, ok := r.providers[strings.ToLower(providerID)]
+	if !ok {
+		return model
+	}
+	override, ok := provider.overrides[modelID]
+	if !ok {
+		return model
+	}
+	return applyModelOverride(model, override)
+}
+
+func applyModelOverride(model Model, override modelOverride) Model {
+	if override.Name != nil {
+		model.Name = *override.Name
+	}
+	model.UnsupportedFields = appendUnique(model.UnsupportedFields, override.UnsupportedFields...)
+	model.UnknownFields = appendUnique(model.UnknownFields, override.UnknownFields...)
+	return model
 }
 
 func loadModels(path string) (map[string]ProviderConfig, error) {
@@ -473,8 +563,10 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 	} else if ok {
 		p.ConfiguredAPIKey = &key
 	}
-	if p.Headers, err = optionalHeaders(o, "headers", id); err != nil {
-		return p, err
+	for _, key := range []string{"headers", "compat", "oauth", "authHeader"} {
+		if _, present := o[key]; present {
+			p.UnsupportedFields = append(p.UnsupportedFields, key)
+		}
 	}
 	if data, ok := o["models"]; ok {
 		var models []json.RawMessage
@@ -519,6 +611,7 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 		}
 	}
 	sort.Strings(p.UnknownFields)
+	sort.Strings(p.UnsupportedFields)
 	return p, nil
 }
 func parseOverride(providerID, modelID string, raw json.RawMessage) (modelOverride, error) {
@@ -532,15 +625,17 @@ func parseOverride(providerID, modelID string, raw json.RawMessage) (modelOverri
 	} else if present {
 		result.Name = &value
 	}
-	if value, present, err := optionalBool(o, "reasoning", providerID); err != nil {
-		return result, err
-	} else if present {
-		result.Reasoning = &value
+	for key := range o {
+		switch key {
+		case "name":
+		case "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
+			result.UnsupportedFields = append(result.UnsupportedFields, key)
+		default:
+			result.UnknownFields = append(result.UnknownFields, key)
+		}
 	}
-	var err error
-	if result.Headers, err = optionalHeaders(o, "headers", providerID); err != nil {
-		return result, err
-	}
+	sort.Strings(result.UnsupportedFields)
+	sort.Strings(result.UnknownFields)
 	return result, nil
 }
 func parseModel(providerID string, index int, raw json.RawMessage) (Model, error) {
@@ -565,15 +660,17 @@ func parseModel(providerID string, index int, raw json.RawMessage) (Model, error
 	if err != nil {
 		return m, err
 	}
-	m.Headers, err = optionalHeaders(o, "headers", providerID)
-	if err != nil {
-		return m, err
+	for key := range o {
+		switch key {
+		case "id", "name", "api", "baseUrl":
+		case "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
+			m.UnsupportedFields = append(m.UnsupportedFields, key)
+		default:
+			m.UnknownFields = append(m.UnknownFields, key)
+		}
 	}
-	if b, exists, e := optionalBool(o, "reasoning", providerID); e != nil {
-		return m, e
-	} else if exists {
-		m.Reasoning = b
-	}
+	sort.Strings(m.UnsupportedFields)
+	sort.Strings(m.UnknownFields)
 	return m, nil
 }
 
@@ -694,6 +791,12 @@ func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMe
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false, Diagnostic{label, "root", "must be a regular file"}
 	}
+	if runtime.GOOS == "windows" {
+		return nil, false, fmt.Errorf("%w: cannot admit private %s on Windows", ErrUnsafeMode, label)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, false, fmt.Errorf("%w: %s", ErrUnsafeMode, label)
+	}
 	if info.Size() > maxFileBytes {
 		return nil, false, Diagnostic{label, "root", "exceeds size limit"}
 	}
@@ -706,20 +809,97 @@ func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMe
 	}
 	root, err := decodeObject(data)
 	if err != nil {
+		var duplicate duplicateFieldError
+		if errors.As(err, &duplicate) {
+			return nil, false, Diagnostic{label, duplicate.Path, "contains a duplicate object field"}
+		}
 		return nil, false, Diagnostic{label, "root", "is not strict JSON"}
 	}
 	return root, true, nil
 }
 func decodeObject(data []byte) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
+	d.UseNumber()
+	if err := validateJSONValue(d, "root", 0); err != nil {
+		return nil, err
+	}
+	if _, err := d.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("trailing JSON value")
+		}
+		return nil, err
+	}
 	var root map[string]json.RawMessage
-	if err := d.Decode(&root); err != nil || root == nil {
+	if err := json.Unmarshal(data, &root); err != nil || root == nil {
 		return nil, errors.New("not object")
 	}
-	if d.Decode(&struct{}{}) != io.EOF {
-		return nil, errors.New("trailing data")
-	}
 	return root, nil
+}
+
+type duplicateFieldError struct{ Path string }
+
+func (e duplicateFieldError) Error() string { return "duplicate JSON object field" }
+
+func validateJSONValue(decoder *json.Decoder, path string, depth int) error {
+	if depth > 64 {
+		return errors.New("JSON nesting exceeds limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			child := path + "." + key
+			if _, duplicate := seen[key]; duplicate {
+				return duplicateFieldError{Path: child}
+			}
+			seen[key] = struct{}{}
+			if err := validateJSONValue(decoder, child, depth+1); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return errors.New("unterminated object")
+		}
+		return nil
+	case '[':
+		index := 0
+		for decoder.More() {
+			if err := validateJSONValue(decoder, fmt.Sprintf("%s.%d", path, index), depth+1); err != nil {
+				return err
+			}
+			index++
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return errors.New("unterminated array")
+		}
+		return nil
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
 }
 func normalizeJSONC(data []byte) []byte {
 	out := append([]byte(nil), data...)
@@ -778,19 +958,32 @@ func normalizeJSONC(data []byte) []byte {
 	return out
 }
 
-func atomicWrite(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("%w: create settings directory", ErrInvalidConfig)
+type atomicWriteFaults struct {
+	beforeRename func() error
+	afterRename  func() error
+}
+
+func atomicWrite(ctx context.Context, path string, data []byte, label string, faults atomicWriteFaults) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("%w: %s", ErrPersistence, label)
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".settings.json-*")
+	if err := contextCause(ctx); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%w: create %s directory", ErrInvalidConfig, label)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".model-config-*")
 	if err != nil {
-		return fmt.Errorf("%w: create settings temporary file", ErrInvalidConfig)
+		return fmt.Errorf("%w: create %s temporary file", ErrInvalidConfig, label)
 	}
 	name := f.Name()
-	ok := false
+	published := false
 	defer func() {
-		if !ok {
-			_ = os.Remove(name)
+		if !published {
+			// Preserve an unsuccessful temporary write for recovery/inspection.
+			// We deliberately never delete configuration artifacts in place.
+			_ = os.Rename(name, filepath.Join(os.TempDir(), "pi-go-"+filepath.Base(name)))
 		}
 	}()
 	if err = f.Chmod(0o600); err == nil {
@@ -803,18 +996,43 @@ func atomicWrite(path string, data []byte) error {
 		err = closeErr
 	}
 	if err != nil {
-		return fmt.Errorf("%w: write global settings", ErrInvalidConfig)
+		return fmt.Errorf("%w: write %s", ErrInvalidConfig, label)
+	}
+	if err := contextCause(ctx); err != nil {
+		return err
+	}
+	if faults.beforeRename != nil {
+		if err := faults.beforeRename(); err != nil {
+			return fmt.Errorf("%w: publish %s", ErrInvalidConfig, label)
+		}
 	}
 	if err = os.Rename(name, path); err != nil {
-		return fmt.Errorf("%w: publish global settings", ErrInvalidConfig)
+		return fmt.Errorf("%w: publish %s", ErrInvalidConfig, label)
 	}
-	ok = true
+	published = true
+	if faults.afterRename != nil {
+		if err := faults.afterRename(); err != nil {
+			return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
+		}
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil || closeErr != nil {
+		return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
+	}
 	return nil
 }
 
 // acquireFileLock deliberately does not reclaim a stale lock. Guessing that a
 // suspended process is dead risks overwriting a concurrent user's settings.
 func acquireFileLock(ctx context.Context, path string) (func(), error) {
+	if err := contextCause(ctx); err != nil {
+		return nil, err
+	}
 	lock := path + ".lock"
 	for {
 		if err := os.Mkdir(lock, 0o700); err == nil {
@@ -828,9 +1046,21 @@ func acquireFileLock(ctx context.Context, path string) (func(), error) {
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return nil, fmt.Errorf("%w: acquire settings lock", ErrInvalidConfig)
+			return nil, fmt.Errorf("%w: acquire configuration lock: %w", ErrCancelled, context.Cause(ctx))
 		case <-timer.C:
 		}
+	}
+}
+func newLocalGate() chan struct{} { gate := make(chan struct{}, 1); gate <- struct{}{}; return gate }
+func acquireLocal(ctx context.Context, gate chan struct{}) (func(), error) {
+	if err := contextCause(ctx); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: wait for local serialization: %w", ErrCancelled, context.Cause(ctx))
+	case <-gate:
+		return func() { gate <- struct{}{} }, nil
 	}
 }
 func contextCause(ctx context.Context) error {
@@ -838,7 +1068,7 @@ func contextCause(ctx context.Context) error {
 		return fmt.Errorf("%w: nil context", ErrInvalidConfig)
 	}
 	if err := context.Cause(ctx); err != nil {
-		return fmt.Errorf("%w: operation cancelled", ErrInvalidConfig)
+		return fmt.Errorf("%w: %w", ErrCancelled, err)
 	}
 	return nil
 }
@@ -874,23 +1104,26 @@ func cloneHeaders(v map[string]string) map[string]string {
 	}
 	return out
 }
-func cloneModel(m Model) Model { m.Headers = cloneHeaders(m.Headers); return m }
+func cloneModel(m Model) Model {
+	m.Headers = cloneHeaders(m.Headers)
+	m.UnsupportedFields = append([]string(nil), m.UnsupportedFields...)
+	m.UnknownFields = append([]string(nil), m.UnknownFields...)
+	return m
+}
 func cloneProvider(p ProviderConfig) ProviderConfig {
 	p.Headers = cloneHeaders(p.Headers)
 	p.Models = append([]Model(nil), p.Models...)
 	p.UnknownFields = append([]string(nil), p.UnknownFields...)
+	p.UnsupportedFields = append([]string(nil), p.UnsupportedFields...)
 	if p.overrides != nil {
 		p.overrides = make(map[string]modelOverride, len(p.overrides))
 		for k, v := range p.overrides {
-			v.Headers = cloneHeaders(v.Headers)
 			if v.Name != nil {
 				x := *v.Name
 				v.Name = &x
 			}
-			if v.Reasoning != nil {
-				x := *v.Reasoning
-				v.Reasoning = &x
-			}
+			v.UnsupportedFields = append([]string(nil), v.UnsupportedFields...)
+			v.UnknownFields = append([]string(nil), v.UnknownFields...)
 			p.overrides[k] = v
 		}
 	}
@@ -902,6 +1135,20 @@ func cloneProvider(p ProviderConfig) ProviderConfig {
 		p.ConfiguredAPIKey = &v
 	}
 	return p
+}
+func appendUnique(base []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(base)+len(values))
+	for _, v := range base {
+		seen[v] = struct{}{}
+	}
+	for _, v := range values {
+		if _, ok := seen[v]; !ok {
+			base = append(base, v)
+			seen[v] = struct{}{}
+		}
+	}
+	sort.Strings(base)
+	return base
 }
 func cloneSettings(s Settings) Settings {
 	s.EnabledModels = append([]string(nil), s.EnabledModels...)

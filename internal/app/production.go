@@ -125,6 +125,9 @@ func assembleProductionDependencies(
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
 	}
+	if err := catalog.ValidateRoute(selection.Model); err != nil {
+		return Dependencies{}, fmt.Errorf("%w: selected model configuration is not migrated", ErrUnsupportedProductionValue)
+	}
 	model, err := selection.Model.Ref()
 	if err != nil {
 		return Dependencies{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
@@ -133,13 +136,7 @@ func assembleProductionDependencies(
 		return Dependencies{}, fmt.Errorf("%w: selected provider/API is not supported by this production assembly", ErrUnsupportedProductionValue)
 	}
 	configured, _ := catalog.Provider(model.Provider())
-	if len(configured.UnknownFields) != 0 {
-		return Dependencies{}, fmt.Errorf("%w: models.json OpenAI provider contains a field outside the migrated projection", ErrUnsupportedProductionValue)
-	}
 	modelConfig := openAIModelConfig{apiKey: configured.ConfiguredAPIKey, baseURL: selection.Model.BaseURL}
-	if len(selection.Model.Headers) != 0 {
-		return Dependencies{}, fmt.Errorf("%w: models.json OpenAI provider contains a field outside the migrated projection (configured request headers)", ErrUnsupportedProductionValue)
-	}
 	apiKey, err := resolveOpenAIAPIKey(ctx, parsed, agentDir, modelConfig, ambientEnvironment)
 	if err != nil {
 		return Dependencies{}, err

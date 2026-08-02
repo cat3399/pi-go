@@ -224,3 +224,9 @@
 - 明确延期：OAuth login/refresh、command-backed config execution、Windows DACL persistence；
   未知 stale lock 不自动回收仍是明确 contract，不由本里程碑静默改变。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-MODEL-001：M-MODEL/v0.1 首轮复审修订（进行中）
+
+- 首轮结论为 0 Blocker / 4 Major / 1 Minor；本条只记录修订范围，**不构成 passed 结论**。
+- 已修订：JSONC 全树 duplicate-field admission 与 model fuzz；selected-route 的 compat/oauth/authHeader/model/override 未实现或未知字段 secret-safe preflight；settings/store 的 context-aware local + file-lock serialization、private admission、temp fsync/rename/directory sync、fault/cancel/re-exec coverage；`models-store.json` read-only runtime projection 及 opaque root/entry/model data write-back preservation。
+- 明确仍延后：remote refresh HTTP/auth contract、完整 compat schema、fuzzy selection/model cycling 和正式 project-trust decision；这些不是本轮通过的替代品。

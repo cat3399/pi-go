@@ -32,7 +32,7 @@ metadata 的显式字段；production 仅装配 `openai/openai-responses`，其�
 | B-MODEL-002 | provider/model overlay、custom model 与最小 OpenAI baseline | ported/strengthened |
 | B-MODEL-003 | CLI/provider-prefixed、settings default、ordered enabled scope | ported (exact only) |
 | B-MODEL-004 | transactional reload、snapshot clone、settings/store atomic persistence | strengthened |
-| B-MODEL-005 | production preflight only supported provider/API | ported/strengthened |
+| B-MODEL-005 | production preflight only supported provider/API and selected-route unsupported/unknown fields | in-progress (independent review pending) |
 
 ## 明确债务
 

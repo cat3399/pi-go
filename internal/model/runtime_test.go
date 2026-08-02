@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -47,8 +48,11 @@ func TestRuntimeModelsJSONCOverlayAndCustomModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.API != OpenAIResponsesAPI || got.Model.BaseURL != "https://example.test/v1" || got.Model.Headers["x-base"] != "two" {
+	if got.Model.API != OpenAIResponsesAPI || got.Model.BaseURL != "https://example.test/v1" {
 		t.Fatalf("custom overlay = %#v", got.Model)
+	}
+	if err := r.ValidateRoute(got.Model); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("headers must fail at selected route: %v", err)
 	}
 	if _, err := r.Resolve(Selection{Provider: "openai", Model: "not-listed"}); err != nil {
 		t.Fatalf("explicit custom model: %v", err)
@@ -61,8 +65,42 @@ func TestRuntimeModelOverrideDoesNotEraseBuiltinMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.Name != "renamed" || !got.Model.Reasoning || got.Model.API != OpenAIResponsesAPI || got.Model.Headers["x-base"] != "two" {
+	if got.Model.Name != "renamed" || got.Model.API != OpenAIResponsesAPI {
 		t.Fatalf("override = %#v", got.Model)
+	}
+	if err := r.ValidateRoute(got.Model); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("override options must fail at selected route: %v", err)
+	}
+}
+
+func TestRuntimeDuplicateJSONCFieldsAreRejectedAtEveryDepth(t *testing.T) {
+	for _, content := range []string{
+		`{"providers":{"openai":{"api":"openai-responses","api":"future-secret"}}}`,
+		`{"providers":{"openai":{"models":[{"id":"one","api":"openai-responses","nested":{"x":1,"x":2}}]}}}`,
+		`{"providers":{"openai":{"models":[{"id":"one","api":"openai-responses","nested":[{"x":1,"x":2}]}]}}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "models.json")
+		writeFile(t, path, content)
+		if _, err := loadModels(path); err == nil || !strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "future-secret") {
+			t.Fatalf("loadModels duplicate = %v", err)
+		}
+	}
+}
+
+func TestRuntimeOnlySelectedProviderRejectsFutureFields(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"future":{"compat":{"token":"do-not-leak"},"models":[{"id":"ignored","api":"openai-responses"}]},"openai":{"models":[{"id":"supported","api":"openai-responses"}]}}}`, "", false)
+	openAI, err := r.Resolve(Selection{Provider: "openai", Model: "supported"})
+	if err != nil || r.ValidateRoute(openAI.Model) != nil {
+		t.Fatalf("unselected future provider must not block openai: %#v, %v", openAI, err)
+	}
+	future, err := r.Resolve(Selection{Provider: "future", Model: "ignored"})
+	if err != nil || !errors.Is(r.ValidateRoute(future.Model), ErrUnsupported) {
+		t.Fatalf("selected future provider must fail safely: %#v, %v", future, err)
+	}
+	r, _, _ = newTestRuntime(t, `{"providers":{"openai":{"modelOverrides":{"custom":{"compat":{"token":"do-not-leak"}}}}}}`, "", false)
+	custom, err := r.Resolve(Selection{Provider: "openai", Model: "custom"})
+	if err != nil || !errors.Is(r.ValidateRoute(custom.Model), ErrUnsupported) {
+		t.Fatalf("selected custom override must fail safely: %#v, %v", custom, err)
 	}
 }
 
@@ -150,6 +188,57 @@ func TestRuntimeConcurrentSnapshotAndReload(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+func TestGlobalSettingsCancellationFaultAndPrivateAdmission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows v0.1 fails closed for private durable configuration")
+	}
+	r, agent, _ := newTestRuntime(t, "", `{"defaultModel":"gpt-5.5"}`, false)
+	release, err := acquireLocal(context.Background(), r.local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.SetGlobalSettings(ctx, func(*Settings) error { return nil }); !errors.Is(err, ErrCancelled) {
+		t.Fatalf("cancelled settings write = %v", err)
+	}
+	release()
+	r.faults.beforeRename = func() error { return errors.New("injected") }
+	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "before"; return nil }); err == nil {
+		t.Fatal("pre-rename settings fault succeeded")
+	}
+	content, err := os.ReadFile(filepath.Join(agent, "settings.json"))
+	if err != nil || strings.Contains(string(content), "before") {
+		t.Fatalf("pre-rename wrote settings: %q, %v", content, err)
+	}
+	r.faults.beforeRename = nil
+	r.faults.afterRename = func() error { return errors.New("injected") }
+	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "after"; return nil }); !errors.Is(err, ErrCommitUnknown) {
+		t.Fatalf("post-rename settings error = %v", err)
+	}
+	content, err = os.ReadFile(filepath.Join(agent, "settings.json"))
+	if err != nil || !strings.Contains(string(content), "after") {
+		t.Fatalf("post-rename did not publish: %q, %v", content, err)
+	}
+	r.faults.afterRename = nil
+	if err := os.Chmod(filepath.Join(agent, "settings.json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Reload(context.Background()); !errors.Is(err, ErrUnsafeMode) {
+		t.Fatalf("unsafe settings mode = %v", err)
+	}
+}
+
+func TestWindowsGlobalSettingsPersistenceFailsClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only contract")
+	}
+	r, _, _ := newTestRuntime(t, "", "", false)
+	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "model"; return nil }); !errors.Is(err, ErrPersistence) {
+		t.Fatalf("settings write = %v", err)
+	}
 }
 
 func FuzzLoadModelsDoesNotPanic(f *testing.F) {
