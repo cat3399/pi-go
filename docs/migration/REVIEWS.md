@@ -307,3 +307,28 @@
 - 明确延期：OAuth login/refresh、command-backed config execution、Windows DACL persistence；
   未知 stale lock 不自动回收仍是明确 contract，不由本里程碑静默改变。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-MODEL-001：M-MODEL/v0.1 联合审查与定点复审
+
+- 范围：`internal/model`、production model admission、相邻 app tests，以及 charter、behavior/
+  test/data ledgers；固定上游为 `a116523434806910336b9de3e38a41aa5860030b`，reviewer 未参与实现。
+- 提交链：`624d393` 实现 settings/catalog runtime；`65e7ad6` 关闭首轮 admission、persistence
+  与 store findings；`3e8fb2b` 关闭 canonical identity、durable catalog 与 parent durability
+  findings；`63e275f` 隔离 unlisted custom fallback。
+- 首轮结论：Blocker 0 / Major 4 / Minor 1。修订覆盖 JSONC 全树 duplicate-field admission
+  与 model fuzz、selected-route compat/oauth/authHeader/model/override 未实现或未知字段的
+  secret-safe preflight、settings/store 的本地与跨进程序列化及 durable atomic write/fault
+  contract，以及 `models-store.json` runtime projection 和 opaque data preservation。
+- 第二轮结论：Blocker 0 / Major 3 / Minor 0。修订统一 provider/override/store 的 case-fold
+  identity 并拒绝等价 duplicate，补齐完整 public `CachedModel` durable contract 与 raw future
+  fields preservation，并将 mutation success 固定为 pre-existing parent + leaf-parent sync。
+- 最终定点轮尚余 Blocker 0 / Major 1 / Minor 0：explicit/settings unlisted custom 会从任意
+  configured model 继承 request metadata。修订后只从 canonical provider default 和
+  provider-level overlay 派生；production 回归证明 `openai/aaa` 的 per-model URL 不接收 key。
+- 最终实现候选 gate：全仓 test/vet/build/race、5 秒 model-config fuzz、explicit/settings
+  custom 隔离回归 20 次，以及 Darwin arm64、Linux amd64、Windows amd64 command build 和
+  Linux/Windows model、Windows app test-binary compile 均通过；`git diff --check` 通过。
+- 明确延期：generated catalog 的原始 data/manifest 缺失；remote refresh 的 source、HTTP/auth
+  contract，完整 compat/OAuth/authHeader adapter，fuzzy selection/model cycling 与正式 project
+  trust decision 均需独立后续 slice，不能由本里程碑的通过结论覆盖。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。

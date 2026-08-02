@@ -21,6 +21,16 @@
 
 ## M-PROVIDER
 
+## M-MODEL
+
+| ID | Behavior | 上游 test intent | 当前状态 | Go 覆盖 |
+| --- | --- | --- | --- | --- |
+| `T-MODEL-001` | B-MODEL-001 | `model-config` malformed/schema/comments | `strengthened` | strict JSONC、recursive/equivalent duplicate IDs、fuzz/no panic、secret-safe production error；R-MODEL-001 |
+| `T-MODEL-002` | B-MODEL-002 | `model-runtime-*`, `model-registry` | `strengthened` | overlay headers/base URL、custom ID、case-fold canonical identities、explicit API preflight；R-MODEL-001 |
+| `T-MODEL-003` | B-MODEL-003 | `model-resolver`, regressions 3217/6949 | `strengthened` | exact v0.1 provider prefix、explicit/settings custom 只派生 canonical provider default、per-model URL/API/metadata 隔离、ordered scope/unavailable diagnostic；fuzzy deferred；R-MODEL-001 |
+| `T-MODEL-004` | B-MODEL-004 | `models-store`, settings reload regressions 6999/3616/2753 | `strengthened` | case-fold key/duplicate matrix、全部 public cached-model fields 与 opaque raw round-trip、missing-parent/pre-post-fault/parent-sync、re-exec merge、reload health、race snapshot/read；R-MODEL-001 |
+| `T-MODEL-005` | B-MODEL-005 | `model-runtime-*`/`model-registry` configured request-option and provider route intent | `strengthened` | secret-safe selected-route preflight、unselected-provider preservation、rejection network/session side effects=0、custom fallback poison-URL calls=0/credential isolation；R-MODEL-001 |
+
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
 | `T-PROVIDER-001` | B-PROVIDER-001/003 | `packages/ai/test/faux-provider.test.ts` — `consumes queued responses in order and errors when exhausted` | `strengthened` | FIFO、并发分配、request snapshot 与 typed exhaustion |

@@ -10,13 +10,13 @@
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |
 | `D-SESSION-005` | v3 `compaction` / `branch_summary` session entries | coding `session-manager.ts`；coding/Harness compaction modules | compaction envelope/parent/first-kept/usage 可严格读取写入；branch summary raw-preserved but not projected until navigation/cache contract | `compaction implemented; branch_summary deferred` |
-| `D-SETTINGS-001` | global/project `settings.json` | `packages/coding-agent/src/core/settings-manager.ts` | source precedence、project trust、unknown setting preservation | `classified` |
+| `D-SETTINGS-001` | global/project `settings.json` | `packages/coding-agent/src/core/settings-manager.ts` | source precedence、project trust、unknown setting preservation | `ported-global-v0.1`; project read requires explicit trust decision |
 | `D-TRUST-001` | `~/.pi/agent/trust.json` project trust decisions | `packages/coding-agent/src/core/trust-manager.ts::ProjectTrustStore` | 安全关键；path normalization、nearest ancestor、lock/merge、unknown/malformed preservation | `classified` |
 | `D-KEYBINDING-001` | `~/.pi/agent/keybindings.json` | `packages/coding-agent/src/core/keybindings.ts`；`packages/coding-agent/src/migrations.ts::migrateKeybindingsConfigFile` | TUI 前实现；unknown/malformed 不覆盖，alias migration 可重复 | `deferred` |
 | `D-AUTH-001` | `auth.json` provider credential map | `packages/coding-agent/src/core/auth-storage.ts`；`packages/ai/src/auth/types.ts` | mode 0600、lock/merge、malformed 不覆盖、secret 不进入 log | `ported-api-key-v0.1-unix`；Windows fail-closed；OAuth deferred |
 | `D-AUTH-002` | legacy `oauth.json` 与 settings API keys | `packages/coding-agent/src/migrations.ts` | 后续 one-way migration，保留原文件直至成功 | `deferred` |
-| `D-MODEL-001` | user `models.json` | `packages/coding-agent/src/core/model-config.ts` | comments/schema、provider overrides、错误诊断和 reload | `classified` |
-| `D-MODEL-002` | dynamic `models-store.json` | `packages/coding-agent/src/core/models-store.ts`；`packages/ai/src/models-store.ts` | provider-scoped merge、etag/checkedAt、malformed 不覆盖 | `classified` |
+| `D-MODEL-001` | user `models.json` | `packages/coding-agent/src/core/model-config.ts` | comments/schema、recursive duplicate admission、provider overrides、secret-safe diagnostics 与 reload；full compat/OAuth/authHeader request semantics deferred | `ported-v0.1` |
+| `D-MODEL-002` | dynamic `models-store.json` | `packages/coding-agent/src/core/models-store.ts`；`packages/ai/src/models-store.ts` | case-fold canonical provider-scoped merge、etag/checkedAt、完整 public cached-model fields、malformed 不覆盖；runtime projection、opaque entry/model fields write-back preservation；remote refresh deferred | `ported-v0.1` |
 | `D-RESOURCE-001` | global/project `prompts/` 与 legacy `commands/` | `packages/coding-agent/src/migrations.ts::migrateCommandsToPrompts` | 资源清单先保留；collision 不覆盖，迁移成功前不丢 source | `deferred` |
 | `D-RESOURCE-002` | global/project extensions、skills、themes 与 package resource dirs | `packages/coding-agent/src/core/resource-loader.ts`；`packages/coding-agent/src/migrations.ts` | 后续资源模块逐类取证；当前不得把未知 user resource 当临时文件清理 | `deferred` |
 | `D-CATALOG-001` | built-in generated model catalog | `packages/ai/src/models.generated.ts`；`packages/ai/scripts/generate-models.ts` | 冻结产物可读；原始 data/manifest 缺失，不能 live regenerate 冒充基线 | `baseline-artifact-gap` |
@@ -95,6 +95,12 @@ provider-scoped model list、Last-Modified、checkedAt 和 opaque ETag。
 M-APP/v0.2 只读投影 `providers.openai.apiKey/baseUrl`，并接受无请求语义的 `name` 与固定
 `openai-responses` API 标记。选中 OpenAI provider 的其余字段明确失败；这不等于完整迁移
 D-MODEL-001。
+
+M-MODEL/v0.1 对两种格式使用统一的 case-fold canonical provider/model identity。Global
+settings 与 dynamic store mutation 在进程内及跨进程重读合并，并以 pre-existing durable
+parent、临时文件同步、rename 和 leaf-parent 同步为成功边界；失败 reload 不替换最后有效
+snapshot。Store 写回保留完整 public `CachedModel` 字段及 opaque future fields。它只迁移本地
+cache 的 read/write contract；catalog remote refresh、source manifest 与 HTTP/auth policy 仍延后。
 
 ## Legacy location 与 user resource
 

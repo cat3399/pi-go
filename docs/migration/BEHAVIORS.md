@@ -19,6 +19,16 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 
 ## M-PROVIDER
 
+## M-MODEL
+
+| ID | 行为 | 上游证据 | 状态 | 重评条件 |
+| --- | --- | --- | --- | --- |
+| `B-MODEL-001` | strict JSONC models admission、typed secret-safe diagnostics | `model-config.ts` | `ported` | full compat schema 与 provider adapter slice |
+| `B-MODEL-002` | builtin OpenAI + configured provider/model overlay/custom model；provider/override/store key 使用统一 case-fold canonical identity | `model-runtime.ts`、`provider-composer.ts` | `ported` | generated catalog input/manifest availability |
+| `B-MODEL-003` | exact CLI/default/enabled ordered resolution、unavailable diagnostics 与 canonical provider-default custom derivation | `model-resolver.ts`; 3217/6949 | `ported` | fuzzy/cycling interactive workflow |
+| `B-MODEL-004` | atomic snapshots, failed reload preserves health, global unknown preservation；pre-existing durable parent + leaf parent sync | `settings-manager.ts`; 6999/3616/2753 | `ported` | project trust service and richer settings migration |
+| `B-MODEL-005` | production selected-route preflight rejects unsupported/unknown provider, model and override fields before credential/network/session side effects | `model-runtime.ts`、`model-registry.ts`、`provider-composer.ts` | `ported` | full compat/oauth/auth-header adapter slice remains deferred |
+
 | ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
 | --- | --- | --- | --- | --- |
 | `B-PROVIDER-001` | 每实例 FIFO script、固定 chunk/clock/ID/usage、request capture | `packages/ai/test/faux-provider.test.ts` 的 `consumes queued responses in order and errors when exhausted`、`can replace and append queued responses` | `ported` | R-PROVIDER-002 |
