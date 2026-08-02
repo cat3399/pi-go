@@ -154,7 +154,9 @@ func TestCancelAndConcurrentSnapshots(t *testing.T) {
 		go func() {
 			defer group.Done()
 			for n := 0; n < 80; n++ {
-				if err := s.Reload(context.Background()); err != nil {
+				if err := s.Reload(context.Background()); errors.Is(err, ErrStaleReload) {
+					continue
+				} else if err != nil {
 					t.Errorf("reload: %v", err)
 					return
 				}

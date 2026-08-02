@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 type scalarKind uint8
@@ -176,7 +175,7 @@ func parseArgs(value string) []string {
 			hasToken = true
 			continue
 		}
-		if unicode.IsSpace(r) {
+		if isECMAScriptWhitespace(r) {
 			if hasToken {
 				out = append(out, current.String())
 				current.Reset()
@@ -191,6 +190,20 @@ func parseArgs(value string) []string {
 		out = append(out, current.String())
 	}
 	return out
+}
+
+// isECMAScriptWhitespace implements the fixed ECMAScript WhiteSpace and
+// LineTerminator sets used by upstream JavaScript regexp \s. In particular it
+// includes BOM/FEFF and excludes Unicode NEL/U+0085.
+func isECMAScriptWhitespace(r rune) bool {
+	switch r {
+	case '\u0009', '\u000a', '\u000b', '\u000c', '\u000d', '\u0020',
+		'\u00a0', '\u1680', '\u2028', '\u2029', '\u202f', '\u205f',
+		'\u3000', '\ufeff':
+		return true
+	default:
+		return r >= '\u2000' && r <= '\u200a'
+	}
 }
 
 var placeholder = regexp.MustCompile(`\$\{(\d+|ARGUMENTS|@):-([^}]*)\}|\$\{@:(\d+)(?::(\d+))?\}|\$(ARGUMENTS|@|\d+)`)

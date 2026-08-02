@@ -185,6 +185,7 @@ func TestTemplateInvocationUsesUnicodeWhitespaceBoundaries(t *testing.T) {
 		"/review\none\ttwo":     "one|two|one two",
 		"/review\r\none\ftwo":   "one|two|one two",
 		"/review\u00a0one\vtwo": "one|two|one two",
+		"/review\ufeffone two":  "one|two|one two",
 	} {
 		if got := ExpandTemplate(input, templates); got != want {
 			t.Fatalf("ExpandTemplate(%q) = %q, want %q", input, got, want)
@@ -192,6 +193,12 @@ func TestTemplateInvocationUsesUnicodeWhitespaceBoundaries(t *testing.T) {
 	}
 	if got := ExpandTemplate("/ review", templates); got != "/ review" {
 		t.Fatalf("empty command name expanded to %q", got)
+	}
+	if got := ExpandTemplate("/review\u0085one", templates); got != "/review\u0085one" {
+		t.Fatalf("NEL incorrectly separated command: %q", got)
+	}
+	if got := ExpandTemplate("/review one\u0085two", templates); got != "one\u0085two||one\u0085two" {
+		t.Fatalf("NEL incorrectly separated argument: %q", got)
 	}
 	if got := substitute("<$1>", parseArgs(`"line one
 line two"`)); got != "<line one\nline two>" {
@@ -386,6 +393,42 @@ func TestReloadFailureBeforeFirstSnapshotAndCancellationRetention(t *testing.T) 
 	snapshot, err := s.Snapshot()
 	if err != nil || !strings.Contains(snapshot.SystemPrompt, "healthy") {
 		t.Fatalf("cancelled reload changed healthy snapshot: %#v %v", snapshot, err)
+	}
+}
+
+func TestReloadGenerationPreventsTrustedStalePublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, _, cwd := newService(t)
+	write(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "stale trusted prompt")
+	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	s.beforePublish = func(generation uint64) {
+		if generation == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	oldDone := make(chan error, 1)
+	go func() { oldDone <- s.Reload(context.Background()) }()
+	<-entered
+	if err := s.Trust().Set(context.Background(), cwd, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatalf("new untrusted reload = %v", err)
+	}
+	close(release)
+	if err := <-oldDone; !errors.Is(err, ErrStaleReload) {
+		t.Fatalf("old trusted reload = %v", err)
+	}
+	snapshot, err := s.Snapshot()
+	if err != nil || snapshot.Trusted || strings.Contains(snapshot.SystemPrompt, "stale trusted prompt") {
+		t.Fatalf("final snapshot = %#v, %v", snapshot, err)
 	}
 }
 
@@ -667,6 +710,49 @@ func TestTrustStoreCancellationLockAndMultiInstanceRace(t *testing.T) {
 	data, err := os.ReadFile(store.Path())
 	if err != nil || !strings.HasSuffix(string(data), "}\n") || strings.Count(string(data), "\n") < 25 {
 		t.Fatalf("racing trust output = %q %v", data, err)
+	}
+}
+
+func TestTrustSerializedSizeLimitPreservesOldStateAndReopens(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, agent, cwd := newService(t)
+	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	beforeSnapshot, _ := s.Snapshot()
+	before, err := os.ReadFile(s.Trust().Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Trust().max = int64(len(before))
+	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
+		t.Fatalf("exact serialized boundary = %v", err)
+	}
+	if err := s.Trust().Set(context.Background(), filepath.Join(cwd, "extra"), false); !errors.Is(err, ErrTooLarge) || !errors.Is(err, ErrTrustStore) {
+		t.Fatalf("serialized overflow = %v", err)
+	}
+	after, err := os.ReadFile(s.Trust().Path())
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("overflow changed old file = %q, %v", after, err)
+	}
+	afterSnapshot, _ := s.Snapshot()
+	if afterSnapshot.SystemPrompt != beforeSnapshot.SystemPrompt || afterSnapshot.Trusted != beforeSnapshot.Trusted {
+		t.Fatalf("overflow changed snapshot = %#v", afterSnapshot)
+	}
+	reopened, err := NewTrustStore(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trusted, known, err := reopened.Get(context.Background(), cwd); err != nil || !known || !trusted {
+		t.Fatalf("reopen after overflow = %t,%t,%v", trusted, known, err)
+	}
+	if err := reopened.Set(context.Background(), filepath.Join(cwd, "extra"), false); err != nil {
+		t.Fatalf("lock not released after overflow: %v", err)
 	}
 }
 

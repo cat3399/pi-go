@@ -14,10 +14,12 @@ import (
 )
 
 type Service struct {
-	config   Config
-	trust    *TrustStore
-	mu       sync.RWMutex
-	snapshot *Snapshot
+	config        Config
+	trust         *TrustStore
+	mu            sync.RWMutex
+	generation    uint64
+	snapshot      *Snapshot
+	beforePublish func(uint64)
 }
 
 // afterDirectoryLstat is a package-private fault seam. It is only set by
@@ -55,10 +57,15 @@ func (s *Service) Reload(ctx context.Context) error {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	s.generation++
+	generation := s.generation
+	s.mu.Unlock()
 	decision, err := s.trust.decision(ctx, s.config.CWD)
 	if err != nil {
 		return err
 	}
+	admission := decision
 	config := s.config
 	if decision.Known && decision.Trusted {
 		config.CWD, decision.Root, err = admitTrustedPath(config.CWD, decision.Root)
@@ -70,10 +77,21 @@ func (s *Service) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.snapshot = &next
-	s.mu.Unlock()
-	return nil
+	if s.beforePublish != nil {
+		s.beforePublish(generation)
+	}
+	// confirmDecision holds the trust-store serialization token from the final
+	// durable re-read through publication. The service mutex then makes the
+	// generation comparison and assignment one indivisible state transition.
+	return s.trust.confirmDecision(ctx, s.config.CWD, admission, func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if generation != s.generation {
+			return ErrStaleReload
+		}
+		s.snapshot = &next
+		return nil
+	})
 }
 
 // admitTrustedPath is intentionally called only after a lexical trust match.

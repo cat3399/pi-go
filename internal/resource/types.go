@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -23,6 +22,7 @@ var (
 	// either the old or new decision survived a crash.
 	ErrCommitUnknown = errors.New("trust decision commit durability is unknown")
 	ErrUnavailable   = errors.New("resource snapshot unavailable")
+	ErrStaleReload   = errors.New("resource reload superseded")
 )
 
 const (
@@ -127,9 +127,9 @@ func ExpandTemplate(text string, templates []Template) string {
 	name := command
 	rest := ""
 	for offset, r := range command {
-		if unicode.IsSpace(r) {
+		if isECMAScriptWhitespace(r) {
 			name = command[:offset]
-			rest = strings.TrimLeftFunc(command[offset:], unicode.IsSpace)
+			rest = strings.TrimLeftFunc(command[offset:], isECMAScriptWhitespace)
 			break
 		}
 	}

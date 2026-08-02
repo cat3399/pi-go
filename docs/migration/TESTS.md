@@ -122,9 +122,9 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 
 | `T-RESOURCE-001` | B-RESOURCE-001 | resource-loader/project-trust source/tests | `implemented-awaiting-independent-review` | untrusted missing/loop/alias cwd is non-probed; trusted physical-anchor escape and directory-swap regression |
-| `T-RESOURCE-002` | B-RESOURCE-002 | trust-manager tests | `implemented-awaiting-independent-review` | null inherit/future stop, raw huge-number preservation, cancellable local serialization, atomic/commit-unknown reconcile, permission/race; Windows compile fail-closed |
-| `T-RESOURCE-003` | B-RESOURCE-003 | prompt-templates/skills tests and 2781 | `implemented-awaiting-independent-review` | same/cross-scope collision, Unicode whitespace/template truncation, strict skill boolean/trim-empty, malformed/size/symlink plus parser fuzz |
-| `T-RESOURCE-004` | B-RESOURCE-004/B-APP-009 | system-prompt/resource reload and 2753 | `implemented-awaiting-independent-review` | healthy snapshot retention, concurrent snapshots, production preflight and admitted `-p` template-to-session/request E2E |
+| `T-RESOURCE-002` | B-RESOURCE-002 | trust-manager tests | `implemented-awaiting-independent-review` | null inherit/future stop, raw huge-number and exact/exceed serialized-size boundary, cancellable serialization, atomic/commit-unknown reconcile, merge/reopen/race |
+| `T-RESOURCE-003` | B-RESOURCE-003 | prompt-templates/skills tests and 2781 | `implemented-awaiting-independent-review` | same/cross-scope collision, exact ECMAScript whitespace (FEFF/NEL), Unicode truncation, strict skill boolean/trim-empty, malformed/size/symlink plus fuzz |
+| `T-RESOURCE-004` | B-RESOURCE-004/B-APP-009 | system-prompt/resource reload and 2753 | `implemented-awaiting-independent-review` | generation-gated stale trusted build, healthy snapshot retention/race, production preflight and admitted `-p` template E2E |
 
 JSON print mode 的 error exit、RPC、interactive、真实 provider 和 terminal integration tests
 不属于 WF-001 v0.1；进入对应 workflow 时逐项登记。

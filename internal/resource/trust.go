@@ -129,6 +129,10 @@ func (s *TrustStore) decision(ctx context.Context, cwd string) (trustDecision, e
 		return trustDecision{}, err
 	}
 	defer release()
+	return s.decisionUnlocked(cwd)
+}
+
+func (s *TrustStore) decisionUnlocked(cwd string) (trustDecision, error) {
 	root, _, err := s.read()
 	if err != nil {
 		return trustDecision{}, err
@@ -152,6 +156,25 @@ func (s *TrustStore) decision(ctx context.Context, cwd string) (trustDecision, e
 		}
 		current = parent
 	}
+}
+
+func (s *TrustStore) confirmDecision(ctx context.Context, cwd string, want trustDecision, publish func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	release, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	got, err := s.decisionUnlocked(cwd)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return ErrStaleReload
+	}
+	return publish()
 }
 
 func (s *TrustStore) Set(ctx context.Context, cwd string, trusted bool) error {
@@ -220,6 +243,9 @@ func (s *TrustStore) SetMany(ctx context.Context, changes []TrustUpdate) error {
 		out.WriteByte('\n')
 	}
 	out.WriteString("}\n")
+	if int64(out.Len()) > s.max {
+		return fmt.Errorf("%w: %w", ErrTrustStore, ErrTooLarge)
+	}
 	return s.atomic(out.Bytes())
 }
 func (s *TrustStore) Options(cwd string) ([]TrustOption, error) {
