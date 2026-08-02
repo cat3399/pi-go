@@ -455,6 +455,48 @@ func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
 	}
 }
 
+func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("existing persistent trust is deliberately fail-closed on Windows")
+	}
+	root := t.TempDir()
+	workingDir := filepath.Join(root, "parent", "project")
+	agentDir := filepath.Join(root, "agent")
+	if err := os.MkdirAll(filepath.Join(workingDir, ".pi"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workingDir, ".pi", "SYSTEM.md"), []byte("project must stay unauthorized"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := fmt.Sprintf("{\n  %q: true,\n  %q: {\"trusted\": false}\n}\n", filepath.Dir(workingDir), workingDir)
+	if err := os.WriteFile(filepath.Join(agentDir, "trust.json"), []byte(trust), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "ordinary prompt", "--session", filepath.Join(workingDir, "result.jsonl"),
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	system := input[0].(map[string]any)["content"].(string)
+	if strings.Contains(system, "project must stay unauthorized") {
+		t.Fatalf("future trust value inherited parent authorization: %q", system)
+	}
+	userContent := input[1].(map[string]any)["content"].([]any)
+	if userContent[0].(map[string]any)["text"] != "ordinary prompt" {
+		t.Fatalf("ordinary prompt changed: %#v", input[1])
+	}
+}
+
 func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()

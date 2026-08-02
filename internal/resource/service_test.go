@@ -171,8 +171,10 @@ func TestCancelAndConcurrentSnapshots(t *testing.T) {
 func FuzzResourceParsersDoNotPanic(f *testing.F) {
 	f.Add("/name one two")
 	f.Add("---\nname: valid\ndescription: x\n---\nbody")
+	f.Add("1e9999")
 	f.Fuzz(func(t *testing.T, input string) {
 		_, _, _ = frontmatter(input)
 		_ = ExpandTemplate(input, []Template{{Name: "name", Content: "$1 ${2:-x} $@"}})
+		_ = validateRawJSON([]byte(input))
 	})
 }

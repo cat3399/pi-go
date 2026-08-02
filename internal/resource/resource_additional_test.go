@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestExactTrustDoesNotReadAboveTrustAnchor(t *testing.T) {
@@ -177,6 +178,27 @@ func TestTemplatesExpansionAndPrecedenceAreDeterministic(t *testing.T) {
 	}
 }
 
+func TestTemplateInvocationUsesUnicodeWhitespaceBoundaries(t *testing.T) {
+	templates := []Template{{Name: "review", Content: "$1|$2|$@"}}
+	for input, want := range map[string]string{
+		"/review\tone two":      "one|two|one two",
+		"/review\none\ttwo":     "one|two|one two",
+		"/review\r\none\ftwo":   "one|two|one two",
+		"/review\u00a0one\vtwo": "one|two|one two",
+	} {
+		if got := ExpandTemplate(input, templates); got != want {
+			t.Fatalf("ExpandTemplate(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if got := ExpandTemplate("/ review", templates); got != "/ review" {
+		t.Fatalf("empty command name expanded to %q", got)
+	}
+	if got := substitute("<$1>", parseArgs(`"line one
+line two"`)); got != "<line one\nline two>" {
+		t.Fatalf("quoted argument text = %q", got)
+	}
+}
+
 func TestMalformedTemplatesFailWithoutReplacingHealthySnapshot(t *testing.T) {
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "prompts", "ok.md"), "body")
@@ -219,6 +241,56 @@ func TestSkillsRootNestedCollisionAndDisableInvocation(t *testing.T) {
 	}
 }
 
+func TestSkillCollisionsWithinAndAcrossScopesHaveOneWinner(t *testing.T) {
+	s, agent, cwd := newService(t)
+	write(t, filepath.Join(agent, "skills", "a", "SKILL.md"), "---\nname: same\ndescription: global first\n---")
+	write(t, filepath.Join(agent, "skills", "b", "SKILL.md"), "---\nname: same\ndescription: global second\n---")
+	write(t, filepath.Join(cwd, ".pi", "skills", "a", "SKILL.md"), "---\nname: same\ndescription: project first\n---")
+	write(t, filepath.Join(cwd, ".pi", "skills", "b", "SKILL.md"), "---\nname: same\ndescription: project second\n---")
+	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := s.Snapshot()
+	if len(snapshot.Skills) != 1 || snapshot.Skills[0].Description != "project first" {
+		t.Fatalf("skill winners = %#v", snapshot.Skills)
+	}
+	if len(snapshot.Diagnostics) != 3 {
+		t.Fatalf("skill collision diagnostics = %#v", snapshot.Diagnostics)
+	}
+	for _, diagnostic := range snapshot.Diagnostics {
+		if diagnostic.Resource != "skill" || diagnostic.Name != "same" || diagnostic.WinnerPath == diagnostic.LoserPath {
+			t.Fatalf("invalid collision diagnostic = %#v", diagnostic)
+		}
+	}
+	if !strings.Contains(snapshot.SystemPrompt, "project first") || strings.Contains(snapshot.SystemPrompt, "global first") || strings.Contains(snapshot.SystemPrompt, "project second") {
+		t.Fatalf("skill winner prompt = %q", snapshot.SystemPrompt)
+	}
+}
+
+func TestWideDescriptionsKeepValidUTF8Boundaries(t *testing.T) {
+	s, agent, _ := newService(t)
+	wide := strings.Repeat("界", 61)
+	write(t, filepath.Join(agent, "prompts", "wide.md"), wide+"\nbody")
+	write(t, filepath.Join(agent, "skills", "wide", "SKILL.md"), "---\nname: wide\ndescription: "+strings.Repeat("界", 1024)+"\n---")
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := s.Snapshot()
+	if len(snapshot.Templates) != 1 || snapshot.Templates[0].Description != strings.Repeat("界", 60)+"..." {
+		t.Fatalf("wide template description = %q", snapshot.Templates[0].Description)
+	}
+	if len(snapshot.Skills) != 1 || utf8.RuneCountInString(snapshot.Skills[0].Description) != 1024 || !utf8.ValidString(snapshot.SystemPrompt) {
+		t.Fatalf("wide skill/prompt = %#v, valid=%t", snapshot.Skills, utf8.ValidString(snapshot.SystemPrompt))
+	}
+	write(t, filepath.Join(agent, "skills", "too-wide", "SKILL.md"), "---\nname: too-wide\ndescription: "+strings.Repeat("界", 1025)+"\n---")
+	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("overlong rune description = %v", err)
+	}
+}
+
 func TestSkillValidationAndSymlinkFailClosed(t *testing.T) {
 	for _, content := range []string{
 		"---\nname: INVALID\ndescription: x\n---",
@@ -240,6 +312,39 @@ func TestSkillValidationAndSymlinkFailClosed(t *testing.T) {
 	}
 	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("linked skill directory = %v", err)
+	}
+}
+
+func TestSkillBooleanAndTrimEmptyDescriptionAreStrict(t *testing.T) {
+	for _, value := range []string{"1", "t", "yes", "'true'", `"true"`} {
+		s, agent, _ := newService(t)
+		write(t, filepath.Join(agent, "skills", "candidate", "SKILL.md"), "---\nname: candidate\ndescription: valid\ndisable-model-invocation: "+value+"\n---")
+		if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("disable-model-invocation %q = %v", value, err)
+		}
+	}
+	s, agent, _ := newService(t)
+	write(t, filepath.Join(agent, "skills", "blank", "SKILL.md"), "---\nname: blank\ndescription: ' \t '\n---")
+	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("trim-empty description = %v", err)
+	}
+	s, agent, _ = newService(t)
+	write(t, filepath.Join(agent, "skills", "visible", "SKILL.md"), "---\nname: visible\ndescription: valid\ndisable-model-invocation: false\n---")
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatalf("literal false = %v", err)
+	}
+	snapshot, _ := s.Snapshot()
+	if snapshot.Skills[0].DisableModelInvocation {
+		t.Fatalf("literal false disabled skill")
+	}
+	s, agent, _ = newService(t)
+	write(t, filepath.Join(agent, "skills", "hidden", "SKILL.md"), "---\nname: hidden\ndescription: valid\ndisable-model-invocation: TRUE\n---")
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatalf("YAML TRUE = %v", err)
+	}
+	snapshot, _ = s.Snapshot()
+	if !snapshot.Skills[0].DisableModelInvocation {
+		t.Fatalf("YAML TRUE did not disable skill")
 	}
 }
 
@@ -372,10 +477,14 @@ func TestTrustNullAndFutureValuesRoundTripWithoutBlockingOtherDecision(t *testin
 	}
 	s, agent, cwd := newService(t)
 	parent := filepath.Dir(cwd)
-	content := "{\n  \"/future\": {\"version\": 2},\n  \"" + parent + "\": true,\n  \"" + cwd + "\": null\n}\n"
+	future := filepath.Join(cwd, "future")
+	content := "{\n  \"/future-number\": 1e9999,\n  \"" + future + "\": {\"trusted\": false},\n  \"" + parent + "\": true,\n  \"" + cwd + "\": null\n}\n"
 	write(t, filepath.Join(agent, "trust.json"), content)
 	if trusted, known, err := s.Trust().Get(context.Background(), cwd); err != nil || !known || !trusted {
 		t.Fatalf("null entry should inherit parent = %t,%t,%v", trusted, known, err)
+	}
+	if trusted, known, err := s.Trust().Get(context.Background(), filepath.Join(future, "child")); err != nil || known || trusted {
+		t.Fatalf("future value inherited parent trust = %t,%t,%v", trusted, known, err)
 	}
 	child := filepath.Join(cwd, "child")
 	no := false
@@ -383,11 +492,22 @@ func TestTrustNullAndFutureValuesRoundTripWithoutBlockingOtherDecision(t *testin
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(agent, "trust.json"))
-	if err != nil || !strings.Contains(string(data), `"/future": {"version": 2}`) || !strings.Contains(string(data), `"`+cwd+`": null`) {
+	if err != nil || !strings.Contains(string(data), `"/future-number": 1e9999`) || !strings.Contains(string(data), `"`+future+`": {"trusted": false}`) || !strings.Contains(string(data), `"`+cwd+`": null`) {
 		t.Fatalf("future/null preservation = %q %v", data, err)
 	}
 	if trusted, known, err := s.Trust().Get(context.Background(), child); err != nil || !known || trusted {
 		t.Fatalf("new explicit decision = %t,%t,%v", trusted, known, err)
+	}
+}
+
+func TestTrustFutureRawNestedDuplicateIsRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows persistence is deliberately fail-closed")
+	}
+	s, agent, cwd := newService(t)
+	write(t, filepath.Join(agent, "trust.json"), "{\n  \""+cwd+"\": {\"x\": 1, \"x\": 2}\n}\n")
+	if _, _, err := s.Trust().Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
+		t.Fatalf("nested duplicate future value = %v", err)
 	}
 }
 
@@ -555,5 +675,12 @@ func FuzzTemplateExpansionBoundaries(f *testing.F) {
 	f.Add("${999999999999999999999999:-x}", "")
 	f.Fuzz(func(t *testing.T, template, arguments string) {
 		_ = substitute(template, parseArgs(arguments))
+		if utf8.ValidString(template) {
+			for _, limit := range []int{0, 1, 60, 1024} {
+				if got := truncateRunes(template, limit); !utf8.ValidString(got) {
+					t.Fatalf("truncateRunes produced invalid UTF-8: %q", got)
+				}
+			}
+		}
 	})
 }

@@ -18,7 +18,7 @@
 - 未明确 trusted 的 cwd 只作 lexical absolute key lookup，不 `stat`/canonicalize/read/parse/discover；因此 project 文件（包括 dangling/loop symlink）不能改变 global prompt、错误或 resource-loader 时序。明确命中后才 canonicalize，并拒绝逃离该 physical trust anchor 的链接。
 - global 先加载，trusted project 覆盖同名 template/skill；collision 有 deterministic diagnostic。所有目录顺序稳定，symlink、invalid UTF-8、oversize、malformed frontmatter/skill 都明确失败，绝不拼入 prompt。
 - reload 在锁外构造完整候选 snapshot；失败保留最后健康 snapshot，首次失败返回 unavailable。snapshot 及返回 slices 都不可由调用者反向改写。
-- trust JSON 保留 `boolean`、`null` 与 future raw values；仅 boolean 是明确 decision。rename 后 directory sync 失败以 `ErrCommitUnknown` 返回，调用者必须 reopen/reconcile，不能假定 durable outcome。
+- trust JSON 原样保留 `boolean`、`null` 与 future raw JSON（含超大 number）；`null` 继续查父级，future value 是未授权 stop point，不能降级继承父级 `true`。rename 后 directory sync 失败以 `ErrCommitUnknown` 返回，调用者必须 reopen/reconcile，不能假定 durable outcome。
 - `SYSTEM.md` 取代默认主体；append/instructions/templates/visible skills 与当前 cwd、仅真实可用 tool 一起有边界化 assembly，超过总上限 fail-closed。`disable-model-invocation` skill 不进入模型 prompt；已 admitted template 在 `-p` 进入 session/provider 前展开。
 
 ## 上游证据与 disposition

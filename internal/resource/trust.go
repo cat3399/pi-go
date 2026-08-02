@@ -102,6 +102,9 @@ func (s *TrustStore) Get(ctx context.Context, cwd string) (bool, bool, error) {
 			if value, known := boolDecision(raw); known {
 				return value, true, nil
 			}
+			if !nullDecision(raw) {
+				return false, false, nil
+			}
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -138,6 +141,9 @@ func (s *TrustStore) decision(ctx context.Context, cwd string) (trustDecision, e
 		if raw, ok := root[current]; ok {
 			if value, known := boolDecision(raw); known {
 				return trustDecision{Trusted: value, Known: true, Root: current}, nil
+			}
+			if !nullDecision(raw) {
+				return trustDecision{}, nil
 			}
 		}
 		parent := filepath.Dir(current)
@@ -288,9 +294,13 @@ func boolDecision(raw json.RawMessage) (bool, bool) {
 	if bytes.Equal(trimmed, []byte("false")) {
 		return false, true
 	}
-	// null and future values are intentionally unknown. They neither authorize
-	// a cwd nor poison unrelated explicit decisions in the same durable object.
+	// null and future values are intentionally not booleans. Callers distinguish
+	// null (inherit) from a future value (an unknown stop point).
 	return false, false
+}
+
+func nullDecision(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 func decodeStrictObject(data []byte) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -315,8 +325,7 @@ func decodeStrictObject(data []byte) (map[string]json.RawMessage, error) {
 		if err := dec.Decode(&raw); err != nil {
 			return nil, err
 		}
-		var value any
-		if err := json.Unmarshal(raw, &value); err != nil {
+		if err := validateRawJSON(raw); err != nil {
 			return nil, err
 		}
 		out[name] = append(json.RawMessage(nil), raw...)
@@ -329,6 +338,67 @@ func decodeStrictObject(data []byte) (map[string]json.RawMessage, error) {
 		return nil, errors.New("trailing")
 	}
 	return out, nil
+}
+
+func validateRawJSON(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := validateJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing value")
+	}
+	return nil
+}
+
+func validateJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("duplicate object key")
+			}
+			seen[key] = struct{}{}
+			if err := validateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closeToken, err := decoder.Token()
+		if err != nil || closeToken != json.Delim('}') {
+			return errors.New("object close")
+		}
+	case '[':
+		for decoder.More() {
+			if err := validateJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closeToken, err := decoder.Token()
+		if err != nil || closeToken != json.Delim(']') {
+			return errors.New("array close")
+		}
+	default:
+		return errors.New("unexpected delimiter")
+	}
+	return nil
 }
 func (s *TrustStore) lock(ctx context.Context) (func(), error) {
 	path := s.path + ".lock"

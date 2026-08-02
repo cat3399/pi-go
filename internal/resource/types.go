@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -122,9 +123,18 @@ func ExpandTemplate(text string, templates []Template) string {
 	if !strings.HasPrefix(text, "/") {
 		return text
 	}
-	name, rest, found := strings.Cut(strings.TrimPrefix(text, "/"), " ")
-	if !found {
-		rest = ""
+	command := strings.TrimPrefix(text, "/")
+	name := command
+	rest := ""
+	for offset, r := range command {
+		if unicode.IsSpace(r) {
+			name = command[:offset]
+			rest = strings.TrimLeftFunc(command[offset:], unicode.IsSpace)
+			break
+		}
+	}
+	if name == "" {
+		return text
 	}
 	for _, template := range templates {
 		if template.Name == name {

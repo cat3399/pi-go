@@ -5,6 +5,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+)
+
+type scalarKind uint8
+
+const (
+	scalarPlain scalarKind = iota
+	scalarQuoted
 )
 
 // frontmatter is deliberately a small strict subset. Resource metadata is
@@ -12,8 +20,13 @@ import (
 // second interpreter to the trust boundary. Quoted scalars and folded lines
 // cover the upstream skill/template metadata used by this milestone.
 func frontmatter(raw string) (map[string]string, string, error) {
+	values, body, _, err := frontmatterDetailed(raw)
+	return values, body, err
+}
+
+func frontmatterDetailed(raw string) (map[string]string, string, map[string]scalarKind, error) {
 	if !strings.HasPrefix(raw, "---\n") && !strings.HasPrefix(raw, "---\r\n") {
-		return map[string]string{}, raw, nil
+		return map[string]string{}, raw, map[string]scalarKind{}, nil
 	}
 	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 	end := -1
@@ -24,31 +37,33 @@ func frontmatter(raw string) (map[string]string, string, error) {
 		}
 	}
 	if end < 0 {
-		return nil, "", fmt.Errorf("unterminated frontmatter")
+		return nil, "", nil, fmt.Errorf("unterminated frontmatter")
 	}
 	out := map[string]string{}
+	kinds := map[string]scalarKind{}
 	for _, line := range lines[1:end] {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		key, value, ok := strings.Cut(line, ":")
 		if !ok || strings.TrimSpace(key) == "" {
-			return nil, "", fmt.Errorf("invalid frontmatter")
+			return nil, "", nil, fmt.Errorf("invalid frontmatter")
 		}
 		key = strings.TrimSpace(key)
 		if _, exists := out[key]; exists {
-			return nil, "", fmt.Errorf("duplicate frontmatter field")
+			return nil, "", nil, fmt.Errorf("duplicate frontmatter field")
 		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			kinds[key] = scalarQuoted
 			value = value[1 : len(value)-1]
 		}
 		if value == "|" || value == ">" {
-			return nil, "", fmt.Errorf("multiline frontmatter is unsupported")
+			return nil, "", nil, fmt.Errorf("multiline frontmatter is unsupported")
 		}
 		out[key] = value
 	}
-	return out, strings.Join(lines[end+1:], "\n"), nil
+	return out, strings.Join(lines[end+1:], "\n"), kinds, nil
 }
 
 func assemble(c Config, snapshot Snapshot) (string, error) {
@@ -161,7 +176,7 @@ func parseArgs(value string) []string {
 			hasToken = true
 			continue
 		}
-		if r == ' ' || r == '\t' || r == '\n' {
+		if unicode.IsSpace(r) {
 			if hasToken {
 				out = append(out, current.String())
 				current.Reset()

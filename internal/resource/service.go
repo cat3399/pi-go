@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -197,6 +196,7 @@ func load(ctx context.Context, c Config, decision trustDecision) (Snapshot, erro
 	if out.Skills, err = loadSkills(ctx, filepath.Join(c.AgentDir, "skills"), ScopeGlobal, c.MaxFileBytes, ""); err != nil {
 		return Snapshot{}, err
 	}
+	out.Skills, out.Diagnostics = mergeSkills(nil, out.Skills, out.Diagnostics)
 	if trusted {
 		for _, dir := range []string{filepath.Join(c.CWD, ".pi", "skills"), filepath.Join(c.CWD, ".agents", "skills")} {
 			project, err := loadSkills(ctx, dir, ScopeProject, c.MaxFileBytes, decision.Root)
@@ -362,8 +362,8 @@ func loadTemplates(ctx context.Context, dir string, scope Scope, max int64, anch
 			for _, line := range strings.Split(body, "\n") {
 				if strings.TrimSpace(line) != "" {
 					desc = line
-					if len(desc) > 60 {
-						desc = desc[:60] + "..."
+					if utf8.RuneCountInString(desc) > 60 {
+						desc = truncateRunes(desc, 60) + "..."
 					}
 					break
 				}
@@ -387,7 +387,7 @@ func loadSkills(ctx context.Context, dir string, scope Scope, max int64, anchor 
 				if err != nil {
 					return err
 				}
-				front, _, err := frontmatter(raw)
+				front, _, kinds, err := frontmatterDetailed(raw)
 				if err != nil {
 					return fmt.Errorf("%w: SKILL.md", ErrMalformed)
 				}
@@ -401,11 +401,11 @@ func loadSkills(ctx context.Context, dir string, scope Scope, max int64, anchor 
 				}
 				disable := false
 				if raw, exists := front["disable-model-invocation"]; exists {
-					parsed, parseErr := strconv.ParseBool(raw)
-					if parseErr != nil {
+					boolean := strings.ToLower(raw)
+					if kinds["disable-model-invocation"] == scalarQuoted || (boolean != "true" && boolean != "false") {
 						return fmt.Errorf("%w: invalid disable-model-invocation", ErrMalformed)
 					}
-					disable = parsed
+					disable = boolean == "true"
 				}
 				out = append(out, Skill{Source: Source{filepath.Join(current, entry.Name()), scope}, Name: name, Description: desc, BaseDir: current, DisableModelInvocation: disable})
 				return nil
@@ -434,7 +434,7 @@ func loadSkills(ctx context.Context, dir string, scope Scope, max int64, anchor 
 	return out, nil
 }
 func validSkill(name, desc string) bool {
-	if name == "" || len(name) > 64 || desc == "" || len(desc) > 1024 {
+	if name == "" || len(name) > 64 || strings.TrimSpace(desc) == "" || utf8.RuneCountInString(desc) > 1024 {
 		return false
 	}
 	for _, r := range name {
@@ -443,6 +443,20 @@ func validSkill(name, desc string) bool {
 		}
 	}
 	return !strings.HasPrefix(name, "-") && !strings.HasSuffix(name, "-") && !strings.Contains(name, "--")
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	count := 0
+	for offset := range value {
+		if count == limit {
+			return value[:offset]
+		}
+		count++
+	}
+	return value
 }
 func mergeTemplates(base, project []Template, diagnostics []Diagnostic) ([]Template, []Diagnostic) {
 	index := map[string]int{}
@@ -467,8 +481,13 @@ func mergeSkills(base, project []Skill, diagnostics []Diagnostic) ([]Skill, []Di
 	}
 	for _, v := range project {
 		if i, ok := index[v.Name]; ok {
-			diagnostics = append(diagnostics, Diagnostic{Kind: "collision", Resource: "skill", Name: v.Name, WinnerPath: v.Path, LoserPath: base[i].Path})
-			base[i] = v
+			winner := base[i]
+			loser := v
+			if winner.Scope == ScopeGlobal && v.Scope == ScopeProject {
+				winner, loser = v, winner
+				base[i] = v
+			}
+			diagnostics = append(diagnostics, Diagnostic{Kind: "collision", Resource: "skill", Name: v.Name, WinnerPath: winner.Path, LoserPath: loser.Path})
 		} else {
 			index[v.Name] = len(base)
 			base = append(base, v)
