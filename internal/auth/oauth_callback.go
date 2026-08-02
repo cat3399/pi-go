@@ -34,13 +34,16 @@ type callbackResult struct {
 	err  error
 }
 type callbackWaiter struct {
-	state    string
-	listener net.Listener
-	server   *http.Server
-	result   chan callbackResult
-	once     sync.Once
-	closed   chan struct{}
-	hosts    map[string]struct{}
+	state       string
+	listener    net.Listener
+	server      *http.Server
+	result      chan callbackResult
+	closed      chan struct{}
+	hosts       map[string]struct{}
+	mu          sync.Mutex
+	claimed     bool
+	published   bool
+	publishDone chan struct{}
 }
 
 func startCallbackWaiter(host string, port int, state string, factory ListenerFactory) (*callbackWaiter, error) {
@@ -52,41 +55,60 @@ func startCallbackWaiter(host string, port int, state string, factory ListenerFa
 		return nil, failure(KindOAuth, "bind OAuth callback listener", "openai", err)
 	}
 	w := &callbackWaiter{
-		state: state, listener: listener, result: make(chan callbackResult, 1), closed: make(chan struct{}),
+		state: state, listener: listener, result: make(chan callbackResult, 1), closed: make(chan struct{}), publishDone: make(chan struct{}),
 		hosts: map[string]struct{}{net.JoinHostPort("localhost", strconv.Itoa(port)): {}, net.JoinHostPort(host, strconv.Itoa(port)): {}},
 	}
 	w.server = &http.Server{Handler: http.HandlerFunc(w.handle), ReadHeaderTimeout: callbackReadHeaderTimeout, MaxHeaderBytes: callbackMaxHeaderBytes}
 	go func() {
 		if err := w.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			w.finish(callbackResult{err: failure(KindOAuth, "serve OAuth callback", "openai", err)})
+			if w.claim() {
+				w.publish(callbackResult{err: failure(KindOAuth, "serve OAuth callback", "openai", err)})
+			}
 		}
 	}()
 	return w, nil
 }
 
-func (w *callbackWaiter) finish(result callbackResult) bool {
-	won := false
-	w.once.Do(func() { won = true; w.result <- result; close(w.closed); _ = w.listener.Close() })
-	return won
+func (w *callbackWaiter) claim() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.claimed {
+		return false
+	}
+	w.claimed = true
+	return true
+}
+func (w *callbackWaiter) publish(result callbackResult) {
+	w.mu.Lock()
+	if w.published {
+		w.mu.Unlock()
+		return
+	}
+	w.published = true
+	w.result <- result
+	close(w.closed)
+	close(w.publishDone)
+	w.mu.Unlock()
+	_ = w.listener.Close()
 }
 func (w *callbackWaiter) Close() {
 	if w == nil {
 		return
 	}
-	w.finish(callbackResult{err: failure(KindCancelled, "cancel OAuth callback", "openai", context.Canceled)})
+	if w.claim() {
+		w.publish(callbackResult{err: failure(KindCancelled, "cancel OAuth callback", "openai", context.Canceled)})
+	}
+	<-w.publishDone
 	_ = w.server.Close()
 	_ = w.listener.Close()
 }
 func (w *callbackWaiter) handle(response http.ResponseWriter, request *http.Request) {
-	response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if request.Method != http.MethodGet || request.URL.Path != "/auth/callback" || request.URL.RawPath != "" {
-		response.WriteHeader(http.StatusNotFound)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "Callback route not found.")))
+		_ = writeCallbackPage(response, http.StatusNotFound, "Authentication failed", "Callback route not found.")
 		return
 	}
 	if _, ok := w.hosts[request.Host]; !ok {
-		response.WriteHeader(http.StatusBadRequest)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "Invalid callback host.")))
+		_ = writeCallbackPage(response, http.StatusBadRequest, "Authentication failed", "Invalid callback host.")
 		return
 	}
 	if len(request.URL.RawQuery) > callbackMaxQueryBytes {
@@ -105,29 +127,49 @@ func (w *callbackWaiter) handle(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	if query.Get("state") != w.state {
-		response.WriteHeader(http.StatusBadRequest)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "State mismatch.")))
+		_ = writeCallbackPage(response, http.StatusBadRequest, "Authentication failed", "State mismatch.")
 		return
 	}
 	if query.Get("error") != "" {
-		response.WriteHeader(http.StatusBadRequest)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "Authorization was rejected.")))
-		w.finish(callbackResult{err: failure(KindOAuth, "receive OAuth callback", "openai", nil)})
+		if !w.claim() {
+			_ = writeCallbackPage(response, http.StatusGone, "Authentication failed", "This login has already completed.")
+			return
+		}
+		if err := writeCallbackPage(response, http.StatusBadRequest, "Authentication failed", "Authorization was rejected."); err != nil {
+			w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", "openai", err)})
+			return
+		}
+		w.publish(callbackResult{err: failure(KindOAuth, "receive OAuth callback", "openai", nil)})
 		return
 	}
 	code := query.Get("code")
 	if !validOAuthText(code) {
-		response.WriteHeader(http.StatusBadRequest)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "Missing authorization code.")))
+		_ = writeCallbackPage(response, http.StatusBadRequest, "Authentication failed", "Missing authorization code.")
 		return
 	}
-	if !w.finish(callbackResult{code: code}) {
-		response.WriteHeader(http.StatusGone)
-		_, _ = response.Write([]byte(oauthPage("Authentication failed", "This login has already completed.")))
-	} else {
-		response.WriteHeader(http.StatusOK)
-		_, _ = response.Write([]byte(oauthPage("Authentication successful", "OpenAI authentication completed. You can close this window.")))
+	if !w.claim() {
+		_ = writeCallbackPage(response, http.StatusGone, "Authentication failed", "This login has already completed.")
+		return
 	}
+	if err := writeCallbackPage(response, http.StatusOK, "Authentication successful", "OpenAI authentication completed. You can close this window."); err != nil {
+		w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", "openai", err)})
+		return
+	}
+	w.publish(callbackResult{code: code})
+}
+
+func writeCallbackPage(response http.ResponseWriter, status int, title, message string) error {
+	response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	response.WriteHeader(status)
+	if _, err := response.Write([]byte(oauthPage(title, message))); err != nil {
+		return err
+	}
+	flusher, ok := response.(http.Flusher)
+	if !ok {
+		return errors.New("callback response cannot be flushed")
+	}
+	flusher.Flush()
+	return nil
 }
 
 func oauthPage(title, message string) string {

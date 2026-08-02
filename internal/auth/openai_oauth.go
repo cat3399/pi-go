@@ -322,10 +322,7 @@ func (o *OpenAICodexOAuth) token(ctx context.Context, operation string, form url
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := o.client.Do(request)
 	if err != nil {
-		if context.Cause(ctx) != nil {
-			return OAuthCredential{}, failure(KindCancelled, operation+" OpenAI Codex token", "openai", context.Cause(ctx))
-		}
-		return OAuthCredential{}, failure(KindOAuth, operation+" OpenAI Codex token", "openai", err)
+		return OAuthCredential{}, requestFailure(ctx, operation+" OpenAI Codex token", err)
 	}
 	defer response.Body.Close()
 	body, root, admissionErr := readJSONDocument(response, o.maxBody, response.StatusCode < 200 || response.StatusCode > 299)

@@ -139,6 +139,50 @@ func TestBrowserCallbackStateErrorsCancellationAndLateCallback(t *testing.T) {
 	}
 }
 
+func TestBrowserWaitStartsBeforeCallbackClientReadsCompletePage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, oauthJSON(oauthJWT("concurrent-account"), "refresh"))
+	}))
+	defer server.Close()
+	listener := &ephemeralListener{}
+	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, CallbackListener: listener})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz, err := flow.BeginBrowserLogin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		credential, waitErr := authz.Wait(context.Background(), nil)
+		if waitErr == nil && credential.AccountID != "concurrent-account" {
+			waitErr = errors.New("wrong account")
+		}
+		waitDone <- waitErr
+	}()
+	request, _ := http.NewRequest(http.MethodGet, "http://"+listener.listener.Addr().String()+"/auth/callback?state="+authz.callback.state+"&code=code", nil)
+	request.Host = "localhost:1455"
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("callback request returned EOF/error: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), "OpenAI authentication completed") {
+		t.Fatalf("callback page = status %d body %q error %v", response.StatusCode, body, readErr)
+	}
+	select {
+	case waitErr := <-waitDone:
+		if waitErr != nil {
+			t.Fatal(waitErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not complete")
+	}
+}
+
 func TestDeviceFlowPollsPendingSlowDownAndExchanges(t *testing.T) {
 	var polls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -355,6 +399,64 @@ func TestDeviceHungPollIsBoundedByExpiryContext(t *testing.T) {
 	case <-entered:
 	default:
 		t.Fatal("poll was not issued")
+	}
+}
+
+func TestDeviceFinalExchangeDeadlineAndCallerCancelClassification(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		expires      time.Duration
+		cancelCaller bool
+		want         Kind
+	}{
+		{name: "deadline", expires: 30 * time.Millisecond, want: KindTimeout},
+		{name: "caller cancel", expires: time.Second, cancelCaller: true, want: KindCancelled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			exchangeEntered := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/api/accounts/deviceauth/token":
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(writer, `{"authorization_code":"code","code_verifier":"verifier"}`)
+				case "/oauth/token":
+					close(exchangeEntered)
+					<-release
+				default:
+					t.Errorf("path = %s", request.URL.Path)
+				}
+			}))
+			defer func() { close(release); server.Close() }()
+			flow, _ := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL})
+			ctx := context.Background()
+			var cancel context.CancelFunc
+			if test.cancelCaller {
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := flow.CompleteDeviceLogin(ctx, DeviceCode{DeviceAuthID: "device", UserCode: "user", ExpiresIn: test.expires})
+				done <- err
+			}()
+			select {
+			case <-exchangeEntered:
+			case <-time.After(time.Second):
+				t.Fatal("final exchange was not issued")
+			}
+			if test.cancelCaller {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !IsKind(err, test.want) {
+					t.Fatalf("exchange error = %v, want %s", err, test.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("hung final exchange exceeded deadline/cancel")
+			}
+		})
 	}
 }
 
