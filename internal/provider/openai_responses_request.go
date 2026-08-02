@@ -10,11 +10,12 @@ import (
 )
 
 type responsesRequestPayload struct {
-	Model  string                  `json:"model"`
-	Input  []any                   `json:"input"`
-	Tools  []responsesFunctionTool `json:"tools,omitempty"`
-	Stream bool                    `json:"stream"`
-	Store  bool                    `json:"store"`
+	Model             string                  `json:"model"`
+	Input             []any                   `json:"input"`
+	Tools             []responsesFunctionTool `json:"tools,omitempty"`
+	ParallelToolCalls bool                    `json:"parallel_tool_calls"`
+	Stream            bool                    `json:"stream"`
+	Store             bool                    `json:"store"`
 }
 
 type responsesFunctionTool struct {
@@ -117,11 +118,12 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 		return nil, err
 	}
 	payload, err := json.Marshal(responsesRequestPayload{
-		Model:  request.Model().ID(),
-		Input:  input,
-		Tools:  tools,
-		Stream: true,
-		Store:  false,
+		Model:             request.Model().ID(),
+		Input:             input,
+		Tools:             tools,
+		ParallelToolCalls: request.ParallelToolCalls(),
+		Stream:            true,
+		Store:             false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode JSON: %w", ErrOpenAIResponsesRequest, err)

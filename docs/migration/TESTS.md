@@ -35,6 +35,7 @@
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
 | `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；awaiting module review |
 | `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `deferred` | 已覆盖 request causality、local SSE、empty output、bounded/stable non-`fc_*` normalization 与 multi-text fallback IDs；assistant message 尚无 source provider/API/model，无法区分 native/foreign `fc_*` 或 same-provider different-model pairing。M-BASE/session provenance 进入 provider Request 时必须重评并补 foreign `fc_*`/model-handoff fixture；awaiting module review |
+| `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | recursive strict object-completeness admission、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire 与 production simulated-server 400 oracle；`true` 仅在已复审 M-AGENT/v0.2 合入并完成 integration test 后启用；awaiting module review |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -93,7 +94,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `strengthened` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；R-TOOL-005 |
 | `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `strengthened` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；R-TOOL-005 |
 | `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `strengthened` | JSON/edit/unified-patch fuzz、symlink TOCTOU、effective permission、cancel/race strengthening；R-TOOL-005 |
-| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission、Bash timeout schema/decoder exact boundary contract、filesystem schema/runtime samples and WF-003 request assertion；awaiting module review |
+| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission、fixed-upstream `strict:false`、Bash timeout schema/decoder exact boundary contract、filesystem schema/runtime samples and WF-003 request assertion；awaiting module review |
 
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。

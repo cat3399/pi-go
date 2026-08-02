@@ -55,10 +55,19 @@ func (m ModelRef) ID() string       { return m.id }
 
 // Request is an immutable snapshot of one provider invocation.
 type Request struct {
-	model        ModelRef
-	systemPrompt string
-	messages     []llm.ConversationMessage
-	tools        []ToolDefinition
+	model             ModelRef
+	systemPrompt      string
+	messages          []llm.ConversationMessage
+	tools             []ToolDefinition
+	parallelToolCalls bool
+}
+
+// RequestOptions contains provider capabilities that must be chosen by the
+// coordinator constructing a request. The zero value is the safe single-call
+// policy used by the current agent runtime.
+type RequestOptions struct {
+	Tools                  []ToolDefinition
+	AllowParallelToolCalls bool
 }
 
 func NewRequest(
@@ -66,7 +75,7 @@ func NewRequest(
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 ) (Request, error) {
-	return NewRequestWithTools(model, systemPrompt, messages, nil)
+	return NewRequestWithOptions(model, systemPrompt, messages, RequestOptions{})
 }
 
 // NewRequestWithTools creates one immutable provider request. The legacy
@@ -77,11 +86,24 @@ func NewRequestWithTools(
 	messages []llm.ConversationMessage,
 	tools []ToolDefinition,
 ) (Request, error) {
+	return NewRequestWithOptions(model, systemPrompt, messages, RequestOptions{Tools: tools})
+}
+
+// NewRequestWithOptions creates one immutable provider request with explicit
+// tool-call concurrency capability. Callers that do not own a multi-call
+// scheduler must leave AllowParallelToolCalls false.
+func NewRequestWithOptions(
+	model ModelRef,
+	systemPrompt string,
+	messages []llm.ConversationMessage,
+	options RequestOptions,
+) (Request, error) {
 	request := Request{
-		model:        model,
-		systemPrompt: systemPrompt,
-		messages:     append([]llm.ConversationMessage(nil), messages...),
-		tools:        append([]ToolDefinition(nil), tools...),
+		model:             model,
+		systemPrompt:      systemPrompt,
+		messages:          append([]llm.ConversationMessage(nil), messages...),
+		tools:             append([]ToolDefinition(nil), options.Tools...),
+		parallelToolCalls: options.AllowParallelToolCalls,
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -235,6 +257,8 @@ func (r Request) Messages() []llm.ConversationMessage {
 func (r Request) Tools() []ToolDefinition {
 	return append([]ToolDefinition(nil), r.tools...)
 }
+
+func (r Request) ParallelToolCalls() bool { return r.parallelToolCalls }
 
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.

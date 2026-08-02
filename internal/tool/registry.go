@@ -202,8 +202,11 @@ func NewBuiltInRegistry(bash *Bash, filesystem *FilesystemSuite) (*Registry, err
 	return NewRegistryWithSpecifications(specifications, tools...)
 }
 
-func mustSpecification(name, description, schema string) Specification {
-	specification, err := NewSpecification(name, description, true, []byte(schema))
+func mustBuiltInSpecification(name, description, schema string) Specification {
+	// The fixed upstream Responses conversion defaults ordinary JSON-schema
+	// tools to non-strict mode. Keep built-ins false unless their schemas are
+	// deliberately redesigned so every optional property is required-nullable.
+	specification, err := NewSpecification(name, description, false, []byte(schema))
 	if err != nil {
 		panic(err)
 	}
@@ -215,17 +218,17 @@ func bashSpecification() Specification {
 		`{"type":"object","additionalProperties":false,"properties":{"command":{"type":"string"},"timeout":{"type":"number","exclusiveMinimum":0,"maximum":%s}},"required":["command"]}`,
 		formatSeconds(MaxBashTimeout),
 	)
-	return mustSpecification(BashToolName, "Run a shell command in the working directory.", schema)
+	return mustBuiltInSpecification(BashToolName, "Run a shell command in the working directory.", schema)
 }
 
 func filesystemSpecifications() []Specification {
 	return []Specification{
-		mustSpecification(ReadToolName, "Read a UTF-8 text file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
-		mustSpecification(WriteToolName, "Write UTF-8 text to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"}},"required":["path","content"]}`),
-		mustSpecification(EditToolName, "Apply exact text replacements to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"edits":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"oldText":{"type":"string","minLength":1},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}`),
-		mustSpecification(GrepToolName, "Search text files for a pattern.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustSpecification(FindToolName, "Find paths matching a glob.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustSpecification(LsToolName, "List directory entries.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":[]}`),
+		mustBuiltInSpecification(ReadToolName, "Read a UTF-8 text file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
+		mustBuiltInSpecification(WriteToolName, "Write UTF-8 text to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"}},"required":["path","content"]}`),
+		mustBuiltInSpecification(EditToolName, "Apply exact text replacements to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"edits":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"oldText":{"type":"string","minLength":1},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}`),
+		mustBuiltInSpecification(GrepToolName, "Search text files for a pattern.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
+		mustBuiltInSpecification(FindToolName, "Find paths matching a glob.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
+		mustBuiltInSpecification(LsToolName, "List directory entries.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":[]}`),
 	}
 }
 

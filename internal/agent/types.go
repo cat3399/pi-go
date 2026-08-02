@@ -103,7 +103,10 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Transcript) {
 		return runtimeConfig{}, fmt.Errorf("%w: transcript is required", ErrInvalidConfig)
 	}
-	if _, err := provider.NewRequestWithTools(config.Model, config.SystemPrompt, nil, config.Tools); err != nil {
+	if _, err := provider.NewRequestWithOptions(config.Model, config.SystemPrompt, nil, provider.RequestOptions{
+		Tools:                  config.Tools,
+		AllowParallelToolCalls: false,
+	}); err != nil {
 		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 

@@ -163,6 +163,10 @@ func TestRunProductionOpenAIToolWorkflowReplaysDurableResult(t *testing.T) {
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if err := simulatedOpenAIResponsesAdmission(payload); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		payloads = append(payloads, payload)
 		turn := len(payloads)
@@ -200,9 +204,20 @@ func TestRunProductionOpenAIToolWorkflowReplaysDurableResult(t *testing.T) {
 	if len(received) != 2 {
 		t.Fatalf("request count = %d", len(received))
 	}
-	tools, ok := received[0]["tools"].([]any)
-	if !ok || len(tools) != 7 {
-		t.Fatalf("first request tools = %#v", received[0]["tools"])
+	for requestIndex, payload := range received {
+		if parallel, ok := payload["parallel_tool_calls"].(bool); !ok || parallel {
+			t.Fatalf("request %d parallel_tool_calls = %#v, want false", requestIndex+1, payload["parallel_tool_calls"])
+		}
+		tools, ok := payload["tools"].([]any)
+		if !ok || len(tools) != 7 {
+			t.Fatalf("request %d tools = %#v", requestIndex+1, payload["tools"])
+		}
+		for toolIndex, raw := range tools {
+			tool, ok := raw.(map[string]any)
+			if !ok || tool["strict"] != false {
+				t.Fatalf("request %d tool %d strict = %#v, want false", requestIndex+1, toolIndex, raw)
+			}
+		}
 	}
 	input, ok := received[1]["input"].([]any)
 	if !ok || len(input) != 3 {
@@ -613,6 +628,57 @@ func writeProductionSSE(t *testing.T, writer io.Writer, events ...map[string]any
 			return
 		}
 	}
+}
+
+// simulatedOpenAIResponsesAdmission models the two request rules that matter
+// to the production single-tool workflow. It deliberately returns HTTP 400 in
+// the fixture when parallel calls are enabled or a strict object leaves any
+// declared property optional, matching the real API's admission behavior.
+func simulatedOpenAIResponsesAdmission(payload map[string]any) error {
+	parallel, ok := payload["parallel_tool_calls"].(bool)
+	if !ok || parallel {
+		return fmt.Errorf("parallel_tool_calls must be false for the single-call runtime")
+	}
+	tools, _ := payload["tools"].([]any)
+	for index, raw := range tools {
+		definition, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("tool %d must be an object", index)
+		}
+		strict, ok := definition["strict"].(bool)
+		if !ok {
+			return fmt.Errorf("tool %d strict must be a boolean", index)
+		}
+		if !strict {
+			continue
+		}
+		parameters, ok := definition["parameters"].(map[string]any)
+		if !ok || parameters["additionalProperties"] != false {
+			return fmt.Errorf("strict tool %d must set additionalProperties false", index)
+		}
+		properties, ok := parameters["properties"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("strict tool %d properties must be an object", index)
+		}
+		requiredValues, ok := parameters["required"].([]any)
+		if !ok {
+			return fmt.Errorf("strict tool %d must require every property", index)
+		}
+		required := make(map[string]struct{}, len(requiredValues))
+		for _, value := range requiredValues {
+			name, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("strict tool %d required names must be strings", index)
+			}
+			required[name] = struct{}{}
+		}
+		for name := range properties {
+			if _, present := required[name]; !present {
+				return fmt.Errorf("strict tool %d leaves property %q optional", index, name)
+			}
+		}
+	}
+	return nil
 }
 
 func writeModelsJSON(

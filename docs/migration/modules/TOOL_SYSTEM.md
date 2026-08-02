@@ -6,7 +6,7 @@
 
 最近通过里程碑：`M-TOOL/v0.2-filesystem-suite`
 
-当前里程碑：`M-TOOL/v0.3-provider-tool-registry`。Registry 将 bash 与 filesystem 的 immutable JSON Schema、严格标记和 executor 同时注册；不能只广告不可执行名称。provider-neutral spec 保持在 tool 边界，OpenAI wire encoding 属 M-PROVIDER。
+当前里程碑：`M-TOOL/v0.3-provider-tool-registry`。Registry 将 bash 与 filesystem 的 immutable JSON Schema、strict capability 和 executor 同时注册；不能只广告不可执行名称。固定上游普通 tools 默认 non-strict，因此当前 built-ins 都登记 `strict:false`；provider-neutral spec 保持在 tool 边界，任何 future strict eligibility 与 OpenAI wire encoding 均属 M-PROVIDER。
 
 ## v0.2 filesystem suite
 

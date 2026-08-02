@@ -82,6 +82,20 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 	}
 }
 
+func TestBuiltInSpecificationsUseUpstreamNonStrictDefault(t *testing.T) {
+	t.Parallel()
+
+	specifications := append([]Specification{bashSpecification()}, filesystemSpecifications()...)
+	if len(specifications) != 7 {
+		t.Fatalf("built-in specification count = %d, want 7", len(specifications))
+	}
+	for _, specification := range specifications {
+		if specification.Strict() {
+			t.Fatalf("built-in specification %q advertises strict mode", specification.Name())
+		}
+	}
+}
+
 func TestFilesystemSpecificationConstraintsMatchRuntimeSamples(t *testing.T) {
 	t.Parallel()
 

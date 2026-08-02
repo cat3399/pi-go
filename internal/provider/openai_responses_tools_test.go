@@ -72,6 +72,9 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	if !ok || tool["type"] != "function" || tool["name"] != "bash" || tool["strict"] != true {
 		t.Fatalf("tool payload = %#v", tools[0])
 	}
+	if parallel, ok := firstPayload["parallel_tool_calls"].(bool); !ok || parallel {
+		t.Fatalf("parallel_tool_calls = %#v, want false", firstPayload["parallel_tool_calls"])
+	}
 
 	text, err := llm.NewTextBlock("I will run it.")
 	if err != nil {
@@ -144,13 +147,14 @@ func functionCallSSEEvents(index int, itemID, callID, arguments string) []any {
 }
 
 func TestToolDefinitionsAreValidatedAndImmutable(t *testing.T) {
-	schema := []byte(`{"type":"object"}`)
+	wantSchema := `{"type":"object","additionalProperties":false,"properties":{},"required":[]}`
+	schema := []byte(wantSchema)
 	definition, err := provider.NewToolDefinition("one", "first tool", true, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
 	schema[2] = 'X'
-	if string(definition.ParametersJSON()) != `{"type":"object"}` {
+	if string(definition.ParametersJSON()) != wantSchema {
 		t.Fatalf("definition schema was mutated: %q", definition.ParametersJSON())
 	}
 	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
@@ -170,7 +174,7 @@ func TestToolDefinitionsAreValidatedAndImmutable(t *testing.T) {
 func TestToolDefinitionEnforcesOpenAIFunctionNameAdmission(t *testing.T) {
 	t.Parallel()
 
-	if _, err := provider.NewToolDefinition(strings.Repeat("a", 64), "valid", true, []byte(`{"type":"object"}`)); err != nil {
+	if _, err := provider.NewToolDefinition(strings.Repeat("a", 64), "valid", false, []byte(`{"type":"object"}`)); err != nil {
 		t.Fatalf("64-character name rejected: %v", err)
 	}
 	invalidNames := []string{
@@ -182,9 +186,102 @@ func TestToolDefinitionEnforcesOpenAIFunctionNameAdmission(t *testing.T) {
 		string([]byte{0xff}),
 	}
 	for _, name := range invalidNames {
-		if _, err := provider.NewToolDefinition(name, "invalid", true, []byte(`{"type":"object"}`)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+		if _, err := provider.NewToolDefinition(name, "invalid", false, []byte(`{"type":"object"}`)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
 			t.Fatalf("NewToolDefinition(%q) error = %v, want ErrInvalidToolDefinition", name, err)
 		}
+	}
+}
+
+func TestToolDefinitionStrictSchemaAdmission(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		`{"type":"object","additionalProperties":false,"properties":{},"required":[]}`,
+		`{"type":"object","additionalProperties":false,"properties":{"value":{"type":["string","null"]}},"required":["value"]}`,
+		`{"type":"object","additionalProperties":false,"properties":{"values":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"id":{"type":"integer"}},"required":["id"]}}},"required":["values"]}`,
+		`{"type":"object","additionalProperties":false,"properties":{"entry":{"$ref":"#/$defs/entry"}},"required":["entry"],"$defs":{"entry":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}},"required":["name"]}}}`,
+	}
+	for index, schema := range valid {
+		if _, err := provider.NewToolDefinition("valid", "valid strict schema", true, []byte(schema)); err != nil {
+			t.Fatalf("valid strict schema %d rejected: %v", index, err)
+		}
+	}
+
+	invalid := []struct {
+		name   string
+		schema string
+	}{
+		{name: "root type", schema: `{"type":"array","items":{"type":"string"}}`},
+		{name: "root anyOf", schema: `{"type":"object","anyOf":[{"type":"object","additionalProperties":false,"properties":{},"required":[]}],"additionalProperties":false,"properties":{},"required":[]}`},
+		{name: "missing additional properties", schema: `{"type":"object","properties":{},"required":[]}`},
+		{name: "open additional properties", schema: `{"type":"object","additionalProperties":true,"properties":{},"required":[]}`},
+		{name: "missing required", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"}}}`},
+		{name: "omitted property", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"},"optional":{"type":"string"}},"required":["value"]}`},
+		{name: "undeclared required", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value","other"]}`},
+		{name: "duplicate required", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value","value"]}`},
+		{name: "nested object incomplete", schema: `{"type":"object","additionalProperties":false,"properties":{"nested":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}},"required":["nested"]}`},
+		{name: "array missing items", schema: `{"type":"object","additionalProperties":false,"properties":{"values":{"type":"array"}},"required":["values"]}`},
+		{name: "unsupported composition", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string","allOf":[{"type":"string"}]}},"required":["value"]}`},
+		{name: "external reference", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"https://example.test/schema"}},"required":["value"]}`},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := provider.NewToolDefinition("invalid", "invalid strict schema", true, []byte(test.schema)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+				t.Fatalf("NewToolDefinition() error = %v, want ErrInvalidToolDefinition", err)
+			}
+		})
+	}
+
+	optional := []byte(`{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"}},"required":[]}`)
+	if _, err := provider.NewToolDefinition("non_strict", "optional property", false, optional); err != nil {
+		t.Fatalf("non-strict optional schema rejected: %v", err)
+	}
+}
+
+func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
+	t.Parallel()
+
+	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := provider.NewToolDefinition("echo", "Echo input.", false, []byte(`{"type":"object","properties":{"value":{"type":"string"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultRequest, err := provider.NewRequestWithTools(model, "", []llm.ConversationMessage{mustUser(t, "echo")}, []provider.ToolDefinition{definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabledRequest, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustUser(t, "echo")}, provider.RequestOptions{
+		Tools:                  []provider.ToolDefinition{definition},
+		AllowParallelToolCalls: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		request provider.Request
+		want    bool
+	}{
+		{name: "safe default", request: defaultRequest, want: false},
+		{name: "explicit capability", request: enabledRequest, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := test.request.ParallelToolCalls(); got != test.want {
+				t.Fatalf("ParallelToolCalls() = %t, want %t", got, test.want)
+			}
+			payload, err := encodeReplayForTest(test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := payload["parallel_tool_calls"].(bool); !ok || got != test.want {
+				t.Fatalf("parallel_tool_calls = %#v, want %t", payload["parallel_tool_calls"], test.want)
+			}
+		})
 	}
 }
 

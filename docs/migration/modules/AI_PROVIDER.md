@@ -127,11 +127,11 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 
 ## v0.3 OpenAI tools/replay 边界
 
-- `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，名称不满足 `[A-Za-z0-9_-]{1,64}`、重复/非 object/可变 caller bytes 均在 admission 失败。
+- `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，名称不满足 `[A-Za-z0-9_-]{1,64}`、重复/非 object/可变 caller bytes 均在 admission 失败。`strict:true` 还必须在 root/nested/array/anyOf/definitions 中满足 Structured Outputs object closure：root object、每个 object `additionalProperties:false`、`required` 完整覆盖 properties；optional 必须改成 required-nullable。固定上游普通 tools 默认 non-strict，因此当前七个 built-ins 显式发送 `strict:false`。
 - replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。Request admission 按 successful assistant call 的 source order 配对 ToolResult，并拒绝 orphan、错序、ID/name mismatch、重复及未完成结果。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID；非 `fc_*` item ID 由完整 raw value 稳定散列为 bounded `fc_*`。
 - SSE 支持 source-order mixed text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
 - 本里程碑只覆盖 function tools。reasoning/image/custom tool、prompt cache，以及没有 M-BASE metadata storage 的 response/message provenance 仍延期；不创建无界 metadata map。当前 assistant domain 没有 source provider/API/model，因而只能保留 `fc_*` 形状，不能判断它是 native 还是 foreign，也不能实现上游 foreign `fc_*` re-hash / same-provider different-model pairing policy；`T-PROVIDER-012` 在 provenance 进入 Request 后重评。
-- M-AGENT/v0.1 只消费一个 call，但 adapter/replay 可表达多个完整 calls；并行 dispatch 属 M-AGENT/v0.2。M-APP 的 local HTTP/SSE scenario 验证一个 bash call、durable ToolResult 和第二 request replay。
+- M-AGENT/v0.1 只消费一个 call，但 adapter/replay 可表达多个完整 calls。`RequestOptions.AllowParallelToolCalls` 是显式 capability，OpenAI wire 总是发送 `parallel_tool_calls`；本分支 agent/production 固定为 `false`。主线已复审的 M-AGENT/v0.2 合入本分支并完成 multi-call integration oracle 后才能显式启用 `true`，本里程碑不合并或冒充该能力。M-APP 的 local HTTP/SSE scenario 以模拟 server admission 验证 non-strict schemas、single-call flag、一个 bash call、durable ToolResult 和第二 request replay。
 
 | ID | 行为 | Workflow | 状态 |
 | --- | --- | --- | --- |

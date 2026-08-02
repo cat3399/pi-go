@@ -59,6 +59,53 @@ func TestOpenAIResponsesRejectsInvalidFunctionNameBeforeNetwork(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesRejectsInvalidStrictSchemaBeforeNetwork(t *testing.T) {
+	t.Parallel()
+
+	model, err := NewModelRef(OpenAIProviderID, OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schema := range [][]byte{
+		[]byte(`{"type":"object","properties":{},"required":[]}`),
+		[]byte(`{"type":"object","additionalProperties":false,"properties":{"optional":{"type":"string"}},"required":[]}`),
+	} {
+		transport := &rejectNetworkDoer{}
+		implementation, err := NewOpenAIResponsesProvider(OpenAIResponsesConfig{
+			BaseURL: "https://fixture.test/v1",
+			APIKey:  "secret",
+			Client:  transport,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := Request{
+			model: model,
+			tools: []ToolDefinition{{
+				name:        "strict_tool",
+				description: "invalid strict schema",
+				strict:      true,
+				parameters:  schema,
+			}},
+		}
+		stream := implementation.Stream(context.Background(), request)
+		event, err := stream.Next()
+		if err != nil || event == nil {
+			t.Fatalf("preflight failure = (%T, %v), want error event", event, err)
+		}
+		failure, ok := event.(llm.ErrorEvent)
+		if !ok || !errors.Is(failure.Failure(), ErrInvalidRequest) || !errors.Is(failure.Failure(), ErrInvalidToolDefinition) {
+			t.Fatalf("preflight event = %#v, want invalid request/tool definition", event)
+		}
+		if transport.calls != 0 {
+			t.Fatalf("HTTP calls = %d, want 0", transport.calls)
+		}
+		if err := stream.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}
+}
+
 type rejectNetworkDoer struct{ calls int }
 
 func (d *rejectNetworkDoer) Do(*http.Request) (*http.Response, error) {

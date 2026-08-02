@@ -26,7 +26,7 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error、pre/mid cancel 形成唯一 terminal outcome | faux exhaustion/factory/error/abort tests | `ported` | R-PROVIDER-002 |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown provider 或缺 adapter 返回 error stream | `providers.test.ts`、`models-runtime.test.ts` | `deferred` | application model装配启动 |
 | `B-PROVIDER-005` | 标准 OpenAI Responses 基础 text/SSE 与 terminal handling | `openai-responses-shared.ts` 及 terminal-event tests | `ported` | R-PROVIDER-004；真实 credential smoke 与 production assembler 分开验收 |
-| `B-PROVIDER-006` | OpenAI Responses function tools schema、assistant/function-call + ToolResult replay、source-order SSE arguments reducer 与 partial/unknown failure | WF-003 | `in-progress` | M-AGENT/v0.1 single-call 接入；多 call dispatch 等 M-AGENT/v0.2；foreign `fc_*` replay 等 source provenance 进入 Request；reasoning/image/custom/cache deferred |
+| `B-PROVIDER-006` | OpenAI Responses function tools schema、assistant/function-call + ToolResult replay、source-order SSE arguments reducer 与 partial/unknown failure | WF-003 | `in-progress` | 当前 built-ins `strict:false` 且 agent `parallel_tool_calls:false`；显式 true 等已复审 M-AGENT/v0.2 集成；foreign `fc_*` replay 等 source provenance 进入 Request；reasoning/image/custom/cache deferred |
 
 ## M-AGENT
 
@@ -81,7 +81,7 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与可应用 multi-hunk patch | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `ported` | R-TOOL-005；full NFKC fuzzy mapping deferred |
 | `B-TOOL-009` | stable ls/find/grep、compiled scoped ignore、grep byte-only truncation、entry/discovery/walk cancellation | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `ported` | R-TOOL-005；Rust regex/fd/gitignore parity debt |
 | `B-TOOL-010` | registry dispatch and agent named executor preserve normal unknown-tool result | tools creation/Agent tool loop evidence | `ported` | R-TOOL-005；provider tool-schema advertisement remains separate slice |
-| `B-TOOL-011` | immutable built-in bash/filesystem schemas and executor come from one registry, so advertised names are dispatchable | tool registry + WF-003 local OpenAI fixture | `in-progress` | M-PROVIDER/v0.3；schema is provider-neutral, no vendor dependency |
+| `B-TOOL-011` | immutable built-in bash/filesystem schemas and executor come from one registry, so advertised names are dispatchable | tool registry + WF-003 local OpenAI fixture | `in-progress` | M-PROVIDER/v0.3；provider-neutral specs follow fixed-upstream non-strict default，strict eligibility 由 provider admission 决定 |
 
 ## M-APP
 
