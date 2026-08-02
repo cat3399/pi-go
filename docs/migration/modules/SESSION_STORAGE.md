@@ -166,7 +166,7 @@ v3 通过结论掩盖。
 
 ## M-SESSION/v0.2-tree-branch
 
-状态：`implemented-awaiting-independent-review`
+状态：`ported`（`R-SESSION-003`）
 
 本里程碑扩大 v3 的 domain 输入域为 append-only forest：每个 entry 仍有唯一 ID，非根
 entry 仍必须引用物理更早的 parent；因此 broken/forward parent、duplicate ID 和 cycle
@@ -191,13 +191,13 @@ compaction-aware context。这些 wire entry 可作为未知 entry 保留和走 
 
 验收重点：branch/reset/reopen round-trip、extract/fork source-preservation、已存在 target 和
 post-publication fault、cancel-before-create、forest graph fuzz，以及 selection/append race。
-本段不构成独立 review 结论。
+独立 review 结论见 [../REVIEWS.md](../REVIEWS.md) 的 `R-SESSION-003`。
 
-上游 `session-manager` test 分类候选（待独立复审定稿）：`tree-traversal` 的
-message/tree/path/branch/reset 和 `createBranchedSession` 路径已有实现与加强测试（atomic
-target、active-source snapshot 与 source-preservation）；`build-context` 的 selected-path
-部分已有实现，compaction/branch-summary projection deferred；`custom-session-id` 的 Create
-既有 coverage 保持，fork custom ID 已有本模块实现与测试；
+上游 `session-manager` test 分类：`tree-traversal` 的 message/tree/path/branch/reset 和
+`createBranchedSession` 路径已 port，并增加 atomic target、active-source snapshot 与
+source-preservation 回归；`build-context` 的 selected-path 部分已 port，compaction/
+branch-summary projection deferred；`custom-session-id` 的 Create 既有 coverage 保持，
+fork custom ID 已 port；
 `file-operations` 的 strict open 已在 v0.1，discovery/list 与空文件初始化属于 application
 selector policy deferred；`labels`、`save-entry` 的 extension entry 及 `migration` 的 v1/v2
 rewrite 均 deferred，不能因 tree reader 能保留 unknown entry 而宣称其 API 已实现。
