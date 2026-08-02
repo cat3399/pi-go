@@ -44,6 +44,13 @@ func (storage *poisonedSnapshotStorage) create(path string, data []byte) (bool, 
 func (storage *poisonedSnapshotStorage) append(ctx context.Context, path string, data []byte) (bool, error) {
 	storage.appendCalls++
 	if storage.appendCalls == storage.failAppendAt {
+		started, err := storage.base.append(ctx, path, data)
+		if err != nil {
+			return started, errors.Join(err, storage.appendErr)
+		}
+		// The complete record is now written and synced. Injecting an error after
+		// that durable operation models the exact disk-ahead-of-memory outcome
+		// that ErrCommitUnknown requires callers to reconcile.
 		return true, storage.appendErr
 	}
 	return storage.base.append(ctx, path, data)
@@ -188,7 +195,7 @@ func TestPoisonedSessionForkAndExtractFailClosedBeforeTargetCreate(t *testing.T)
 	t.Parallel()
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "poisoned-source.jsonl")
-	diskFailure := errors.New("sync outcome unknown")
+	diskFailure := errors.New("injected error after synced append")
 	storage := &poisonedSnapshotStorage{failAppendAt: 2, appendErr: diskFailure}
 	session, err := createWithStorage(storage, sourcePath, CreateOptions{
 		ID: "poisoned-source", WorkingDir: directory,
@@ -203,13 +210,34 @@ func TestPoisonedSessionForkAndExtractFailClosedBeforeTargetCreate(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	sourceAtRoot, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, err = session.Append(context.Background(), mustUserMessage(t, "uncertain tail", time.UnixMilli(2)), AppendOptions{})
 	if !errors.Is(err, ErrCommitUnknown) || !errors.Is(err, diskFailure) || !session.Poisoned() {
 		t.Fatalf("poisoning append = %v, poisoned=%t", err, session.Poisoned())
 	}
-	sourceBefore, err := os.ReadFile(sourcePath)
+	entries := session.Entries()
+	if len(entries) != 1 || entries[0].ID() != root.ID() {
+		t.Fatalf("poisoned memory entries = %v, want only durable root", entryIDs(entries))
+	}
+	if leaf, ok := session.LeafID(); !ok || leaf != root.ID() {
+		t.Fatalf("poisoned memory leaf = (%q, %t), want %q", leaf, ok, root.ID())
+	}
+	sourceWithUncertainTail, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if bytes.Equal(sourceAtRoot, sourceWithUncertainTail) {
+		t.Fatal("fault seam did not put disk ahead of memory")
+	}
+	_, diskEntries, _, _, err := decodeSessionFile(sourcePath, sourceWithUncertainTail)
+	if err != nil {
+		t.Fatalf("synced uncertain tail is not a complete session record: %v", err)
+	}
+	if got, want := entryIDs(diskEntries), []string{"root", "uncertain"}; !equalIDs(got, want) {
+		t.Fatalf("disk entries = %v, want %v", got, want)
 	}
 	createCalls := storage.createCalls
 	tests := []struct {
@@ -226,7 +254,7 @@ func TestPoisonedSessionForkAndExtractFailClosedBeforeTargetCreate(t *testing.T)
 		{
 			name: "extract", path: filepath.Join(directory, "extract-target.jsonl"),
 			call: func() (*Session, error) {
-				return session.ExtractBranch(context.Background(), root.ID(), ExtractOptions{TargetPath: filepath.Join(directory, "extract-target.jsonl"), ID: "extract-target", WorkingDir: directory})
+				return session.ExtractBranch(context.Background(), "not-in-memory", ExtractOptions{TargetPath: filepath.Join(directory, "extract-target.jsonl"), ID: "extract-target", WorkingDir: directory})
 			},
 		},
 	}
@@ -248,7 +276,7 @@ func TestPoisonedSessionForkAndExtractFailClosedBeforeTargetCreate(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(sourceBefore, sourceAfter) {
+	if !bytes.Equal(sourceWithUncertainTail, sourceAfter) {
 		t.Fatal("poisoned Fork/Extract changed source bytes")
 	}
 }
