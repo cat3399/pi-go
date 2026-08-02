@@ -60,7 +60,7 @@ func TestResolveOpenAIKeyPrecedenceAndStoredOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = ResolveOpenAIKey(context.Background(), runtime, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient"})
-	if !IsKind(err, KindUnsupported) || strings.Contains(err.Error(), "secret") {
+	if !IsKind(err, KindMalformed) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("OAuth ownership error = %v", err)
 	}
 }

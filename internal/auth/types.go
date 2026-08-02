@@ -2,21 +2,37 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
 
 const DefaultMaxFileBytes int64 = 4 << 20
 
-// Credential is the supported API-key projection. OAuth is intentionally not
-// represented as a usable credential in v0.1, although opaque OAuth entries
-// are retained exactly when another provider is written.
+// Credential is the typed projection of one auth.json entry. Unknown provider
+// records remain raw JSON in Store and are never decoded merely to preserve a
+// neighbouring mutation.
 type Credential struct {
-	Type string
-	Key  string
-	Env  map[string]string
+	Type  string
+	Key   string
+	Env   map[string]string
+	OAuth OAuthCredential
 }
+
+// OAuthCredential is the canonical, durable OpenAI Codex token shape. Expires
+// is Unix milliseconds to match auth.json and the upstream implementation.
+// Extra retains provider fields that a newer pi may have written.
+type OAuthCredential struct {
+	Access    string
+	Refresh   string
+	Expires   int64
+	AccountID string
+	Extra     map[string]json.RawMessage
+}
+
+func (c OAuthCredential) Expiry() time.Time { return time.UnixMilli(c.Expires) }
 
 type Info struct {
 	ProviderID string
@@ -81,6 +97,10 @@ func validProviderID(provider string) bool {
 
 func validAPIKey(key string) bool {
 	return utf8.ValidString(key) && strings.TrimSpace(key) != "" && !strings.ContainsFunc(key, unicode.IsControl)
+}
+
+func validOAuthText(value string) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) != "" && !strings.ContainsFunc(value, unicode.IsControl)
 }
 
 func cloneEnv(source map[string]string) map[string]string {
