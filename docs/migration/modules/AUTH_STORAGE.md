@@ -2,6 +2,8 @@
 
 状态：`ported`（`M-AUTH/v0.1-api-key-storage-runtime`）
 
+最近通过里程碑：`M-AUTH/v0.1-api-key-storage-runtime`
+
 ## 负责
 
 - `auth.json` 的 API-key credential read/set/delete/list，单文件的进程内与健康进程间串行化；
@@ -51,11 +53,17 @@
 
 | ID | 行为 | 状态 | 证据 |
 | --- | --- | --- | --- |
-| `B-AUTH-001` | API-key read/set/delete 保留 unknown provider，malformed 不覆盖 | `ported` | strict JSON、round-trip、preservation matrix |
-| `B-AUTH-002` | private admission、atomic/durable replacement；Windows persistence fail-closed | `ported` | mode、Windows-only runner suite/cross-compile、fault cleanup |
-| `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、two re-exec writers、cancel/failure release/merge、`-race` |
-| `B-AUTH-004` | runtime override 与 stored/configured/ambient source ownership | `ported` | overlay/precedence/error matrix |
-| `B-AUTH-005` | config template; command value safe refusal | `ported` | escapes, missing env, no-process-side-effect |
+| `B-AUTH-001` | API-key read/set/delete 保留 unknown provider，malformed 不覆盖 | `ported` | strict JSON、round-trip、preservation matrix；R-AUTH-001 |
+| `B-AUTH-002` | private admission、atomic/durable replacement；Windows persistence fail-closed | `ported` | mode、Windows-only runner suite/cross-compile、fault cleanup；R-AUTH-001 |
+| `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、two re-exec writers、cancel/failure release/merge、`-race`；R-AUTH-001 |
+| `B-AUTH-004` | runtime override 与 stored/configured/ambient source ownership | `ported` | overlay/precedence/error matrix；R-AUTH-001 |
+| `B-AUTH-005` | config template; command value safe refusal | `ported` | escapes, missing env, no-process-side-effect；R-AUTH-001 |
+
+## v0.1 review gate
+
+R-AUTH-001 已完成独立联合审查与定点复审，最终结论 `passed`，Blocker/Major/Minor 为
+0/0/0。Windows DACL-backed persistence 和 Windows 实机 test execution 未作为已完成能力；
+v0.1 在 Windows 保持上述 fail-closed contract。
 
 OAuth and bounded command execution are deferred to their own explicitly reviewed slices. Re-evaluate command
 execution only with a concrete trust decision, bounded process-tree implementation for each supported platform,
