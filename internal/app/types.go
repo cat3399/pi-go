@@ -74,6 +74,7 @@ type runtimeDependencies struct {
 	agentNow           func() time.Time
 	settlementTimeout  time.Duration
 	executor           agent.ToolExecutor
+	toolDefinitions    []provider.ToolDefinition
 	bashOptions        tool.BashOptions
 	expandPrompt       func(string) string
 }
@@ -116,11 +117,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		MaxOutputLines:    deps.BashMaxOutputLines,
 		MaxOutputBytes:    deps.BashMaxOutputBytes,
 	}
-	bash, err := tool.NewBash(bashOptions)
-	if err != nil {
-		return runtimeDependencies{}, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
-	}
-	executor, err := agent.NewBashExecutor(bash)
+	executor, definitions, err := buildProductionToolRuntime(bashOptions)
 	if err != nil {
 		return runtimeDependencies{}, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
 	}
@@ -138,6 +135,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		agentNow:           deps.AgentNow,
 		settlementTimeout:  deps.SettlementTimeout,
 		executor:           executor,
+		toolDefinitions:    definitions,
 		bashOptions:        bashOptions,
 		expandPrompt:       deps.ExpandPrompt,
 	}, nil
@@ -162,17 +160,44 @@ func resolveWorkingDirectory(path string) (string, error) {
 	return resolved, nil
 }
 
-func (r runtimeDependencies) executorFor(workingDir string) (agent.ToolExecutor, error) {
+func (r runtimeDependencies) executorFor(workingDir string) (agent.ToolExecutor, []provider.ToolDefinition, error) {
 	if filepath.Clean(workingDir) == r.workingDir {
-		return r.executor, nil
+		return r.executor, append([]provider.ToolDefinition(nil), r.toolDefinitions...), nil
 	}
 	options := r.bashOptions
 	options.WorkingDir = workingDir
+	return buildProductionToolRuntime(options)
+}
+
+func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, []provider.ToolDefinition, error) {
 	bash, err := tool.NewBash(options)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return agent.NewBashExecutor(bash)
+	filesystem, err := tool.NewFilesystemSuite(tool.FilesystemOptions{WorkingDir: options.WorkingDir})
+	if err != nil {
+		return nil, nil, err
+	}
+	registry, err := tool.NewBuiltInRegistry(bash, filesystem)
+	if err != nil {
+		return nil, nil, err
+	}
+	executor, err := agent.NewRegistryExecutor(registry)
+	if err != nil {
+		return nil, nil, err
+	}
+	specifications := registry.Specifications()
+	definitions := make([]provider.ToolDefinition, len(specifications))
+	for index, specification := range specifications {
+		definition, err := provider.NewToolDefinition(
+			specification.Name(), specification.Description(), specification.Strict(), specification.ParametersJSON(),
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		definitions[index] = definition
+	}
+	return executor, definitions, nil
 }
 
 func isNilInterface(value any) bool {

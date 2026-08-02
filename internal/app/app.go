@@ -124,7 +124,7 @@ func runApplication(
 			}
 		}
 	}()
-	executor, err := runtime.executorFor(transcript.Header().WorkingDir())
+	executor, toolDefinitions, err := runtime.executorFor(transcript.Header().WorkingDir())
 	if err != nil {
 		writeDiagnostic(stderr, fmt.Errorf("initialize session tool runtime: %w", err))
 		return ExitFailure
@@ -136,6 +136,7 @@ func runApplication(
 		Model:             runtime.model,
 		SystemPrompt:      runtime.systemPrompt,
 		Tool:              executor,
+		Tools:             toolDefinitions,
 		Now:               runtime.agentNow,
 		SettlementTimeout: runtime.settlementTimeout,
 	})

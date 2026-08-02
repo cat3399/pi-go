@@ -50,7 +50,6 @@ func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 				"item": map[string]any{"type": "message", "id": "msg-1", "role": "assistant", "content": []any{}},
 			},
 			map[string]any{"type": "response.output_text.delta", "output_index": 0, "item_id": "msg-1", "delta": "hel"},
-			map[string]any{"type": "response.future_progress", "opaque": true},
 			map[string]any{"type": "response.output_text.delta", "output_index": 0, "item_id": "msg-1", "delta": "lo"},
 			map[string]any{
 				"type": "response.output_item.done", "output_index": 0,
@@ -107,7 +106,7 @@ func TestOpenAIResponsesIncompleteCanFinalizeFromOutputItemDone(t *testing.T) {
 		APIKey:  "secret",
 		Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(
 			map[string]any{
-				"type": "response.output_item.done", "output_index": 3,
+				"type": "response.output_item.done", "output_index": 0,
 				"item": map[string]any{
 					"type": "message", "id": "msg-final", "role": "assistant", "status": "completed",
 					"content": []any{map[string]any{"type": "output_text", "text": "short"}},
@@ -366,7 +365,7 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			),
 		},
 		{
-			name: "tool output is explicit", contentType: "text/event-stream", wantCause: provider.ErrOpenAIResponsesUnsupported,
+			name: "malformed tool output is explicit", contentType: "text/event-stream",
 			body: responsesSSE(
 				map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc"}},
 				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},
@@ -380,7 +379,7 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			),
 		},
 		{
-			name: "orphan tool delta is explicit", contentType: "text/event-stream", wantCause: provider.ErrOpenAIResponsesUnsupported,
+			name: "orphan tool delta is invalid", contentType: "text/event-stream",
 			body: responsesSSE(
 				map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{}"},
 				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},
@@ -498,13 +497,6 @@ func TestOpenAIResponsesValidatesConfigurationRoutingAndTextScopeBeforeTransport
 	_, wrongTerminal := collectStream(t, implementation.Stream(context.Background(), wrongRequest))
 	assertProviderFailure(t, terminalFailure(t, wrongTerminal), provider.FailureConfiguration, provider.ErrOpenAIResponsesRequest)
 
-	toolRequest := mustResponsesRequest(t, "", []llm.ConversationMessage{
-		mustUser(t, "use tool"),
-		mustToolTerminal(t, "call", "bash", []byte(`{"command":"true"}`)),
-		mustToolResult(t, "call", "bash", "done"),
-	})
-	_, toolTerminal := collectStream(t, implementation.Stream(context.Background(), toolRequest))
-	assertProviderFailure(t, terminalFailure(t, toolTerminal), provider.FailureInvalidRequest, provider.ErrOpenAIResponsesUnsupported)
 	if calls.Load() != 0 {
 		t.Fatalf("transport calls = %d, want 0", calls.Load())
 	}

@@ -4,7 +4,8 @@
 commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 
 首个 deterministic standalone workflow 所需的六个领域模块均已通过独立复审；
-`WF-001` 已闭环，真实 provider adapter 属于下一里程碑。
+`WF-001`、标准 Responses text 与 `WF-003` production multi-tool replay 已闭环；provider
+capability、Agent 调度和 source-order durable replay 由同一联合 integration gate 固定。
 
 ## M-BASE
 
@@ -36,6 +37,7 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-PROVIDER-003` | queue exhaustion、factory/explicit error、pre/mid cancel 形成唯一 terminal outcome | faux exhaustion/factory/error/abort tests | `ported` | R-PROVIDER-002 |
 | `B-PROVIDER-004` | 显式 provider/API dispatch；unknown provider 或缺 adapter 返回 error stream | `providers.test.ts`、`models-runtime.test.ts` | `deferred` | application model装配启动 |
 | `B-PROVIDER-005` | 标准 OpenAI Responses 基础 text/SSE 与 terminal handling | `openai-responses-shared.ts` 及 terminal-event tests | `ported` | R-PROVIDER-004；真实 credential smoke 与 production assembler 分开验收 |
+| `B-PROVIDER-006` | OpenAI Responses function tools schema、assistant/function-call + ToolResult replay、source-order SSE arguments reducer 与 partial/unknown failure | WF-003 | `ported` | R-PROVIDER-005 + Agent integration；built-ins `strict:false`，parallel flag 按有效 execution mode；foreign `fc_*` provenance、reasoning/image/custom/cache deferred |
 
 ## M-AGENT
 
@@ -101,6 +103,7 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与可应用 multi-hunk patch | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `ported` | R-TOOL-005；full NFKC fuzzy mapping deferred |
 | `B-TOOL-009` | stable ls/find/grep、compiled scoped ignore、grep byte-only truncation、entry/discovery/walk cancellation | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `ported` | R-TOOL-005；Rust regex/fd/gitignore parity debt |
 | `B-TOOL-010` | registry dispatch and agent named executor preserve normal unknown-tool result | tools creation/Agent tool loop evidence | `ported` | R-TOOL-005；provider tool-schema advertisement remains separate slice |
+| `B-TOOL-011` | immutable built-in bash/filesystem schemas and executor come from one registry, so advertised names are dispatchable | tool registry + WF-003 local OpenAI fixture | `ported` | R-PROVIDER-005；fixed-upstream non-strict default 是有意 contract，strict eligibility 由 provider admission 决定 |
 
 ## M-APP
 
@@ -114,6 +117,7 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-APP-006` | `--api-key` > stored OpenAI credential > configured models key > `OPENAI_API_KEY`；选中来源失败不 ambient fallback，secret 不进诊断 | `runtime-credentials.ts`；`auth/resolve.ts`；`provider-composer.ts` | `ported` | R-APP-002；login/command value 后续重评 |
 | `B-APP-007` | `--provider openai --model <id>`、`--model openai/<id>` 与默认 OpenAI model；未知 route 在副作用前失败 | `cli/args.ts`；`model-resolver.ts::resolveCliModel` | `ported` | R-APP-002；完整 catalog/fuzzy/cycling 后续重评 |
 | `B-APP-008` | 无 `--session` 时在 agent dir/sessions 下按 cwd 隔离创建 durable session，显式 path 优先 | `config.ts::getAgentDir`；`session-manager.ts::getDefaultSessionDirPath/newSession` | `ported` | R-APP-002 |
+| `B-APP-010` | production local OpenAI HTTP/SSE multi-call workflow advertises registry tools, executes concurrently, stores source-order results, replays both calls/results, and prints final text | WF-003 | `ported` | R-PROVIDER-005 + R-AGENT-002 integration；built-ins non-strict，parallel capability derived；auth/model/resource semantics unchanged |
 
 ## M-AUTH
 
@@ -141,8 +145,7 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-RESOURCE-004` | snapshot reload and system prompt composition | `resource-loader.ts`、`system-prompt.ts`、regressions 2753/2781 | `ported` | generation-gated reload strengthening；extensions/packages deferred；R-RESOURCE-001 |
 | `B-APP-009` | production uses trusted assembled system prompt | `main.ts` resource/runtime assembly | `ported` | pre-session/pre-network assembly and template expansion；R-RESOURCE-001 |
 
-- Prompt cache、multiple models、thinking/image、parallel tools、steering/follow-up、retry、
-  compaction、branch/tree、settings/auth、dynamic catalog、JSON/RPC/interactive/TUI 均为
+- Prompt cache、thinking/image、retry、automatic compaction/navigation、JSON/RPC/interactive/TUI 均为
   `deferred`，按新的 behavior ID 和真实依赖逐项进入。
 - Legacy global provider registration/unregistration、TypeScript conditional generic、TypeBox、
   EventStream class、Node dynamic import 和 package/class 层次属于实现细节，相关 test

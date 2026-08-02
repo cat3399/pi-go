@@ -103,6 +103,45 @@ type FilesystemExecutor struct {
 	registry *tool.Registry
 }
 
+// RegistryExecutor exposes any immutable internal/tool registry through the
+// existing named executor port. It is used by production so advertised bash
+// and filesystem schemas have the same dispatch owner.
+type RegistryExecutor struct{ registry *tool.Registry }
+
+func NewRegistryExecutor(registry *tool.Registry) (*RegistryExecutor, error) {
+	if registry == nil || len(registry.Names()) == 0 {
+		return nil, fmt.Errorf("%w: tool registry is required", ErrInvalidConfig)
+	}
+	return &RegistryExecutor{registry: registry}, nil
+}
+func (e *RegistryExecutor) Name() string { return "registry" }
+func (e *RegistryExecutor) Supports(name string) bool {
+	return e != nil && e.registry != nil && e.registry.Supports(name)
+}
+func (e *RegistryExecutor) ToolExecutionMode(name string) (ToolExecutionMode, bool) {
+	if e == nil || e.registry == nil {
+		return 0, false
+	}
+	mode, ok := e.registry.ExecutionMode(name)
+	if !ok {
+		return 0, false
+	}
+	if mode == tool.ExecutionSequential {
+		return ToolExecutionSequential, true
+	}
+	return ToolExecutionParallel, true
+}
+func (e *RegistryExecutor) Execute(_ context.Context, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+	return ToolOutput{Text: "Tool registry requires a tool name"}, errors.New("tool registry requires a tool name")
+}
+func (e *RegistryExecutor) ExecuteNamed(ctx context.Context, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+	if e == nil || e.registry == nil {
+		return ToolOutput{Text: "Tool registry is not configured"}, errors.New("tool registry is not configured")
+	}
+	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
+	return ToolOutput{Text: result.Text}, err
+}
+
 func NewFilesystemExecutor(registry *tool.Registry) (*FilesystemExecutor, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("%w: filesystem registry is required", ErrInvalidConfig)

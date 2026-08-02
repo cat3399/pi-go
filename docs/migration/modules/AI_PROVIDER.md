@@ -1,9 +1,10 @@
 # M-PROVIDER：AI 与 provider runtime charter
 
-状态：`ported`（`M-PROVIDER/v0.1-deterministic-script`、
-`M-PROVIDER/v0.2-openai-responses-text`）
+状态：`ported`（`M-PROVIDER/v0.3-openai-tools-replay`；`R-PROVIDER-005` passed）
 
-最近完成里程碑：`M-PROVIDER/v0.2-openai-responses-text`
+最近完成里程碑：`M-PROVIDER/v0.3-openai-tools-replay`
+
+本轮通过里程碑：`M-PROVIDER/v0.3-openai-tools-replay`
 
 ## 负责
 
@@ -123,3 +124,23 @@ Provider dispatch 与真实 adapter 分别形成后续独立里程碑和 review�
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005
 replay metadata 仍分别验收，不能用本地 fixture 冒充。
+
+## v0.3 OpenAI tools/replay 边界
+
+- `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，名称不满足 `[A-Za-z0-9_-]{1,64}`、重复/非 object/可变 caller bytes 均在 admission 失败。`strict:true` 还必须在 root/nested/array/anyOf/`$defs` 及 local `$ref` 可达节点中满足 Structured Outputs object closure：root object、每个 object 的 `additionalProperties` 必须是 raw boolean `false`、`required` 完整覆盖 properties；optional 必须改成 required-nullable。local `$ref` 按完整 root 解析 canonical JSON Pointer（含 `#` recursion、`~0/~1` 与 array token），缺失/非法/remote/非 schema target 在 constructor 和发送前 preflight 失败；visited/active 与 traversal budget 保证合法递归且有界。固定上游普通 tools 默认 non-strict，因此当前七个 built-ins 显式发送 `strict:false`。
+- replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。Request admission 按 successful assistant call 的 source order 配对 ToolResult，并拒绝 orphan、错序、ID/name mismatch、重复及未完成结果。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID；非 `fc_*` item ID 由完整 raw value 稳定散列为 bounded `fc_*`。
+- SSE 支持 source-order mixed text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
+- 本里程碑只覆盖 function tools。reasoning/image/custom tool、prompt cache，以及没有 M-BASE metadata storage 的 response/message provenance 仍延期；不创建无界 metadata map。当前 assistant domain 没有 source provider/API/model，因而只能保留 `fc_*` 形状，不能判断它是 native 还是 foreign，也不能实现上游 foreign `fc_*` re-hash / same-provider different-model pairing policy；`T-PROVIDER-012` 在 provenance 进入 Request 后重评。
+- `RequestOptions.AllowParallelToolCalls` 是显式 capability，OpenAI wire 总是发送
+  `parallel_tool_calls`。与 M-AGENT/v0.2 联合集成后，request 与 batch execution 复用同一有效
+  mode：global parallel 且所有已广告 tools 均无 sequential override 时为 `true`；global
+  sequential、任一已广告 sequential override 或非法 override 为 `false`。Production 当前
+  registry 全部进入 parallel lane，因此本地 HTTP/SSE scenario 验证两个 call 并发执行、
+  completion/source-order 分离、两个 durable ToolResult 及第二 request 完整 replay。
+
+| ID | 行为 | Workflow | 状态 |
+| --- | --- | --- | --- |
+| `B-PROVIDER-006` | Responses function tool schema encoding、tool replay、strict SSE function-call reducer | WF-003 | `ported` |
+
+`R-PROVIDER-005` 已以 0 Blocker / 0 Major / 0 Minor 通过 provider 本里程碑；随后完成的
+M-AGENT/v0.2 联合 gate 不重写该历史 review 范围。明确延期项不因 integration 改变。

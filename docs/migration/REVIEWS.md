@@ -358,3 +358,39 @@
 - 验证：累计全仓 test/vet/build/race、resource parser/template fuzz、production E2E，以及 Windows amd64、Linux arm64、Plan 9 amd64 build/test compile；最终 control-key 修订另通过 resource/app targeted/race、全仓 test/vet/build、Windows compile、fuzz 与 diff check。
 - 延期：interactive trust selector、extension/package/remote resource loading、themes、legacy commands migration、settings hot reload 与 Windows private trust persistence；跨平台 compile 不等于 Windows 实机验证。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-PROVIDER-005：M-PROVIDER/v0.3 tools/replay 联合审查与复审
+
+- 范围：M-PROVIDER/v0.3、相关 M-TOOL registry、M-AGENT/v0.1 compatibility wiring、
+  M-APP/v0.3 与 WF-003；实现和闭环 commits 为 `35592e6`、`be96f9d`、`4c29a20`、
+  `ffda854`。
+- 首轮对 `35592e6` 给出 `changes-required`：补齐 OpenAI function-name/发送前 admission、
+  replay causality 与 bounded identity、registry schema/runtime contract evidence，并把缺少
+  source provenance 的 foreign `fc_*` 行为准确留在 deferred ledger；`be96f9d` 关闭这些项。
+- 第二轮为 1 Blocker / 1 Major / 0 Minor：带 optional properties 的 built-ins 不能发送
+  `strict:true`，single-call Agent 也必须在 wire 明确 `parallel_tool_calls:false`；`4c29a20`
+  将 built-ins 固定为有意的 non-strict contract，并加入显式 parallel capability/gate。
+- 第三轮为 0 Blocker / 2 Major / 0 Minor：local `$ref` 尚未基于完整 root 解析，且
+  `additionalProperties:null` 会被误当成 false；`ffda854` 加入 canonical JSON Pointer、
+  recursive visited/active/budget admission、raw boolean false 检查与 zero-HTTP/fuzz 回归。
+- 最终候选验证：全仓 test/vet/build/race、provider/tool 与 local-ref fuzz、Linux/Windows
+  test compile、Darwin arm64 build、production local HTTP/SSE workflow 和累计 diff check
+  均通过；固定上游仍为 `a116523434806910336b9de3e38a41aa5860030b`。
+- 历史 review 边界：当前七个 built-ins 的 `strict:false` 是 fixed-upstream compatibility
+  contract；当时 v0.1 production 固定 `parallel_tool_calls:false`，M-AGENT/v0.2 联合集成不在
+  本 review 的候选 ancestry 中。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0；B-PROVIDER-006、B-TOOL-011、
+  B-APP-010 的 single-call baseline 与 WF-003 provider slice 关闭，T-PROVIDER-012 的
+  provenance gap 保持明确延期。`B-APP-010` 使用新 ID 是为避免与后续已合入的 resource
+  `B-APP-009` 冲突，不改变原 review 证据。
+
+### Core integration disposition
+
+- 随后的 core-integration 合并同时保留 `R-AGENT-002` 的 multi-tool scheduler 与本 review
+  的 schema/replay adapter；它不是对任一历史 review 的追溯扩张。
+- request capability 与执行共享有效 mode：global sequential 或已广告 sequential/invalid
+  override 为 `false`，其余为 `true`；Agent 定点 matrix 固定 default、global 与 override。
+- production 联合 oracle 证明两个 Bash call 并发启动、fast-before-slow completion、
+  slow-before-fast durable ToolResult、下一 request 的两个 call/result source-order replay，
+  同时断言 built-ins `strict:false`、assembled resource system prompt、selected model 与现有
+  OAuth/no-fallback 路径不退化。

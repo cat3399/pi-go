@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ func TestRequestValidatesAndCopiesConversation(t *testing.T) {
 
 	model := mustModel(t)
 	user := mustUser(t, "hello")
-	assistant := mustTextTerminal(t, "prior")
+	assistant := mustToolTerminal(t, "call-1", "echo", []byte(`{"value":"prior"}`))
 	result := mustToolResult(t, "call-1", "echo", "done")
 	messages := []llm.ConversationMessage{user, assistant, result}
 
@@ -32,6 +33,53 @@ func TestRequestValidatesAndCopiesConversation(t *testing.T) {
 	}
 	if request.Model() != model || request.SystemPrompt() != "system" {
 		t.Fatalf("request identity = (%v, %q), want (%v, system)", request.Model(), request.SystemPrompt(), model)
+	}
+}
+
+func TestRequestValidatesToolResultCausality(t *testing.T) {
+	t.Parallel()
+
+	model := mustModel(t)
+	firstCall := mustToolCallBlock(t, "call-1", "echo")
+	secondCall := mustToolCallBlock(t, "call-2", "read")
+	multiple := mustToolUseMessage(t, firstCall, secondCall)
+	firstResult := mustToolResult(t, firstCall.ID(), firstCall.Name(), "one")
+	secondResult := mustToolResult(t, secondCall.ID(), secondCall.Name(), "two")
+
+	if _, err := provider.NewRequest(model, "", []llm.ConversationMessage{
+		mustUser(t, "run both"), multiple, firstResult, secondResult, mustTextTerminal(t, "done"),
+	}); err != nil {
+		t.Fatalf("ordered multiple calls/results rejected: %v", err)
+	}
+
+	failure, err := llm.NewAssistantFailureMessage(nil, llm.FinishError, "failed", llm.Usage{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongID := mustToolResult(t, "call-other", firstCall.Name(), "wrong")
+	wrongName := mustToolResult(t, firstCall.ID(), "other", "wrong")
+	tests := []struct {
+		name     string
+		messages []llm.ConversationMessage
+		contains string
+	}{
+		{name: "orphan", messages: []llm.ConversationMessage{firstResult}, contains: "orphan tool result"},
+		{name: "out of order", messages: []llm.ConversationMessage{multiple, secondResult, firstResult}, contains: "out-of-order tool result"},
+		{name: "id mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongID}, contains: "does not match tool call"},
+		{name: "name mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongName}, contains: "does not match tool call"},
+		{name: "duplicate result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), firstResult, firstResult}, contains: "duplicate tool result"},
+		{name: "missing result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall)}, contains: "ended before result"},
+		{name: "interrupted results", messages: []llm.ConversationMessage{multiple, firstResult, mustUser(t, "continue")}, contains: "arrived before result"},
+		{name: "failed assistant creates no call", messages: []llm.ConversationMessage{failure, firstResult}, contains: "orphan tool result"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := provider.NewRequest(model, "", test.messages)
+			if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("NewRequest() error = %v, want ErrInvalidRequest containing %q", err, test.contains)
+			}
+		})
 	}
 }
 
@@ -163,6 +211,28 @@ func mustToolResult(t *testing.T, id, name, text string) llm.ToolResultMessage {
 	)
 	if err != nil {
 		t.Fatalf("NewToolResultMessage() error = %v", err)
+	}
+	return message
+}
+
+func mustToolCallBlock(t *testing.T, id, name string) llm.ToolCallBlock {
+	t.Helper()
+	call, err := llm.NewToolCallBlock(id, name, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("NewToolCallBlock() error = %v", err)
+	}
+	return call
+}
+
+func mustToolUseMessage(t *testing.T, calls ...llm.ToolCallBlock) llm.AssistantToolUseMessage {
+	t.Helper()
+	blocks := make([]llm.AssistantBlock, len(calls))
+	for index, call := range calls {
+		blocks[index] = call
+	}
+	message, err := llm.NewAssistantToolUseMessage(blocks, llm.Usage{}, time.Time{})
+	if err != nil {
+		t.Fatalf("NewAssistantToolUseMessage() error = %v", err)
 	}
 	return message
 }

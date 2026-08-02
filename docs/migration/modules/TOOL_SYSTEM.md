@@ -1,10 +1,17 @@
 # M-TOOL：Tool 与系统能力 charter
 
-状态：`ported`（`M-TOOL/v0.1-bash`、`M-TOOL/v0.2-filesystem-suite`）
+状态：`ported`（`M-TOOL/v0.3-provider-tool-registry`；`R-PROVIDER-005` passed）
 
 首个里程碑：`M-TOOL/v0.1-bash`
 
-最近通过里程碑：`M-TOOL/v0.2-filesystem-suite`
+最近通过里程碑：`M-TOOL/v0.3-provider-tool-registry`
+
+通过里程碑：`M-TOOL/v0.3-provider-tool-registry`。Registry 将 bash 与 filesystem 的 immutable
+JSON Schema、strict capability 和 executor 同时注册；不能只广告不可执行名称。固定上游
+普通 tools 默认 non-strict，因此当前 built-ins 有意登记 `strict:false`，这是已复审 contract；
+provider-neutral spec 保持在 tool 边界。Registry 的 execution-mode metadata 由 production
+Agent adapter 原样转发，使 tool-level sequential override 同时约束 request capability 与实际
+batch 调度；future strict eligibility 与 OpenAI wire encoding 仍属 M-PROVIDER。
 
 ## v0.2 filesystem suite
 

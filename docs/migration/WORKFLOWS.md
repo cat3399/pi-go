@@ -106,22 +106,36 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 本地 production workflow、错误持久化、全仓 quality gate 与 `R-APP-002` 已通过。
 
-## WF-003：multi-tool control flow
+## WF-003：multi-tool control flow 与 production OpenAI replay
 
-状态：`ported`（R-AGENT-002）
+状态：`ported`（模块基线 `R-AGENT-002`、`R-PROVIDER-005`；联合 integration gate 完成）
 
 ~~~text
-user -> assistant(tool A, tool B, ...)
-     -> parallel completion events / source-order durable ToolResults
-     -> steering drain before next provider turn
-     -> terminal assistant -> follow-up drain -> Continue admission
+production request (built-in schemas, parallel_tool_calls=true)
+  -> SSE assistant(tool A, tool B, ...)
+  -> concurrent execution / completion-order events
+  -> source-order durable ToolResults
+  -> next request replays function_calls + function_call_outputs
+  -> final assistant text / durable session
 ~~~
 
-验收以并行 completion 与 transcript source order 的独立 oracle、missing/failure/terminate/cancel
-混合批次 durable barrier、provider-only transform、queue reservation/逐条 durable ack，以及
-Abort/WaitForIdle 在所有 worker、append 与 observer settle 后才公开 idle 为准。实现与修订
-`80d4094`、`84a8c93`、`7e587b9`、`7cbc1c5` 经 `R-AGENT-002` 最终复审通过；filesystem
-基线已由主线 `R-TOOL-005` 独立复审，本 workflow 不重复其结论。
+Agent 层验收包括 global parallel/sequential、tool-level sequential override、missing/failure/
+terminate/cancel 混合批次、provider-only transform、steering/follow-up queue durable ack，以及
+Abort/WaitForIdle 在全部 worker、append 与 observer settle 后才公开 idle。请求 capability 与
+执行共享有效 mode：全局 sequential 或任一已广告 sequential override 发送 `false`，可并行的
+production registry 发送 `true`。
+
+Production 联合 oracle 由本地 HTTP/SSE server 和受控 Bash runner 驱动：两个 source-order
+calls 必须同时启动，fast 必须先于 slow 完成，但 session 中 ToolResult 仍为 slow、fast；
+第二次 request 必须按相同 call/item identity 发送两个 function_call，随后按 source order
+发送两个 function_call_output，最后打印 final text。两次请求都断言七个 built-ins 来自同一
+registry 且 `strict:false`，并保留 trusted system prompt、selected model、credential/OAuth
+source ownership 和无 lower-source/custom-model fallback。partial/error/aborted calls 不 replay；
+unknown/out-of-order/malformed events fail explicit。foreign `fc_*` provenance 仍由
+`T-PROVIDER-012` 延期重评。
+
+`R-AGENT-002` 与 `R-PROVIDER-005` 的原独立结论保持各自范围；联合 gate 不把一方的历史
+review 冒充为另一方。filesystem 基线仍由 `R-TOOL-005` 独立复审。
 
 ## 后续 workflow 规则
 

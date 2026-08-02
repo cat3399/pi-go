@@ -22,6 +22,7 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/tool"
 )
 
 var productionTestTime = time.Date(2026, time.August, 2, 9, 10, 11, 120_000_000, time.UTC)
@@ -199,6 +200,206 @@ func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing
 				t.Fatalf("aaa endpoint received %d request(s), authorization=%v", poisonCalls.Load(), poisonAuthorization.Load())
 			}
 		})
+	}
+}
+
+type concurrentProductionRunner struct {
+	slowStarted  chan struct{}
+	fastStarted  chan struct{}
+	fastDone     chan struct{}
+	slowOnce     sync.Once
+	fastOnce     sync.Once
+	fastDoneOnce sync.Once
+
+	mu        sync.Mutex
+	completed []string
+}
+
+func newConcurrentProductionRunner() *concurrentProductionRunner {
+	return &concurrentProductionRunner{
+		slowStarted: make(chan struct{}),
+		fastStarted: make(chan struct{}),
+		fastDone:    make(chan struct{}),
+	}
+}
+
+func (r *concurrentProductionRunner) Run(ctx context.Context, request tool.RunRequest, sink tool.OutputSink) (tool.ExitStatus, error) {
+	command := request.Command()
+	switch command {
+	case "slow":
+		r.slowOnce.Do(func() { close(r.slowStarted) })
+		if err := waitProductionRunner(ctx, r.fastStarted); err != nil {
+			return tool.UnknownExitStatus(), err
+		}
+		if err := waitProductionRunner(ctx, r.fastDone); err != nil {
+			return tool.UnknownExitStatus(), err
+		}
+		if err := sink([]byte("slow-output")); err != nil {
+			return tool.UnknownExitStatus(), err
+		}
+		r.recordCompletion(command)
+	case "fast":
+		r.fastOnce.Do(func() { close(r.fastStarted) })
+		if err := waitProductionRunner(ctx, r.slowStarted); err != nil {
+			return tool.UnknownExitStatus(), err
+		}
+		if err := sink([]byte("fast-output")); err != nil {
+			return tool.UnknownExitStatus(), err
+		}
+		r.recordCompletion(command)
+		r.fastDoneOnce.Do(func() { close(r.fastDone) })
+	default:
+		return tool.UnknownExitStatus(), fmt.Errorf("unexpected production command %q", command)
+	}
+	status, err := tool.NewExitStatus(0)
+	if err != nil {
+		return tool.UnknownExitStatus(), err
+	}
+	return status, nil
+}
+
+func waitProductionRunner(ctx context.Context, ready <-chan struct{}) error {
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+func (r *concurrentProductionRunner) recordCompletion(command string) {
+	r.mu.Lock()
+	r.completed = append(r.completed, command)
+	r.mu.Unlock()
+}
+
+func (r *concurrentProductionRunner) completionOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.completed...)
+}
+
+func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourceOrder(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	sessionPath := filepath.Join(workingDir, "tool-workflow.jsonl")
+	var mu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := simulatedOpenAIResponsesAdmission(payload, true); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		payloads = append(payloads, payload)
+		turn := len(payloads)
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if turn == 1 {
+			slow := map[string]any{"type": "function_call", "id": "fc_slow", "call_id": "call_slow", "name": "bash", "arguments": `{"command":"slow"}`}
+			fast := map[string]any{"type": "function_call", "id": "fc_fast", "call_id": "call_fast", "name": "bash", "arguments": `{"command":"fast"}`}
+			writeProductionSSE(t, writer,
+				map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc_slow", "call_id": "call_slow", "name": "bash", "arguments": ""}},
+				map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_slow", "delta": `{"command":"slow"}`},
+				map[string]any{"type": "response.function_call_arguments.done", "output_index": 0, "item_id": "fc_slow", "arguments": `{"command":"slow"}`},
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": slow},
+				map[string]any{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "function_call", "id": "fc_fast", "call_id": "call_fast", "name": "bash", "arguments": ""}},
+				map[string]any{"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "fc_fast", "delta": `{"command":"fast"}`},
+				map[string]any{"type": "response.function_call_arguments.done", "output_index": 1, "item_id": "fc_fast", "arguments": `{"command":"fast"}`},
+				map[string]any{"type": "response.output_item.done", "output_index": 1, "item": fast},
+				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{slow, fast}}},
+			)
+			return
+		}
+		item := map[string]any{"type": "message", "id": "msg_final", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "tools completed"}}}
+		writeProductionSSE(t, writer,
+			map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
+			map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{item}}},
+		)
+	}))
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	runner := newConcurrentProductionRunner()
+	config.BashRunner = runner
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	exitCode := app.RunProduction(ctx, config, []string{"--model", "openai/gpt-tool", "--session", sessionPath, "-p", "use bash twice"}, &stdout, &stderr)
+	if exitCode != app.ExitSuccess || stdout.String() != "tools completed\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
+	}
+	if got := strings.Join(runner.completionOrder(), ","); got != "fast,slow" {
+		t.Fatalf("tool completion order = %q, want fast,slow", got)
+	}
+	mu.Lock()
+	received := append([]map[string]any(nil), payloads...)
+	mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("request count = %d", len(received))
+	}
+	for requestIndex, payload := range received {
+		if parallel, ok := payload["parallel_tool_calls"].(bool); !ok || !parallel {
+			t.Fatalf("request %d parallel_tool_calls = %#v, want true", requestIndex+1, payload["parallel_tool_calls"])
+		}
+		tools, ok := payload["tools"].([]any)
+		if !ok || len(tools) != 7 {
+			t.Fatalf("request %d tools = %#v", requestIndex+1, payload["tools"])
+		}
+		for toolIndex, raw := range tools {
+			tool, ok := raw.(map[string]any)
+			if !ok || tool["strict"] != false {
+				t.Fatalf("request %d tool %d strict = %#v, want false", requestIndex+1, toolIndex, raw)
+			}
+		}
+	}
+	input, ok := received[1]["input"].([]any)
+	if !ok || len(input) != 6 {
+		t.Fatalf("second request input = %#v", received[1]["input"])
+	}
+	if system, ok := input[0].(map[string]any); !ok || system["role"] != "system" || !strings.Contains(system["content"].(string), "<available_tools>") {
+		t.Fatalf("second request system prompt = %#v", input[0])
+	}
+	wantReplay := []struct {
+		index    int
+		typeName string
+		callID   string
+		itemID   string
+		output   string
+	}{
+		{index: 2, typeName: "function_call", callID: "call_slow", itemID: "fc_slow"},
+		{index: 3, typeName: "function_call", callID: "call_fast", itemID: "fc_fast"},
+		{index: 4, typeName: "function_call_output", callID: "call_slow", output: "slow-output"},
+		{index: 5, typeName: "function_call_output", callID: "call_fast", output: "fast-output"},
+	}
+	for _, want := range wantReplay {
+		item, ok := input[want.index].(map[string]any)
+		if !ok || item["type"] != want.typeName || item["call_id"] != want.callID ||
+			(want.itemID != "" && item["id"] != want.itemID) || (want.output != "" && item["output"] != want.output) {
+			t.Fatalf("second request item %d = %#v", want.index, input[want.index])
+		}
+	}
+	transcript, err := session.Open(sessionPath, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) != 5 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant || messages[2].Role() != llm.RoleToolResult || messages[3].Role() != llm.RoleToolResult || messages[4].Role() != llm.RoleAssistant {
+		t.Fatalf("durable roles = %#v", messages)
+	}
+	firstResult := messages[2].(llm.ToolResultMessage)
+	secondResult := messages[3].(llm.ToolResultMessage)
+	if firstResult.ToolCallID() != "call_slow|fc_slow" || firstResult.Content()[0].Text() != "slow-output" ||
+		secondResult.ToolCallID() != "call_fast|fc_fast" || secondResult.Content()[0].Text() != "fast-output" {
+		t.Fatalf("durable source-order results = %#v / %#v", firstResult, secondResult)
 	}
 }
 
@@ -803,6 +1004,56 @@ func writeProductionSSE(t *testing.T, writer io.Writer, events ...map[string]any
 			return
 		}
 	}
+}
+
+// simulatedOpenAIResponsesAdmission models the request rules that matter to
+// the production tool workflow. Capability must match the test's scheduler,
+// and strict objects may not leave a declared property optional.
+func simulatedOpenAIResponsesAdmission(payload map[string]any, wantParallel bool) error {
+	parallel, ok := payload["parallel_tool_calls"].(bool)
+	if !ok || parallel != wantParallel {
+		return fmt.Errorf("parallel_tool_calls = %v, want %t", payload["parallel_tool_calls"], wantParallel)
+	}
+	tools, _ := payload["tools"].([]any)
+	for index, raw := range tools {
+		definition, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("tool %d must be an object", index)
+		}
+		strict, ok := definition["strict"].(bool)
+		if !ok {
+			return fmt.Errorf("tool %d strict must be a boolean", index)
+		}
+		if !strict {
+			continue
+		}
+		parameters, ok := definition["parameters"].(map[string]any)
+		if !ok || parameters["additionalProperties"] != false {
+			return fmt.Errorf("strict tool %d must set additionalProperties false", index)
+		}
+		properties, ok := parameters["properties"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("strict tool %d properties must be an object", index)
+		}
+		requiredValues, ok := parameters["required"].([]any)
+		if !ok {
+			return fmt.Errorf("strict tool %d must require every property", index)
+		}
+		required := make(map[string]struct{}, len(requiredValues))
+		for _, value := range requiredValues {
+			name, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("strict tool %d required names must be strings", index)
+			}
+			required[name] = struct{}{}
+		}
+		for name := range properties {
+			if _, present := required[name]; !present {
+				return fmt.Errorf("strict tool %d leaves property %q optional", index, name)
+			}
+		}
+	}
+	return nil
 }
 
 func writeModelsJSON(

@@ -55,9 +55,19 @@ func (m ModelRef) ID() string       { return m.id }
 
 // Request is an immutable snapshot of one provider invocation.
 type Request struct {
-	model        ModelRef
-	systemPrompt string
-	messages     []llm.ConversationMessage
+	model             ModelRef
+	systemPrompt      string
+	messages          []llm.ConversationMessage
+	tools             []ToolDefinition
+	parallelToolCalls bool
+}
+
+// RequestOptions contains provider capabilities that must be chosen by the
+// coordinator constructing a request. The zero value remains the safe
+// single-call policy for callers without a parallel batch scheduler.
+type RequestOptions struct {
+	Tools                  []ToolDefinition
+	AllowParallelToolCalls bool
 }
 
 func NewRequest(
@@ -65,10 +75,35 @@ func NewRequest(
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 ) (Request, error) {
+	return NewRequestWithOptions(model, systemPrompt, messages, RequestOptions{})
+}
+
+// NewRequestWithTools creates one immutable provider request. The legacy
+// NewRequest convenience remains deliberately tool-free for existing callers.
+func NewRequestWithTools(
+	model ModelRef,
+	systemPrompt string,
+	messages []llm.ConversationMessage,
+	tools []ToolDefinition,
+) (Request, error) {
+	return NewRequestWithOptions(model, systemPrompt, messages, RequestOptions{Tools: tools})
+}
+
+// NewRequestWithOptions creates one immutable provider request with explicit
+// tool-call concurrency capability. Callers that do not own a multi-call
+// scheduler must leave AllowParallelToolCalls false.
+func NewRequestWithOptions(
+	model ModelRef,
+	systemPrompt string,
+	messages []llm.ConversationMessage,
+	options RequestOptions,
+) (Request, error) {
 	request := Request{
-		model:        model,
-		systemPrompt: systemPrompt,
-		messages:     append([]llm.ConversationMessage(nil), messages...),
+		model:             model,
+		systemPrompt:      systemPrompt,
+		messages:          append([]llm.ConversationMessage(nil), messages...),
+		tools:             append([]ToolDefinition(nil), options.Tools...),
+		parallelToolCalls: options.AllowParallelToolCalls,
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -88,11 +123,126 @@ func (r Request) validate() error {
 			return fmt.Errorf("%w: message %d: %w", ErrInvalidRequest, index, err)
 		}
 	}
+	if err := validateToolResultCausality(r.messages); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+	}
+	seenTools := make(map[string]struct{}, len(r.tools))
+	for index, definition := range r.tools {
+		if err := definition.validate(); err != nil {
+			return fmt.Errorf("%w: tool %d: %w", ErrInvalidRequest, index, err)
+		}
+		if _, duplicate := seenTools[definition.Name()]; duplicate {
+			return fmt.Errorf("%w: duplicate tool name %q", ErrInvalidRequest, definition.Name())
+		}
+		seenTools[definition.Name()] = struct{}{}
+	}
+	return nil
+}
+
+type pendingToolCall struct {
+	call         llm.ToolCallBlock
+	messageIndex int
+}
+
+// validateToolResultCausality validates the conversation itself rather than
+// relying on an adapter to notice malformed replay incidentally. One
+// successful assistant tool-use turn introduces its calls in source order;
+// the immediately following tool results must consume that ordered queue.
+func validateToolResultCausality(messages []llm.ConversationMessage) error {
+	pending := make([]pendingToolCall, 0)
+	seenCalls := make(map[string]int)
+	seenResults := make(map[string]int)
+
+	for messageIndex, message := range messages {
+		switch message := message.(type) {
+		case llm.AssistantToolUseMessage:
+			if len(pending) != 0 {
+				return fmt.Errorf(
+					"message %d: assistant tool call arrived before result for call %q from message %d",
+					messageIndex,
+					pending[0].call.ID(),
+					pending[0].messageIndex,
+				)
+			}
+			for _, block := range message.Blocks() {
+				call, ok := block.(llm.ToolCallBlock)
+				if !ok {
+					continue
+				}
+				if firstIndex, duplicate := seenCalls[call.ID()]; duplicate {
+					return fmt.Errorf(
+						"message %d: duplicate tool call id %q first used by message %d",
+						messageIndex,
+						call.ID(),
+						firstIndex,
+					)
+				}
+				seenCalls[call.ID()] = messageIndex
+				pending = append(pending, pendingToolCall{call: call, messageIndex: messageIndex})
+			}
+
+		case llm.ToolResultMessage:
+			if firstIndex, duplicate := seenResults[message.ToolCallID()]; duplicate {
+				return fmt.Errorf(
+					"message %d: duplicate tool result for call %q first supplied by message %d",
+					messageIndex,
+					message.ToolCallID(),
+					firstIndex,
+				)
+			}
+			if len(pending) == 0 {
+				return fmt.Errorf(
+					"message %d: orphan tool result for call %q",
+					messageIndex,
+					message.ToolCallID(),
+				)
+			}
+
+			expected := pending[0]
+			if message.ToolCallID() != expected.call.ID() {
+				for _, later := range pending[1:] {
+					if message.ToolCallID() == later.call.ID() {
+						return fmt.Errorf(
+							"message %d: out-of-order tool result for call %q; next call is %q",
+							messageIndex,
+							message.ToolCallID(),
+							expected.call.ID(),
+						)
+					}
+				}
+			}
+			if err := llm.ValidateToolResultAssociation(expected.call, message); err != nil {
+				return fmt.Errorf("message %d: %w", messageIndex, err)
+			}
+			seenResults[message.ToolCallID()] = messageIndex
+			pending = pending[1:]
+
+		default:
+			if len(pending) != 0 {
+				return fmt.Errorf(
+					"message %d: %T arrived before result for call %q from message %d",
+					messageIndex,
+					message,
+					pending[0].call.ID(),
+					pending[0].messageIndex,
+				)
+			}
+		}
+	}
+
+	if len(pending) != 0 {
+		return fmt.Errorf(
+			"conversation ended before result for call %q from message %d",
+			pending[0].call.ID(),
+			pending[0].messageIndex,
+		)
+	}
 	return nil
 }
 
 func (r Request) clone() Request {
 	r.messages = append([]llm.ConversationMessage(nil), r.messages...)
+	r.tools = append([]ToolDefinition(nil), r.tools...)
 	return r
 }
 
@@ -103,6 +253,12 @@ func (r Request) SystemPrompt() string { return r.systemPrompt }
 func (r Request) Messages() []llm.ConversationMessage {
 	return append([]llm.ConversationMessage(nil), r.messages...)
 }
+
+func (r Request) Tools() []ToolDefinition {
+	return append([]ToolDefinition(nil), r.tools...)
+}
+
+func (r Request) ParallelToolCalls() bool { return r.parallelToolCalls }
 
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.

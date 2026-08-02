@@ -33,6 +33,15 @@ type responsesTextSlot struct {
 	text         strings.Builder
 }
 
+type responsesToolSlot struct {
+	contentIndex  int
+	itemID        string
+	callID        string
+	name          string
+	arguments     []byte
+	argumentsDone bool
+}
+
 type openAIResponsesStream struct {
 	ctx               context.Context
 	cancel            context.CancelCauseFunc
@@ -53,15 +62,17 @@ type openAIResponsesStream struct {
 	closed      bool
 	finished    bool
 
-	initialized       bool
-	started           bool
-	decoder           *responsesSSEDecoder
-	queue             []llm.StreamEvent
-	slots             map[int]*responsesTextSlot
-	completedOutputs  map[int]struct{}
-	nextContentIndex  int
-	unsupportedOutput string
-	pendingDone       *llm.DoneEvent
+	initialized      bool
+	started          bool
+	decoder          *responsesSSEDecoder
+	queue            []llm.StreamEvent
+	slots            map[int]*responsesTextSlot
+	toolSlots        map[int]*responsesToolSlot
+	completedOutputs map[int]struct{}
+	nextContentIndex int
+	nextOutputIndex  int
+	sawFunctionCall  bool
+	pendingDone      *llm.DoneEvent
 }
 
 func newResponsesFailureStream(
@@ -89,6 +100,7 @@ func newResponsesFailureStream(
 			message: message,
 		},
 		slots:            make(map[int]*responsesTextSlot),
+		toolSlots:        make(map[int]*responsesToolSlot),
 		completedOutputs: make(map[int]struct{}),
 	}
 }

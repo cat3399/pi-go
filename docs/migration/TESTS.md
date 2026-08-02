@@ -43,7 +43,9 @@
 | `T-PROVIDER-008` | B-PROVIDER-005 | `packages/ai/test/openai-responses-terminal-event.test.ts` 的 premature EOF、wrapper error 与唯一 terminal cases | `strengthened` | R-PROVIDER-004；另覆盖 dirty EOF、staged terminal/usage、race 与 fuzz |
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
-| `T-PROVIDER-011` | B-PROVIDER-002 + 后续真实 tool adapter | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `deferred` | 不属于 text-only B-PROVIDER-005；真实 tool-call slice 重评 |
+| `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；R-PROVIDER-005 |
+| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `deferred` | 已覆盖 request causality、local SSE、empty output、bounded/stable non-`fc_*` normalization 与 multi-text fallback IDs；assistant message 尚无 source provider/API/model，无法区分 native/foreign `fc_*` 或 same-provider different-model pairing。M-BASE/session provenance 进入 provider Request 时必须重评并补 foreign `fc_*`/model-handoff fixture；R-PROVIDER-005 确认延期 |
+| `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | full-root local `$ref` JSON Pointer/recursive graph admission、raw boolean `additionalProperties:false` 全路径、traversal budget/fuzz、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire；Agent 有效 mode matrix 与 production multi-call simulated-server oracle 已完成；R-PROVIDER-005 + integration gate |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -61,7 +63,7 @@ Prompt cache、multiple model、unregister 以外的 compat/global registry test
 | `T-AGENT-007` | B-AGENT-006 | `packages/agent/test/harness/agent-harness.test.ts` 的 save-point、shutdown、queue 和 listener cases | `deferred` | 真实独立 caller 或后续 upstream scope 要求时重评 |
 | `T-AGENT-008` | B-AGENT-008 | `packages/agent/src/agent-loop.ts::executeToolCalls*` 上游会形成 error ToolResult 后可能再次调用 cancelled provider | `intentionally-incompatible` | Go scenario 固定四条 transcript、provider call count=1、zero usage 与 settlement |
 | `T-AGENT-009` | B-AGENT-009 | `packages/agent/test/agent-loop.test.ts` — `should not execute tool calls from a length-truncated assistant message` | `deferred` | 当前 M-BASE 拒绝 mixed length/tool terminal；不能以 text-only length 代替 |
-| `T-AGENT-010` | B-AGENT-010 | `packages/agent/test/agent-loop.test.ts` — multi-tool sequential/parallel and source-order result cases | `strengthened` | R-AGENT-002；Go normal/error/override、completion/source-order 双 oracle 与 repeated agent suite |
+| `T-AGENT-010` | B-AGENT-010 | `packages/agent/test/agent-loop.test.ts` — multi-tool sequential/parallel and source-order result cases | `strengthened` | R-AGENT-002；Go normal/error/override、completion/source-order 双 oracle、provider capability global/advertised-override matrix 与 repeated agent suite |
 | `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `strengthened` | R-AGENT-002；cancel/terminate/missing/failure、late update、fault barrier 与 race |
 | `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `strengthened` | R-AGENT-002；one/all、Continue admission、reentrant storage、durable prefix ack、clear/enqueue/Abort fault/race |
 | `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `strengthened` | R-AGENT-002；immutable request、transform error/cancel、multi-worker abort、pending state 与 settlement race |
@@ -110,6 +112,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `strengthened` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；R-TOOL-005 |
 | `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `strengthened` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；R-TOOL-005 |
 | `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `strengthened` | JSON/edit/unified-patch fuzz、symlink TOCTOU、effective permission、cancel/race strengthening；R-TOOL-005 |
+| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission、fixed-upstream `strict:false` intentional contract、Bash timeout schema/decoder exact boundary contract、filesystem schema/runtime samples and WF-003 request assertion；R-PROVIDER-005 |
 
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。
@@ -126,6 +129,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-APP-006` | B-APP-005/007 | `args.test.ts` provider/model/api-key cases；`model-resolver.test.ts` provider-prefixed/custom model cases | `strengthened` | production request/model/exit integration；R-APP-002 |
 | `T-APP-007` | B-APP-006 | `models-runtime.test.ts` explicit/stored/ambient 与 wrong-handler cases；`auth-storage.test.ts` read/malformed intent | `strengthened` | 四层 precedence、secret-safe、无 session/network 副作用 matrix；R-APP-002 |
 | `T-APP-008` | B-APP-008 | `session-manager.ts` default cwd-encoded directory/new filename；上游缺同等 crash-safe create test | `strengthened` | filename/header ID/time、explicit resume advancing clock；R-APP-002 |
+| `T-APP-010` | B-APP-010 | `agent-session` multi-tool persistence flow + Responses request/stream evidence | `strengthened` | local HTTP/SSE request1 schemas/true → two concurrent calls → reverse completion/source-order durable results → request2 ordered replay → final print；R-PROVIDER-005 + R-AGENT-002 integration |
 
 ## M-AUTH
 
@@ -140,9 +144,19 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-AUTH-007` | B-AUTH-007 | `openai-codex-oauth.test.ts` + `oauth-device-code.test.ts` | `strengthened` | no-redirect, device pending/403/slow_down, hung exchange timeout/cancel, bounded recursive-strict JSON/media and secret-safe errors；R-AUTH-002 |
 | `T-AUTH-008` | B-AUTH-008 | `resolve.ts` OAuth double-check refresh | `strengthened` | same-provider concurrent refresh, durable rotation write fault, no lower-source fallback and fuzz；R-AUTH-002 |
 | `T-AUTH-009` | B-AUTH-009 | `oauth-auth.test.ts` stored OAuth resolution | `strengthened` | production assembly local token→Responses SSE fixture and auth.json rotation；R-AUTH-002 |
+
+## Workflows
+
+| ID | Workflow | 上游 test intent | 当前状态 | 覆盖 |
+| --- | --- | --- | --- | --- |
+| `T-WF-003` | WF-003 | Responses function tools、Agent multi-tool 与 durable production print intents 分散证明 | `strengthened` | simulated OpenAI admission + concurrent two-call/two-request local HTTP/SSE workflow；R-PROVIDER-005 + R-AGENT-002 integration |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 
+## M-RESOURCE
+
+| ID | Behavior | 上游 test intent | 当前状态 | 覆盖 |
+| --- | --- | --- | --- | --- |
 | `T-RESOURCE-001` | B-RESOURCE-001 | resource-loader/project-trust source/tests | `strengthened` | untrusted missing/loop/alias cwd non-probe；physical-anchor escape/directory-swap；R-RESOURCE-001 |
 | `T-RESOURCE-002` | B-RESOURCE-002 | trust-manager tests | `strengthened` | control-key/raw round-trip、null/future、size/fault/cancel/merge/reopen/race；R-RESOURCE-001 |
 | `T-RESOURCE-003` | B-RESOURCE-003 | prompt-templates/skills tests and 2781 | `strengthened` | scope collision、ECMAScript whitespace、Unicode/skill validation、symlink/fuzz；R-RESOURCE-001 |

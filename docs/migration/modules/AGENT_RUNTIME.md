@@ -50,6 +50,19 @@
 - M-TOOL filesystem 的最终独立结论属于主线 `R-TOOL-005`；本里程碑只核验 named-tool
   consumer，不替代或重复该 review。
 
+### Provider tools/replay 联合集成
+
+M-PROVIDER/v0.3 的 immutable tool definitions 现由 v0.2 coordinator 在每个 transform 后的
+provider request 中发送。`parallel_tool_calls` 不再固定：全局 parallel 且所有已广告 tool
+都没有 sequential override 时为 `true`；全局 sequential、任一已广告 sequential override
+或非法 override 值时为 `false`。执行批次对 provider 实际选择的 names 复用同一判定，因而
+request capability 与 worker 调度不会各自漂移；未广告 name 不影响当前 request admission。
+
+Production 的七个 built-ins 来自同一个 immutable registry，当前均为 parallel lane，因此
+发送 `true`。联合本地 HTTP/SSE oracle 固定证明两个 tool 并发启动、逆 source order settle、
+ToolResult 按 source order durable commit，并在下一 request 以原 call/item identity replay；
+同一场景同时保留 assembled system prompt、selected model、OAuth/no-fallback 的既有边界。
+
 ## 负责
 
 - Accepted run 与 turn lifecycle；
@@ -169,8 +182,8 @@ barrier。
 再实现，不能用 text-only length 用例代替。
 
 v0.1 的 durable ToolResult 只承诺 call ID/name、`isError` 和 text；稳定 category/details
-等待真实消费者出现并由 M-BASE/M-SESSION 共同设计。当前 provider request 也尚无 tool
-schema，scripted 闭环已成立，但真实 provider 的 tool discovery 留给对应 adapter slice。
+等待真实消费者出现并由 M-BASE/M-SESSION 共同设计。v0.1 最初没有 provider tool schema；
+当前已由上述 M-PROVIDER/v0.3 联合集成补齐，历史 v0.1 review 边界不据此重写。
 
 ## v0.1 退出与 review gate
 
@@ -181,5 +194,5 @@ schema，scripted 闭环已成立，但真实 provider 的 tool discovery 留给
 - [../REVIEWS.md](../REVIEWS.md) 中 M-AGENT 独立 reviewer 结论为 `passed`，且没有
   unresolved blocker。
 
-该里程碑通过不表示 parallel tool、queue、retry、compaction 或 Harness 独有能力已
-迁移；它们继续保留独立 behavior 与重评条件。
+上述 v0.1 退出声明不覆盖后续里程碑；parallel tool 与 queue 已由 v0.2 迁移，retry、
+automatic compaction 与 Harness 独有能力仍保留独立 behavior 与重评条件。

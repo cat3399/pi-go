@@ -98,9 +98,13 @@ type Config struct {
 	// TransformContext is an immutable request seam. It receives a copied
 	// transcript projection immediately before every provider call and must
 	// return a replacement snapshot; it never mutates durable transcript data.
-	TransformContext  ContextTransform
-	SteeringMode      QueueMode
-	FollowUpMode      QueueMode
+	TransformContext ContextTransform
+	SteeringMode     QueueMode
+	FollowUpMode     QueueMode
+	// Tools is the immutable model-visible schema snapshot for this run. It is
+	// separate from Tool execution so deterministic providers can remain
+	// tool-free while production binds both views through one registry.
+	Tools             []provider.ToolDefinition
 	Now               func() time.Time
 	SettlementTimeout time.Duration
 }
@@ -112,6 +116,7 @@ type runtimeConfig struct {
 	systemPrompt      string
 	tool              ToolExecutor
 	toolName          string
+	tools             []provider.ToolDefinition
 	now               func() time.Time
 	settlementTimeout time.Duration
 	toolExecution     ToolExecutionMode
@@ -169,7 +174,10 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Transcript) {
 		return runtimeConfig{}, fmt.Errorf("%w: transcript is required", ErrInvalidConfig)
 	}
-	if _, err := provider.NewRequest(config.Model, config.SystemPrompt, nil); err != nil {
+	if _, err := provider.NewRequestWithOptions(config.Model, config.SystemPrompt, nil, provider.RequestOptions{
+		Tools:                  config.Tools,
+		AllowParallelToolCalls: false,
+	}); err != nil {
 		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
@@ -226,6 +234,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		systemPrompt:      config.SystemPrompt,
 		tool:              configuredTool,
 		toolName:          toolName,
+		tools:             append([]provider.ToolDefinition(nil), config.Tools...),
 		now:               now,
 		settlementTimeout: settlementTimeout,
 		toolExecution:     toolExecution,
@@ -243,6 +252,36 @@ func configuredToolName(tool ToolExecutor) (name string, err error) {
 		}
 	}()
 	return tool.Name(), nil
+}
+
+// effectiveToolExecutionMode is the shared request/execution admission rule.
+// A request may advertise parallel calls only when every advertised tool can
+// remain in the parallel lane. At execution time the same rule is applied to
+// the calls actually selected by the provider. Unknown overrides inherit the
+// global mode; malformed override values fail closed to sequential.
+func effectiveToolExecutionMode(global ToolExecutionMode, executor ToolExecutor, names []string) ToolExecutionMode {
+	if global != ToolExecutionParallel {
+		return ToolExecutionSequential
+	}
+	overrides, ok := executor.(ToolExecutionOverride)
+	if !ok {
+		return ToolExecutionParallel
+	}
+	for _, name := range names {
+		mode, set := overrides.ToolExecutionMode(name)
+		if set && mode != ToolExecutionParallel {
+			return ToolExecutionSequential
+		}
+	}
+	return ToolExecutionParallel
+}
+
+func (c runtimeConfig) allowParallelToolCalls() bool {
+	names := make([]string, len(c.tools))
+	for index, definition := range c.tools {
+		names[index] = definition.Name()
+	}
+	return effectiveToolExecutionMode(c.toolExecution, c.tool, names) == ToolExecutionParallel
 }
 
 // Phase is the externally inspectable coarse phase. Detailed transition state

@@ -502,7 +502,10 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 		}
 		messages = append([]llm.ConversationMessage(nil), transformed...)
 	}
-	request, err := provider.NewRequest(a.config.model, a.config.systemPrompt, messages)
+	request, err := provider.NewRequestWithOptions(a.config.model, a.config.systemPrompt, messages, provider.RequestOptions{
+		Tools:                  a.config.tools,
+		AllowParallelToolCalls: a.config.allowParallelToolCalls(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
 	}
@@ -559,14 +562,11 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 	if len(calls) == 0 {
 		return toolBatch{}, fmt.Errorf("%w: empty tool batch", ErrInvariant)
 	}
-	sequential := a.config.toolExecution == ToolExecutionSequential
-	if modes, ok := a.config.tool.(ToolExecutionOverride); ok {
-		for _, call := range calls {
-			if mode, set := modes.ToolExecutionMode(call.Name()); set && mode == ToolExecutionSequential {
-				sequential = true
-			}
-		}
+	names := make([]string, len(calls))
+	for index, call := range calls {
+		names[index] = call.Name()
 	}
+	sequential := effectiveToolExecutionMode(a.config.toolExecution, a.config.tool, names) == ToolExecutionSequential
 	a.mu.Lock()
 	if a.active != active {
 		a.mu.Unlock()
