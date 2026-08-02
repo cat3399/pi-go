@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -26,7 +27,7 @@ type ContextTokenEstimate struct {
 
 // EstimateContextTokens uses the latest successful assistant usage when one is
 // available, then adds conservative estimates for the trailing messages.
-func EstimateContextTokens(messages []llm.ConversationMessage) ContextTokenEstimate {
+func EstimateContextTokens(messages []llm.ConversationMessage) (ContextTokenEstimate, error) {
 	result := ContextTokenEstimate{LastUsageIndex: -1}
 	for index := len(messages) - 1; index >= 0; index-- {
 		usage, ok := usableAssistantUsage(messages[index])
@@ -42,10 +43,21 @@ func EstimateContextTokens(messages []llm.ConversationMessage) ContextTokenEstim
 		start = result.LastUsageIndex + 1
 	}
 	for index := start; index < len(messages); index++ {
-		result.TrailingTokens += estimateMessageTokens(messages[index])
+		tokens, err := estimateMessageTokens(messages[index])
+		if err != nil {
+			return ContextTokenEstimate{}, err
+		}
+		result.TrailingTokens, err = checkedAddTokens(result.TrailingTokens, tokens)
+		if err != nil {
+			return ContextTokenEstimate{}, err
+		}
 	}
-	result.Tokens = result.UsageTokens + result.TrailingTokens
-	return result
+	var err error
+	result.Tokens, err = checkedAddTokens(result.UsageTokens, result.TrailingTokens)
+	if err != nil {
+		return ContextTokenEstimate{}, err
+	}
+	return result, nil
 }
 
 func usableAssistantUsage(message llm.ConversationMessage) (llm.Usage, bool) {
@@ -62,50 +74,93 @@ func usableAssistantUsage(message llm.ConversationMessage) (llm.Usage, bool) {
 	return llm.Usage{}, false
 }
 
-// ShouldCompact is policy-only. v0.3 deliberately exposes it without wiring
-// automatic triggering into the still-evolving agent coordinator.
-func ShouldCompact(contextTokens, contextWindow, reserveTokens uint64) bool {
-	if contextWindow <= reserveTokens {
-		return contextTokens > 0
+// ShouldCompact is policy-only. It estimates the supplied context itself so an
+// overflow cannot be accidentally discarded before applying the threshold.
+// v0.3 deliberately does not wire this into the evolving agent coordinator.
+func ShouldCompact(messages []llm.ConversationMessage, contextWindow, reserveTokens uint64) (bool, error) {
+	estimate, err := EstimateContextTokens(messages)
+	if err != nil {
+		return false, err
 	}
-	return contextTokens > contextWindow-reserveTokens
+	if contextWindow <= reserveTokens {
+		return estimate.Tokens > 0, nil
+	}
+	return estimate.Tokens > contextWindow-reserveTokens, nil
 }
 
-func estimateMessageTokens(message llm.ConversationMessage) uint64 {
-	var chars int
+func estimateMessageTokens(message llm.ConversationMessage) (uint64, error) {
+	var chars uint64
+	add := func(text string) error {
+		var err error
+		chars, err = checkedAddTokens(chars, uint64(len(text)))
+		return err
+	}
 	switch value := message.(type) {
 	case llm.UserTextMessage:
 		for _, block := range value.Content() {
-			chars += len(block.Text())
+			if err := add(block.Text()); err != nil {
+				return 0, err
+			}
 		}
 	case llm.AssistantTextMessage:
 		for _, block := range value.Content() {
-			chars += len(block.Text())
+			if err := add(block.Text()); err != nil {
+				return 0, err
+			}
 		}
 	case llm.AssistantToolUseMessage:
 		for _, block := range value.Content() {
 			switch block := block.(type) {
 			case llm.TextBlock:
-				chars += len(block.Text())
+				if err := add(block.Text()); err != nil {
+					return 0, err
+				}
 			case llm.ToolCallBlock:
-				chars += len(block.Name()) + len(block.ArgumentsJSON())
+				if err := add(block.Name()); err != nil {
+					return 0, err
+				}
+				if err := add(string(block.ArgumentsJSON())); err != nil {
+					return 0, err
+				}
 			}
 		}
 	case llm.AssistantFailureMessage:
 		for _, block := range value.Content() {
-			chars += len(block.Text())
+			if err := add(block.Text()); err != nil {
+				return 0, err
+			}
 		}
-		chars += len(value.ErrorMessage())
+		if err := add(value.ErrorMessage()); err != nil {
+			return 0, err
+		}
 	case llm.ToolResultMessage:
 		for _, block := range value.Content() {
-			chars += len(block.Text())
+			if err := add(block.Text()); err != nil {
+				return 0, err
+			}
 		}
-		chars += len(value.ToolCallID()) + len(value.ToolName())
+		if err := add(value.ToolCallID()); err != nil {
+			return 0, err
+		}
+		if err := add(value.ToolName()); err != nil {
+			return 0, err
+		}
 	}
 	if chars == 0 {
-		return 0
+		return 0, nil
 	}
-	return uint64((chars + 3) / 4)
+	tokens := chars / 4
+	if chars%4 != 0 {
+		return checkedAddTokens(tokens, 1)
+	}
+	return tokens, nil
+}
+
+func checkedAddTokens(left, right uint64) (uint64, error) {
+	if left > math.MaxUint64-right {
+		return 0, ErrTokenEstimateOverflow
+	}
+	return left + right, nil
 }
 
 // Compact manually summarizes an immutable selected-branch snapshot, then
@@ -179,6 +234,11 @@ func (s *Session) compactionSnapshot(ctx context.Context, request CompactRequest
 	if keep == 0 {
 		keep = defaultKeepRecentTokens
 	}
+	contextMessages := s.buildContextLocked().Messages()
+	estimate, err := EstimateContextTokens(contextMessages)
+	if err != nil {
+		return SummaryInput{}, err
+	}
 	preparation, err := prepareCompaction(path, keep)
 	if err != nil {
 		return SummaryInput{}, err
@@ -194,7 +254,7 @@ func (s *Session) compactionSnapshot(ctx context.Context, request CompactRequest
 		Messages:         append([]llm.ConversationMessage(nil), preparation.messages...),
 		RetainedTail:     append([]llm.ConversationMessage(nil), preparation.retained...),
 		FirstKeptEntryID: preparation.firstKeptID,
-		TokensBefore:     EstimateContextTokens(s.buildContextLocked().Messages()).Tokens,
+		TokensBefore:     estimate.Tokens,
 		Generation:       s.generation,
 		SelectedLeafID:   s.entries[s.leaf].id,
 	}, nil
@@ -296,7 +356,10 @@ func prepareCompaction(path []Entry, keepRecentTokens uint64) (compactionPrepara
 			break
 		}
 	}
-	cut := findCompactionCut(path, boundaryStart, len(path), keepRecentTokens)
+	cut, err := findCompactionCut(path, boundaryStart, len(path), keepRecentTokens)
+	if err != nil {
+		return compactionPreparation{}, err
+	}
 	if cut < 0 || cut >= len(path) || cut == boundaryStart {
 		return compactionPreparation{}, ErrNothingToCompact
 	}
@@ -309,26 +372,43 @@ func prepareCompaction(path []Entry, keepRecentTokens uint64) (compactionPrepara
 	return compactionPreparation{firstKeptID: firstKept.id, messages: messages, retained: retained, previousSummary: previousSummary}, nil
 }
 
-func findCompactionCut(entries []Entry, start, end int, keepRecentTokens uint64) int {
+func findCompactionCut(entries []Entry, start, end int, keepRecentTokens uint64) (int, error) {
+	return findCompactionCutWithEstimator(entries, start, end, keepRecentTokens, estimateMessageTokens)
+}
+
+func findCompactionCutWithEstimator(
+	entries []Entry,
+	start int,
+	end int,
+	keepRecentTokens uint64,
+	estimate func(llm.ConversationMessage) (uint64, error),
+) (int, error) {
 	if start >= end {
-		return -1
+		return -1, nil
 	}
 	var accumulated uint64
 	for index := end - 1; index >= start; index-- {
 		entry := entries[index]
 		for _, message := range entryMessages(entry) {
-			accumulated += estimateMessageTokens(message)
+			tokens, err := estimate(message)
+			if err != nil {
+				return -1, err
+			}
+			accumulated, err = checkedAddTokens(accumulated, tokens)
+			if err != nil {
+				return -1, err
+			}
 		}
 		if accumulated >= keepRecentTokens {
 			for candidate := index; candidate < end; candidate++ {
 				if isValidCompactionCut(entries[candidate]) {
-					return candidate
+					return candidate, nil
 				}
 			}
-			return -1
+			return -1, nil
 		}
 	}
-	return -1
+	return -1, nil
 }
 
 func isValidCompactionCut(entry Entry) bool {

@@ -228,7 +228,9 @@ M-AGENT 控制流。
   unknown 将 writer poison，内存 leaf 不前进；poisoned session 禁止后续 compact/fork/extract，必须
   close/reopen 后显式 reconcile。provider error、abort、empty summary 和 stale snapshot 不写 record。
 - token estimate 使用最新有效 assistant usage 加之后的保守字符估计；cut point 不会落在 tool result，
-  但其 token 仍计入 retained budget。`ShouldCompact` 仅提供 policy predicate，v0.3 不自动触发。
+  但其 token 仍计入 retained budget。所有 usage、trailing 和 cut-prefix 累加使用 checked add；任何
+  `uint64` 溢出返回 `ErrTokenEstimateOverflow`，threshold 与 manual compaction 均 fail-explicit 且不写
+  record，不能 wrap 为较小值。`ShouldCompact` 仅提供 policy predicate，v0.3 不自动触发。
 
 ### 上游证据与 Go 取舍
 

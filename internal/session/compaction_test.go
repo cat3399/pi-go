@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -471,7 +472,7 @@ func FuzzCompactionHelpersNeverPanic(f *testing.F) {
 			t.Fatal(err)
 		}
 		messages := []llm.ConversationMessage{userMessage, assistantMessage, toolMessage}
-		_ = EstimateContextTokens(messages)
+		_, _ = EstimateContextTokens(messages)
 		_ = SerializeConversation(messages)
 	})
 }
@@ -488,10 +489,103 @@ func TestEstimateContextTokensUsesToolUsageAndTrailingSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 	tail := mustUserMessage(t, "12345", time.UnixMilli(2))
-	estimate := EstimateContextTokens([]llm.ConversationMessage{assistant, tail})
+	estimate, err := EstimateContextTokens([]llm.ConversationMessage{assistant, tail})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if estimate.LastUsageIndex != 0 || estimate.UsageTokens != 50 || estimate.TrailingTokens != 2 || estimate.Tokens != 52 {
 		t.Fatalf("estimate = %#v", estimate)
 	}
+	compact, err := ShouldCompact([]llm.ConversationMessage{assistant, tail}, 53, 2)
+	if err != nil || !compact {
+		t.Fatalf("ShouldCompact() = (%t, %v), want true", compact, err)
+	}
+}
+
+func TestTokenEstimateOverflowFailsPolicyCutAndCompactWithoutWrite(t *testing.T) {
+	t.Parallel()
+	maxUsage, err := llm.NewUsage(llm.UsageSpec{Input: math.MaxUint64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistantBlock := mustTextBlock(t, "assistant")
+	assistant, err := llm.NewAssistantTextMessage([]llm.TextBlock{assistantBlock}, llm.FinishStop, maxUsage, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail := mustUserMessage(t, "x", time.UnixMilli(2))
+	messages := []llm.ConversationMessage{assistant, tail}
+	if _, err := EstimateContextTokens(messages); !errors.Is(err, ErrTokenEstimateOverflow) {
+		t.Fatalf("EstimateContextTokens() = %v, want ErrTokenEstimateOverflow", err)
+	}
+	if compact, err := ShouldCompact(messages, math.MaxUint64, 1); compact || !errors.Is(err, ErrTokenEstimateOverflow) {
+		t.Fatalf("ShouldCompact() = (%t, %v), want false ErrTokenEstimateOverflow", compact, err)
+	}
+
+	entries := []Entry{
+		{id: "old", typeName: "message", message: mustUserMessage(t, "old", time.UnixMilli(3))},
+		{id: "new", typeName: "message", message: mustUserMessage(t, "new", time.UnixMilli(4))},
+	}
+	estimator := func(message llm.ConversationMessage) (uint64, error) {
+		text := joinTextBlocks(message.(llm.UserTextMessage).Content())
+		if text == "new" {
+			return math.MaxUint64 - 1, nil
+		}
+		return 2, nil
+	}
+	if cut, err := findCompactionCutWithEstimator(entries, 0, len(entries), math.MaxUint64, estimator); cut != -1 || !errors.Is(err, ErrTokenEstimateOverflow) {
+		t.Fatalf("findCompactionCutWithEstimator() = (%d, %v)", cut, err)
+	}
+
+	directory := t.TempDir()
+	path := filepath.Join(directory, "overflow.jsonl")
+	session, err := Create(path, CreateOptions{ID: "overflow", WorkingDir: directory, NewEntryID: sequenceIDs("assistant", "tail", "compact")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.Append(context.Background(), assistant, AppendOptions{Assistant: testAssistantProvenance}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Append(context.Background(), tail, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summarizer := &recordingSummarizer{output: SummaryOutput{Text: "must not run"}}
+	if _, err := session.Compact(context.Background(), CompactRequest{KeepRecentTokens: 1, Summarizer: summarizer}); !errors.Is(err, ErrTokenEstimateOverflow) {
+		t.Fatalf("Compact() = %v, want ErrTokenEstimateOverflow", err)
+	}
+	summarizer.mu.Lock()
+	calls := len(summarizer.inputs)
+	summarizer.mu.Unlock()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || !bytes.Equal(before, after) || len(session.Entries()) != 2 || session.Poisoned() {
+		t.Fatalf("overflow side effects: calls=%d bytesChanged=%t entries=%d poisoned=%t", calls, !bytes.Equal(before, after), len(session.Entries()), session.Poisoned())
+	}
+}
+
+func FuzzCheckedTokenAdditionNeverWraps(f *testing.F) {
+	f.Add(uint64(0), uint64(0))
+	f.Add(uint64(math.MaxUint64), uint64(1))
+	f.Add(uint64(math.MaxUint64-1), uint64(1))
+	f.Fuzz(func(t *testing.T, left, right uint64) {
+		sum, err := checkedAddTokens(left, right)
+		if left > math.MaxUint64-right {
+			if !errors.Is(err, ErrTokenEstimateOverflow) || sum != 0 {
+				t.Fatalf("overflow add (%d,%d) = (%d,%v)", left, right, sum, err)
+			}
+			return
+		}
+		if err != nil || sum < left || sum < right || sum != left+right {
+			t.Fatalf("checked add (%d,%d) = (%d,%v)", left, right, sum, err)
+		}
+	})
 }
 
 func messageTexts(messages []llm.ConversationMessage) []string {
