@@ -121,5 +121,10 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 
+| `T-RESOURCE-001` | B-RESOURCE-001 | resource-loader/project-trust source/tests | `implemented-awaiting-independent-review` | untrusted invalid project is neither read nor diagnosed; trusted precedence |
+| `T-RESOURCE-002` | B-RESOURCE-002 | trust-manager tests | `implemented-awaiting-independent-review` | duplicate/permission/atomic preservation/cancel/race coverage; Windows compile fail-closed |
+| `T-RESOURCE-003` | B-RESOURCE-003 | prompt-templates/skills tests and 2781 | `implemented-awaiting-independent-review` | malformed/UTF-8/size/symlink/collision/disable-model-invocation plus parser fuzz |
+| `T-RESOURCE-004` | B-RESOURCE-004/B-APP-009 | system-prompt/resource reload and 2753 | `implemented-awaiting-independent-review` | healthy snapshot retention, concurrent snapshots and production preflight side-effect regression |
+
 JSON print mode 的 error exit、RPC、interactive、真实 provider 和 terminal integration tests
 不属于 WF-001 v0.1；进入对应 workflow 时逐项登记。

@@ -267,3 +267,9 @@
 - 明确延期：OAuth login/refresh、command-backed config execution、Windows DACL persistence；
   未知 stale lock 不自动回收仍是明确 contract，不由本里程碑静默改变。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-RESOURCE-001：M-RESOURCE/v0.1 review pending
+
+- 范围：`internal/resource`、production prompt assembly、对应 charter/behavior/test/data ledger；固定上游 `a116523434806910336b9de3e38a41aa5860030b`。
+- 状态：`awaiting-independent-review`。本模块实现者不得将 unit/race/fuzz/build gates 或本文档记录表述为独立 review passed。
+- 必核：untrusted cwd non-probe、strict durable trust private/atomic/lock/cancel、unknown decision preservation、symlink/UTF-8/size/diagnostic boundary、snapshot reload/race、prompt injection boundaries、production no-session/no-network preflight，以及 extension/package/interactive/remote 的延期边界。

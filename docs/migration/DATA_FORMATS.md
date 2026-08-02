@@ -10,14 +10,14 @@
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |
 | `D-SETTINGS-001` | global/project `settings.json` | `packages/coding-agent/src/core/settings-manager.ts` | source precedence、project trust、unknown setting preservation | `classified` |
-| `D-TRUST-001` | `~/.pi/agent/trust.json` project trust decisions | `packages/coding-agent/src/core/trust-manager.ts::ProjectTrustStore` | 安全关键；path normalization、nearest ancestor、lock/merge、unknown/malformed preservation | `classified` |
+| `D-TRUST-001` | `~/.pi/agent/trust.json` project trust decisions | `packages/coding-agent/src/core/trust-manager.ts::ProjectTrustStore` | 安全关键；path normalization、nearest ancestor、lock/merge、unknown/malformed preservation | `implemented-awaiting-independent-review` |
 | `D-KEYBINDING-001` | `~/.pi/agent/keybindings.json` | `packages/coding-agent/src/core/keybindings.ts`；`packages/coding-agent/src/migrations.ts::migrateKeybindingsConfigFile` | TUI 前实现；unknown/malformed 不覆盖，alias migration 可重复 | `deferred` |
 | `D-AUTH-001` | `auth.json` provider credential map | `packages/coding-agent/src/core/auth-storage.ts`；`packages/ai/src/auth/types.ts` | mode 0600、lock/merge、malformed 不覆盖、secret 不进入 log | `ported-api-key-v0.1-unix`；Windows fail-closed；OAuth deferred |
 | `D-AUTH-002` | legacy `oauth.json` 与 settings API keys | `packages/coding-agent/src/migrations.ts` | 后续 one-way migration，保留原文件直至成功 | `deferred` |
 | `D-MODEL-001` | user `models.json` | `packages/coding-agent/src/core/model-config.ts` | comments/schema、provider overrides、错误诊断和 reload | `classified` |
 | `D-MODEL-002` | dynamic `models-store.json` | `packages/coding-agent/src/core/models-store.ts`；`packages/ai/src/models-store.ts` | provider-scoped merge、etag/checkedAt、malformed 不覆盖 | `classified` |
-| `D-RESOURCE-001` | global/project `prompts/` 与 legacy `commands/` | `packages/coding-agent/src/migrations.ts::migrateCommandsToPrompts` | 资源清单先保留；collision 不覆盖，迁移成功前不丢 source | `deferred` |
-| `D-RESOURCE-002` | global/project extensions、skills、themes 与 package resource dirs | `packages/coding-agent/src/core/resource-loader.ts`；`packages/coding-agent/src/migrations.ts` | 后续资源模块逐类取证；当前不得把未知 user resource 当临时文件清理 | `deferred` |
+| `D-RESOURCE-001` | global/project `prompts/` 与 legacy `commands/` | `packages/coding-agent/src/migrations.ts::migrateCommandsToPrompts` | v0.1 strict prompt discovery/collision 已实现；legacy commands migration 仍 deferred，绝不丢 source | `partially-implemented-awaiting-independent-review` |
+| `D-RESOURCE-002` | global/project extensions、skills、themes 与 package resource dirs | `packages/coding-agent/src/core/resource-loader.ts`；`packages/coding-agent/src/migrations.ts` | v0.1 strict global/trusted-project skills 已实现；extensions/themes/package dirs deferred，未知 user resource 不清理 | `partially-implemented-awaiting-independent-review` |
 | `D-CATALOG-001` | built-in generated model catalog | `packages/ai/src/models.generated.ts`；`packages/ai/scripts/generate-models.ts` | 冻结产物可读；原始 data/manifest 缺失，不能 live regenerate 冒充基线 | `baseline-artifact-gap` |
 
 ## D-SESSION-001：首个兼容子集
