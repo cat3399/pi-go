@@ -297,6 +297,13 @@ atomic replace 会把各 link 分裂成不同历史；普通单路径以及不�
 此前完整 v3 prefix 可严格 decode 时工作；先 no-clobber 创建 `.partial-recovery.backup`，再
 atomic replace 截断。它绝不处理 middle corruption 或完整 tail，且不会由 Open/Application
 自动调用。Unix 使用 kernel-released `flock`，Windows 使用 `LockFileEx`；两者都不采用会在
-crash 后变成安全风险的 stale-directory sentinel。rewrite 在 chmod/write/fsync/close 或
+crash 后变成安全风险的 stale-directory sentinel。Windows identity handle 由明确的
+`CreateFileW(GENERIC_READ, SHARE_READ|SHARE_WRITE|SHARE_DELETE, OPEN_EXISTING)` 建立，允许
+持锁期间的同卷 replacement；replacement 明确使用
+`MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)` 且不允许 `COPY_ALLOWED`，因此不会退化为
+非原子的跨卷 copy/delete。对应 runtime migration/recovery/rename-under-lock test 必须在
+Windows runner 执行；非 Windows gate 只验证参数 contract 与 Windows compile。
+
+rewrite 在 chmod/write/fsync/close 或
 pre-rename failure 时关闭并移除 private temp，cleanup error 与主错误一起返回；rename 后的
 commit-unknown 路径绝不再按 temporary path 删除，避免误删已发布数据。
