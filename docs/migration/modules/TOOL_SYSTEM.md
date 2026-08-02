@@ -1,10 +1,10 @@
 # M-TOOL：Tool 与系统能力 charter
 
-状态：`in-progress`（`M-TOOL/v0.2-filesystem-suite`；`v0.1-bash` 已复审）
+状态：`ported`（`M-TOOL/v0.1-bash`、`M-TOOL/v0.2-filesystem-suite`）
 
 首个里程碑：`M-TOOL/v0.1-bash`
 
-当前里程碑：`M-TOOL/v0.2-filesystem-suite`
+最近通过里程碑：`M-TOOL/v0.2-filesystem-suite`
 
 ## v0.2 filesystem suite
 
@@ -40,17 +40,17 @@
 - `packages/coding-agent/test/file-mutation-queue.test.ts`；
 - `packages/coding-agent/test/path-utils.test.ts`。
 
-所有 v0.2 条目在最终独立 review 通过前保持 `in-progress`/`deferred`，不因本地 gate 通过标为 `ported`。
+所有 v0.2 条目已由 `R-TOOL-005` 最终独立复审关闭；已知差异继续由下述 debt 单独追踪。
 
 ### v0.2 behavior slice
 
-| ID | 行为 | 初始状态 |
+| ID | 行为 | 审查后状态 |
 | --- | --- | --- |
-| `B-TOOL-006` | shared cwd path resolution、read range/UTF-8/binary/truncation | `in-progress` |
-| `B-TOOL-007` | atomic write/edit、same-target alias serialization、cancel linearization | `in-progress` |
-| `B-TOOL-008` | exact original-snapshot multi-edit、CRLF/BOM、diff metadata | `in-progress` |
-| `B-TOOL-009` | deterministic ls/find/grep、glob/ignore/context/limit | `in-progress` |
-| `B-TOOL-010` | registry dispatcher 与 agent named-tool adapter | `in-progress` |
+| `B-TOOL-006` | shared cwd path resolution、read range/UTF-8/binary/truncation | `ported` |
+| `B-TOOL-007` | atomic write/edit、same-target alias serialization、cancel linearization | `ported` |
+| `B-TOOL-008` | exact original-snapshot multi-edit、CRLF/BOM、diff metadata | `ported` |
+| `B-TOOL-009` | deterministic ls/find/grep、glob/ignore/context/limit | `ported` |
+| `B-TOOL-010` | registry dispatcher 与 agent named-tool adapter | `ported` |
 
 ### v0.2 known debt / re-evaluation
 

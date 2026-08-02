@@ -44,8 +44,8 @@
 | `F-SESSION-002` | Major | M-SESSION | Create 隐式 MkdirAll，但未同步新 ancestor 在父目录中的目录项 | parent precondition 与缺目录回归 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-003` | Minor | M-SESSION | 超出 RFC3339 四位年份的 clock 值可写但不可 reopen | create/append 可重开时间验证 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-004` | Minor | M-AGENT | bounded settlement 容易被误解为 write 后仍可由 deadline 中断 | 首次 write 线性化边界写入 charter | R-SESSION-001 | `closed-by-R-SESSION-002` |
-| `F-TOOL-001` | Major | M-TOOL | queued cancellation 的 relay goroutine 在长 predecessor 下让已返回调用残留 goroutine/barrier | 长 A、批量 B-cancel、C 顺序、settlement 后零 node/key 与 race 定点复审 | R-TOOL-003/R-TOOL-004 | `fix-applied-awaiting-review` |
-| `F-TOOL-002` | Major | M-TOOL | mode write bits 不能表达 effective identity/ACL writability；owner mode `0002` 可被 rename 绕过 | non-mutating effective probe、prepare/commit 双检、`0002`/0444/symlink/TOCTOU 回归复审 | R-TOOL-003/R-TOOL-004 | `fix-applied-awaiting-review` |
+| `F-TOOL-001` | Major | M-TOOL | queued cancellation 的 relay goroutine 在长 predecessor 下让已返回调用残留 goroutine/barrier | 长 A、批量 B-cancel、C 顺序、settlement 后零 node/key 与 race 定点复审 | R-TOOL-003/R-TOOL-004/R-TOOL-005 | `closed-by-R-TOOL-005` |
+| `F-TOOL-002` | Major | M-TOOL | mode write bits 不能表达 effective identity/ACL writability；owner mode `0002` 可被 rename 绕过 | non-mutating effective probe、prepare/commit 双检、`0002`/0444/symlink/TOCTOU 回归复审 | R-TOOL-003/R-TOOL-004/R-TOOL-005 | `closed-by-R-TOOL-005` |
 | `F-TOOL-003` | Major | M-TOOL | edit patch hunk/count/context 不可应用 | single/distant multi-hunk 实际 apply oracle 复审 | R-TOOL-003 | `closed-by-R-TOOL-004` |
 | `F-TOOL-004` | Major | M-TOOL | malformed ignore rule nil-call panic、I/O error 被吞且缺 parent rule | compiled scoped rules、typed failure、parent/nested/cancel 复审 | R-TOOL-003 | `closed-by-R-TOOL-004` |
 | `F-TOOL-005` | Major | M-TOOL | grep context 被 2,000-line cap 截断却报告 byte limit | >2,000 lines 且 <50KiB regression 与 metadata 复审 | R-TOOL-003 | `closed-by-R-TOOL-004` |
@@ -164,6 +164,17 @@
   identity-checked、无 truncation/append/write 的 `O_WRONLY` effective permission probe，并增加
   owner mode `0002` 与 content/mtime 稳定回归。两项仍为 `fix-applied-awaiting-review`，不声称
   本轮 review 已通过。
+
+## R-TOOL-005：M-TOOL/v0.2 filesystem suite 最终定点复审
+
+- 范围：commit `5f9ca71` 的 queue lifecycle 与 effective-writability 修订，以及
+  `F-TOOL-001/002` 的相邻 symlink、mode、TOCTOU、取消和 race 回归；reviewer 只读复核。
+- 结论：`passed`，0 Blocker / 0 Major / 0 Minor。取消节点同步等待 predecessor，settlement
+  后 queue 无 node/key/goroutine 残留；existing target 在 prepare/commit 以原生
+  `O_WRONLY` 做无写入权限探测并复核 identity/mode，owner `0002`、`0444`、symlink 和
+  retarget 用例均通过。
+- 验证：定点测试与 race 重复、全仓 test/vet/race/build、Linux/Windows test cross-compile
+  和累计 diff check。Windows ACL runtime 未在当前 macOS 主机执行，保留平台验证边界。
 
 ## R-SESSION-001：M-SESSION/v0.1 首轮联合审查
 

@@ -68,15 +68,15 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account 的全部权限；任何
 未来 confinement 都必须作为新的安全 behavior 明确设计，不能在 v0.1 名称中暗示存在。
 
-### M-TOOL/v0.2 filesystem suite（active，awaiting independent review）
+### M-TOOL/v0.2 filesystem suite（ported）
 
 | ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
 | --- | --- | --- | --- | --- |
-| `B-TOOL-006` | read shared cwd path、line range、UTF-8-safe head truncation；binary 不 silent decode | `core/tools/read.ts`、`path-utils.ts`、`truncate.ts`；`tools.test.ts` read suite | `in-progress` | R-TOOL-004 已关闭对应 finding；image/NFKC gap 见 TOOL_SYSTEM debt |
-| `B-TOOL-007` | follow-symlink atomic replace、mode + effective writability、same target/alias serialize、cancelled queue node 同步等待并转发 predecessor barrier | `write.ts`、`edit.ts`、`file-mutation-queue.ts` 与 queue tests | `in-progress` | R-TOOL-004 两项候选修复 awaiting review；跨进程 locking 另建 slice |
-| `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与可应用 multi-hunk patch | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `in-progress` | R-TOOL-004 已关闭对应 finding；full NFKC fuzzy mapping deferred |
-| `B-TOOL-009` | stable ls/find/grep、compiled scoped ignore、grep byte-only truncation、entry/discovery/walk cancellation | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `in-progress` | R-TOOL-004 已关闭对应 findings；Rust regex/fd/gitignore parity debt |
-| `B-TOOL-010` | registry dispatch and agent named executor preserve normal unknown-tool result | tools creation/Agent tool loop evidence | `in-progress` | R-TOOL-003；provider tool-schema advertisement remains separate slice |
+| `B-TOOL-006` | read shared cwd path、line range、UTF-8-safe head truncation；binary 不 silent decode | `core/tools/read.ts`、`path-utils.ts`、`truncate.ts`；`tools.test.ts` read suite | `ported` | R-TOOL-005；image/NFKC gap 见 TOOL_SYSTEM debt |
+| `B-TOOL-007` | follow-symlink atomic replace、mode + effective writability、same target/alias serialize、cancelled queue node 同步等待并转发 predecessor barrier | `write.ts`、`edit.ts`、`file-mutation-queue.ts` 与 queue tests | `ported` | R-TOOL-005；跨进程 locking 另建 slice |
+| `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与可应用 multi-hunk patch | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `ported` | R-TOOL-005；full NFKC fuzzy mapping deferred |
+| `B-TOOL-009` | stable ls/find/grep、compiled scoped ignore、grep byte-only truncation、entry/discovery/walk cancellation | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `ported` | R-TOOL-005；Rust regex/fd/gitignore parity debt |
+| `B-TOOL-010` | registry dispatch and agent named executor preserve normal unknown-tool result | tools creation/Agent tool loop evidence | `ported` | R-TOOL-005；provider tool-schema advertisement remains separate slice |
 
 ## M-APP
 
