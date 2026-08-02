@@ -50,11 +50,22 @@ type ToolUpdate struct {
 	Text string
 }
 
-// ToolExecutor is the single-tool execution port used by the first milestone.
+// ToolExecutor is the compatibility execution port used by the first
+// milestone. NamedToolExecutor below extends it for a registry while retaining
+// existing single-tool implementations and tests.
 // report may be called synchronously or concurrently while Execute is active.
 type ToolExecutor interface {
 	Name() string
 	Execute(context.Context, []byte, func(ToolUpdate)) (ToolOutput, error)
+}
+
+// NamedToolExecutor dispatches an admitted tool call by name. The agent checks
+// Supports before starting it, so unknown registry names retain the normal
+// error-ToolResult behavior instead of becoming coordinator failures.
+type NamedToolExecutor interface {
+	ToolExecutor
+	Supports(string) bool
+	ExecuteNamed(context.Context, string, []byte, func(ToolUpdate)) (ToolOutput, error)
 }
 
 // Config is immutable after New. Tool may be nil so a model request for an

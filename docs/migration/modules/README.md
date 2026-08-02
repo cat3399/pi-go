@@ -8,7 +8,7 @@ review gate；随着新行为证据调整时，必须同步更新 ledger 与受�
 - [AI_PROVIDER.md](AI_PROVIDER.md) — M-PROVIDER deterministic fake 与 provider runtime；
 - [AGENT_RUNTIME.md](AGENT_RUNTIME.md) — M-AGENT 单 active run 与 tool loop；
 - [SESSION_STORAGE.md](SESSION_STORAGE.md) — M-SESSION v3 JSONL 与 durable invariant；
-- [TOOL_SYSTEM.md](TOOL_SYSTEM.md) — M-TOOL 首个 Bash tool；
+- [TOOL_SYSTEM.md](TOOL_SYSTEM.md) — M-TOOL Bash 与 filesystem tool suite；
 - [APPLICATION_CLI.md](APPLICATION_CLI.md) — M-APP text print 与 WF-001 装配。
 
 阶段 0 之后的产品服务、Interactive/TUI、Extension 和 Remote 模块仍以

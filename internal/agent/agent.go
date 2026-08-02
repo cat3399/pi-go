@@ -693,7 +693,7 @@ func (a *Agent) executeToolCall(
 	if a.runCause(active) != nil {
 		return ToolOutput{Text: toolCancellationText}, ErrAgentAborted, true
 	}
-	if a.config.tool == nil || a.config.toolName != call.Name() {
+	if a.config.tool == nil || !toolSupports(a.config.tool, a.config.toolName, call.Name()) {
 		return ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())},
 			fmt.Errorf("%w: %s", ErrToolNotFound, call.Name()), false
 	}
@@ -723,7 +723,7 @@ func (a *Agent) executeToolCall(
 			ToolUpdate: update,
 		})
 	}
-	output, toolErr := executeToolSafely(a.config.tool, active.ctx, call.ArgumentsJSON(), report)
+	output, toolErr := executeNamedToolSafely(a.config.tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
 	updateMu.Lock()
 	acceptingUpdates = false
 	updateMu.Unlock()
@@ -736,6 +736,13 @@ func (a *Agent) executeToolCall(
 	cancelled := a.active == active && context.Cause(active.ctx) != nil
 	a.mu.Unlock()
 	return output, toolErr, cancelled
+}
+
+func toolSupports(executor ToolExecutor, configuredName, requestedName string) bool {
+	if named, ok := executor.(NamedToolExecutor); ok {
+		return named.Supports(requestedName)
+	}
+	return configuredName == requestedName
 }
 
 func (a *Agent) commitToolCancellationTerminal(
