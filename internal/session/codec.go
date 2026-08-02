@@ -54,6 +54,9 @@ func decodeSessionFile(path string, data []byte) (Header, []Entry, map[string]in
 	if !haveHeader {
 		return Header{}, nil, nil, false, fmt.Errorf("%w: %s: missing header", ErrInvalidSession, path)
 	}
+	if err := validateCompactionEntries(entries, byID); err != nil {
+		return Header{}, nil, nil, false, fmt.Errorf("%w: %s", ErrInvalidEntry, err)
+	}
 	needsSeparator := len(data) > 0 && data[len(data)-1] != '\n'
 	return header, entries, byID, needsSeparator, nil
 }
@@ -180,10 +183,133 @@ func decodeEntry(raw []byte) (Entry, error) {
 		if err != nil {
 			return Entry{}, err
 		}
+	} else if typeName == "compaction" {
+		compaction, err := decodeCompactionRecord(object)
+		if err != nil {
+			return Entry{}, err
+		}
+		entry.compaction = &compaction
 	} else {
 		entry.diagnostics = []Diagnostic{{Code: DiagnosticUnknownEntry, EntryID: id, ContentIndex: -1}}
 	}
 	return entry, nil
+}
+
+func decodeCompactionRecord(object map[string]json.RawMessage) (CompactionRecord, error) {
+	summary, err := requiredString(object, "summary")
+	if err != nil || !utf8.ValidString(summary) || strings.TrimSpace(summary) == "" {
+		return CompactionRecord{}, fmt.Errorf("invalid compaction summary")
+	}
+	firstKept, err := requiredString(object, "firstKeptEntryId")
+	if err != nil {
+		return CompactionRecord{}, fmt.Errorf("invalid compaction firstKeptEntryId")
+	}
+	if err := validateOpaqueID(firstKept, "compaction first kept entry id"); err != nil {
+		return CompactionRecord{}, err
+	}
+	tokensBefore, err := requiredUint64(object, "tokensBefore")
+	if err != nil {
+		return CompactionRecord{}, fmt.Errorf("invalid compaction tokensBefore")
+	}
+	record := CompactionRecord{Summary: summary, FirstKeptEntryID: firstKept, TokensBefore: tokensBefore}
+	if raw, exists := object["usage"]; exists {
+		usage, err := decodeCompactionUsage(raw)
+		if err != nil {
+			return CompactionRecord{}, err
+		}
+		record.Usage = &usage
+	}
+	return record, nil
+}
+
+func decodeCompactionUsage(raw []byte) (CompactionUsage, error) {
+	object, err := decodeObject(raw)
+	if err != nil {
+		return CompactionUsage{}, fmt.Errorf("invalid compaction usage")
+	}
+	input, err := requiredUint64(object, "input")
+	if err != nil {
+		return CompactionUsage{}, err
+	}
+	output, err := requiredUint64(object, "output")
+	if err != nil {
+		return CompactionUsage{}, err
+	}
+	cacheRead, err := requiredUint64(object, "cacheRead")
+	if err != nil {
+		return CompactionUsage{}, err
+	}
+	cacheWrite, err := requiredUint64(object, "cacheWrite")
+	if err != nil {
+		return CompactionUsage{}, err
+	}
+	spec := llm.UsageSpec{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	if rawReasoning, exists := object["reasoning"]; exists {
+		value, err := decodeUint64(rawReasoning)
+		if err != nil {
+			return CompactionUsage{}, err
+		}
+		spec.Reasoning = &value
+	}
+	if rawCacheWrite1h, exists := object["cacheWrite1h"]; exists {
+		value, err := decodeUint64(rawCacheWrite1h)
+		if err != nil {
+			return CompactionUsage{}, err
+		}
+		spec.CacheWrite1h = &value
+	}
+	usage, err := llm.NewUsage(spec)
+	if err != nil {
+		return CompactionUsage{}, err
+	}
+	if rawTotal, exists := object["totalTokens"]; exists {
+		total, err := decodeUint64(rawTotal)
+		if err != nil || total != usage.TotalTokens() {
+			return CompactionUsage{}, fmt.Errorf("invalid compaction totalTokens")
+		}
+	}
+	costRaw, exists := object["cost"]
+	if !exists {
+		return CompactionUsage{}, fmt.Errorf("compaction usage is missing cost")
+	}
+	var cost UsageCost
+	if err := json.Unmarshal(costRaw, &cost); err != nil || validateUsageCost(cost) != nil {
+		return CompactionUsage{}, fmt.Errorf("invalid compaction usage cost")
+	}
+	return CompactionUsage{Usage: usage, Cost: cost}, nil
+}
+
+func validateCompactionEntries(entries []Entry, byID map[string]int) error {
+	for index := range entries {
+		entry := entries[index]
+		if entry.compaction == nil {
+			continue
+		}
+		if !entry.hasParent {
+			return fmt.Errorf("compaction %q must have a parent", entry.id)
+		}
+		firstIndex, exists := byID[entry.compaction.FirstKeptEntryID]
+		if !exists || firstIndex >= index {
+			return fmt.Errorf("compaction %q first kept entry is not earlier", entry.id)
+		}
+		ancestor := byID[entry.parentID]
+		found := false
+		for {
+			if ancestor == firstIndex {
+				found = true
+				break
+			}
+			parent := entries[ancestor]
+			if !parent.hasParent {
+				break
+			}
+			ancestor = byID[parent.parentID]
+		}
+		if !found {
+			return fmt.Errorf("compaction %q first kept entry is outside its parent branch", entry.id)
+		}
+	}
+	return nil
 }
 
 func decodeAssistantProvenance(raw []byte) (AssistantProvenance, bool, error) {

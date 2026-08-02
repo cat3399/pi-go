@@ -201,3 +201,69 @@ fork custom ID 已 port；
 `file-operations` 的 strict open 已在 v0.1，discovery/list 与空文件初始化属于 application
 selector policy deferred；`labels`、`save-entry` 的 extension entry 及 `migration` 的 v1/v2
 rewrite 均 deferred，不能因 tree reader 能保留 unknown entry 而宣称其 API 已实现。
+
+## M-SESSION/v0.3-context-compaction
+
+状态：`implemented; independent review pending`
+
+本里程碑把手动 context compaction 作为现有 `Session` aggregate 的正式能力，而不是独立
+engine。它只依赖 M-BASE 的 durable message/usage 语义；不会创建第二套 AgentHarness 或重写
+M-AGENT 控制流。
+
+### 负责与不变量
+
+- `Session.BuildContext` 与 `Context` 只沿 selected leaf 的 parent path 投影。该 path 上最新
+  `compaction` entry 投影为一个 checkpoint summary、`firstKeptEntryId` 到 compaction parent 的
+  retained tail、以及 compaction 后的 entries；old prefix 和所有 sibling 都不进入 provider context。
+- `Session.Compact(ctx, CompactRequest)` 是真实的 manual API。它捕获 immutable selected-branch
+  snapshot（summary prompt、serialized messages、previous summary、retained tail、token estimate），
+  在所有 mutex/append gate 外调用窄 `Summarizer` port，再在 gate 内比较 generation 与 selected
+  leaf 后提交。append/select/reset/另一 compact 在此期间发生时返回 `ErrCompactionConflict`，绝不
+  覆盖新分支。
+- v3 `compaction` record 有普通 entry envelope：`type`, `id`, `parentId`, `timestamp`，以及
+  `summary`, `firstKeptEntryId`, `tokensBefore`, optional `usage`。parent 必须是 snapshot leaf；
+  first kept 必须是该 parent 的更早 ancestor；usage 含 normalized token breakdown 与 v3 `cost`。
+  reader 重新验证这些关系，不能把 sibling 或 forward id 当 retained tail。
+- compaction append 复用普通 append 的 write boundary：pre-write failure 不改变 state；write/sync
+  unknown 将 writer poison，内存 leaf 不前进；poisoned session 禁止后续 compact/fork/extract，必须
+  close/reopen 后显式 reconcile。provider error、abort、empty summary 和 stale snapshot 不写 record。
+- token estimate 使用最新有效 assistant usage 加之后的保守字符估计；cut point 不会落在 tool result，
+  但其 token 仍计入 retained budget。`ShouldCompact` 仅提供 policy predicate，v0.3 不自动触发。
+
+### 上游证据与 Go 取舍
+
+固定 commit `a116523434806910336b9de3e38a41aa5860030b`：
+
+- coding-agent `src/core/compaction/{compaction,branch-summarization,utils}.ts`、
+  `src/core/session-manager.ts::{buildContextEntries,buildSessionContext}`、
+  `src/core/agent-session.ts::compact`；
+- AgentHarness `src/harness/compaction/{compaction,branch-summarization,utils}.ts` 与
+  `src/harness/agent-harness.ts::compact`；
+- coding tests `compaction.test.ts`, `compaction-serialization.test.ts`,
+  `agent-session-compaction.test.ts`, `session-manager/build-context.test.ts`,
+  `suite/regressions/5217-compaction-reason.test.ts`。
+
+两条上游路径共享 selected-path、latest checkpoint、cut/estimate 和 summary snapshot invariant，
+但各自拥有 retry/event/provider orchestration。Go 只提炼前者；手动 API 接收可注入
+`Summarizer`，因此可由未来 application/agent wiring 实际消费，不把 provider stream 持久化或锁入
+Session。自动阈值触发、retry 和 UI events 留给 M-AGENT/M-APP integration gate。
+
+### 明确延期
+
+`branch_summary` 的生成、cache/invalidation 与 tree-navigation atomicity 不能在不引入第二个
+agent/session coordinator 的前提下形成完整 contract；本里程碑仍将其作为 unknown entry 安全保留，
+不投影也不声称已支持。后续 `M-SESSION/v0.4-branch-summary` 必须同时定义 navigation owner、cache
+key/invalidation、cancel/fault publication 与 selected-path context，才可将 wire type 升格。
+
+同样延期：v1/v2 migration、automatic threshold invocation、provider retry 和 extension hooks。它们
+不得绕过 `Session.Compact` 的 snapshot/commit gate。
+
+### 验收与 integration gate
+
+- session suite 覆盖 v3 encode/decode/reopen、parent/first-kept validation、selected sibling isolation、
+  fork raw round-trip、summary error/cancel/repeat、append race/conflict、storage fault/poison 和 fuzz；
+- `BuildContext` 已是 Agent provider request 所消费的 production path，因而压缩后下一 agent turn 会
+  获得 summary + tail。M-AGENT/M-APP 后续只需在 idle/manual command surface 注入 a real
+  `Summarizer`，并决定 auto threshold/retry/event policy；不允许重建 context projection；
+- 本节不表示独立 review 已通过。review 必须复核 v3 foreign fixture compatibility、concurrent
+  select/append/compact race、usage/cost wire 和 branch-summary deferral 的 integration gate。

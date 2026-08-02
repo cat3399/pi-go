@@ -211,6 +211,95 @@ func encodeMessageEntry(
 	return append(encoded, '}'), nil
 }
 
+func encodeCompactionEntry(
+	id string,
+	parentID string,
+	timestamp time.Time,
+	record CompactionRecord,
+) (json.RawMessage, error) {
+	if err := validateOpaqueID(id, "entry id"); err != nil {
+		return nil, err
+	}
+	if err := validateOpaqueID(parentID, "compaction parent id"); err != nil {
+		return nil, err
+	}
+	if err := validateOpaqueID(record.FirstKeptEntryID, "compaction first kept entry id"); err != nil {
+		return nil, err
+	}
+	if !utf8.ValidString(record.Summary) || strings.TrimSpace(record.Summary) == "" {
+		return nil, fmt.Errorf("compaction summary must be non-empty valid UTF-8")
+	}
+	encoded := append([]byte(nil), `{"type":"compaction","id":`...)
+	var err error
+	encoded, err = appendJSONValue(encoded, id)
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"parentId":`...)
+	encoded, err = appendJSONValue(encoded, parentID)
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"timestamp":`...)
+	encoded, err = appendJSONValue(encoded, formatISOTime(timestamp))
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"summary":`...)
+	encoded, err = appendJSONValue(encoded, record.Summary)
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"firstKeptEntryId":`...)
+	encoded, err = appendJSONValue(encoded, record.FirstKeptEntryID)
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"tokensBefore":`...)
+	encoded = strconv.AppendUint(encoded, record.TokensBefore, 10)
+	if record.Usage != nil {
+		usage, err := encodeCompactionUsage(*record.Usage)
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, `,"usage":`...)
+		encoded = append(encoded, usage...)
+	}
+	return append(encoded, '}'), nil
+}
+
+func encodeCompactionUsage(value CompactionUsage) (json.RawMessage, error) {
+	if err := validateUsageCost(value.Cost); err != nil {
+		return nil, err
+	}
+	usage := value.Usage
+	encoded := append([]byte(nil), `{"input":`...)
+	encoded = strconv.AppendUint(encoded, usage.Input(), 10)
+	encoded = append(encoded, `,"output":`...)
+	encoded = strconv.AppendUint(encoded, usage.Output(), 10)
+	encoded = append(encoded, `,"cacheRead":`...)
+	encoded = strconv.AppendUint(encoded, usage.CacheRead(), 10)
+	encoded = append(encoded, `,"cacheWrite":`...)
+	encoded = strconv.AppendUint(encoded, usage.CacheWrite(), 10)
+	if reasoning, ok := usage.Reasoning(); ok {
+		encoded = append(encoded, `,"reasoning":`...)
+		encoded = strconv.AppendUint(encoded, reasoning, 10)
+	}
+	if cacheWrite1h, ok := usage.CacheWrite1h(); ok {
+		encoded = append(encoded, `,"cacheWrite1h":`...)
+		encoded = strconv.AppendUint(encoded, cacheWrite1h, 10)
+	}
+	encoded = append(encoded, `,"totalTokens":`...)
+	encoded = strconv.AppendUint(encoded, usage.TotalTokens(), 10)
+	cost, err := json.Marshal(value.Cost)
+	if err != nil {
+		return nil, err
+	}
+	encoded = append(encoded, `,"cost":`...)
+	encoded = append(encoded, cost...)
+	return append(encoded, '}'), nil
+}
+
 func appendJSONArray(destination []byte, values []json.RawMessage) []byte {
 	destination = append(destination, '[')
 	for index, value := range values {
