@@ -124,4 +124,4 @@ production OpenAI request (built-in tool schemas)
   -> final assistant text / session
 ~~~
 
-本地 HTTP/SSE E2E 断言 request1 有 bash/filesystem schemas，call ID 与 `fc_*` item identity 正确归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。M-AGENT/v0.2 的 multi-call scheduler 是集成前提，不由本 workflow 宣称完成。
+本地 HTTP/SSE E2E 断言 request1 有 bash/filesystem schemas，call ID、native-shaped `fc_*` 与 non-`fc_*` bounded identity 依当前无 provenance 的 policy 归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。foreign `fc_*` 的 provider/API 判定明确留在 `T-PROVIDER-012`，本 workflow 不宣称覆盖；M-AGENT/v0.2 的 multi-call scheduler 是集成前提，也不由本 workflow 宣称完成。

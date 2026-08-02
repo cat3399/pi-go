@@ -225,15 +225,19 @@ func normalizeResponsesCallID(value string) string {
 }
 
 func normalizeResponsesFunctionItemID(value string) string {
-	value = normalizeResponsesIDPart(value)
 	if value == "" {
 		return ""
 	}
-	if !strings.HasPrefix(value, "fc_") {
-		sum := sha256.Sum256([]byte(value))
-		return fmt.Sprintf("fc_%x", sum[:12])
+	normalized := normalizeResponsesIDPart(value)
+	if strings.HasPrefix(normalized, "fc_") {
+		return normalized
 	}
-	return value
+	// Without provider/API provenance the request cannot prove that an item is
+	// native. Hash every non-fc shape from its full raw value so very long or
+	// punctuation-heavy foreign IDs remain bounded, stable, and do not collide
+	// merely because their normalized 64-byte prefixes are equal.
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("fc_%x", sum[:12])
 }
 
 func normalizeResponsesIDPart(value string) string {
@@ -245,11 +249,11 @@ func normalizeResponsesIDPart(value string) string {
 			result.WriteByte('_')
 		}
 	}
-	normalized := strings.TrimRight(result.String(), "_")
+	normalized := result.String()
 	if len(normalized) > 64 {
 		normalized = normalized[:64]
 	}
-	return normalized
+	return strings.TrimRight(normalized, "_")
 }
 
 func appendResponsesAssistantText(

@@ -211,17 +211,21 @@ func mustSpecification(name, description, schema string) Specification {
 }
 
 func bashSpecification() Specification {
-	return mustSpecification(BashToolName, "Run a shell command in the working directory.", `{"type":"object","additionalProperties":false,"properties":{"command":{"type":"string"},"timeout":{"type":"number","minimum":0}},"required":["command"]}`)
+	schema := fmt.Sprintf(
+		`{"type":"object","additionalProperties":false,"properties":{"command":{"type":"string"},"timeout":{"type":"number","exclusiveMinimum":0,"maximum":%s}},"required":["command"]}`,
+		formatSeconds(MaxBashTimeout),
+	)
+	return mustSpecification(BashToolName, "Run a shell command in the working directory.", schema)
 }
 
 func filesystemSpecifications() []Specification {
 	return []Specification{
-		mustSpecification(ReadToolName, "Read a UTF-8 text file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
-		mustSpecification(WriteToolName, "Write UTF-8 text to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}`),
-		mustSpecification(EditToolName, "Apply exact text replacements to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}`),
-		mustSpecification(GrepToolName, "Search text files for a pattern.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustSpecification(FindToolName, "Find paths matching a glob.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustSpecification(LsToolName, "List directory entries.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":[]}`),
+		mustSpecification(ReadToolName, "Read a UTF-8 text file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
+		mustSpecification(WriteToolName, "Write UTF-8 text to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"}},"required":["path","content"]}`),
+		mustSpecification(EditToolName, "Apply exact text replacements to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"edits":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"oldText":{"type":"string","minLength":1},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}`),
+		mustSpecification(GrepToolName, "Search text files for a pattern.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
+		mustSpecification(FindToolName, "Find paths matching a glob.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
+		mustSpecification(LsToolName, "List directory entries.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":[]}`),
 	}
 }
 

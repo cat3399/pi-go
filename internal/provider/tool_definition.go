@@ -15,6 +15,8 @@ import (
 // snapshot visible to a model.
 var ErrInvalidToolDefinition = errors.New("invalid tool definition")
 
+const maxOpenAIFunctionNameLength = 64
+
 // ToolDefinition is the neutral, provider-independent function tool surface.
 // ParametersJSON is a JSON Schema object (not a JSON string) and is copied at
 // both construction and access boundaries so request construction cannot race
@@ -40,8 +42,30 @@ func NewToolDefinition(name, description string, strict bool, parametersJSON []b
 }
 
 func (d ToolDefinition) validate() error {
-	if !utf8.ValidString(d.name) || strings.TrimSpace(d.name) == "" {
-		return fmt.Errorf("%w: name must be non-empty valid UTF-8", ErrInvalidToolDefinition)
+	if !utf8.ValidString(d.name) {
+		return fmt.Errorf("%w: name must be valid UTF-8", ErrInvalidToolDefinition)
+	}
+	if d.name == "" {
+		return fmt.Errorf("%w: name must be non-empty", ErrInvalidToolDefinition)
+	}
+	if len(d.name) > maxOpenAIFunctionNameLength {
+		return fmt.Errorf(
+			"%w: name must be at most %d characters",
+			ErrInvalidToolDefinition,
+			maxOpenAIFunctionNameLength,
+		)
+	}
+	for _, character := range d.name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' {
+			continue
+		}
+		return fmt.Errorf(
+			"%w: name may contain only ASCII letters, digits, underscore, and hyphen",
+			ErrInvalidToolDefinition,
+		)
 	}
 	if !utf8.ValidString(d.description) || strings.TrimSpace(d.description) == "" {
 		return fmt.Errorf("%w: description must be non-empty valid UTF-8", ErrInvalidToolDefinition)

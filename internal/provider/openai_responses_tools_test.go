@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/llm"
@@ -166,6 +167,137 @@ func TestToolDefinitionsAreValidatedAndImmutable(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionEnforcesOpenAIFunctionNameAdmission(t *testing.T) {
+	t.Parallel()
+
+	if _, err := provider.NewToolDefinition(strings.Repeat("a", 64), "valid", true, []byte(`{"type":"object"}`)); err != nil {
+		t.Fatalf("64-character name rejected: %v", err)
+	}
+	invalidNames := []string{
+		strings.Repeat("a", 65),
+		"has.dot",
+		"has space",
+		"slash/name",
+		"工具",
+		string([]byte{0xff}),
+	}
+	for _, name := range invalidNames {
+		if _, err := provider.NewToolDefinition(name, "invalid", true, []byte(`{"type":"object"}`)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+			t.Fatalf("NewToolDefinition(%q) error = %v, want ErrInvalidToolDefinition", name, err)
+		}
+	}
+}
+
+func TestOpenAIResponsesReplayNormalizesNonFCIDsAndAppliesOriginlessFCShapePolicy(t *testing.T) {
+	t.Parallel()
+
+	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedLongPrefix := strings.Repeat("foreign/item+", 12)
+	first := mustReplayCall(t, "call/one|"+sharedLongPrefix+"left", "one")
+	second := mustReplayCall(t, "call:two|"+sharedLongPrefix+"right", "two")
+	fcShaped := mustReplayCall(t, "call-three|fc_native-1", "three")
+	assistant, err := llm.NewAssistantToolUseMessage(
+		[]llm.AssistantBlock{first, second, fcShaped},
+		llm.Usage{},
+		responsesTestTime,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []llm.ConversationMessage{
+		mustUser(t, "run"),
+		assistant,
+		mustToolResult(t, first.ID(), first.Name(), "one"),
+		mustToolResult(t, second.ID(), second.Name(), "two"),
+		mustToolResult(t, fcShaped.ID(), fcShaped.Name(), "three"),
+	}
+	request, err := provider.NewRequest(model, "", messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstPayload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPayload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFunctions := replayItemsOfType(t, firstPayload, "function_call")
+	secondFunctions := replayItemsOfType(t, secondPayload, "function_call")
+	if !reflect.DeepEqual(firstFunctions, secondFunctions) {
+		t.Fatalf("normalization is not stable:\nfirst  = %#v\nsecond = %#v", firstFunctions, secondFunctions)
+	}
+	if len(firstFunctions) != 3 {
+		t.Fatalf("function calls = %#v", firstFunctions)
+	}
+
+	firstID := firstFunctions[0]["id"].(string)
+	secondID := firstFunctions[1]["id"].(string)
+	for _, itemID := range []string{firstID, secondID} {
+		if !isBoundedResponsesFunctionItemID(itemID) {
+			t.Fatalf("normalized item id = %q, want bounded fc_ ASCII shape", itemID)
+		}
+	}
+	if firstID == secondID {
+		t.Fatalf("distinct raw IDs sharing a long prefix collided: %q", firstID)
+	}
+	if got := firstFunctions[2]["id"]; got != "fc_native-1" {
+		t.Fatalf("originless fc-shaped item id = %v, want fc_native-1", got)
+	}
+	if got, want := []any{firstFunctions[0]["call_id"], firstFunctions[1]["call_id"], firstFunctions[2]["call_id"]}, []any{"call_one", "call_two", "call-three"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("call ids = %#v, want %#v", got, want)
+	}
+
+	outputs := replayItemsOfType(t, firstPayload, "function_call_output")
+	if len(outputs) != 3 {
+		t.Fatalf("function call outputs = %#v", outputs)
+	}
+	if got, want := []any{outputs[0]["call_id"], outputs[1]["call_id"], outputs[2]["call_id"]}, []any{"call_one", "call_two", "call-three"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("result call ids = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenAIResponsesReplayAssignsDistinctIDsToMultipleTextBlocks(t *testing.T) {
+	t.Parallel()
+
+	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstText := mustTextBlock(t, "before")
+	secondText := mustTextBlock(t, "after")
+	call := mustReplayCall(t, "call-1|fc_1", "bash")
+	assistant, err := llm.NewAssistantToolUseMessage(
+		[]llm.AssistantBlock{firstText, call, secondText},
+		llm.Usage{},
+		responsesTestTime,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{
+		mustUser(t, "run"),
+		assistant,
+		mustToolResult(t, call.ID(), call.Name(), "done"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := replayItemsOfType(t, payload, "message")
+	if len(messages) != 2 || messages[0]["id"] != "msg_pi_1" || messages[1]["id"] != "msg_pi_1_1" {
+		t.Fatalf("assistant message IDs = %#v, want msg_pi_1 and msg_pi_1_1", messages)
+	}
+}
+
 func TestOpenAIResponsesToolStreamRejectsPartialMalformedAndOutOfOrderEvents(t *testing.T) {
 	tests := []string{
 		responsesSSE(
@@ -216,4 +348,45 @@ func encodeReplayForTest(request provider.Request) (map[string]any, error) {
 	}
 	_, _, err = collectStreamResult(implementation.Stream(context.Background(), request))
 	return payload, err
+}
+
+func mustReplayCall(t *testing.T, id, name string) llm.ToolCallBlock {
+	t.Helper()
+	call, err := llm.NewToolCallBlock(id, name, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("NewToolCallBlock() error = %v", err)
+	}
+	return call
+}
+
+func replayItemsOfType(t *testing.T, payload map[string]any, itemType string) []map[string]any {
+	t.Helper()
+	input, ok := payload["input"].([]any)
+	if !ok {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	var items []map[string]any
+	for _, candidate := range input {
+		item, ok := candidate.(map[string]any)
+		if ok && item["type"] == itemType {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func isBoundedResponsesFunctionItemID(value string) bool {
+	if len(value) > 64 || !strings.HasPrefix(value, "fc_") {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
