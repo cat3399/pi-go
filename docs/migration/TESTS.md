@@ -83,6 +83,16 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-TOOL-006` | B-TOOL-003/005 | 5208 late-output 与 5303 background-pipe regressions | `strengthened` | idle-grace、late isolation、race 与 process integration |
 | `T-TOOL-007` | B-TOOL-001 | `packages/coding-agent/src/utils/shell.ts::getShellEnv/getShellConfig` | `strengthened` | inherited/stripped env 与跨平台 shell resolution |
 
+### M-TOOL/v0.2 filesystem suite（reviewed）
+
+| ID | Behavior | 上游测试/证据 | 当前 disposition | 覆盖或重评条件 |
+| --- | --- | --- | --- | --- |
+| `T-TOOL-008` | B-TOOL-006 | `tools.test.ts` read range/limit/truncate；`path-utils.test.ts` | `strengthened` | range/binary/truncation + NFD/lowercase AM/PM variants；R-TOOL-005 |
+| `T-TOOL-009` | B-TOOL-007 | `file-mutation-queue.test.ts` all cases；write/edit tests | `strengthened` | 长 A/批量 B-cancel/C、settlement 后零 queue node、alias/target/mode/effective `0002`/0444/retarget、race；R-TOOL-005 |
+| `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `strengthened` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；R-TOOL-005 |
+| `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `strengthened` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；R-TOOL-005 |
+| `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `strengthened` | JSON/edit/unified-patch fuzz、symlink TOCTOU、effective permission、cancel/race strengthening；R-TOOL-005 |
+
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。
 

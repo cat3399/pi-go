@@ -78,6 +78,56 @@ func executeToolSafely(
 	return executor.Execute(ctx, arguments, report)
 }
 
+func executeNamedToolSafely(
+	executor ToolExecutor,
+	ctx context.Context,
+	name string,
+	arguments []byte,
+	report func(ToolUpdate),
+) (output ToolOutput, err error) {
+	if named, ok := executor.(NamedToolExecutor); ok {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				err = &toolPanicError{value: safeValueText(recovered), stack: debug.Stack()}
+				output = ToolOutput{Text: safeErrorText(err)}
+			}
+		}()
+		return named.ExecuteNamed(ctx, name, arguments, report)
+	}
+	return executeToolSafely(executor, ctx, arguments, report)
+}
+
+// FilesystemExecutor adapts a complete internal/tool registry to the agent's
+// existing execution port. It owns neither tool-call IDs nor transcript state.
+type FilesystemExecutor struct {
+	registry *tool.Registry
+}
+
+func NewFilesystemExecutor(registry *tool.Registry) (*FilesystemExecutor, error) {
+	if registry == nil {
+		return nil, fmt.Errorf("%w: filesystem registry is required", ErrInvalidConfig)
+	}
+	if len(registry.Names()) == 0 {
+		return nil, fmt.Errorf("%w: filesystem registry is empty", ErrInvalidConfig)
+	}
+	return &FilesystemExecutor{registry: registry}, nil
+}
+
+func (e *FilesystemExecutor) Name() string { return "filesystem" }
+func (e *FilesystemExecutor) Supports(name string) bool {
+	return e != nil && e.registry != nil && e.registry.Supports(name)
+}
+func (e *FilesystemExecutor) Execute(_ context.Context, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+	return ToolOutput{Text: "Filesystem executor requires a tool name"}, errors.New("filesystem executor requires a tool name")
+}
+func (e *FilesystemExecutor) ExecuteNamed(ctx context.Context, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+	if e == nil || e.registry == nil {
+		return ToolOutput{Text: "Filesystem tools are not configured"}, errors.New("filesystem tools are not configured")
+	}
+	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
+	return ToolOutput{Text: result.Text}, err
+}
+
 func normalizeToolOutcome(output ToolOutput, err error) (ToolOutput, error) {
 	if utf8.ValidString(output.Text) {
 		if err == nil || output.Text != "" {

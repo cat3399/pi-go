@@ -1,8 +1,62 @@
 # M-TOOL：Tool 与系统能力 charter
 
-状态：`ported`（`M-TOOL/v0.1-bash`）
+状态：`ported`（`M-TOOL/v0.1-bash`、`M-TOOL/v0.2-filesystem-suite`）
 
 首个里程碑：`M-TOOL/v0.1-bash`
+
+最近通过里程碑：`M-TOOL/v0.2-filesystem-suite`
+
+## v0.2 filesystem suite
+
+### 负责
+
+- 统一的 `read`、`write`、`edit`、`grep`、`find`、`ls` JSON dispatcher 与 agent named-tool adapter；
+- relative/absolute/`~`/`@` path 解析，及 read 的 macOS screenshot curly-quote/AM-PM fallback；
+- UTF-8 文本读取、binary 显式拒绝、line/range 与 UTF-8-safe head truncation；
+- deterministic directory/tree search、basic `.gitignore`、glob、regex/literal grep 与 context；
+- follow-symlink atomic temp-write/rename、target mode/effective writability preservation、同 canonical target mutation serialization、queued cancellation synchronous barrier；
+- BOM/CRLF-preserving exact replacement、non-overlap/unique validation 与 display/unified diff metadata。
+
+### 明确不负责
+
+- filesystem sandbox：与上游一致，WorkingDir 只解析 relative path，absolute path 与 `..` 保持 OS account 权限；
+- image attachment/resize：当前 Go LLM content 只有 text block，binary/image read 以 typed error 显式失败；
+- TypeScript `diff` package 的逐字 patch formatter、TUI preview renderer、remote filesystem adapter；
+- PCRE/Rust-regex 全集与完整 gitignore/NFKC fuzzy replacement。不能安全等价的模式必须显式失败或留在 ledger，不允许 shell/TypeScript fallback。
+
+### Contract 与 ownership
+
+- `FilesystemSuite` 是 immutable cwd/limit owner；每次 execution 接收 `context.Context`，不保存 context、tool-call ID 或 session state。
+- write/edit 在同 target（含 existing/dangling symlink alias）内串行；queued cancel node 同步等待 predecessor 完成后才返回并转发 barrier，调用结算后不保留 relay goroutine 或 queue node。提交固定解析 real target，复核 alias/target identity 与 mode，保留 writable target mode；existing target 在 prepare 与 rename 前都执行 identity-checked、无 truncation/append/write 的 `O_WRONLY` effective permission probe，同时保留无 write bit 显式拒绝策略。操作在 atomic rename 前观察 cancellation，rename 后按已线性化的成功结果返回。
+- Read/search 是 best-effort snapshot；read/edit 遇到 NUL 或 invalid UTF-8 返回 `ErrBinaryFile`，不会用 replacement rune 污染模型上下文。
+- read fallback 使用 canonical NFD 与 case-insensitive AM/PM；find/grep 的 ignore rules 从 git boundary 到 search root 加载并随 walk 增量编译，malformed/unsupported/I/O error typed fail。所有入口与 discovery/walk/read boundary 传播 cancellation。
+- Grep match limit 与 output byte limit 独立；context lines 不使用通用 2,000-line ceiling。Edit patch 是 4-line context、准确 count 的可应用多-hunk unified diff。
+- `Registry` only dispatches; `agent.FilesystemExecutor` only maps named calls to provider-visible text. Agent remains transcript/settlement owner.
+
+### 上游证据与 disposition
+
+- `packages/coding-agent/src/core/tools/{read,write,edit,grep,find,ls,path-utils,truncate,edit-diff,file-mutation-queue}.ts`；
+- `packages/coding-agent/test/tools.test.ts` 的 read/write/edit/grep/find/ls 与 CRLF/fuzzy suites；
+- `packages/coding-agent/test/file-mutation-queue.test.ts`；
+- `packages/coding-agent/test/path-utils.test.ts`。
+
+所有 v0.2 条目已由 `R-TOOL-005` 最终独立复审关闭；已知差异继续由下述 debt 单独追踪。
+
+### v0.2 behavior slice
+
+| ID | 行为 | 审查后状态 |
+| --- | --- | --- |
+| `B-TOOL-006` | shared cwd path resolution、read range/UTF-8/binary/truncation | `ported` |
+| `B-TOOL-007` | atomic write/edit、same-target alias serialization、cancel linearization | `ported` |
+| `B-TOOL-008` | exact original-snapshot multi-edit、CRLF/BOM、diff metadata | `ported` |
+| `B-TOOL-009` | deterministic ls/find/grep、glob/ignore/context/limit | `ported` |
+| `B-TOOL-010` | registry dispatcher 与 agent named-tool adapter | `ported` |
+
+### v0.2 known debt / re-evaluation
+
+- `D-TOOL-001`: Go stdlib lacks a safe byte-offset-preserving NFKC mapping. v0.2 supports the explicit smart-quote/dash/space/trailing-whitespace fuzzy subset; compatibility-only/fullwidth NFKC replacements are deferred until a mapping design has independent fixtures. Owner M-TOOL; re-evaluate with Unicode normalization dependency proposal.
+- `D-TOOL-002`: Go regexp and the internal glob/.gitignore matcher are intentionally explicit subsets of Rust `rg`/`fd` behavior. Rules are precompiled; invalid or known-unsupported escape syntax fails explicitly, with no command fallback. Owner M-TOOL; re-evaluate before claiming arbitrary upstream regex/gitignore compatibility.
+- `D-TOOL-003`: binary/image read is explicit failure until M-BASE gains image content blocks and image processing contract. Owner M-BASE/M-TOOL; re-evaluate with vision content slice.
 
 ## 负责
 
