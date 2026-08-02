@@ -35,6 +35,16 @@ M-SESSION/v0.1 只写 coding-agent v3 header 和线性 `message` entries，足�
   不确定，不能承诺原 bytes 不变；
 - v0.1 明确 single-process writer，multi-process lock 后续单独设计。
 
+M-SESSION/v0.2 仍只写同一 v3 header/entry wire，但 writer 可以在显式 `ResetLeaf` 后增加
+另一个 `parentId:null` root，或在 `SelectLeaf(id)` 后向非物理 tail 加 child。选择本身不写
+record；重开时 physical last entry 是 selected leaf。branch extract 创建独立 JSONL，保留
+selected path 的原始 entry bytes，并写 new header 的 `parentSession`；fork 保留 source forest
+的所有 entry bytes。活跃 aggregate 通过 `Session.Fork` 在 append gate 下 snapshot；只有未由
+当前进程持有 writer claim 的外部文件才走 `ForkFrom(path)` 的 strict Open。目标 create
+必须 no-replace/atomic，任一失败不得改 source。若活跃 source 已因 append
+commit-unknown poisoned，Fork/Extract 必须先返回 `ErrPoisoned`，不能用可能落后磁盘的
+内存 snapshot 创建目标；调用者仍须 close/reopen/reconcile。
+
 ## D-SETTINGS-001
 
 上游同时有 global agent settings 和 project `.pi/settings.json`，project source 受 trust

@@ -152,6 +152,18 @@
 - 最终结论：`passed`，0 Blocker、0 Major、0 Minor。真实掉电注入和真实 Windows runtime
   保留为平台验证债务，不阻塞 v0.1。
 
+## R-SESSION-003：M-SESSION/v0.2-tree-branch 独立复审
+
+- 范围：append-only forest、leaf select/reset、tree/path/context、active/external fork、branch
+  extract、reopen 与 poison quarantine；reviewer 未参与实现。
+- 闭环：`14d2302` 初版，`a2ade0b` 修复 active-source snapshot，`b900951` 禁止 poisoned
+  export，`e2027d7` 以 synced uncertain tail 补实 fault evidence。
+- 验证：全仓 test/vet/build/race、定点并发与 fault 回归、decoder/forest property fuzz，及
+  Linux arm64、Windows amd64 交叉构建通过。
+- 延期：branch-summary/compaction projection、label/custom/model/thinking entry 创建、v1/v2
+  migration、multi-process writer 与真实掉电注入仍由后续里程碑重评。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
 ## R-AGENT-001：M-AGENT/v0.1 完整模块联合审查
 
 - 范围：`internal/agent` 的完整 single-tool loop、provider/tool/session 因果 barrier、
