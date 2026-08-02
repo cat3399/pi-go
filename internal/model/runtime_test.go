@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -136,6 +137,37 @@ func TestRuntimeCanonicalIdentifiersRejectDuplicatesAndApplyOverrides(t *testing
 		if resolved.Model.Provider != OpenAIProviderID {
 			t.Fatalf("provider was not canonical: %#v", resolved.Model)
 		}
+	}
+}
+
+func TestRuntimeCustomFallbackUsesOnlyCanonicalProviderBaseline(t *testing.T) {
+	models := `{"providers":{"openai":{"api":"provider-api","baseUrl":"https://provider.invalid/v1","models":[{"id":"aaa","name":"poison","api":"poison-api","baseUrl":"https://aaa.invalid/v1","headers":{"Authorization":"aaa-secret"},"compat":{"token":"aaa-secret"},"futureOption":"aaa-secret"}]}}}`
+	for _, testCase := range []struct {
+		name      string
+		settings  string
+		selection Selection
+	}{
+		{name: "explicit custom", selection: Selection{Provider: "OPENAI", Model: "custom"}},
+		{name: "settings provider custom", settings: `{"defaultProvider":"OpEnAi","defaultModel":"custom"}`},
+		{name: "settings prefixed custom", settings: `{"defaultModel":"OPENAI/custom"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			r, _, _ := newTestRuntime(t, models, testCase.settings, false)
+			resolved, err := r.Resolve(testCase.selection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			model := resolved.Model
+			if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != "provider-api" || model.BaseURL != "https://provider.invalid/v1" {
+				t.Fatalf("custom baseline = %#v", model)
+			}
+			if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") {
+				t.Fatalf("custom inherited per-model metadata: %#v", model)
+			}
+			if err := r.ValidateRoute(model); err != nil {
+				t.Fatalf("clean custom route = %v", err)
+			}
+		})
 	}
 }
 

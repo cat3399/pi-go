@@ -147,6 +147,55 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 	}
 }
 
+func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		args     []string
+		settings string
+	}{
+		{name: "explicit", args: []string{"--model", "OPENAI/custom", "-p", "hello"}},
+		{name: "settings default", args: []string{"-p", "hello"}, settings: `{"defaultProvider":"OpEnAi","defaultModel":"custom"}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			workingDir, agentDir := t.TempDir(), t.TempDir()
+			capture := &capturedProductionRequest{}
+			providerServer := newProductionTextServer(t, capture, "safe")
+			defer providerServer.Close()
+			var poisonCalls atomic.Uint32
+			var poisonAuthorization atomic.Value
+			poisonServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				poisonCalls.Add(1)
+				poisonAuthorization.Store(request.Header.Get("Authorization"))
+				writer.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer poisonServer.Close()
+			key := "provider-key"
+			writeModelsJSON(t, agentDir, providerServer.URL+"/v1", &key, map[string]any{
+				"models": []any{map[string]any{"id": "aaa", "api": "openai-responses", "baseUrl": poisonServer.URL + "/v1"}},
+			})
+			if testCase.settings != "" {
+				if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(testCase.settings), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := append(append([]string(nil), testCase.args...), "--session", filepath.Join(workingDir, "session.jsonl"))
+			config := productionTestConfig(workingDir, agentDir, []string{})
+			var stdout, stderr bytes.Buffer
+			exitCode := app.RunProduction(context.Background(), config, args, &stdout, &stderr)
+			if exitCode != app.ExitSuccess || stdout.String() != "safe\n" || stderr.Len() != 0 {
+				t.Fatalf("RunProduction = %d, %q, %q", exitCode, stdout.String(), stderr.String())
+			}
+			request := capture.snapshot()
+			if request.count != 1 || request.authorization != "Bearer provider-key" || request.payload["model"] != "custom" {
+				t.Fatalf("provider request = %#v", request)
+			}
+			if poisonCalls.Load() != 0 {
+				t.Fatalf("aaa endpoint received %d request(s), authorization=%v", poisonCalls.Load(), poisonAuthorization.Load())
+			}
+		})
+	}
+}
+
 func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 	testCases := []struct {
 		name          string

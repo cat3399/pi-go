@@ -15,6 +15,9 @@ parent 已由 application create phase 建立；模块只同步临时文件、re
 它不拥有 credential resolution（`internal/auth`）、provider request adapter、session/tool、
 project trust decision、remote refresh、fuzzy selection 或 model cycling。项目
 `.pi/settings.json` 只有 `ProjectTrusted: true` 时才读取；production v0.1 明确传 false。
+Unlisted custom model 只能从已迁移的 canonical provider default（v0.1 为
+`openai/gpt-5.5`）及 provider-level overlay 派生；没有已迁移 default 的 provider
+明确失败，不能借用任意 configured model 的 request metadata。
 
 ## 上游证据
 

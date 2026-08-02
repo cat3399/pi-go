@@ -234,3 +234,7 @@
   case-fold identity 并拒绝等价 duplicate，拆出完整 `CachedModel` durable contract 且保留 raw
   future fields，同时将 settings/store mutation 固定为 pre-existing parent + leaf-parent sync。
   本记录仍为进行中，等待独立复审，不构成 `passed`。
+- 最终复审尚余 0 Blocker / 1 Major / 0 Minor：explicit/settings unlisted custom 曾从排序后
+  的任意 configured model 继承 request metadata。修订后仅从 canonical provider default
+  与 provider-level overlay 派生；production 回归证明 `openai/aaa` 的 per-model URL 不接收
+  credential。该修订仍等待 reviewer 裁决，本记录不构成 `passed`。

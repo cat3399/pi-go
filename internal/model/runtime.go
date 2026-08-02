@@ -329,12 +329,8 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 		// An explicit provider is an intentional custom-model request. Derive its
 		// transport metadata from the provider baseline, never from a guessed API.
 		if providerID != "" {
-			for _, base := range s.Models {
-				if strings.EqualFold(base.Provider, providerID) {
-					base.ID, base.Name = modelID, modelID
-					base = r.applyModelOverride(providerID, modelID, base)
-					return Resolution{Model: base}, nil
-				}
+			if custom, ok := r.customModel(providerID, modelID); ok {
+				return Resolution{Model: custom}, nil
 			}
 		}
 		return Resolution{}, fmt.Errorf("%w: %s", ErrNotFound, reference(providerID, modelID))
@@ -343,24 +339,22 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 		return Resolution{}, fmt.Errorf("%w: provider requires a model", ErrInvalidConfig)
 	}
 	if s.Settings.DefaultModel != "" {
-		p := s.Settings.DefaultProvider
+		p, defaultModel := strings.TrimSpace(s.Settings.DefaultProvider), strings.TrimSpace(s.Settings.DefaultModel)
 		if p == "" {
-			_, p, _ = splitKnownProvider(s.Settings.DefaultModel, s.Models)
+			if inferredProvider, inferredModel, ok := splitKnownProvider(defaultModel, s.Models); ok {
+				p, defaultModel = inferredProvider, inferredModel
+			}
 		}
-		matches := filterModels(s.Models, p, s.Settings.DefaultModel)
+		matches := filterModels(s.Models, p, defaultModel)
 		if len(matches) == 1 {
 			return Resolution{Model: matches[0]}, nil
 		}
 		if p != "" {
-			for _, base := range s.Models {
-				if strings.EqualFold(base.Provider, p) {
-					base.ID, base.Name = s.Settings.DefaultModel, s.Settings.DefaultModel
-					base = r.applyModelOverride(p, s.Settings.DefaultModel, base)
-					return Resolution{Model: base}, nil
-				}
+			if custom, ok := r.customModel(p, defaultModel); ok {
+				return Resolution{Model: custom}, nil
 			}
 		}
-		return Resolution{}, fmt.Errorf("%w: settings default %s", ErrNotFound, reference(p, s.Settings.DefaultModel))
+		return Resolution{}, fmt.Errorf("%w: settings default %s", ErrNotFound, reference(p, defaultModel))
 	}
 	if len(s.Settings.EnabledModels) > 0 {
 		scoped, diagnostics := scope(s.Models, s.Settings.EnabledModels)
@@ -500,18 +494,30 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 	return Snapshot{Models: models, Providers: ids, Settings: cloneSettings(settings)}
 }
 
-func (r *Runtime) applyModelOverride(providerID, modelID string, model Model) Model {
+// customModel derives only from the provider's canonical default. v0.1 has one
+// complete builtin provider baseline: openai/gpt-5.5. A configured provider
+// without a migrated canonical default fails closed instead of borrowing an
+// arbitrary configured model's request metadata.
+func (r *Runtime) customModel(providerID, modelID string) (Model, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	provider, ok := r.providers[canonicalKey(providerID)]
-	if !ok {
-		return model
+	providerID = canonicalKey(providerID)
+	if providerID != OpenAIProviderID {
+		return Model{}, false
 	}
-	override, ok := provider.overrides[canonicalKey(modelID)]
-	if !ok {
-		return model
+	model := Model{Provider: OpenAIProviderID, ID: modelID, Name: modelID, API: OpenAIResponsesAPI}
+	if configured, ok := r.providers[providerID]; ok {
+		if configured.API != "" {
+			model.API = configured.API
+		}
+		if configured.BaseURL != "" {
+			model.BaseURL = configured.BaseURL
+		}
+		if override, ok := configured.overrides[canonicalKey(modelID)]; ok {
+			model = applyModelOverride(model, override)
+		}
 	}
-	return applyModelOverride(model, override)
+	return model, true
 }
 
 func applyModelOverride(model Model, override modelOverride) Model {
