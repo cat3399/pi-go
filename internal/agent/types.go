@@ -273,10 +273,10 @@ func (p Phase) String() string {
 
 // State is an immutable snapshot of the active coordinator state.
 type State struct {
-	phase           Phase
-	runID           uint64
-	turn            uint32
-	pendingToolCall string
+	phase            Phase
+	runID            uint64
+	turn             uint32
+	pendingToolCalls []string
 }
 
 func (s State) Phase() Phase { return s.phase }
@@ -284,8 +284,22 @@ func (s State) RunID() (uint64, bool) {
 	return s.runID, s.phase != PhaseIdle
 }
 func (s State) Turn() uint32 { return s.turn }
+
+// PendingToolCalls returns an immutable snapshot of all calls active in the
+// current batch. Parallel batches expose every call that has started and not
+// settled; sequential batches expose the one call currently being executed.
+func (s State) PendingToolCalls() []string {
+	return append([]string(nil), s.pendingToolCalls...)
+}
+
+// PendingToolCall is retained for callers of the v0.1 single-tool surface. It
+// reports a call only while exactly one call is active; use PendingToolCalls
+// for a complete multi-tool snapshot.
 func (s State) PendingToolCall() (string, bool) {
-	return s.pendingToolCall, s.pendingToolCall != ""
+	if len(s.pendingToolCalls) != 1 {
+		return "", false
+	}
+	return s.pendingToolCalls[0], true
 }
 
 // EventKind is the compact lifecycle vocabulary needed by current application

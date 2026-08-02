@@ -104,43 +104,78 @@ func (a *Agent) admitContinuation(ctx context.Context) (*activeRun, []llm.UserTe
 		return nil, nil, fmt.Errorf("%w: invalid continuation", ErrInvalidRun)
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.active != nil || a.starting {
+		a.mu.Unlock()
 		return nil, nil, ErrBusy
 	}
 	if a.nextID == ^uint64(0) {
+		a.mu.Unlock()
 		return nil, nil, ErrRunIDExhausted
 	}
+	reservedID := a.nextID
+	// Reserve the same single-run slot used by Run before consulting the
+	// external transcript port. Context may block or re-enter Agent methods, so
+	// it must never execute under mu. The reservation prevents Run or another
+	// Continue from taking the slot while this snapshot is in flight.
+	a.starting = true
+	a.mu.Unlock()
+	reserved := true
+	defer func() {
+		if !reserved {
+			return
+		}
+		a.mu.Lock()
+		if a.starting && a.active == nil {
+			a.starting = false
+		}
+		a.mu.Unlock()
+	}()
 
-	// The active slot excludes coordinator appends while Context is sampled.
-	// Queue selection and removal remain under the same lock, so failed busy,
-	// tail, context, and run-ID admission can never consume a message.
 	messages := a.config.transcript.Context().Messages()
-	if len(messages) == 0 {
-		return nil, nil, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
-	}
-	var initial []llm.UserTextMessage
-	var selected *[]llm.UserTextMessage
-	if messages[len(messages)-1].Role() == llm.RoleAssistant {
-		selected = &a.steeringQueue
-		mode := a.config.steeringMode
-		if len(*selected) == 0 {
-			selected = &a.followUpQueue
-			mode = a.config.followUpMode
+
+	a.mu.Lock()
+	active, initial, err := func() (*activeRun, []llm.UserTextMessage, error) {
+		defer a.mu.Unlock()
+		// Every path after reserving must return the slot if admission does not
+		// install an active run. No queue is touched until validation succeeds.
+		if !a.starting || a.active != nil || a.nextID != reservedID {
+			return nil, nil, fmt.Errorf("%w: continuation reservation was lost", ErrInvariant)
 		}
-		if len(*selected) == 0 {
-			return nil, nil, fmt.Errorf("%w: assistant tail", ErrCannotContinue)
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, nil, fmt.Errorf("%w: continuation context cancelled during admission: %w", ErrInvalidRun, cause)
 		}
-		initial = queuePrefix(*selected, mode)
-	}
-	a.nextID++
-	runCtx, cancel := context.WithCancelCause(ctx)
-	active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
-	a.active = active
-	if selected != nil {
-		discardQueuePrefix(selected, len(initial))
-	}
-	return active, initial, nil
+		if a.nextID == ^uint64(0) {
+			return nil, nil, ErrRunIDExhausted
+		}
+		if len(messages) == 0 {
+			return nil, nil, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
+		}
+		var initial []llm.UserTextMessage
+		var selected *[]llm.UserTextMessage
+		if messages[len(messages)-1].Role() == llm.RoleAssistant {
+			selected = &a.steeringQueue
+			mode := a.config.steeringMode
+			if len(*selected) == 0 {
+				selected = &a.followUpQueue
+				mode = a.config.followUpMode
+			}
+			if len(*selected) == 0 {
+				return nil, nil, fmt.Errorf("%w: assistant tail", ErrCannotContinue)
+			}
+			initial = queuePrefix(*selected, mode)
+		}
+		a.nextID++
+		runCtx, cancel := context.WithCancelCause(ctx)
+		active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
+		a.active = active
+		a.starting = false
+		if selected != nil {
+			discardQueuePrefix(selected, len(initial))
+		}
+		reserved = false
+		return active, initial, nil
+	}()
+	return active, initial, err
 }
 
 func (a *Agent) drainQueue(steering bool) []llm.UserTextMessage {
@@ -303,8 +338,7 @@ func (a *Agent) setRunPhaseV2(active *activeRun, turn uint32, phase Phase) error
 	}
 	active.turn = turn
 	active.phase = phase
-	active.pendingToolCall = ""
-	active.pendingToolName = ""
+	active.pendingToolCalls = nil
 	return nil
 }
 
@@ -416,15 +450,6 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 	if len(calls) == 0 {
 		return toolBatch{}, fmt.Errorf("%w: empty tool batch", ErrInvariant)
 	}
-	a.mu.Lock()
-	if a.active != active {
-		a.mu.Unlock()
-		return toolBatch{}, fmt.Errorf("%w: inactive tool batch", ErrInvariant)
-	}
-	active.phase = PhaseTool
-	active.pendingToolCall = calls[0].ID()
-	active.pendingToolName = calls[0].Name()
-	a.mu.Unlock()
 	sequential := a.config.toolExecution == ToolExecutionSequential
 	if modes, ok := a.config.tool.(ToolExecutionOverride); ok {
 		for _, call := range calls {
@@ -433,6 +458,14 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 			}
 		}
 	}
+	a.mu.Lock()
+	if a.active != active {
+		a.mu.Unlock()
+		return toolBatch{}, fmt.Errorf("%w: inactive tool batch", ErrInvariant)
+	}
+	active.phase = PhaseTool
+	active.pendingToolCalls = nil
+	a.mu.Unlock()
 	results := make([]batchOutcome, len(calls))
 	if sequential {
 		for i, call := range calls {
@@ -458,7 +491,9 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 		var workers sync.WaitGroup
 		completed := make(chan batchOutcome, len(calls))
 		for i, call := range calls {
-			a.emitToolStart(active, turn, call)
+			if err := a.beginToolCallV2(active, turn, call); err != nil {
+				return toolBatch{}, err
+			}
 			workers.Add(1)
 			go func(index int, c llm.ToolCallBlock) {
 				defer workers.Done()
@@ -487,11 +522,42 @@ func (a *Agent) emitToolStart(active *activeRun, turn uint32, call llm.ToolCallB
 	a.notify(active.ctx, Event{Kind: EventToolStarted, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name()})
 }
 func (a *Agent) emitToolSettled(active *activeRun, turn uint32, outcome batchOutcome) {
+	a.removePendingToolCallV2(active, outcome.call.ID())
 	a.notify(active.ctx, Event{Kind: EventToolSettled, RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), ToolOutput: outcome.output, ToolError: outcome.err})
 }
 func (a *Agent) executeOneV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {
-	a.emitToolStart(active, turn, call)
+	if err := a.beginToolCallV2(active, turn, call); err != nil {
+		return batchOutcome{call: call, err: err}
+	}
 	return a.executeOneNoStartV2(active, turn, call)
+}
+
+func (a *Agent) beginToolCallV2(active *activeRun, turn uint32, call llm.ToolCallBlock) error {
+	a.mu.Lock()
+	if a.active != active || active.terminalAccepted {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: inactive tool state transition", ErrInvariant)
+	}
+	active.pendingToolCalls = append(active.pendingToolCalls, call.ID())
+	a.mu.Unlock()
+	a.emitToolStart(active, turn, call)
+	return nil
+}
+
+func (a *Agent) removePendingToolCallV2(active *activeRun, id string) {
+	a.mu.Lock()
+	if a.active == active {
+		for index, pending := range active.pendingToolCalls {
+			if pending != id {
+				continue
+			}
+			copy(active.pendingToolCalls[index:], active.pendingToolCalls[index+1:])
+			active.pendingToolCalls[len(active.pendingToolCalls)-1] = ""
+			active.pendingToolCalls = active.pendingToolCalls[:len(active.pendingToolCalls)-1]
+			break
+		}
+	}
+	a.mu.Unlock()
 }
 
 func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, call llm.ToolCallBlock) batchOutcome {

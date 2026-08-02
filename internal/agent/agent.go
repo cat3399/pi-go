@@ -28,8 +28,7 @@ type activeRun struct {
 	done             chan struct{}
 	phase            Phase
 	turn             uint32
-	pendingToolCall  string
-	pendingToolName  string
+	pendingToolCalls []string
 	providerTurns    uint32
 	toolExecutions   uint32
 	terminalAccepted bool
@@ -41,9 +40,9 @@ type observerEntry struct {
 }
 
 // Agent is the single owner of volatile run state. Provider, tool, transcript
-// append, and observers are always called without holding mu. Continue reads a
-// transcript snapshot while holding mu so tail admission and queue reservation
-// share one linearization point.
+// append, and observers are always called without holding mu. Continue reserves
+// its single-run slot under mu, reads its transcript snapshot without mu, then
+// validates the snapshot and consumes queues under mu.
 type Agent struct {
 	mu sync.Mutex
 	// clockMu serializes an injected clock independently from coordinator state.
@@ -111,10 +110,10 @@ func (a *Agent) State() State {
 		return State{phase: PhaseIdle}
 	}
 	return State{
-		phase:           a.active.phase,
-		runID:           a.active.id,
-		turn:            a.active.turn,
-		pendingToolCall: a.active.pendingToolCall,
+		phase:            a.active.phase,
+		runID:            a.active.id,
+		turn:             a.active.turn,
+		pendingToolCalls: append([]string(nil), a.active.pendingToolCalls...),
 	}
 }
 
@@ -264,8 +263,7 @@ func (a *Agent) enterSettling(active *activeRun) {
 	a.mu.Lock()
 	if a.active == active {
 		active.phase = PhaseSettling
-		active.pendingToolCall = ""
-		active.pendingToolName = ""
+		active.pendingToolCalls = nil
 	}
 	a.mu.Unlock()
 }
