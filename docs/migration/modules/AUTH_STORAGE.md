@@ -52,8 +52,8 @@
 | ID | 行为 | 状态 | 证据 |
 | --- | --- | --- | --- |
 | `B-AUTH-001` | API-key read/set/delete 保留 unknown provider，malformed 不覆盖 | `ported` | strict JSON、round-trip、preservation matrix |
-| `B-AUTH-002` | private admission、atomic/durable replacement；Windows persistence fail-closed | `ported` | mode、simulated Windows policy、cross-compile、fault cleanup |
-| `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、re-exec contender、cancel/release/merge、`-race` |
+| `B-AUTH-002` | private admission、atomic/durable replacement；Windows persistence fail-closed | `ported` | mode、Windows-only runner suite/cross-compile、fault cleanup |
+| `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、two re-exec writers、cancel/failure release/merge、`-race` |
 | `B-AUTH-004` | runtime override 与 stored/configured/ambient source ownership | `ported` | overlay/precedence/error matrix |
 | `B-AUTH-005` | config template; command value safe refusal | `ported` | escapes, missing env, no-process-side-effect |
 

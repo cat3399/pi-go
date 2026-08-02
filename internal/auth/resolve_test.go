@@ -28,6 +28,7 @@ func TestResolveValueTemplatesAndCommandRejectionAreSecretSafe(t *testing.T) {
 }
 
 func TestResolveOpenAIKeyPrecedenceAndStoredOwnership(t *testing.T) {
+	requirePersistentAuth(t)
 	directory := t.TempDir()
 	store, err := NewStore(Options{Path: filepath.Join(directory, "auth.json")})
 	if err != nil {

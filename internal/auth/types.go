@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -37,7 +36,6 @@ type Store struct {
 	maxFileBytes int64
 	lockPoll     func(context.Context) error
 	local        chan struct{}
-	platform     string
 	// beforeRename is a package-private fault-injection seam. Production leaves
 	// it nil; tests use it to prove a failed replacement preserves old bytes.
 	beforeRename func() error
@@ -58,7 +56,7 @@ func NewStore(options Options) (*Store, error) {
 	local <- struct{}{}
 	return &Store{
 		path: options.Path, maxFileBytes: max, lockPoll: options.LockPoll,
-		local: local, platform: runtime.GOOS,
+		local: local,
 	}, nil
 }
 

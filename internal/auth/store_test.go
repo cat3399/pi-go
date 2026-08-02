@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -232,54 +233,122 @@ func TestStoreSameInstanceWaitIsContextAwareAndReleasesAfterCancellation(t *test
 	}
 }
 
-func TestStoreFailClosedWindowsPolicyAndEphemeralFallback(t *testing.T) {
-	store := newTestStore(t)
-	store.platform = "windows"
-	if _, exists, err := store.Read(context.Background(), "openai"); err != nil || exists {
-		t.Fatalf("missing Windows auth file = exists %t, error %v", exists, err)
+func TestSeparateProcessWritersContendMergeAndRelease(t *testing.T) {
+	requirePersistentAuth(t)
+	directory := t.TempDir()
+	path := filepath.Join(directory, "auth.json")
+	marker := filepath.Join(directory, "first-holds-lock")
+	releaseMarker := filepath.Join(directory, "release-first")
+	contendMarker := filepath.Join(directory, "second-observed-contention")
+	first := authHelperCommand(path, "write", "openai", "first-key", marker)
+	second := authHelperCommand(path, "write", "anthropic", "second-key", "")
+	first.Env = append(first.Env, "PI_GO_AUTH_RELEASE_MARKER="+releaseMarker)
+	second.Env = append(second.Env, "PI_GO_AUTH_CONTEND_MARKER="+contendMarker)
+	var firstOutput bytes.Buffer
+	var secondOutput bytes.Buffer
+	first.Stdout, first.Stderr = &firstOutput, &firstOutput
+	second.Stdout, second.Stderr = &secondOutput, &secondOutput
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.SetAPIKey(context.Background(), "openai", "persistent-secret", nil); !errors.Is(err, ErrPersistentAuthUnavailable) || !IsKind(err, KindUnsupported) {
-		t.Fatalf("Windows persistent write error = %v", err)
+	if err := waitForTestPath(marker, time.Second); err != nil {
+		_ = first.Process.Kill()
+		_ = first.Wait()
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
-		t.Fatalf("Windows fail-closed write created a file: %v", err)
+	if err := second.Start(); err != nil {
+		_ = first.Process.Kill()
+		_ = first.Wait()
+		t.Fatal(err)
 	}
+	if err := waitForTestPath(contendMarker, time.Second); err != nil {
+		_ = first.Process.Kill()
+		_ = second.Process.Kill()
+		_ = first.Wait()
+		_ = second.Wait()
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(releaseMarker, []byte("release"), 0o600); err != nil {
+		_ = first.Process.Kill()
+		_ = second.Process.Kill()
+		_ = first.Wait()
+		_ = second.Wait()
+		t.Fatal(err)
+	}
+	if err := first.Wait(); err != nil {
+		t.Fatalf("first writer: %v: %s", err, firstOutput.String())
+	}
+	if err := second.Wait(); err != nil {
+		t.Fatalf("second writer: %v: %s", err, secondOutput.String())
+	}
+	store, err := NewStore(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for provider, key := range map[string]string{"openai": "first-key", "anthropic": "second-key"} {
+		credential, exists, err := store.Read(context.Background(), provider)
+		if err != nil || !exists || credential.Key != key {
+			t.Fatalf("merged %s = %#v, %t, %v", provider, credential, exists, err)
+		}
+	}
+	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("successful child writers left lock behind: %v", err)
+	}
+}
 
-	runtimeCredentials := NewRuntime(store)
-	if err := runtimeCredentials.SetAPIKey("openai", "ephemeral-key"); err != nil {
+func TestSeparateProcessFailureReleasesForHealthyWriter(t *testing.T) {
+	requirePersistentAuth(t)
+	path := filepath.Join(t.TempDir(), "auth.json")
+	failed := authHelperCommand(path, "fail", "", "", "")
+	if output, err := failed.CombinedOutput(); err != nil {
+		t.Fatalf("expected child failure path: %v: %s", err, output)
+	}
+	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("failed child left lock behind: %v", err)
+	}
+	healthy := authHelperCommand(path, "write", "openai", "healthy-key", "")
+	if output, err := healthy.CombinedOutput(); err != nil {
+		t.Fatalf("healthy writer after failure: %v: %s", err, output)
+	}
+	store, err := NewStore(Options{Path: path})
+	if err != nil {
 		t.Fatal(err)
 	}
-	credential, exists, err := runtimeCredentials.Read(context.Background(), "openai")
-	if err != nil || !exists || credential.Key != "ephemeral-key" {
-		t.Fatalf("Windows runtime override = %#v, %t, %v", credential, exists, err)
+	credential, exists, err := store.Read(context.Background(), "openai")
+	if err != nil || !exists || credential.Key != "healthy-key" {
+		t.Fatalf("healthy post-failure credential = %#v, %t, %v", credential, exists, err)
 	}
-	runtimeCredentials.RemoveAPIKey("openai")
-	configured := "configured-key"
-	value, err := ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient-key"})
-	if err != nil || value != "configured-key" {
-		t.Fatalf("Windows configured fallback = %q, %v", value, err)
+	if _, exists, err := store.Read(context.Background(), "failed-child"); err != nil || exists {
+		t.Fatalf("failed child was committed = %t, %v", exists, err)
 	}
-	value, err = ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, nil, map[string]string{"OPENAI_API_KEY": "ambient-key"})
-	if err != nil || value != "ambient-key" {
-		t.Fatalf("Windows ambient fallback = %q, %v", value, err)
-	}
+}
 
-	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(store.Path(), []byte(`{"openai":{"type":"api_key","key":"stored-secret"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = store.Read(context.Background(), "openai")
-	if !errors.Is(err, ErrPrivateAdmissionUnavailable) || !IsKind(err, KindPermission) {
-		t.Fatalf("existing Windows auth admission error = %v", err)
-	}
-	if strings.Contains(err.Error(), "stored-secret") {
-		t.Fatalf("Windows admission leaked secret: %v", err)
-	}
-	_, err = ResolveOpenAIKey(context.Background(), runtimeCredentials, nil, &configured, map[string]string{"OPENAI_API_KEY": "ambient-key"})
-	if !errors.Is(err, ErrPrivateAdmissionUnavailable) {
-		t.Fatalf("existing Windows file fell through to lower source: %v", err)
+func authHelperCommand(path, mode, provider, key, marker string) *exec.Cmd {
+	command := exec.Command(os.Args[0], "-test.run=TestAuthProcessHelper")
+	command.Env = append(
+		os.Environ(),
+		"PI_GO_AUTH_HELPER=1",
+		"PI_GO_AUTH_PATH="+path,
+		"PI_GO_AUTH_HELPER_MODE="+mode,
+		"PI_GO_AUTH_PROVIDER="+provider,
+		"PI_GO_AUTH_KEY="+key,
+		"PI_GO_AUTH_HOLD_MARKER="+marker,
+	)
+	return command
+}
+
+func waitForTestPath(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for child lock marker")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -287,14 +356,58 @@ func TestAuthProcessHelper(t *testing.T) {
 	if os.Getenv("PI_GO_AUTH_HELPER") != "1" {
 		return
 	}
-	store, err := NewStore(Options{Path: os.Getenv("PI_GO_AUTH_PATH")})
+	options := Options{Path: os.Getenv("PI_GO_AUTH_PATH")}
+	if marker := os.Getenv("PI_GO_AUTH_CONTEND_MARKER"); marker != "" {
+		options.LockPoll = func(ctx context.Context) error {
+			if err := os.WriteFile(marker, []byte("contended"), 0o600); err != nil {
+				return err
+			}
+			timer := time.NewTimer(10 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
+	store, err := NewStore(options)
 	if err != nil {
 		os.Exit(11)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer cancel()
-	if !IsKind(store.SetAPIKey(ctx, "helper", "key", nil), KindCancelled) {
-		os.Exit(12)
+	switch os.Getenv("PI_GO_AUTH_HELPER_MODE") {
+	case "write":
+		if marker := os.Getenv("PI_GO_AUTH_HOLD_MARKER"); marker != "" {
+			store.beforeRename = func() error {
+				if err := os.WriteFile(marker, []byte("locked"), 0o600); err != nil {
+					return err
+				}
+				if release := os.Getenv("PI_GO_AUTH_RELEASE_MARKER"); release != "" {
+					return waitForTestPath(release, 2*time.Second)
+				}
+				return nil
+			}
+		}
+		if err := store.SetAPIKey(
+			context.Background(),
+			os.Getenv("PI_GO_AUTH_PROVIDER"),
+			os.Getenv("PI_GO_AUTH_KEY"),
+			nil,
+		); err != nil {
+			os.Exit(13)
+		}
+	case "fail":
+		store.beforeRename = func() error { return errors.New("injected child write failure") }
+		if !IsKind(store.SetAPIKey(context.Background(), "failed-child", "failed-key", nil), KindIO) {
+			os.Exit(14)
+		}
+	default:
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		defer cancel()
+		if !IsKind(store.SetAPIKey(ctx, "helper", "key", nil), KindCancelled) {
+			os.Exit(12)
+		}
 	}
 	os.Exit(0)
 }

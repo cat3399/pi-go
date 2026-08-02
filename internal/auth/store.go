@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"unicode/utf8"
 )
@@ -91,7 +92,7 @@ func (s *Store) mutate(ctx context.Context, operation, provider string, change f
 	if cause := context.Cause(ctx); cause != nil {
 		return failure(KindCancelled, operation, provider, cause)
 	}
-	if s.platform == "windows" {
+	if runtime.GOOS == "windows" {
 		return failure(KindUnsupported, operation, provider, ErrPersistentAuthUnavailable)
 	}
 	releaseLocal, err := s.acquireLocal(ctx, operation, provider)
@@ -139,7 +140,7 @@ func (s *Store) readRoot() (map[string]json.RawMessage, bool, error) {
 	if !info.Mode().IsRegular() {
 		return nil, false, failure(KindInvalid, "read auth file", "", nil)
 	}
-	if s.platform == "windows" {
+	if runtime.GOOS == "windows" {
 		return nil, false, failure(KindPermission, "read auth file", "", ErrPrivateAdmissionUnavailable)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
