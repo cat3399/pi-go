@@ -204,7 +204,7 @@ rewrite 均 deferred，不能因 tree reader 能保留 unknown entry 而宣称�
 
 ## M-SESSION/v0.3-context-compaction
 
-状态：`implemented; independent review pending`
+状态：`ported`（`R-SESSION-004`）
 
 本里程碑把手动 context compaction 作为现有 `Session` aggregate 的正式能力，而不是独立
 engine。它只依赖 M-BASE 的 durable message/usage 语义；不会创建第二套 AgentHarness 或重写
@@ -267,5 +267,6 @@ key/invalidation、cancel/fault publication 与 selected-path context，才可�
 - `BuildContext` 已是 Agent provider request 所消费的 production path，因而压缩后下一 agent turn 会
   获得 summary + tail。M-AGENT/M-APP 后续只需在 idle/manual command surface 注入 a real
   `Summarizer`，并决定 auto threshold/retry/event policy；不允许重建 context projection；
-- 本节不表示独立 review 已通过。review 必须复核 v3 foreign fixture compatibility、concurrent
-  select/append/compact race、usage/cost wire 和 branch-summary deferral 的 integration gate。
+- 独立 review 已复核 v3 foreign fixture compatibility、concurrent select/append/compact race、
+  usage/cost wire、token overflow fail-explicit 修订及上述 deferred integration gate；结论见
+  [../REVIEWS.md](../REVIEWS.md) 的 `R-SESSION-004`。

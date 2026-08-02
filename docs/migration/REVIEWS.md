@@ -44,6 +44,7 @@
 | `F-SESSION-002` | Major | M-SESSION | Create 隐式 MkdirAll，但未同步新 ancestor 在父目录中的目录项 | parent precondition 与缺目录回归 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-003` | Minor | M-SESSION | 超出 RFC3339 四位年份的 clock 值可写但不可 reopen | create/append 可重开时间验证 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-004` | Minor | M-AGENT | bounded settlement 容易被误解为 write 后仍可由 deadline 中断 | 首次 write 线性化边界写入 charter | R-SESSION-001 | `closed-by-R-SESSION-002` |
+| `F-SESSION-005` | Major | M-SESSION | context estimate 与 cut-prefix 的 `uint64` 累加可 wrap 低估并写坏 `tokensBefore` | checked overflow、MaxUint64/no-write regression 与 fuzz 经复审 | R-SESSION-004 | `closed-by-R-SESSION-004` |
 | `F-TOOL-001` | Major | M-TOOL | queued cancellation 的 relay goroutine 在长 predecessor 下让已返回调用残留 goroutine/barrier | 长 A、批量 B-cancel、C 顺序、settlement 后零 node/key 与 race 定点复审 | R-TOOL-003/R-TOOL-004/R-TOOL-005 | `closed-by-R-TOOL-005` |
 | `F-TOOL-002` | Major | M-TOOL | mode write bits 不能表达 effective identity/ACL writability；owner mode `0002` 可被 rename 绕过 | non-mutating effective probe、prepare/commit 双检、`0002`/0444/symlink/TOCTOU 回归复审 | R-TOOL-003/R-TOOL-004/R-TOOL-005 | `closed-by-R-TOOL-005` |
 | `F-TOOL-003` | Major | M-TOOL | edit patch hunk/count/context 不可应用 | single/distant multi-hunk 实际 apply oracle 复审 | R-TOOL-003 | `closed-by-R-TOOL-004` |
@@ -205,6 +206,19 @@
   Linux arm64、Windows amd64 交叉构建通过。
 - 延期：branch-summary/compaction projection、label/custom/model/thinking entry 创建、v1/v2
   migration、multi-process writer 与真实掉电注入仍由后续里程碑重评。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-SESSION-004：M-SESSION/v0.3-context-compaction 独立复审
+
+- 范围：`421f5ba` 的 manual compaction、selected-path projection、v3 wire、并发/fault contract，
+  以及 `bb25bb8` 对 `F-SESSION-005` 的 checked token arithmetic 修订；reviewer 未参与实现。
+- 修订与验证：首轮 0 Blocker / 1 Major / 0 Minor；usage+trailing、message estimate 与 cut-prefix
+  统一 fail-explicit 为 `ErrTokenEstimateOverflow`，并以 MaxUint64、Compact no-write 和 fuzz 关闭。
+  全仓 test/vet/race/build、codec/forest/compaction/token fuzz、Linux/Windows/Darwin 交叉构建与
+  diff check 通过。
+- 明确延期：M-AGENT/M-APP 的真实 summarizer/manual surface integration、automatic threshold、
+  provider retry/UI events，以及 branch-summary navigation/cache/invalidation；这些路径不得绕过
+  `Session.Compact` 的 snapshot/commit gate。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
 
 ## R-AGENT-001：M-AGENT/v0.1 完整模块联合审查
