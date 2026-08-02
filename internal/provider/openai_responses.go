@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -237,4 +239,30 @@ func isTypedNil(value any) bool {
 	default:
 		return false
 	}
+}
+
+// responsesRetryAfter accepts the two RFC-defined forms. Invalid or past
+// values are intentionally omitted: retry policy must not turn malformed
+// remote input into an unbounded wait.
+func responsesRetryAfter(value string, now time.Time) *time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 || seconds > int64(math.MaxInt64/time.Second) {
+			return nil
+		}
+		delay := time.Duration(seconds) * time.Second
+		return &delay
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return nil
+	}
+	delay := when.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	return &delay
 }

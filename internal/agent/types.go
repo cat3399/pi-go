@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,19 +19,21 @@ import (
 const defaultSettlementTimeout = 30 * time.Second
 
 var (
-	ErrInvalidConfig       = errors.New("invalid agent configuration")
-	ErrInvalidRun          = errors.New("invalid agent run")
-	ErrBusy                = errors.New("agent is already running")
-	ErrRunIDExhausted      = errors.New("agent run id exhausted")
-	ErrTranscriptCommit    = errors.New("agent transcript commit failed")
-	ErrInvariant           = errors.New("agent invariant failure")
-	ErrProviderStream      = errors.New("provider stream failed")
-	ErrToolNotFound        = errors.New("tool not found")
-	ErrToolUnsettled       = errors.New("tool returned an unsettled outcome")
-	ErrAgentAborted        = errors.New("agent run aborted")
-	ErrContextTransform    = errors.New("agent context transform failed")
-	ErrInvalidQueueMessage = errors.New("invalid queued message")
-	ErrCannotContinue      = errors.New("agent cannot continue from current transcript")
+	ErrInvalidConfig         = errors.New("invalid agent configuration")
+	ErrInvalidRun            = errors.New("invalid agent run")
+	ErrBusy                  = errors.New("agent is already running")
+	ErrRunIDExhausted        = errors.New("agent run id exhausted")
+	ErrTranscriptCommit      = errors.New("agent transcript commit failed")
+	ErrInvariant             = errors.New("agent invariant failure")
+	ErrProviderStream        = errors.New("provider stream failed")
+	ErrToolNotFound          = errors.New("tool not found")
+	ErrToolUnsettled         = errors.New("tool returned an unsettled outcome")
+	ErrAgentAborted          = errors.New("agent run aborted")
+	ErrContextTransform      = errors.New("agent context transform failed")
+	ErrInvalidQueueMessage   = errors.New("invalid queued message")
+	ErrCannotContinue        = errors.New("agent cannot continue from current transcript")
+	ErrCompactionUnavailable = errors.New("agent compaction is not configured")
+	ErrRetryPolicy           = errors.New("invalid agent retry policy")
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
 	// v0.1 internal implementation; v0.2 no longer returns it for batches.
 	ErrUnsupportedToolTurn = errors.New("unsupported tool turn")
@@ -41,6 +44,27 @@ var (
 type Transcript interface {
 	Context() session.Context
 	Append(context.Context, llm.ConversationMessage, session.AppendOptions) (session.Entry, error)
+}
+
+// ContextBuilder is implemented by Session. Keeping it optional preserves the
+// narrow transcript port used by deterministic test doubles, while production
+// turns use Session.BuildContext's immutable selected-leaf snapshot.
+type ContextBuilder interface{ BuildContext() session.Context }
+
+type sessionCompactor interface {
+	Compact(context.Context, session.CompactRequest) (session.CompactResult, error)
+}
+
+// RetryPolicy bounds retries for a single provider turn. MaxAttempts includes
+// the first attempt; zero means one attempt. RetryAfter is capped independently
+// so a remote header cannot hold the active run indefinitely.
+type RetryPolicy struct {
+	MaxAttempts   uint32
+	InitialDelay  time.Duration
+	MaxDelay      time.Duration
+	MaxRetryAfter time.Duration
+	Sleep         func(context.Context, time.Duration) error
+	Jitter        func(attempt uint32, delay time.Duration) time.Duration
 }
 
 // ToolOutput is the provider-visible final text returned by one tool. A
@@ -98,9 +122,16 @@ type Config struct {
 	// TransformContext is an immutable request seam. It receives a copied
 	// transcript projection immediately before every provider call and must
 	// return a replacement snapshot; it never mutates durable transcript data.
-	TransformContext  ContextTransform
-	SteeringMode      QueueMode
-	FollowUpMode      QueueMode
+	TransformContext ContextTransform
+	SteeringMode     QueueMode
+	FollowUpMode     QueueMode
+	// ContextWindow and ContextReserve enable pre-prompt automatic compaction.
+	// A configured threshold requires a real Session compactor and summarizer.
+	ContextWindow     uint64
+	ContextReserve    uint64
+	KeepRecentTokens  uint64
+	Summarizer        session.Summarizer
+	Retry             RetryPolicy
 	Now               func() time.Time
 	SettlementTimeout time.Duration
 }
@@ -118,6 +149,21 @@ type runtimeConfig struct {
 	transformContext  ContextTransform
 	steeringMode      QueueMode
 	followUpMode      QueueMode
+	contextWindow     uint64
+	contextReserve    uint64
+	keepRecentTokens  uint64
+	summarizer        session.Summarizer
+	compactor         sessionCompactor
+	retry             retryRuntime
+}
+
+type retryRuntime struct {
+	maxAttempts   uint32
+	initialDelay  time.Duration
+	maxDelay      time.Duration
+	maxRetryAfter time.Duration
+	sleep         func(context.Context, time.Duration) error
+	jitter        func(uint32, time.Duration) time.Duration
 }
 
 // ToolExecutionMode controls one assistant message's complete tool batch.
@@ -214,6 +260,23 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		(followUpMode != QueueOneAtATime && followUpMode != QueueAll) {
 		return runtimeConfig{}, fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
 	}
+	if config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
+		return runtimeConfig{}, fmt.Errorf("%w: context reserve exceeds window", ErrInvalidConfig)
+	}
+	if config.ContextWindow != 0 && config.Summarizer == nil {
+		return runtimeConfig{}, fmt.Errorf("%w: automatic compaction requires a summarizer", ErrInvalidConfig)
+	}
+	var compactor sessionCompactor
+	if candidate, ok := config.Transcript.(sessionCompactor); ok {
+		compactor = candidate
+	}
+	if config.ContextWindow != 0 && compactor == nil {
+		return runtimeConfig{}, fmt.Errorf("%w: automatic compaction requires Session", ErrInvalidConfig)
+	}
+	retry, err := normalizeRetryPolicy(config.Retry)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	now := config.Now
 	if now == nil {
 		now = time.Now
@@ -232,7 +295,48 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		transformContext:  config.TransformContext,
 		steeringMode:      steeringMode,
 		followUpMode:      followUpMode,
+		contextWindow:     config.ContextWindow,
+		contextReserve:    config.ContextReserve,
+		keepRecentTokens:  config.KeepRecentTokens,
+		summarizer:        config.Summarizer,
+		compactor:         compactor,
+		retry:             retry,
 	}, nil
+}
+
+func normalizeRetryPolicy(policy RetryPolicy) (retryRuntime, error) {
+	maxAttempts := policy.MaxAttempts
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+	if policy.InitialDelay < 0 || policy.MaxDelay < 0 || policy.MaxRetryAfter < 0 {
+		return retryRuntime{}, fmt.Errorf("%w: negative delay", ErrRetryPolicy)
+	}
+	if policy.MaxDelay != 0 && policy.InitialDelay > policy.MaxDelay {
+		return retryRuntime{}, fmt.Errorf("%w: initial delay exceeds maximum", ErrRetryPolicy)
+	}
+	if maxAttempts > math.MaxUint32/2 { // keeps event/count arithmetic bounded.
+		return retryRuntime{}, fmt.Errorf("%w: too many attempts", ErrRetryPolicy)
+	}
+	sleep := policy.Sleep
+	if sleep == nil {
+		sleep = sleepWithContext
+	}
+	return retryRuntime{maxAttempts: maxAttempts, initialDelay: policy.InitialDelay, maxDelay: policy.MaxDelay, maxRetryAfter: policy.MaxRetryAfter, sleep: sleep, jitter: policy.Jitter}, nil
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return context.Cause(ctx)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
 func configuredToolName(tool ToolExecutor) (name string, err error) {
@@ -252,6 +356,8 @@ type Phase uint8
 const (
 	PhaseIdle Phase = iota + 1
 	PhaseProvider
+	PhaseCompacting
+	PhaseRetryWait
 	PhaseTool
 	PhaseSettling
 )
@@ -262,6 +368,10 @@ func (p Phase) String() string {
 		return "idle"
 	case PhaseProvider:
 		return "provider"
+	case PhaseCompacting:
+		return "compacting"
+	case PhaseRetryWait:
+		return "retry_wait"
 	case PhaseTool:
 		return "tool"
 	case PhaseSettling:
@@ -316,6 +426,10 @@ const (
 	EventToolSettled
 	EventTurnSettled
 	EventRunSettled
+	EventCompactionStarted
+	EventCompactionSettled
+	EventRetryScheduled
+	EventRetryAttempt
 )
 
 func (k EventKind) String() string {
@@ -338,6 +452,14 @@ func (k EventKind) String() string {
 		return "turn_settled"
 	case EventRunSettled:
 		return "run_settled"
+	case EventCompactionStarted:
+		return "compaction_started"
+	case EventCompactionSettled:
+		return "compaction_settled"
+	case EventRetryScheduled:
+		return "retry_scheduled"
+	case EventRetryAttempt:
+		return "retry_attempt"
 	default:
 		return "unknown"
 	}
@@ -358,6 +480,9 @@ type Event struct {
 	ToolError        error
 	Terminal         llm.AssistantTerminal
 	RunError         error
+	RetryAttempt     uint32
+	RetryDelay       time.Duration
+	Compaction       *session.CompactResult
 }
 
 // Observer is invoked synchronously in subscription order. The Agent holds no

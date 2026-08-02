@@ -178,6 +178,58 @@ func (a *Agent) WaitForIdle(ctx context.Context) error {
 	}
 }
 
+// Compact performs an explicit manual compaction while the coordinator owns
+// the active slot. It is intentionally separate from Run: it does not append a
+// synthetic user message, and therefore cannot make a queued prompt appear to
+// have been processed. The real provider call happens inside Session.Compact
+// with no Agent or Session mutex held.
+func (a *Agent) Compact(ctx context.Context, instructions string) (session.CompactResult, error) {
+	if a == nil {
+		return session.CompactResult{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if ctx == nil {
+		return session.CompactResult{}, fmt.Errorf("%w: context is nil", ErrInvalidRun)
+	}
+	if a.config.compactor == nil || a.config.summarizer == nil {
+		return session.CompactResult{}, ErrCompactionUnavailable
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return session.CompactResult{}, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
+	}
+	a.mu.Lock()
+	if a.active != nil || a.starting {
+		a.mu.Unlock()
+		return session.CompactResult{}, ErrBusy
+	}
+	if a.nextID == math.MaxUint64 {
+		a.mu.Unlock()
+		return session.CompactResult{}, ErrRunIDExhausted
+	}
+	a.nextID++
+	runCtx, cancel := context.WithCancelCause(ctx)
+	active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseCompacting, turn: 1}
+	a.active = active
+	a.mu.Unlock()
+	defer a.finishRun(active)
+	defer func() {
+		a.enterSettling(active)
+		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: 1})
+	}()
+	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
+	a.notify(active.ctx, Event{Kind: EventCompactionStarted, RunID: active.id, Turn: 1})
+	result, err := a.config.compactor.Compact(active.ctx, session.CompactRequest{
+		KeepRecentTokens: a.config.keepRecentTokens,
+		Instructions:     instructions,
+		Summarizer:       a.config.summarizer,
+	})
+	if err != nil {
+		a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: 1, RunError: err})
+		return session.CompactResult{}, err
+	}
+	a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: 1, Compaction: &result})
+	return result, nil
+}
+
 // Run accepts one text prompt while idle and synchronously settles its entire
 // provider/tool/transcript/observer lifecycle before returning.
 func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr error) {

@@ -1,10 +1,50 @@
 # M-AGENT：Agent runtime charter
 
-状态：`ported`（`M-AGENT/v0.2-multi-tool-queues`；v0.1/v0.2 均已复审）
+状态：`implemented, pending independent review`（`M-AGENT/v0.3-context-retry-lifecycle`；v0.1/v0.2 均已复审）
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
 最近完成里程碑：`M-AGENT/v0.2-multi-tool-queues`
+
+## v0.3 context-retry-lifecycle
+
+### 负责
+
+- 每次 provider attempt 从 `Session.BuildContext` 的不可变 selected-leaf snapshot 取 context；
+  transform 仍只是 request-local projection，绝不回写 transcript；
+- 在 prompt/turn boundary、provider request 之前，以 `contextWindow - reserve` 判定自动压缩，
+  并调用既有 `Session.Compact` 的 snapshot/commit gate；`Agent.Compact` 提供同一 real
+  summarizer seam 的 idle/manual 入口；
+- active run 是 compaction、retry wait、provider、queue 与 terminal 的唯一 coordinator；所有
+  provider/storage/summarizer/sleeper 调用均在 coordinator mutex 外，`WaitForIdle` 要等到它们
+  及 observer settle；
+- 仅对 transport 与 408/409/425/429/5xx provider failures 做 bounded exponential retry；server
+  `Retry-After` 在 provider adapter 归一，并由 policy cap。cancel、auth/config/invalid request、
+  invalid response、tool 与 storage failure 不重试。
+
+### 关键不变量与取舍
+
+- `RetryPolicy.MaxAttempts` 包含首个请求。未 accepted 的 transient attempt 从不 append user、
+  assistant 或 tool durable record；只有最终 accepted terminal 进入 usage/transcript，因此 totals
+  不会因重试重复计数。stream 无 terminal 的 transport drop 也遵循这条规则。
+- 自动 compaction 每个 logical provider turn 最多一次；retry 只重新取得 immutable context
+  snapshot，不会在刚写 checkpoint 后再次 Compact。conflict/cancel/summary error/commit-unknown 均
+  fail-explicit，后者沿 Session poison quarantine 传播，不能重试或伪装为 provider failure。
+- steering/follow-up 可以在 compact/retry 期间入队，但只在既有 provider/tool boundary reserve；
+  因而它们不会进入已经发出的 summary/request，也不会跨 retry 造成重复 durable user entry。
+- 默认 retry 为一次请求（关闭重试）。jitter/sleep 是可注入 seam；sleep 尊重 active cancel，
+  remote Retry-After 不得形成无上限等待。没有把 retry 放进 OpenAI adapter，避免 adapter 持有
+  Agent queue、Session 或 run ownership。
+
+### 验收与延期
+
+- Go integration fixture 驱动 real OpenAI Responses HTTP/SSE adapter：context 超阈值先 durable
+  summary，chunked transient stream drop 后 retry，最终 text success，断言 session 无重复 prompt/
+  assistant 且有一个 compaction checkpoint；另有 unit/race/fault gates。
+- 真实 credential smoke 仍显式延期；production CLI 尚未暴露 context window/retry/manual compact
+  flags，后续 M-APP 只负责配置/用户 surface，不得绕过本 coordinator 和 `Session.Compact`。
+- 不实现 TUI、tool wire replay、mixed length/tool terminal 或 Harness 独立 runtime；这些保持原有
+  deferred behavior。此实现尚未独立 review，不得把 v0.1/v0.2 review 结论延伸到本 milestone。
 
 ## v0.2 multi-tool queues
 

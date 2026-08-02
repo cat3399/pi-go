@@ -55,6 +55,9 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-AGENT-012` | steering/follow-up FIFO queue drain mode、snapshot/clear、Continue assistant-tail admission 与 durable queue ack | `agent.ts::PendingMessageQueue/steer/followUp/continue`；agent tests | `ported` | R-AGENT-002 |
 | `B-AGENT-013` | provider 前 immutable context transform；error/cancel 不静默 fallback | `agent-loop.ts::streamAssistantResponse`；agent-loop transform tests | `ported` | R-AGENT-002 |
 | `B-AGENT-014` | multi-worker Abort/settlement、single active run、unique terminal/usage commit | `agent.ts::runWithLifecycle`；AgentSession settlement regressions | `ported` | R-AGENT-002 |
+| `B-AGENT-015` | 每个 provider logical turn 从 immutable Session.BuildContext 取 snapshot；threshold/reserve 在 pre-prompt boundary 自动 compaction，manual compact 同一 gate | coding `agent-session.ts::compact`；Harness compact/compaction utils；5217 compaction reason regression | `implemented-pending-review` | M-AGENT/v0.3；必须使用既有 Session.Compact，不重建 projection |
+| `B-AGENT-016` | transient transport/selected HTTP status bounded retry、Retry-After cap、cancel/invalid/auth/tool/storage no-retry；retry 不重复 durable entries/usage | agent runtime retry paths；provider failure taxonomy；6647 retry/session regressions | `implemented-pending-review` | M-AGENT/v0.3；真实 credential smoke deferred |
+| `B-AGENT-017` | retry/compaction lifecycle event、phase、queue timing 与 WaitForIdle settlement | Agent/AgentSession lifecycle + 1717/2113, 6363 settlement regressions | `implemented-pending-review` | M-AGENT/v0.3 independent review required |
 
 ## M-SESSION
 

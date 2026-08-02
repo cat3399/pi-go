@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -59,6 +60,10 @@ type ProviderFailureSpec struct {
 	Cause      error
 	HTTPStatus *int
 	VendorCode string
+	// RetryAfter is an optional server-provided delay. It is deliberately
+	// normalized at the adapter boundary so the coordinator never parses
+	// vendor headers or guesses clock semantics.
+	RetryAfter *time.Duration
 }
 
 // ProviderFailure is immutable structured provider failure information. HTTP
@@ -71,6 +76,8 @@ type ProviderFailure struct {
 	httpStatus    int
 	hasHTTPStatus bool
 	vendorCode    string
+	retryAfter    time.Duration
+	hasRetryAfter bool
 }
 
 func NewProviderFailure(spec ProviderFailureSpec) (*ProviderFailure, error) {
@@ -89,6 +96,9 @@ func NewProviderFailure(spec ProviderFailureSpec) (*ProviderFailure, error) {
 	if !utf8.ValidString(spec.VendorCode) || (spec.VendorCode != "" && strings.TrimSpace(spec.VendorCode) == "") {
 		return nil, fmt.Errorf("%w: vendor code must be empty or non-blank valid UTF-8", ErrInvalidProviderFailure)
 	}
+	if spec.RetryAfter != nil && *spec.RetryAfter < 0 {
+		return nil, fmt.Errorf("%w: retry-after cannot be negative", ErrInvalidProviderFailure)
+	}
 
 	failure := &ProviderFailure{
 		kind:       spec.Kind,
@@ -99,6 +109,10 @@ func NewProviderFailure(spec ProviderFailureSpec) (*ProviderFailure, error) {
 	if spec.HTTPStatus != nil {
 		failure.httpStatus = *spec.HTTPStatus
 		failure.hasHTTPStatus = true
+	}
+	if spec.RetryAfter != nil {
+		failure.retryAfter = *spec.RetryAfter
+		failure.hasRetryAfter = true
 	}
 	return failure, nil
 }
@@ -143,6 +157,14 @@ func (e *ProviderFailure) VendorCode() (string, bool) {
 		return "", false
 	}
 	return e.vendorCode, true
+}
+
+// RetryAfter returns a normalized server delay when the adapter received one.
+func (e *ProviderFailure) RetryAfter() (time.Duration, bool) {
+	if e == nil || !e.hasRetryAfter {
+		return 0, false
+	}
+	return e.retryAfter, true
 }
 
 // FactoryPanicError retains a recovered factory panic as a normal error cause.

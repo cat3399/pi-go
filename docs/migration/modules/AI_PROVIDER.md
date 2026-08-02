@@ -19,8 +19,9 @@
 - 内置 tool 执行；
 - 全局 mutable compat registry 或 default provider fallback；
 - 把每个 provider registration 文件变成独立 Go architecture module；
-- 首里程碑中的 OAuth、prompt cache、dynamic catalog、image generation、retry matrix 或
-  cross-provider handoff。
+- 首里程碑中的 OAuth、prompt cache、dynamic catalog、image generation 或
+  cross-provider handoff。Agent-owned bounded retry policy 已在 M-AGENT/v0.3 消费 provider
+  failure taxonomy；adapter 不自行重试。
 
 ## 上游证据
 
@@ -119,6 +120,11 @@ M-BASE 的 stream/message contract 是前三项的直接依赖。真实 adapter 
 
 Provider dispatch 与真实 adapter 分别形成后续独立里程碑和 review，不被 v0.1 的 fake
 通过结论掩盖。
+
+OpenAI Responses adapter 还会把 valid HTTP `Retry-After` delta-seconds/HTTP-date 归一为
+`ProviderFailure.RetryAfter`；malformed/past header 被忽略。具体 attempt budget、jitter、cancel
+和 retry admission 由 M-AGENT 的 active-run owner 决定，避免 provider adapter 重发有副作用
+的 Agent request。
 
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005

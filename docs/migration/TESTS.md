@@ -65,6 +65,7 @@ Prompt cache、multiple model、unregister 以外的 compat/global registry test
 | `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `strengthened` | R-AGENT-002；cancel/terminate/missing/failure、late update、fault barrier 与 race |
 | `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `strengthened` | R-AGENT-002；one/all、Continue admission、reentrant storage、durable prefix ack、clear/enqueue/Abort fault/race |
 | `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `strengthened` | R-AGENT-002；immutable request、transform error/cancel、multi-worker abort、pending state 与 settlement race |
+| `T-AGENT-014` | B-AGENT-015..017 | coding/Harness compaction and retry paths; regressions 5217/6647 and pre-prompt/settlement intent | `implemented-pending-review` | local HTTP/SSE summary→chunked stream-drop→retry→success/no-duplicate integration；manual/conflict/cancel/error/Retry-After/race additions require independent review |
 
 AgentSession 与低层 Agent 中重复证明相同 invariant 的测试，在 Go 中由一套
 contract/scenario suite 覆盖，不复制两套 runtime test。

@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"net"
 	"runtime/debug"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 type queueReservation struct {
@@ -485,47 +490,193 @@ func (a *Agent) acceptFinalV2(active *activeRun, result Result, terminal llm.Ass
 }
 
 func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTerminal, error) {
-	messages := a.config.transcript.Context().Messages()
-	if a.config.transformContext != nil {
+	if err := a.compactBeforeProvider(active, turn); err != nil {
+		if cause := a.runCause(active); cause != nil {
+			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled during context compaction", cause, llm.Usage{})
+		}
+		return nil, err
+	}
+	for attempt := uint32(1); ; attempt++ {
 		if cause := a.runCause(active); cause != nil {
 			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", cause, llm.Usage{})
 		}
-		transformed, err := a.transformV2(active.ctx, messages)
+		request, err := a.providerRequest(active)
 		if err != nil {
 			if cause := a.runCause(active); cause != nil {
 				return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", cause, llm.Usage{})
 			}
 			return nil, err
 		}
-		if context.Cause(active.ctx) != nil {
-			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled before provider execution", a.contextCause(active), llm.Usage{})
+		a.mu.Lock()
+		if a.active != active || active.terminalAccepted {
+			a.mu.Unlock()
+			return nil, fmt.Errorf("%w: inactive provider turn", ErrInvariant)
 		}
-		messages = append([]llm.ConversationMessage(nil), transformed...)
+		active.phase, active.turn = PhaseProvider, turn
+		active.providerTurns++
+		a.mu.Unlock()
+		if attempt > 1 {
+			a.notify(active.ctx, Event{Kind: EventRetryAttempt, RunID: active.id, Turn: turn, RetryAttempt: attempt})
+		}
+		terminal, streamErr := a.collectProvider(active, turn, request)
+		if streamErr == nil && (a.runCause(active) != nil && terminal.FinishReason() != llm.FinishAborted) {
+			terminal, streamErr = nil, a.contextCause(active)
+		}
+		if !a.retryableProviderOutcome(active, terminal, streamErr) || attempt >= a.config.retry.maxAttempts {
+			if streamErr != nil {
+				reason, text, cause := llm.FinishError, "Provider stream failed", streamErr
+				if runCause := a.runCause(active); runCause != nil {
+					reason, text, cause = llm.FinishAborted, "Run cancelled during provider execution", errors.Join(runCause, streamErr)
+				}
+				return a.failureTerminal(nil, reason, text, cause, llm.Usage{})
+			}
+			return terminal, nil
+		}
+		delay := a.retryDelay(attempt, terminal)
+		a.mu.Lock()
+		if a.active != active {
+			a.mu.Unlock()
+			return nil, fmt.Errorf("%w: inactive retry", ErrInvariant)
+		}
+		active.phase = PhaseRetryWait
+		a.mu.Unlock()
+		a.notify(active.ctx, Event{Kind: EventRetryScheduled, RunID: active.id, Turn: turn, RetryAttempt: attempt + 1, RetryDelay: delay, RunError: streamErr})
+		if err := a.config.retry.sleep(active.ctx, delay); err != nil {
+			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled while waiting to retry provider", err, llm.Usage{})
+		}
+	}
+}
+
+func (a *Agent) providerRequest(active *activeRun) (provider.Request, error) {
+	var snapshot session.Context
+	if builder, ok := a.config.transcript.(ContextBuilder); ok {
+		snapshot = builder.BuildContext()
+	} else {
+		snapshot = a.config.transcript.Context()
+	}
+	messages := snapshot.Messages()
+	if a.config.transformContext != nil {
+		transformed, err := a.transformV2(active.ctx, messages)
+		if err != nil {
+			return provider.Request{}, err
+		}
+		messages = transformed
 	}
 	request, err := provider.NewRequest(a.config.model, a.config.systemPrompt, messages)
 	if err != nil {
-		return nil, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
+		return provider.Request{}, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
+	}
+	return request, nil
+}
+
+func (a *Agent) compactBeforeProvider(active *activeRun, turn uint32) error {
+	if a.config.contextWindow == 0 {
+		return nil
+	}
+	snapshot := a.contextSnapshot()
+	compact, err := session.ShouldCompact(snapshot.Messages(), a.config.contextWindow, a.config.contextReserve)
+	if err != nil {
+		return fmt.Errorf("context threshold: %w", err)
+	}
+	if !compact {
+		return nil
 	}
 	a.mu.Lock()
 	if a.active != active || active.terminalAccepted {
 		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: inactive provider turn", ErrInvariant)
+		return fmt.Errorf("%w: inactive compaction", ErrInvariant)
 	}
-	active.phase, active.turn = PhaseProvider, turn
-	active.providerTurns++
+	active.phase = PhaseCompacting
 	a.mu.Unlock()
-	terminal, streamErr := a.collectProvider(active, turn, request)
+	a.notify(active.ctx, Event{Kind: EventCompactionStarted, RunID: active.id, Turn: turn})
+	result, err := a.config.compactor.Compact(active.ctx, session.CompactRequest{KeepRecentTokens: a.config.keepRecentTokens, Summarizer: a.config.summarizer})
+	if err != nil {
+		a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: turn, RunError: err})
+		return fmt.Errorf("automatic context compaction: %w", err)
+	}
+	a.notify(active.ctx, Event{Kind: EventCompactionSettled, RunID: active.id, Turn: turn, Compaction: &result})
+	return nil
+}
+
+func (a *Agent) contextSnapshot() session.Context {
+	if builder, ok := a.config.transcript.(ContextBuilder); ok {
+		return builder.BuildContext()
+	}
+	return a.config.transcript.Context()
+}
+
+func (a *Agent) retryableProviderOutcome(active *activeRun, terminal llm.AssistantTerminal, streamErr error) bool {
+	if a.runCause(active) != nil {
+		return false
+	}
 	if streamErr != nil {
-		reason, text, cause := llm.FinishError, "Provider stream failed", streamErr
-		if runCause := a.runCause(active); runCause != nil {
-			reason, text, cause = llm.FinishAborted, "Run cancelled during provider execution", errors.Join(runCause, streamErr)
+		// Parser/collector failures share the outer ErrProviderStream wrapper
+		// with a dropped body. Retry only concrete transport interruptions.
+		if errors.Is(streamErr, io.ErrUnexpectedEOF) {
+			return true
 		}
-		return a.failureTerminal(nil, reason, text, cause, llm.Usage{})
+		var networkError net.Error
+		return errors.As(streamErr, &networkError) && (networkError.Timeout() || networkError.Temporary())
 	}
-	if cause := a.runCause(active); cause != nil && terminal.FinishReason() != llm.FinishAborted {
-		return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled during provider execution", cause, llm.Usage{})
+	failure, ok := terminal.(llm.AssistantFailureMessage)
+	if !ok || failure.FinishReason() == llm.FinishAborted {
+		return false
 	}
-	return terminal, nil
+	var providerFailure *provider.ProviderFailure
+	if !errors.As(failure.Failure().Cause(), &providerFailure) {
+		return false
+	}
+	switch providerFailure.Kind() {
+	case provider.FailureTransport:
+		return true
+	case provider.FailureHTTPStatus:
+		status, ok := providerFailure.HTTPStatus()
+		return ok && (status == 408 || status == 409 || status == 425 || status == 429 || status >= 500)
+	default:
+		return false
+	}
+}
+
+func (a *Agent) retryDelay(attempt uint32, terminal llm.AssistantTerminal) time.Duration {
+	delay := a.config.retry.initialDelay
+	for i := uint32(1); i < attempt && delay > 0; i++ {
+		if delay > time.Duration(math.MaxInt64/2) {
+			delay = time.Duration(math.MaxInt64)
+			break
+		}
+		delay *= 2
+	}
+	if max := a.config.retry.maxDelay; max > 0 && delay > max {
+		delay = max
+	}
+	if failure, ok := terminal.(llm.AssistantFailureMessage); ok {
+		var providerFailure *provider.ProviderFailure
+		if errors.As(failure.Failure().Cause(), &providerFailure) {
+			if server, set := providerFailure.RetryAfter(); set {
+				if cap := a.config.retry.maxRetryAfter; cap > 0 && server > cap {
+					server = cap
+				}
+				if server > delay {
+					delay = server
+				}
+			}
+		}
+	}
+	if a.config.retry.jitter != nil {
+		if jittered := a.config.retry.jitter(attempt, delay); jittered >= 0 {
+			delay = jittered
+		}
+	}
+	// A custom jitter seam is intentionally not trusted with an unbounded
+	// result. The larger configured delay cap remains the hard wait ceiling.
+	ceiling := a.config.retry.maxDelay
+	if a.config.retry.maxRetryAfter > ceiling {
+		ceiling = a.config.retry.maxRetryAfter
+	}
+	if ceiling > 0 && delay > ceiling {
+		delay = ceiling
+	}
+	return delay
 }
 
 func (a *Agent) transformV2(ctx context.Context, messages []llm.ConversationMessage) (transformed []llm.ConversationMessage, err error) {

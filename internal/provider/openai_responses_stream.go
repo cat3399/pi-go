@@ -25,6 +25,7 @@ type responsesFailureSpec struct {
 	message    string
 	httpStatus *int
 	vendorCode string
+	retryAfter *time.Duration
 }
 
 type responsesTextSlot struct {
@@ -331,12 +332,14 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 		cause.readError = readErr
 	}
 	status := response.StatusCode
+	retryAfter := responsesRetryAfter(response.Header.Get("Retry-After"), s.clock())
 	return &responsesFailureSpec{
 		kind:       FailureHTTPStatus,
 		cause:      cause,
 		message:    message,
 		httpStatus: &status,
 		vendorCode: vendorCode,
+		retryAfter: retryAfter,
 	}
 }
 
@@ -367,6 +370,7 @@ func (s *openAIResponsesStream) finishFailure(spec responsesFailureSpec) (llm.St
 		Cause:      spec.cause,
 		HTTPStatus: spec.httpStatus,
 		VendorCode: spec.vendorCode,
+		RetryAfter: spec.retryAfter,
 	})
 	if err != nil {
 		s.finishTransport()
