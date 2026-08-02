@@ -267,3 +267,21 @@
 - 明确延期：OAuth login/refresh、command-backed config execution、Windows DACL persistence；
   未知 stale lock 不自动回收仍是明确 contract，不由本里程碑静默改变。
 - 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
+## R-AUTH-002：M-AUTH/v0.2 OpenAI Codex OAuth 独立复审
+
+- 范围：`internal/auth` 的 OpenAI Codex browser/device OAuth、token exchange/refresh、OAuth
+  credential projection/rotation、`internal/app` production consumer、相邻 fixture 与 ledger；实现与
+  修订 commits 为 `6a9a0d6`、`1e21fae`、`8e765df`，reviewer 未参与实现。
+- 首轮结论：`changes-required`，1 Blocker / 3 Major / 0 Minor。修订关闭 OAuth HTTP redirect
+  secret forwarding、device pending/slow-down 与 deadline、bounded recursive-strict JSON/media admission，
+  以及 browser callback transaction/HTTP lifecycle。
+- 定点复审：上述 1B/3M 闭环后为 0 Blocker / 0 Major / 2 Minor；最终修订统一 final exchange
+  deadline/caller-cancel typed classification，并以 callback claim→write/flush→publish barrier 防止
+  零延迟 exchange 截断浏览器页面。最终复审确认 0 Blocker / 0 Major / 0 Minor。
+- 验证：全仓 test/vet/build、auth/app race、OAuth fuzz、local token/Responses HTTP/SSE、307
+  secret collector、hung poll/exchange、callback 并发与 fault 回归、Linux/Windows cross-build，以及
+  Windows auth/app test-binary compile 和累计 diff check 均通过。
+- 延期：真实 credential/browser smoke 与 interactive CLI/TUI login surface 等待对应产品里程碑；
+  Windows DACL-backed persistent store 与 Windows 实机执行仍未完成，当前 contract 继续 fail-closed。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。

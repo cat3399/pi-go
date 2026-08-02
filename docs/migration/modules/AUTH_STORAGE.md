@@ -1,8 +1,8 @@
-# M-AUTH：API-key storage 与 runtime charter
+# M-AUTH：credential storage、runtime 与 OpenAI Codex OAuth charter
 
-状态：`implemented; independent review pending`（`M-AUTH/v0.2-openai-codex-oauth`）
+状态：`ported`（`M-AUTH/v0.2-openai-codex-oauth`）
 
-最近通过里程碑：`M-AUTH/v0.1-api-key-storage-runtime`
+最近通过里程碑：`M-AUTH/v0.2-openai-codex-oauth`
 
 ## v0.2 增量负责
 
@@ -65,10 +65,10 @@
 | `B-AUTH-003` | context-aware same-process and cross-process locking | `ported` | same/different Store、two re-exec writers、cancel/failure release/merge、`-race`；R-AUTH-001 |
 | `B-AUTH-004` | runtime override 与 stored/configured/ambient source ownership | `ported` | overlay/precedence/error matrix；R-AUTH-001 |
 | `B-AUTH-005` | config template; command value safe refusal | `ported` | escapes, missing env, no-process-side-effect；R-AUTH-001 |
-| `B-AUTH-006` | PKCE/state, browser callback/manual code lifecycle | `implemented` | bind/state/error/cancel/late callback/opener seam |
-| `B-AUTH-007` | device code and bounded token exchange/refresh | `implemented` | pending/403/slow_down/status/UTF-8/size fixture |
-| `B-AUTH-008` | OAuth refresh locking, rotation durability and ownership | `implemented` | concurrent resolve, write fault, no fallback, runtime override |
-| `B-AUTH-009` | production OAuth→Responses preflight | `implemented` | local token + SSE fixture and rotated auth.json |
+| `B-AUTH-006` | PKCE/state, browser callback/manual code lifecycle | `ported` | bind/state/error/cancel/late callback/opener seam；R-AUTH-002 |
+| `B-AUTH-007` | device code and bounded token exchange/refresh | `ported` | pending/403/slow_down/status/UTF-8/size fixture；R-AUTH-002 |
+| `B-AUTH-008` | OAuth refresh locking, rotation durability and ownership | `ported` | concurrent resolve, write fault, no fallback, runtime override；R-AUTH-002 |
+| `B-AUTH-009` | production OAuth→Responses preflight | `ported` | local token + SSE fixture and rotated auth.json；R-AUTH-002 |
 
 ## v0.1 review gate
 
@@ -91,4 +91,6 @@ and no-secret diagnostics tests.
 Fixed upstream evidence: `a116523434806910336b9de3e38a41aa5860030b`,
 `packages/ai/src/auth/{types,resolve,helpers,context}.ts`,
 `auth/oauth/{openai-codex,pkce,device-code,oauth-page,load}.ts`, coding auth-storage and
-`openai-codex-oauth`/`oauth-auth`/`oauth-device-code` tests. Real-browser smoke remains `deferred` pending explicit credential and browser authorization; independent review is pending.
+`openai-codex-oauth`/`oauth-auth`/`oauth-device-code` tests. `R-AUTH-002` 最终独立复审结论为
+`passed`（0 Blocker / 0 Major / 0 Minor）。真实 browser smoke 与 interactive UI 仍为 `deferred`；
+Windows DACL-backed persistence 仍未实现，继续保持 fail-closed。

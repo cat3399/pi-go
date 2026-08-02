@@ -103,10 +103,10 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | `B-AUTH-003` | context-aware same-process 与 cross-process serialization | `auth-storage.ts`；concurrent modification tests | `ported` | same/different Store、取消、release/merge、re-exec、race；R-AUTH-001 |
 | `B-AUTH-004` | runtime override 及 stored/configured/environment source ownership | `runtime-credentials.ts`；`runtime-credentials.test.ts`；`auth/resolve.ts` | `ported` | production 使用同一 resolver，request key 不持久化；R-AUTH-001 |
 | `B-AUTH-005` | literal/environment template 与 command safe refusal | `resolve-config-value.ts`；`resolve-config-value.test.ts` | `ported` | command process 不启动，待安全/process slice 重评；R-AUTH-001 |
-| `B-AUTH-006` | OpenAI Codex browser OAuth PKCE/state/callback/manual lifecycle | `openai-codex.ts`；`pkce.ts`；`oauth-page.ts` | `implemented` | independent review pending |
-| `B-AUTH-007` | OpenAI Codex device code and bounded token exchange/refresh | `openai-codex.ts`；`device-code.ts` | `implemented` | independent review pending |
-| `B-AUTH-008` | OAuth expiry/skew refresh, durable rotation and source ownership | `resolve.ts`；`auth-storage.ts` | `implemented` | independent review pending |
-| `B-AUTH-009` | stored OAuth production OpenAI Responses preflight | `oauth-auth.test.ts` | `implemented` | local HTTP/SSE strengthening; independent review pending |
+| `B-AUTH-006` | OpenAI Codex browser OAuth PKCE/state/callback/manual lifecycle | `openai-codex.ts`；`pkce.ts`；`oauth-page.ts` | `ported` | bounded/linearized lifecycle strengthening；R-AUTH-002 |
+| `B-AUTH-007` | OpenAI Codex device code and bounded token exchange/refresh | `openai-codex.ts`；`device-code.ts` | `ported` | redirect/deadline/strict JSON strengthening；R-AUTH-002 |
+| `B-AUTH-008` | OAuth expiry/skew refresh, durable rotation and source ownership | `resolve.ts`；`auth-storage.ts` | `ported` | cross-process double-check/durability strengthening；R-AUTH-002 |
+| `B-AUTH-009` | stored OAuth production OpenAI Responses preflight | `oauth-auth.test.ts` | `ported` | local HTTP/SSE strengthening；R-AUTH-002 |
 
 ## 首个 workflow 之外的明确分类
 
