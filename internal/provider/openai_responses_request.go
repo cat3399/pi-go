@@ -2,6 +2,7 @@ package provider
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -35,6 +36,21 @@ type responsesInputText struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
 }
+type responsesInputImage struct {
+	Type     string `json:"type"`
+	Detail   string `json:"detail"`
+	ImageURL string `json:"image_url"`
+}
+type responsesReasoningInput struct {
+	Type             string                      `json:"type"`
+	ID               string                      `json:"id"`
+	EncryptedContent string                      `json:"encrypted_content,omitempty"`
+	Summary          []responsesReasoningSummary `json:"summary,omitempty"`
+}
+type responsesReasoningSummary struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
 
 type responsesOutputText struct {
 	Type        string `json:"type"`
@@ -48,6 +64,7 @@ type responsesOutputMessage struct {
 	Content []responsesOutputText `json:"content"`
 	Status  string                `json:"status"`
 	ID      string                `json:"id"`
+	Phase   string                `json:"phase,omitempty"`
 }
 
 func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, error) {
@@ -72,13 +89,23 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			}
 			input = append(input, responsesEasyMessage{Role: "user", Content: content})
 			wireMessageIndex++
+		case llm.UserContentMessage:
+			content, err := responsesInputContent(message.Content())
+			if err != nil {
+				return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAIResponsesRequest, sourceIndex, err)
+			}
+			if len(content) != 0 {
+				input = append(input, responsesEasyMessage{Role: "user", Content: content})
+				wireMessageIndex++
+			}
 
 		case llm.AssistantTextMessage:
 			blocks := message.Content()
 			if len(blocks) == 0 {
 				continue
 			}
-			input = appendResponsesAssistantText(input, wireMessageIndex, blocks)
+			policy := responsesReplayPolicyFor(message, request.ReplayTarget())
+			input = appendResponsesAssistantText(input, wireMessageIndex, blocks, policy.sameModel)
 			wireMessageIndex++
 
 		case llm.AssistantFailureMessage:
@@ -88,7 +115,14 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			continue
 
 		case llm.AssistantToolUseMessage:
-			encoded, err := appendResponsesAssistantToolUse(input, wireMessageIndex, message)
+			encoded, err := appendResponsesAssistantToolUse(input, wireMessageIndex, message, responsesReplayPolicyFor(message, request.ReplayTarget()))
+			if err != nil {
+				return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAIResponsesRequest, sourceIndex, err)
+			}
+			input = encoded
+			wireMessageIndex++
+		case llm.AssistantRichMessage:
+			encoded, err := appendResponsesAssistantBlocks(input, wireMessageIndex, message.Blocks(), responsesReplayPolicyFor(message, request.ReplayTarget()))
 			if err != nil {
 				return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAIResponsesRequest, sourceIndex, err)
 			}
@@ -97,6 +131,14 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 
 		case llm.ToolResultMessage:
 			output, err := responsesToolResultOutput(message)
+			if err != nil {
+				return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAIResponsesRequest, sourceIndex, err)
+			}
+			callID, _ := splitResponsesToolID(message.ToolCallID())
+			input = append(input, responsesFunctionCallOutput{Type: "function_call_output", CallID: callID, Output: output})
+			wireMessageIndex++
+		case llm.ToolResultContentMessage:
+			output, err := responsesToolResultContentOutput(message.Content())
 			if err != nil {
 				return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAIResponsesRequest, sourceIndex, err)
 			}
@@ -142,34 +184,67 @@ type responsesFunctionCall struct {
 type responsesFunctionCallOutput struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
-	Output string `json:"output"`
+	Output any    `json:"output"`
 }
 
-func appendResponsesAssistantToolUse(input []any, messageIndex int, message llm.AssistantToolUseMessage) ([]any, error) {
+type responsesReplayPolicy struct{ sourced, sameDialect, sameModel bool }
+type responsesProvenanceCarrier interface {
+	AssistantProvenance() (llm.AssistantProvenance, bool)
+}
+
+func responsesReplayPolicyFor(message responsesProvenanceCarrier, target llm.AssistantProvenance) responsesReplayPolicy {
+	source, ok := message.AssistantProvenance()
+	if !ok {
+		return responsesReplayPolicy{}
+	}
+	sameDialect := source.Provider == target.Provider && source.API == target.API
+	return responsesReplayPolicy{
+		sourced:     true,
+		sameDialect: sameDialect,
+		sameModel:   source.Matches(target.Provider, target.API, target.Model),
+	}
+}
+
+func appendResponsesAssistantToolUse(input []any, messageIndex int, message llm.AssistantToolUseMessage, policy responsesReplayPolicy) ([]any, error) {
+	return appendResponsesAssistantBlocks(input, messageIndex, message.Blocks(), policy)
+}
+func appendResponsesAssistantBlocks(input []any, messageIndex int, blocks []llm.AssistantBlock, policy responsesReplayPolicy) ([]any, error) {
 	textBlockIndex := 0
 	seenCallIDs := make(map[string]struct{})
-	for _, block := range message.Blocks() {
+	for _, block := range blocks {
 		switch block := block.(type) {
 		case llm.TextBlock:
-			input = appendResponsesAssistantText(input, messageIndex, []llm.TextBlock{block})
+			input = appendResponsesAssistantTextAt(input, messageIndex, textBlockIndex, block, policy.sameModel)
 			textBlockIndex++
-			// appendResponsesAssistantText has deterministic fallback IDs. For a
-			// mixed message its only input is this one text block, so rewrite the
-			// final ID when this is not the first text block.
-			if textBlockIndex > 1 {
-				last := input[len(input)-1].(responsesOutputMessage)
-				last.ID = fmt.Sprintf("msg_pi_%d_%d", messageIndex, textBlockIndex-1)
-				input[len(input)-1] = last
+		case llm.ThinkingBlock:
+			replay, ok := block.OpenAIResponsesReplay()
+			if !ok || !policy.sameModel {
+				if replay.Redacted || strings.TrimSpace(block.Thinking()) == "" {
+					continue
+				}
+				text, err := llm.NewTextBlock(block.Thinking())
+				if err != nil {
+					return nil, err
+				}
+				input = appendResponsesAssistantTextAt(input, messageIndex, textBlockIndex, text, false)
+				textBlockIndex++
+				continue
 			}
+			reasoning := responsesReasoningInput{Type: "reasoning", ID: replay.ItemID, EncryptedContent: replay.EncryptedContent}
+			if block.Thinking() != "" {
+				reasoning.Summary = []responsesReasoningSummary{{Type: "summary_text", Text: block.Thinking()}}
+			}
+			input = append(input, reasoning)
 		case llm.ToolCallBlock:
 			callID, itemID := splitResponsesToolID(block.ID())
 			if _, duplicate := seenCallIDs[callID]; duplicate {
 				return nil, fmt.Errorf("duplicate normalized tool call ID %q", callID)
 			}
 			seenCallIDs[callID] = struct{}{}
+			itemID = responsesReplayToolItemID(itemID, policy)
 			input = append(input, responsesFunctionCall{
 				Type:      "function_call",
-				ID:        normalizeResponsesFunctionItemID(itemID),
+				ID:        itemID,
 				CallID:    callID,
 				Name:      block.Name(),
 				Arguments: string(block.ArgumentsJSON()),
@@ -181,7 +256,43 @@ func appendResponsesAssistantToolUse(input []any, messageIndex int, message llm.
 	return input, nil
 }
 
-func responsesToolResultOutput(message llm.ToolResultMessage) (string, error) {
+func responsesReplayToolItemID(itemID string, policy responsesReplayPolicy) string {
+	if itemID == "" {
+		return ""
+	}
+	if policy.sameModel {
+		return normalizeResponsesFunctionItemID(itemID)
+	}
+	if policy.sourced && policy.sameDialect {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(itemID))
+	return fmt.Sprintf("fc_%x", sum[:12])
+}
+
+func responsesInputContent(blocks []llm.UserContentBlock) ([]any, error) {
+	content := make([]any, 0, len(blocks))
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.TextBlock:
+			content = append(content, responsesInputText{Type: "input_text", Text: block.Text()})
+		case llm.ImageBlock:
+			content = append(content, responsesImageInput(block))
+		default:
+			return nil, fmt.Errorf("unsupported user block %T", block)
+		}
+	}
+	return content, nil
+}
+func responsesImageInput(image llm.ImageBlock) responsesInputImage {
+	url := image.URL()
+	if image.Source() == llm.ImageSourceData {
+		url = "data:" + image.MediaType() + ";base64," + base64.StdEncoding.EncodeToString(image.Data())
+	}
+	return responsesInputImage{Type: "input_image", Detail: "auto", ImageURL: url}
+}
+
+func responsesToolResultOutput(message llm.ToolResultMessage) (any, error) {
 	blocks := message.Content()
 	parts := make([]string, len(blocks))
 	for index, block := range blocks {
@@ -194,6 +305,35 @@ func responsesToolResultOutput(message llm.ToolResultMessage) (string, error) {
 		output = "(no tool output)"
 	}
 	return output, nil
+}
+func responsesToolResultContentOutput(blocks []llm.ToolResultContentBlock) (any, error) {
+	texts := make([]string, 0, len(blocks))
+	images := make([]llm.ImageBlock, 0)
+	for _, block := range blocks {
+		switch block := block.(type) {
+		case llm.TextBlock:
+			texts = append(texts, block.Text())
+		case llm.ImageBlock:
+			images = append(images, block)
+		default:
+			return nil, fmt.Errorf("unsupported tool result block %T", block)
+		}
+	}
+	text := strings.Join(texts, "\n")
+	if len(images) == 0 {
+		if text == "" {
+			text = "(no tool output)"
+		}
+		return text, nil
+	}
+	out := make([]any, 0, len(images)+1)
+	if text != "" {
+		out = append(out, responsesInputText{Type: "input_text", Text: text})
+	}
+	for _, image := range images {
+		out = append(out, responsesImageInput(image))
+	}
+	return out, nil
 }
 
 func encodeResponsesTools(definitions []ToolDefinition) ([]responsesFunctionTool, error) {
@@ -262,23 +402,32 @@ func appendResponsesAssistantText(
 	input []any,
 	messageIndex int,
 	blocks []llm.TextBlock,
+	allowReplay bool,
 ) []any {
 	for blockIndex, block := range blocks {
-		id := fmt.Sprintf("msg_pi_%d", messageIndex)
-		if blockIndex != 0 {
-			id = fmt.Sprintf("msg_pi_%d_%d", messageIndex, blockIndex)
-		}
-		input = append(input, responsesOutputMessage{
-			Type: "message",
-			Role: "assistant",
-			Content: []responsesOutputText{{
-				Type:        "output_text",
-				Text:        block.Text(),
-				Annotations: []any{},
-			}},
-			Status: "completed",
-			ID:     id,
-		})
+		input = appendResponsesAssistantTextAt(input, messageIndex, blockIndex, block, allowReplay)
 	}
 	return input
+}
+func appendResponsesAssistantTextAt(input []any, messageIndex, blockIndex int, block llm.TextBlock, allowReplay bool) []any {
+	id := fmt.Sprintf("msg_pi_%d", messageIndex)
+	if blockIndex != 0 {
+		id = fmt.Sprintf("msg_pi_%d_%d", messageIndex, blockIndex)
+	}
+	message := responsesOutputMessage{
+		Type: "message",
+		Role: "assistant",
+		Content: []responsesOutputText{{
+			Type:        "output_text",
+			Text:        block.Text(),
+			Annotations: []any{},
+		}},
+		Status: "completed",
+		ID:     id,
+	}
+	if replay, ok := block.TextReplay(); ok && allowReplay {
+		message.ID = replay.MessageID
+		message.Phase = replay.Phase
+	}
+	return append(input, message)
 }

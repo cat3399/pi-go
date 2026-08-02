@@ -16,12 +16,283 @@ import (
 
 const testHeader = `{"type":"session","version":3,"id":"session-1","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace"}`
 
+func TestOpenProjectsForeignOpaqueSignaturesAsSafeUnsignedContent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		provider   string
+		api        string
+		model      string
+		content    string
+		wantKinds  []llm.AssistantBlockKind
+		wantTexts  []string
+		wantUnsafe []int
+	}{
+		{
+			name:     "anthropic visible and redacted thinking",
+			provider: "anthropic",
+			api:      "anthropic-messages",
+			model:    "claude-test",
+			content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"anthropic-opaque-secret"},` +
+				`{"type":"thinking","thinking":"","thinkingSignature":"anthropic-redacted-secret","redacted":true},` +
+				`{"type":"text","text":"answer"}]`,
+			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
+			wantTexts:  []string{"visible plan", "answer"},
+			wantUnsafe: []int{0, 1},
+		},
+		{
+			name:     "google signed empty and visible parts",
+			provider: "google",
+			api:      "google-generative-ai",
+			model:    "gemini-test",
+			content: `[{"type":"thinking","thinking":"","thinkingSignature":"Z29vZ2xlLW9wYXF1ZQ=="},` +
+				`{"type":"thinking","thinking":"visible thought","thinkingSignature":"Z29vZ2xlLXZpc2libGU="},` +
+				`{"type":"text","text":"","textSignature":"Z29vZ2xlLWVtcHR5LXRleHQ="},` +
+				`{"type":"text","text":"answer","textSignature":"Z29vZ2xlLXRleHQ="}]`,
+			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
+			wantTexts:  []string{"visible thought", "answer"},
+			wantUnsafe: []int{0, 1, 2, 3},
+		},
+		{
+			name:     "foreign provider cannot borrow Responses API provenance",
+			provider: "anthropic",
+			api:      "openai-responses",
+			model:    "claude-test",
+			content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_foreign\",\"encrypted_content\":\"must-not-project\"}"},` +
+				`{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_foreign\",\"phase\":\"final_answer\"}"}]`,
+			wantKinds:  []llm.AssistantBlockKind{llm.AssistantBlockThinking, llm.AssistantBlockText},
+			wantTexts:  []string{"visible plan", "answer"},
+			wantUnsafe: []int{0, 1},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entry := assistantReplayEntryJSON("entry-1", "null", tt.provider, tt.api, tt.model, tt.content, "")
+			path := writeSessionFixture(t, testHeader+"\n"+entry+"\n")
+			transcript, err := Open(path, OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = transcript.Close() })
+
+			if got := transcript.Entries()[0].RawJSON(); !bytes.Equal(got, []byte(entry)) {
+				t.Fatal("foreign opaque signature record was not byte-preserved")
+			}
+			messages := transcript.Context().Messages()
+			if len(messages) != 1 {
+				t.Fatalf("messages = %#v", messages)
+			}
+			metadataCarrier := messages[0].(interface {
+				OpenAIResponsesMetadata() (llm.OpenAIResponsesResponse, bool)
+			})
+			if replay, ok := metadataCarrier.OpenAIResponsesMetadata(); ok {
+				t.Fatalf("untrusted response metadata projected: %#v", replay)
+			}
+			blocks := assistantBlocks(messages[0])
+			if len(blocks) != len(tt.wantKinds) {
+				t.Fatalf("blocks = %#v, want %d safe blocks", blocks, len(tt.wantKinds))
+			}
+			for index, block := range blocks {
+				if block.Kind() != tt.wantKinds[index] {
+					t.Fatalf("block %d kind = %v, want %v", index, block.Kind(), tt.wantKinds[index])
+				}
+				switch block := block.(type) {
+				case llm.ThinkingBlock:
+					if block.Thinking() != tt.wantTexts[index] {
+						t.Fatalf("thinking %d = %q", index, block.Thinking())
+					}
+					if replay, ok := block.OpenAIResponsesReplay(); ok {
+						t.Fatalf("foreign reasoning projected as Responses replay: %#v", replay)
+					}
+				case llm.TextBlock:
+					if block.Text() != tt.wantTexts[index] {
+						t.Fatalf("text %d = %q", index, block.Text())
+					}
+					if replay, ok := block.TextReplay(); ok {
+						t.Fatalf("foreign text projected as Responses replay: %#v", replay)
+					}
+				}
+			}
+			diagnostics := transcript.Context().Diagnostics()
+			if len(diagnostics) != len(tt.wantUnsafe) {
+				t.Fatalf("diagnostics = %#v", diagnostics)
+			}
+			for index, contentIndex := range tt.wantUnsafe {
+				if diagnostics[index] != (Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: "entry-1", ContentIndex: contentIndex}) {
+					t.Fatalf("diagnostic %d = %#v", index, diagnostics[index])
+				}
+			}
+		})
+	}
+}
+
+func TestOpenResponsesReplayMetadataFailsSafe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		content       string
+		extra         string
+		wantBlockKind llm.AssistantBlockKind
+		wantBlocks    int
+	}{
+		{name: "future text envelope version", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":2,\"id\":\"msg_future\",\"phase\":\"final_answer\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "future signed empty text", content: `[{"type":"text","text":"","textSignature":"{\"v\":2,\"id\":\"msg_future\"}"}]`, wantBlocks: 0},
+		{name: "future text envelope field", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "unknown text phase", content: `[{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_future\",\"phase\":\"future_phase\"}"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "malformed text envelope", content: `[{"type":"text","text":"answer","textSignature":"{"}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "non string text envelope", content: `[{"type":"text","text":"answer","textSignature":{"v":1,"id":"msg_object"}}]`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+		{name: "malformed readable reasoning", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"opaque-not-json"}]`, wantBlockKind: llm.AssistantBlockThinking, wantBlocks: 1},
+		{name: "future readable reasoning envelope", content: `[{"type":"thinking","thinking":"visible plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\",\"future\":true}"}]`, wantBlockKind: llm.AssistantBlockThinking, wantBlocks: 1},
+		{name: "unsupported opaque only reasoning", content: `[{"type":"thinking","thinking":"","thinkingSignature":"{\"type\":\"future_reasoning\",\"id\":\"rs_future\",\"encrypted_content\":\"must-not-project\"}"}]`, wantBlocks: 0},
+		{name: "malformed response metadata", content: `[{"type":"text","text":"answer"}]`, extra: `,"responseId":{"future":true}`, wantBlockKind: llm.AssistantBlockText, wantBlocks: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entry := assistantReplayEntryJSON("entry-1", "null", "openai", "openai-responses", "gpt-test", tt.content, tt.extra)
+			path := writeSessionFixture(t, testHeader+"\n"+entry+"\n")
+			transcript, err := Open(path, OpenOptions{})
+			if err != nil {
+				t.Fatalf("Open() rejected compatible future metadata: %v", err)
+			}
+			t.Cleanup(func() { _ = transcript.Close() })
+
+			if got := transcript.Entries()[0].RawJSON(); !bytes.Equal(got, []byte(entry)) {
+				t.Fatal("untrusted Responses metadata record was not byte-preserved")
+			}
+			messages := transcript.Context().Messages()
+			if len(messages) != 1 {
+				t.Fatalf("messages = %#v", messages)
+			}
+			metadataCarrier := messages[0].(interface {
+				OpenAIResponsesMetadata() (llm.OpenAIResponsesResponse, bool)
+			})
+			if replay, ok := metadataCarrier.OpenAIResponsesMetadata(); ok {
+				t.Fatalf("untrusted response metadata projected: %#v", replay)
+			}
+			blocks := assistantBlocks(messages[0])
+			if len(blocks) != tt.wantBlocks {
+				t.Fatalf("blocks = %#v, want %d", blocks, tt.wantBlocks)
+			}
+			if tt.wantBlocks == 1 {
+				if blocks[0].Kind() != tt.wantBlockKind {
+					t.Fatalf("block kind = %v, want %v", blocks[0].Kind(), tt.wantBlockKind)
+				}
+				switch block := blocks[0].(type) {
+				case llm.TextBlock:
+					if replay, ok := block.TextReplay(); ok {
+						t.Fatalf("untrusted text replay projected: %#v", replay)
+					}
+				case llm.ThinkingBlock:
+					if replay, ok := block.OpenAIResponsesReplay(); ok {
+						t.Fatalf("untrusted reasoning replay projected: %#v", replay)
+					}
+				}
+			}
+			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticUnsafeContentOmitted {
+				t.Fatalf("diagnostics = %#v, want one safe-omission diagnostic", diagnostics)
+			}
+		})
+	}
+}
+
+func TestOpenProjectsCurrentResponsesReplayEnvelope(t *testing.T) {
+	t.Parallel()
+
+	content := `[{"type":"thinking","thinking":"plan","thinkingSignature":"{\"type\":\"reasoning\",\"id\":\"rs_current\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"status\":\"completed\",\"encrypted_content\":\"cipher\"}"},` +
+		`{"type":"text","text":"answer","textSignature":"{\"v\":1,\"id\":\"msg_current\",\"phase\":\"final_answer\"}"}]`
+	entry := assistantReplayEntryJSON(
+		"entry-1", "null", "openai", "openai-responses", "gpt-test", content,
+		`,"responseId":"resp_current","rawStopReason":"completed"`,
+	)
+	path := writeSessionFixture(t, testHeader+"\n"+entry+"\n")
+	transcript, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transcript.Close() })
+
+	message := transcript.Context().Messages()[0].(llm.AssistantRichMessage)
+	blocks := message.Blocks()
+	reasoning, ok := blocks[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
+	if !ok || reasoning.ItemID != "rs_current" || reasoning.EncryptedContent != "cipher" {
+		t.Fatalf("reasoning replay = (%#v, %t)", reasoning, ok)
+	}
+	textReplay, ok := blocks[1].(llm.TextBlock).TextReplay()
+	if !ok || textReplay != (llm.TextReplay{MessageID: "msg_current", Phase: "final_answer"}) {
+		t.Fatalf("text replay = (%#v, %t)", textReplay, ok)
+	}
+	response, ok := message.OpenAIResponsesMetadata()
+	if !ok || response != (llm.OpenAIResponsesResponse{ResponseID: "resp_current", RawStopReason: "completed"}) {
+		t.Fatalf("response replay = (%#v, %t)", response, ok)
+	}
+	if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestOpaqueAndFutureReplayMetadataSurvivesForkAndReopen(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "source.jsonl")
+	foreign := assistantReplayEntryJSON(
+		"entry-1", "null", "anthropic", "anthropic-messages", "claude-test",
+		`[{"type":"thinking","thinking":"visible plan","thinkingSignature":"anthropic-durable-secret"},{"type":"text","text":"answer"}]`, "",
+	)
+	future := assistantReplayEntryJSON(
+		"entry-2", `"entry-1"`, "openai", "openai-responses", "gpt-test",
+		`[{"type":"text","text":"future answer","textSignature":"{\"v\":9,\"id\":\"msg_future\",\"phase\":\"future_phase\"}"}]`, "",
+	)
+	data := testHeader + "\n" + foreign + "\n" + future + "\n"
+	if err := os.WriteFile(sourcePath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := Open(sourcePath, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	assertUnsignedReplayProjection(t, source.Context(), 2)
+
+	targetPath := filepath.Join(directory, "fork.jsonl")
+	target, err := source.Fork(stdcontext.Background(), ExtractOptions{TargetPath: targetPath, ID: "fork", WorkingDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRaw := [][]byte{[]byte(foreign), []byte(future)}
+	for index, entry := range target.Entries() {
+		if !bytes.Equal(entry.RawJSON(), wantRaw[index]) {
+			t.Fatalf("fork entry %d changed opaque/future metadata", index)
+		}
+	}
+	assertUnsignedReplayProjection(t, target.Context(), 2)
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(targetPath, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	for index, entry := range reopened.Entries() {
+		if !bytes.Equal(entry.RawJSON(), wantRaw[index]) {
+			t.Fatalf("reopened fork entry %d changed opaque/future metadata", index)
+		}
+	}
+	assertUnsignedReplayProjection(t, reopened.Context(), 2)
+}
+
 func TestOpenAppendPreservesUnknownRawPrefixAndProjectsKnownContent(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "unknown.jsonl")
 	prefix := []byte(
 		` {"type":"session","version":3,"id":"session-1","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace","future":{"keep":true}}` + "\n" +
-			`{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","futureEntry":1,"message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"image","data":"opaque","mimeType":"image/png"},{"type":"text","text":"second"}],"timestamp":1785542401000,"futureMessage":{"x":1}}}` + "\n" +
+			`{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","futureEntry":1,"message":{"role":"user","content":[{"type":"text","text":"first"},{"type":"image","data":"AA==","mimeType":"image/png"},{"type":"text","text":"second"}],"timestamp":1785542401000,"futureMessage":{"x":1}}}` + "\n" +
 			`{"type":"future_state","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02.000Z","payload":{"opaque":[1,2,3]}}` + "\n" +
 			`{"type":"message","id":"entry-3","parentId":"entry-2","timestamp":"2026-08-01T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"opaque"},{"type":"text","text":"reply"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1785542403000}}`,
 	)
@@ -41,18 +312,18 @@ func TestOpenAppendPreservesUnknownRawPrefixAndProjectsKnownContent(t *testing.T
 	if len(messages) != 2 {
 		t.Fatalf("context message count = %d, want 2", len(messages))
 	}
-	user := messages[0].(llm.UserTextMessage)
-	if got := user.Content(); len(got) != 2 || got[0].Text() != "first" || got[1].Text() != "second" {
+	user := messages[0].(llm.UserContentMessage)
+	if got := user.Content(); len(got) != 3 || got[0].(llm.TextBlock).Text() != "first" || got[2].(llm.TextBlock).Text() != "second" {
 		t.Fatalf("projected user content = %#v", got)
 	}
-	if got := messages[1].(llm.AssistantTextMessage).Content(); len(got) != 1 || got[0].Text() != "reply" {
+	if got := messages[1].(llm.AssistantRichMessage).Blocks(); len(got) != 2 || got[1].(llm.TextBlock).Text() != "reply" {
 		t.Fatalf("projected assistant content = %#v", got)
 	}
 	diagnostics := context.Diagnostics()
-	if len(diagnostics) != 3 {
-		t.Fatalf("diagnostics = %#v, want unknown image/entry/thinking", diagnostics)
+	if len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want unknown entry", diagnostics)
 	}
-	if diagnostics[0].Code != DiagnosticUnknownContentBlock || diagnostics[1].Code != DiagnosticUnknownEntry || diagnostics[2].Code != DiagnosticUnknownContentBlock {
+	if diagnostics[0].Code != DiagnosticUnknownEntry {
 		t.Fatalf("diagnostic codes = %#v", diagnostics)
 	}
 
@@ -248,6 +519,14 @@ func TestOpenRejectsInvalidAssistantUsageAndCost(t *testing.T) {
 func FuzzDecodeSessionFileNeverPanics(f *testing.F) {
 	f.Add([]byte(testHeader + "\n"))
 	f.Add([]byte(testHeader + "\n" + userEntryJSON("seed", "entry-1", "null", 1) + "\n"))
+	f.Add([]byte(testHeader + "\n" + assistantReplayEntryJSON(
+		"entry-1", "null", "anthropic", "anthropic-messages", "claude-test",
+		`[{"type":"thinking","thinking":"visible","thinkingSignature":"opaque-seed"}]`, "",
+	) + "\n"))
+	f.Add([]byte(testHeader + "\n" + assistantReplayEntryJSON(
+		"entry-1", "null", "openai", "openai-responses", "gpt-test",
+		`[{"type":"text","text":"answer","textSignature":"{\"v\":99,\"id\":\"future\",\"phase\":\"future\"}"}]`, "",
+	) + "\n"))
 	f.Add([]byte("not-json"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _, _, _, _ = decodeSessionFile("fuzz.jsonl", data)
@@ -356,6 +635,51 @@ func userEntryJSON(text, id, parent string, second int) string {
 
 func assistantEntryJSON(text, id, parent string, second int) string {
 	return `{"type":"message","id":"` + id + `","parentId":` + parent + `,"timestamp":"2026-08-01T00:00:0` + string(rune('0'+second)) + `.000Z","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":178554240` + string(rune('0'+second)) + `000}}`
+}
+
+func assistantReplayEntryJSON(id, parent, provider, api, model, content, extra string) string {
+	return fmt.Sprintf(
+		`{"type":"message","id":%q,"parentId":%s,"timestamp":"2026-08-01T00:00:01.000Z","message":{"role":"assistant","content":%s,"api":%q,"provider":%q,"model":%q,"usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop"%s,"timestamp":1785542401000}}`,
+		id, parent, content, api, provider, model, extra,
+	)
+}
+
+func assistantBlocks(message llm.ConversationMessage) []llm.AssistantBlock {
+	switch message := message.(type) {
+	case llm.AssistantTextMessage:
+		return message.Blocks()
+	case llm.AssistantRichMessage:
+		return message.Blocks()
+	case llm.AssistantToolUseMessage:
+		return message.Blocks()
+	default:
+		return nil
+	}
+}
+
+func assertUnsignedReplayProjection(t *testing.T, context Context, wantDiagnostics int) {
+	t.Helper()
+	messages := context.Messages()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want two assistants", messages)
+	}
+	for messageIndex, message := range messages {
+		for blockIndex, block := range assistantBlocks(message) {
+			switch block := block.(type) {
+			case llm.TextBlock:
+				if replay, ok := block.TextReplay(); ok {
+					t.Fatalf("message %d block %d projected untrusted text replay %#v", messageIndex, blockIndex, replay)
+				}
+			case llm.ThinkingBlock:
+				if replay, ok := block.OpenAIResponsesReplay(); ok {
+					t.Fatalf("message %d block %d projected untrusted reasoning replay %#v", messageIndex, blockIndex, replay)
+				}
+			}
+		}
+	}
+	if diagnostics := context.Diagnostics(); len(diagnostics) != wantDiagnostics {
+		t.Fatalf("diagnostics = %#v, want %d", diagnostics, wantDiagnostics)
+	}
 }
 
 func writeSessionFixture(t *testing.T, data string) string {

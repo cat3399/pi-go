@@ -27,7 +27,8 @@ batch 调度；future strict eligibility 与 OpenAI wire encoding 仍属 M-PROVI
 ### 明确不负责
 
 - filesystem sandbox：与上游一致，WorkingDir 只解析 relative path，absolute path 与 `..` 保持 OS account 权限；
-- image attachment/resize：当前 Go LLM content 只有 text block，binary/image read 以 typed error 显式失败；
+- image attachment/resize：M-BASE 已有 image content block，但 filesystem binary/image read、
+  resize 与 vision executor 尚未接入 M-TOOL，当前仍以 typed error 显式失败；
 - TypeScript `diff` package 的逐字 patch formatter、TUI preview renderer、remote filesystem adapter；
 - PCRE/Rust-regex 全集与完整 gitignore/NFKC fuzzy replacement。不能安全等价的模式必须显式失败或留在 ledger，不允许 shell/TypeScript fallback。
 
@@ -63,7 +64,9 @@ batch 调度；future strict eligibility 与 OpenAI wire encoding 仍属 M-PROVI
 
 - `D-TOOL-001`: Go stdlib lacks a safe byte-offset-preserving NFKC mapping. v0.2 supports the explicit smart-quote/dash/space/trailing-whitespace fuzzy subset; compatibility-only/fullwidth NFKC replacements are deferred until a mapping design has independent fixtures. Owner M-TOOL; re-evaluate with Unicode normalization dependency proposal.
 - `D-TOOL-002`: Go regexp and the internal glob/.gitignore matcher are intentionally explicit subsets of Rust `rg`/`fd` behavior. Rules are precompiled; invalid or known-unsupported escape syntax fails explicitly, with no command fallback. Owner M-TOOL; re-evaluate before claiming arbitrary upstream regex/gitignore compatibility.
-- `D-TOOL-003`: binary/image read is explicit failure until M-BASE gains image content blocks and image processing contract. Owner M-BASE/M-TOOL; re-evaluate with vision content slice.
+- `D-TOOL-003`: M-BASE image content 与 Responses PNG replay 已 ported；binary/image read 仍是
+  explicit failure，等待 M-TOOL image processing、resize/vision executor contract。Owner M-TOOL；
+  re-evaluate with filesystem vision slice.
 
 ## 负责
 

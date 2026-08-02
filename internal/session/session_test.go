@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,182 @@ var testAssistantProvenance = AssistantProvenance{
 	Provider: "scripted",
 	Model:    "scripted-1",
 	Cost:     ZeroUsageCost(),
+}
+
+var testResponsesAssistantProvenance = AssistantProvenance{
+	API:      "openai-responses",
+	Provider: "openai",
+	Model:    "gpt-test",
+	Cost:     ZeroUsageCost(),
+}
+
+func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) {
+	directory := t.TempDir()
+	transcript, err := Create(filepath.Join(directory, "rich.jsonl"), CreateOptions{ID: "rich", WorkingDir: directory, Now: func() time.Time { return time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC) }, NewEntryID: sequenceIDs("u", "a", "r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantImage := bytes.Clone(imageBytes)
+	image, err := llm.NewImageDataBlock("image/png", imageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes[0] = 9
+	text := mustTextBlock(t, "look")
+	user, err := llm.NewUserContentMessage([]llm.UserContentBlock{text, image}, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking, err := llm.NewThinkingBlock("plan", &llm.OpenAIResponsesReasoning{ItemID: "rs_1", EncryptedContent: "cipher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, err := llm.NewTextBlockWithReplay("done", &llm.TextReplay{MessageID: "msg_1", Phase: "final_answer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantRichMessageWithReplay(
+		[]llm.AssistantBlock{thinking, answer},
+		llm.FinishStop,
+		llm.Usage{},
+		time.UnixMilli(2),
+		&llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultContentMessage("call_1", "bash", []llm.ToolResultContentBlock{image}, false, time.UnixMilli(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []llm.ConversationMessage{user, assistant, result} {
+		options := AppendOptions{}
+		if message.Role() == llm.RoleAssistant {
+			options.Assistant = testResponsesAssistantProvenance
+		}
+		if _, err := transcript.Append(context.Background(), message, options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(filepath.Join(directory, "rich.jsonl"), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := reopened.Context().Messages()
+	if len(messages) != 3 {
+		t.Fatalf("messages=%#v", messages)
+	}
+	storedUser := messages[0].(llm.UserContentMessage).Content()
+	if got := storedUser[1].(llm.ImageBlock).Data(); !bytes.Equal(got, wantImage) {
+		t.Fatalf("image=%v", got)
+	}
+	storedAssistant := messages[1].(llm.AssistantRichMessage).Blocks()
+	replay, ok := storedAssistant[0].(llm.ThinkingBlock).OpenAIResponsesReplay()
+	if !ok || replay.ItemID != "rs_1" || replay.EncryptedContent != "cipher" {
+		t.Fatalf("reasoning=%#v", storedAssistant[0])
+	}
+	signature, ok := storedAssistant[1].(llm.TextBlock).TextReplay()
+	if !ok || signature.MessageID != "msg_1" || signature.Phase != "final_answer" {
+		t.Fatalf("text=%#v", storedAssistant[1])
+	}
+	provenance, ok := messages[1].(llm.AssistantRichMessage).AssistantProvenance()
+	if !ok || provenance != (llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model}) {
+		t.Fatalf("assistant provenance = (%#v, %t)", provenance, ok)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "rich.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`\"v\":1,\"id\":\"msg_1\",\"phase\":\"final_answer\"`)) ||
+		!bytes.Contains(raw, []byte(`\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"cipher\"`)) {
+		t.Fatalf("session did not use typed v3 replay envelopes: %s", raw)
+	}
+}
+
+func TestAppendRejectsAssistantMessageProvenanceMismatch(t *testing.T) {
+	directory := t.TempDir()
+	transcript, err := Create(filepath.Join(directory, "provenance.jsonl"), CreateOptions{
+		ID:         "provenance",
+		WorkingDir: directory,
+		NewEntryID: sequenceIDs("assistant"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantTextMessageWithReplay(
+		[]llm.TextBlock{mustTextBlock(t, "answer")},
+		llm.FinishStop,
+		llm.Usage{},
+		time.UnixMilli(1),
+		&llm.AssistantProvenance{Provider: "openai", API: "openai-responses", Model: "gpt-test"},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = transcript.Append(context.Background(), message, AppendOptions{Assistant: testAssistantProvenance})
+	if !errors.Is(err, ErrInvalidEntry) {
+		t.Fatalf("Append() error = %v, want ErrInvalidEntry", err)
+	}
+	if len(transcript.Context().Messages()) != 0 {
+		t.Fatalf("mismatched provenance append mutated transcript: %#v", transcript.Context().Messages())
+	}
+}
+
+func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		finish llm.FinishReason
+	}{
+		{name: "error", finish: llm.FinishError},
+		{name: "aborted", finish: llm.FinishAborted},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			transcript, err := Create(filepath.Join(directory, "failure.jsonl"), CreateOptions{
+				ID:         "failure",
+				WorkingDir: directory,
+				NewEntryID: sequenceIDs("assistant"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = transcript.Close() })
+			partial, err := llm.NewTextBlockWithReplay("partial", &llm.TextReplay{MessageID: "msg_partial", Phase: "commentary"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure, err := llm.NewAssistantFailureMessage([]llm.TextBlock{partial}, tt.finish, "request failed", llm.Usage{}, time.UnixMilli(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry, err := transcript.Append(context.Background(), failure, AppendOptions{Assistant: testResponsesAssistantProvenance})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(entry.RawJSON(), []byte("textSignature")) {
+				t.Fatalf("failed assistant persisted replay metadata: %s", entry.RawJSON())
+			}
+			stored := transcript.Context().Messages()[0].(llm.AssistantFailureMessage)
+			if replay, ok := stored.Blocks()[0].(llm.TextBlock).TextReplay(); ok {
+				t.Fatalf("failed assistant projected replay metadata: %#v", replay)
+			}
+			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
+				t.Fatalf("locally encoded failure diagnostics = %#v", diagnostics)
+			}
+		})
+	}
 }
 
 func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {

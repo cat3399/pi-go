@@ -68,7 +68,8 @@ func (r FinishReason) String() string {
 
 // TextBlock is immutable text content. Empty text is valid.
 type TextBlock struct {
-	text string
+	text   string
+	replay *TextReplay
 }
 
 func (TextBlock) assistantBlock() {}
@@ -88,6 +89,11 @@ func NewTextBlock(text string) (TextBlock, error) {
 func (b TextBlock) validate() error {
 	if !utf8.ValidString(b.text) {
 		return fmt.Errorf("%w: content is not valid UTF-8", ErrInvalidText)
+	}
+	if b.replay != nil {
+		if err := b.replay.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -149,10 +155,37 @@ func (m UserTextMessage) Timestamp() time.Time {
 // only text blocks. Tool-use and failed terminal messages have separate
 // constructors in their behavior slices.
 type AssistantTextMessage struct {
-	content   []TextBlock
-	finish    FinishReason
-	usage     Usage
-	timestamp time.Time
+	content    []TextBlock
+	finish     FinishReason
+	usage      Usage
+	timestamp  time.Time
+	responses  *OpenAIResponsesResponse
+	provenance *AssistantProvenance
+}
+
+func NewAssistantTextMessageWithResponsesReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
+	return NewAssistantTextMessageWithReplay(content, finish, usage, timestamp, nil, replay)
+}
+func NewAssistantTextMessageWithReplay(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, replay *OpenAIResponsesResponse) (AssistantTextMessage, error) {
+	m, err := NewAssistantTextMessage(content, finish, usage, timestamp)
+	if err != nil {
+		return AssistantTextMessage{}, err
+	}
+	if replay != nil {
+		copy := *replay
+		if err := copy.validate(); err != nil {
+			return AssistantTextMessage{}, err
+		}
+		m.responses = &copy
+	}
+	if provenance != nil {
+		copy := *provenance
+		if err := copy.validate(); err != nil {
+			return AssistantTextMessage{}, err
+		}
+		m.provenance = &copy
+	}
+	return m, nil
 }
 
 func (AssistantTextMessage) assistantTerminal()   {}
@@ -198,7 +231,29 @@ func (m AssistantTextMessage) validate() error {
 			return err
 		}
 	}
+	if m.responses != nil {
+		if err := m.responses.validate(); err != nil {
+			return err
+		}
+	}
+	if m.provenance != nil {
+		if err := m.provenance.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+func (m AssistantTextMessage) AssistantProvenance() (AssistantProvenance, bool) {
+	if m.provenance == nil {
+		return AssistantProvenance{}, false
+	}
+	return *m.provenance, true
+}
+func (m AssistantTextMessage) OpenAIResponsesMetadata() (OpenAIResponsesResponse, bool) {
+	if m.responses == nil {
+		return OpenAIResponsesResponse{}, false
+	}
+	return *m.responses, true
 }
 
 func (AssistantTextMessage) Role() Role {
@@ -244,13 +299,19 @@ func ValidateConversationMessage(message ConversationMessage) error {
 	switch message := message.(type) {
 	case UserTextMessage:
 		return message.validate()
+	case UserContentMessage:
+		return message.validate()
 	case AssistantTextMessage:
 		return message.validate()
 	case AssistantToolUseMessage:
 		return message.validate()
+	case AssistantRichMessage:
+		return message.validate()
 	case AssistantFailureMessage:
 		return message.validate()
 	case ToolResultMessage:
+		return message.validate()
+	case ToolResultContentMessage:
 		return message.validate()
 	default:
 		return fmt.Errorf("invalid conversation message %T", message)
@@ -274,6 +335,8 @@ func ValidateAssistantTerminal(message AssistantTerminal) error {
 	case AssistantTextMessage:
 		return message.validate()
 	case AssistantToolUseMessage:
+		return message.validate()
+	case AssistantRichMessage:
 		return message.validate()
 	case AssistantFailureMessage:
 		return message.validate()

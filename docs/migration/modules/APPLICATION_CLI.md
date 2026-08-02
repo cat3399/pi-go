@@ -9,7 +9,9 @@ built-in registry 生成 Agent executor 与 provider tool definitions；与 M-AG
 本地 HTTP/SSE oracle 固定验证 built-ins `strict:false`、`parallel_tool_calls:true`、两个 Bash
 call 并发执行、逆序完成但 source-order durable replay。全局 sequential 或已广告 tool-level
 sequential override 会在 request boundary 发送 `false`。该扩展不改变 auth/model/resource
-selection，也不引入 scripted、credential 或 TypeScript fallback。
+selection，也不引入 scripted、credential 或 TypeScript fallback。Provider+rich integration
+另以 close/reopen oracle 固定同一请求中的 tools/parallel、causal outputs、reasoning/text
+metadata、foreign safe projection 与 PNG；context/retry production wiring 仍待后续合并。
 
 ## 负责
 
@@ -102,10 +104,10 @@ v0.1 的 deterministic application path 已完成；fake 只存在于 `_test.go`
 | `B-APP-006` | CLI/stored/configured/environment API key 优先级与 secret-safe preflight | WF-002 | `ported` |
 | `B-APP-007` | OpenAI model route、provider-prefixed model 与 unsupported route 诊断 | WF-002 | `ported` |
 | `B-APP-008` | cwd 隔离的默认 durable session path，显式 session path 优先 | WF-002 | `ported` |
-| `B-APP-010` | production OpenAI multi-tool concurrent execution、source-order durable replay 与 final print | WF-003 | `ported` |
+| `B-APP-010` | production OpenAI multi-tool concurrent execution、source-order durable rich replay/restart 与 final print | WF-003 | `ported` |
 
 退出 gate：本地 HTTP/SSE production workflow、配置 fuzz、全仓 test/vet/race/build、
 跨平台 compile 和 `R-APP-002` 均通过。
 
-`B-APP-010` 的 provider/Agent 基线分别来自 `R-PROVIDER-005` 与 `R-AGENT-002`；联合
-integration oracle 只证明组合边界，不重写两个历史 review 的原范围。
+`B-APP-010` 的 provider/Agent/base 基线分别来自 `R-PROVIDER-005`、`R-AGENT-002` 与
+`R-BASE-003`；联合 integration oracle 只证明组合边界，不重写三个历史 review 的原范围。

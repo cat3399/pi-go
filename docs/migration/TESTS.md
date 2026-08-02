@@ -1,8 +1,8 @@
 # Test ledger
 
 本表追踪首批 behavior 的上游测试意图。最终状态只使用 `ported`、`strengthened`、
-`deferred`、`intentionally-incompatible` 和 `not-applicable`。M-BASE 已有 Go test，但在
-独立复审通过前，相关 test intent 仍保持 `deferred`。
+`deferred`、`intentionally-incompatible` 和 `not-applicable`。M-BASE/v0.1 与
+v0.2-rich-content-replay 均已通过独立复审；provider/tools/rich 联合集成也已单独验收。
 
 固定上游 commit：`a116523434806910336b9de3e38a41aa5860030b`。
 
@@ -11,7 +11,7 @@
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
 | `T-BASE-001` | B-BASE-001 | `packages/coding-agent/test/suite/agent-session-prompt.test.ts` — `prompts while idle and records a single text response`，只提供 user normalization/role happy path | `deferred` | B-BASE-001 unit + later agent scenario；不把它误作 finish/usage 裁判 |
-| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `deferred` | text 先 port；thinking 在 B-BASE-005 重评 |
+| `T-BASE-002` | B-BASE-001/005 | `packages/ai/test/faux-provider.test.ts` — `supports helper blocks for text, thinking, and tool calls` | `strengthened` | immutable rich values, alias/fuzz, mixed stream/session replay、Anthropic/Google opaque 与 future/malformed v3 round-trip/fork safety；R-BASE-003 |
 | `T-BASE-003` | B-BASE-002 | `packages/agent/test/agent-loop.test.ts` — `should handle tool calls and results` | `deferred` | B-BASE-002 validation + agent scenario；目标 `strengthened` |
 | `T-BASE-004` | B-BASE-001 | `packages/ai/test/faux-provider.test.ts` — `registers a custom provider and estimates usage`；`packages/ai/test/total-tokens.test.ts` — `totalTokens field` | `deferred` | checked total 与真实 provider sum；目标 `strengthened` |
 | `T-BASE-005` | B-BASE-003 | `packages/ai/test/faux-provider.test.ts` — `streams an exact event order for fixed-size chunks` | `strengthened` | strict state machine 同时覆盖 mixed tool、顺序和 snapshot |
@@ -36,7 +36,7 @@
 | `T-PROVIDER-001` | B-PROVIDER-001/003 | `packages/ai/test/faux-provider.test.ts` — `consumes queued responses in order and errors when exhausted` | `strengthened` | FIFO、并发分配、request snapshot 与 typed exhaustion |
 | `T-PROVIDER-002` | B-PROVIDER-001 | `packages/ai/test/faux-provider.test.ts` — `can replace and append queued responses` | `strengthened` | replace/append 及非法 step 的原子性 |
 | `T-PROVIDER-003` | B-PROVIDER-001/003 | `packages/ai/test/faux-provider.test.ts` — `supports async response factories`、`emits an error when a response factory throws` | `strengthened` | lazy factory、returned error、panic、typed cause 与唯一 terminal |
-| `T-PROVIDER-004` | B-PROVIDER-002/003 | `packages/ai/test/faux-provider.test.ts` 的 exact-order、explicit error/aborted cases | `deferred` | text/tool/error 已覆盖；thinking/image block 进入对应 slice 后重评 |
+| `T-PROVIDER-004` | B-PROVIDER-002/003 | `packages/ai/test/faux-provider.test.ts` 的 exact-order、explicit error/aborted cases | `strengthened` | thinking source-order, strict orphan/dirty EOF and immutable snapshots；rich-content extension R-BASE-003 |
 | `T-PROVIDER-005` | B-PROVIDER-003 | `packages/ai/test/faux-provider.test.ts` — `supports aborting before the first chunk` 及同文件 mid-block abort cases | `strengthened` | pre/mid-text/factory-time cancel、race 与 terminal cause |
 | `T-PROVIDER-006` | — | `packages/ai/test/faux-provider.test.ts` — `unregisters the provider` | `not-applicable` | 只验证 legacy global compat registry；pi-go 使用显式 instance |
 | `T-PROVIDER-007` | B-PROVIDER-004 | `packages/ai/test/providers.test.ts` — mixed-API dispatch、missing implementation；`models-runtime.test.ts` — unknown provider error stream | `deferred` | provider runtime dispatch 里程碑 |
@@ -44,7 +44,7 @@
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
 | `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；R-PROVIDER-005 |
-| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `deferred` | 已覆盖 request causality、local SSE、empty output、bounded/stable non-`fc_*` normalization 与 multi-text fallback IDs；assistant message 尚无 source provider/API/model，无法区分 native/foreign `fc_*` 或 same-provider different-model pairing。M-BASE/session provenance 进入 provider Request 时必须重评并补 foreign `fc_*`/model-handoff fixture；R-PROVIDER-005 确认延期 |
+| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `strengthened` | exact provider/API/model replay gate、foreign/missing-origin ID normalization、reasoning/text/image restart、Azure terminal backfill、phase/order、causal tool outputs 与 valid PNG；R-BASE-003 + R-PROVIDER-005 + integration gate |
 | `T-PROVIDER-013` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesTools` non-strict default；Responses function schema/parallel-tool admission | `strengthened` | full-root local `$ref` JSON Pointer/recursive graph admission、raw boolean `additionalProperties:false` 全路径、traversal budget/fuzz、invalid preflight 零 HTTP、built-in `strict:false`、显式 `parallel_tool_calls:false/true` wire；Agent 有效 mode matrix 与 production multi-call simulated-server oracle 已完成；R-PROVIDER-005 + integration gate |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
@@ -81,7 +81,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-SESSION-004` | B-SESSION-006 | `packages/agent/test/harness/session-backends.test.ts` — `fails loudly for malformed headers and entries` | `strengthened` | line/future/parent/tree matrix |
 | `T-SESSION-005` | B-SESSION-006 | coding test `skips malformed lines but keeps valid ones` | `strengthened` | 有意加强为诊断、文件不变并禁止 append |
 | `T-SESSION-006` | B-SESSION-006 | `packages/coding-agent/test/session-file-invalid.test.ts` — `prints a friendly error and preserves non-session file content` | `strengthened` | strict parser + application process preservation |
-| `T-SESSION-007` | B-SESSION-004/005 | 上游无 byte-prefix unknown round-trip、partial write、atomic create/fsync、poison/commit-unknown test | `strengthened` | fault injection、cancel boundary、byte-prefix 与 poison matrix |
+| `T-SESSION-007` | B-SESSION-004/005 | 上游无 byte-prefix unknown round-trip、partial write、atomic create/fsync、poison/commit-unknown test | `strengthened` | fault/cancel/poison matrix；Anthropic/Google、future/malformed signature raw fork/reopen 与 safe projection由 R-BASE-003 通过 |
 | `T-SESSION-008` | B-SESSION-008 | `packages/coding-agent/test/session-manager/migration.test.ts` 的 v1->v2/idempotent cases | `deferred` | v0.1 v3 reader/writer通过后重评 |
 | `T-SESSION-009` | B-SESSION-005/006 | `packages/coding-agent/docs/session-format.md` tree contract 与 `SessionManager._buildIndex/buildSessionPath` physical-tail behavior | `strengthened` | branch-tail/forest root 接受；forward/broken/cycle 拒绝；Open→Append 原 byte prefix 不变 |
 | `T-SESSION-010` | B-SESSION-010/011 | `packages/coding-agent/test/session-manager/tree-traversal.test.ts` branch/reset/tree/path/context cases | `ported` | selection+append serialization、forest reopen、tree snapshot、race 与 graph property fuzz；R-SESSION-003 |
@@ -129,7 +129,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-APP-006` | B-APP-005/007 | `args.test.ts` provider/model/api-key cases；`model-resolver.test.ts` provider-prefixed/custom model cases | `strengthened` | production request/model/exit integration；R-APP-002 |
 | `T-APP-007` | B-APP-006 | `models-runtime.test.ts` explicit/stored/ambient 与 wrong-handler cases；`auth-storage.test.ts` read/malformed intent | `strengthened` | 四层 precedence、secret-safe、无 session/network 副作用 matrix；R-APP-002 |
 | `T-APP-008` | B-APP-008 | `session-manager.ts` default cwd-encoded directory/new filename；上游缺同等 crash-safe create test | `strengthened` | filename/header ID/time、explicit resume advancing clock；R-APP-002 |
-| `T-APP-010` | B-APP-010 | `agent-session` multi-tool persistence flow + Responses request/stream evidence | `strengthened` | local HTTP/SSE request1 schemas/true → two concurrent calls → reverse completion/source-order durable results → request2 ordered replay → final print；R-PROVIDER-005 + R-AGENT-002 integration |
+| `T-APP-010` | B-APP-010 | `agent-session` multi-tool persistence flow + Responses request/stream evidence | `strengthened` | concurrent two-call workflow plus durable close/reopen request carrying tools/parallel, causal outputs, exact-provenance reasoning/text IDs, safe foreign fallback and PNG；R-PROVIDER-005 + R-AGENT-002 + R-BASE-003 integration |
 
 ## M-AUTH
 
@@ -149,7 +149,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 
 | ID | Workflow | 上游 test intent | 当前状态 | 覆盖 |
 | --- | --- | --- | --- | --- |
-| `T-WF-003` | WF-003 | Responses function tools、Agent multi-tool 与 durable production print intents 分散证明 | `strengthened` | simulated OpenAI admission + concurrent two-call/two-request local HTTP/SSE workflow；R-PROVIDER-005 + R-AGENT-002 integration |
+| `T-WF-003` | WF-003 | Responses function tools、rich replay、Agent multi-tool 与 durable production print intents 分散证明 | `strengthened` | concurrent two-call HTTP/SSE workflow + close/reopen rich/tool/image combined request；R-PROVIDER-005 + R-AGENT-002 + R-BASE-003 integration |
 | `T-WF-002` | WF-002 | OpenAI Responses basic text/stream + print/session intents 分散证明 | `strengthened` | 本地 HTTP/SSE production workflow；真实 credential smoke 单独保留 |
 | `T-WF-001` | WF-001 | AgentSession tool-turn + persistence + print tests 分散证明 | `strengthened` | Go 跨模块 process scenario 整体证明 |
 

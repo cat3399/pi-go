@@ -1,6 +1,6 @@
 # M-BASE：基础语义 charter
 
-状态：`ported`（`M-BASE/v0.1-text-tool-stream`）
+状态：`ported`（`M-BASE/v0.2-rich-content-replay`；`R-BASE-003` passed）
 
 首个里程碑：`M-BASE/v0.1-text-tool-stream`
 
@@ -123,7 +123,7 @@ response、任意 header/body、stack 和未经筛选的 diagnostic 不进入 do
 | `B-BASE-002` | tool call 与 tool result 的 ID、arguments、content 和 error 关联 | WF-001 | `ported` |
 | `B-BASE-003` | start/text events/done 的严格顺序、snapshot 与唯一 result | WF-001 | `ported` |
 | `B-BASE-004` | error/aborted、unexpected EOF、pending final 和 duplicate terminal 的失败语义 | WF-001 | `ported` |
-| `B-BASE-005` | thinking/image 与受控 replay metadata | 后续 provider workflow | `deferred` |
+| `B-BASE-005` | immutable thinking/image、mixed assistant content 与受控 Responses replay metadata | production Responses replay | `ported` |
 | `B-BASE-006` | provider cost 的单位、精度、舍入、total 与非法 raw number policy | 真实 provider pricing | `deferred` |
 
 `B-BASE-001` 是第一个实现 slice。随后在同一 module 内按
@@ -140,5 +140,16 @@ pricing 消费者，避免为尚未出现的调用者提前扩张类型。
 - [../REVIEWS.md](../REVIEWS.md) 中 M-BASE 独立 reviewer 结论为 `passed`，且没有
   unresolved blocker。
 
-`B-BASE-005/006` 不属于 v0.1 完成条件，但其 deferred 原因和真实 adapter 重评条件
-必须保留。
+## v0.2 rich-content/replay scope
+
+`B-BASE-005` 增加 immutable `ThinkingBlock`、data/HTTP(S) `ImageBlock`、mixed assistant
+content 及 image-capable user/tool-result message。image media type、source、UTF-8、base64/data
+size和 defensive copy 在 admission 处裁判。Responses 仅保存可重放的 reasoning item ID/
+encrypted content、text message ID/phase、response ID/raw stop reason；不保存 SDK object、任意
+raw map、header/body 或 diagnostic。error/aborted assistant 永不 replay；readable unsigned
+thinking 仅可降级为 text。session v3 只有明确 `openai/openai-responses` provenance 才把
+对应 envelope 投影为 typed replay；foreign、malformed 与未来 metadata 原字节保留，但只投影
+无签名可读内容，redacted/opaque-only 内容省略并产生受控 diagnostic。
+
+`R-BASE-003` 已以 0 Blocker / 0 Major / 0 Minor 通过本里程碑。该结论只覆盖
+rich-content/replay contract；真实 image generation/resize/vision executor 仍延期。

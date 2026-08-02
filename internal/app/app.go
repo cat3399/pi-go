@@ -240,9 +240,13 @@ func openOrCreateSession(
 
 func renderTerminal(terminal llm.AssistantTerminal, stdout, stderr io.Writer) int {
 	switch terminal := terminal.(type) {
-	case llm.AssistantTextMessage:
-		for _, block := range terminal.Content() {
-			if _, err := fmt.Fprintln(stdout, block.Text()); err != nil {
+	case llm.AssistantTextMessage, llm.AssistantRichMessage:
+		for _, block := range terminal.Blocks() {
+			text, ok := block.(llm.TextBlock)
+			if !ok {
+				continue
+			}
+			if _, err := fmt.Fprintln(stdout, text.Text()); err != nil {
 				writeDiagnostic(stderr, fmt.Errorf("write stdout: %w", err))
 				return ExitFailure
 			}

@@ -703,7 +703,7 @@ func FuzzScriptedTextRoundTrip(f *testing.F) {
 			t.Fatalf("round trip type = %T, want AssistantTextMessage", result)
 		}
 		if len(message.Content()) != 1 || message.Content()[0].Text() != text {
-			t.Fatalf("round trip text = %q, want %q", message.Content(), text)
+			t.Fatalf("round trip text = %v, want %q", message.Content(), text)
 		}
 	})
 }
@@ -873,6 +873,12 @@ func eventKind(event llm.StreamEvent) string {
 		return "text_delta"
 	case llm.TextEndEvent:
 		return "text_end"
+	case llm.ThinkingStartEvent:
+		return "thinking_start"
+	case llm.ThinkingDeltaEvent:
+		return "thinking_delta"
+	case llm.ThinkingEndEvent:
+		return "thinking_end"
 	case llm.ToolCallStartEvent:
 		return "toolcall_start"
 	case llm.ToolCallDeltaEvent:

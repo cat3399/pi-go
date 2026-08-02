@@ -93,6 +93,28 @@
 - 验证：test、vet、build、race、5 秒 fuzz 均通过；覆盖率 85.1%。
 - 最终结论：`passed`，没有新的 Blocker、Major、correctness 或 data-race 问题。
 
+## R-BASE-003：M-BASE/v0.2 rich-content/replay 跨边界联合复审
+
+- 范围：`internal/llm` rich content、OpenAI Responses reasoning/text/image replay 与
+  `internal/session` v3 signature projection；实现和修订 commits 为 `3177e05`、`64909f9`、
+  `d56b469`，reviewer 未参与实现。
+- 首轮审查 `3177e05` 为 0 Blocker / 3 Major / 0 Minor：message ID/phase 必须保持 source
+  order，Azure terminal encrypted reasoning 必须按 item ID 回填，typed replay 必须精确 gate
+  assistant source provider/API/model；`64909f9` 关闭三项并补足定点回归。
+- 第二轮为 0 Blocker / 1 Major / 0 Minor：generic v3 `textSignature`/
+  `thinkingSignature` 不能无条件解释成 Responses envelope，否则 foreign opaque signature
+  会被误投影，malformed/future metadata 还会阻断 Open；`d56b469` 改为受控 provenance 解码、
+  foreign/future raw preservation 与 unsigned safe projection。
+- 最终验证：原三项 Major、Anthropic/Google opaque、future/malformed/current envelope、
+  fork/reopen、真实 PNG production replay、usage/error/cancel 定点测试通过，相关回归重复
+  20 次通过；累计 diff check、全仓 test/vet/build/race、全部 fuzz，以及 Linux arm64、
+  Windows amd64、Plan 9 amd64 build 与 test-binary compile 均通过。
+- 边界：foreign/future signature 只承诺原始字节保留和安全降级，provider-specific typed
+  replay 仍是后续 debt。审查当时 `fa78b62` 不在候选祖先链，因此本审查不曾宣称
+  `B-PROVIDER-006` 或 WF-003 完成；后续 core integration 结论见 `R-PROVIDER-005` 下方，
+  不追溯扩大本 review 范围。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0。
+
 ## R-PROVIDER-001：M-PROVIDER/v0.1 首轮独立审查
 
 - 范围：`internal/provider`、其测试，以及 provider 消费所需的 `internal/llm` 扩展；
@@ -394,3 +416,16 @@
   slow-before-fast durable ToolResult、下一 request 的两个 call/result source-order replay，
   同时断言 built-ins `strict:false`、assembled resource system prompt、selected model 与现有
   OAuth/no-fallback 路径不退化。
+- rich-content integration 再并入 `3177e05`、`64909f9`、`d56b469` 与 `06768fc` 的
+  `R-BASE-003` 候选；`provider.Request` 同时保留 immutable tools、parallel capability 和由
+  target model 推导的 exact replay provenance，text/image ToolResult 共用 causality admission。
+- Production restart oracle 将 PNG、reasoning、带 phase/ID text、两个 calls/results 与 foreign
+  signature 写入 v3 session 后 close/reopen；下一请求同时断言 tools/parallel、source-order
+  outputs 和 same-provenance opaque metadata。Foreign signature bytes 保持原 prefix，但其 ID/
+  cipher 不进入请求；`T-PROVIDER-012` 因此由 deferred 更新为 `strengthened`。
+- Core integration 候选通过 app/provider/session 关键矩阵各 20 次重复、全仓
+  test/vet/build/race、9 个相关 fuzz 目标各 5 秒，以及 Linux/Windows/Plan 9 amd64 build 与
+  test-binary compile；累计 diff/conflict audit 无异常。
+- Provider+rich integration gate 已完成，但不构成新的独立 module review；`R-PROVIDER-005`、
+  `R-BASE-003` 与 `R-AGENT-002` 各自的 passed 范围保持不变。M-AGENT context/retry production
+  integration 仍待后续 core 合并。

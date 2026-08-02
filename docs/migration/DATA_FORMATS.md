@@ -46,6 +46,13 @@ selected path 的原始 entry bytes，并写 new header 的 `parentSession`；fo
 commit-unknown poisoned，Fork/Extract 必须先返回 `ErrPoisoned`，不能用可能落后磁盘的
 内存 snapshot 创建目标；调用者仍须 close/reopen/reconcile。
 
+v3 的通用 `textSignature`/`thinkingSignature` 不是天然的 Responses type tag：reader 仅在
+`openai/openai-responses` assistant provenance 下解析当前受控 envelope。其他 provider、
+malformed/unsupported version、未知 phase 或未来字段继续由 raw entry 逐字 round-trip；provider
+context 只取得安全可读的 unsigned 内容，redacted 或 opaque-only block 被省略并诊断。
+该 v3 子集的 reopen/fork 与 projection 已由 `R-BASE-003` 通过；它只保证 raw preservation
+和安全降级，不声称已经实现 Anthropic、Google 或未来 signature 的 typed replay。
+
 ## D-SETTINGS-001
 
 上游同时有 global agent settings 和 project `.pi/settings.json`，project source 受 trust

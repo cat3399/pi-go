@@ -30,6 +30,7 @@ type responsesFailureSpec struct {
 type responsesTextSlot struct {
 	contentIndex int
 	itemID       string
+	phase        string
 	text         strings.Builder
 }
 
@@ -41,6 +42,24 @@ type responsesToolSlot struct {
 	arguments     []byte
 	argumentsDone bool
 }
+type responsesReasoningSlot struct {
+	contentIndex int
+	itemID       string
+	text         strings.Builder
+}
+
+type responsesCompletedReasoning struct {
+	contentIndex     int
+	itemID           string
+	text             string
+	encryptedContent string
+}
+
+type responsesDeferredEvent struct {
+	event          llm.StreamEvent
+	reasoningIndex int
+	reasoningEnd   bool
+}
 
 type openAIResponsesStream struct {
 	ctx               context.Context
@@ -51,6 +70,7 @@ type openAIResponsesStream struct {
 	clock             Clock
 	timestamp         time.Time
 	payload           []byte
+	model             ModelRef
 	maxEventBytes     int
 	maxErrorBodyBytes int
 	preflight         *responsesFailureSpec
@@ -67,11 +87,18 @@ type openAIResponsesStream struct {
 	decoder          *responsesSSEDecoder
 	queue            []llm.StreamEvent
 	slots            map[int]*responsesTextSlot
+	reasoningSlots   map[int]*responsesReasoningSlot
 	toolSlots        map[int]*responsesToolSlot
 	completedOutputs map[int]struct{}
+	completedItemIDs map[int]string
+	completedPhases  map[int]string
+	pendingReasoning map[int]*responsesCompletedReasoning
+	deferredEvents   []responsesDeferredEvent
+	deferOutput      bool
 	nextContentIndex int
 	nextOutputIndex  int
 	sawFunctionCall  bool
+	sawFinalAnswer   bool
 	pendingDone      *llm.DoneEvent
 }
 
@@ -100,8 +127,12 @@ func newResponsesFailureStream(
 			message: message,
 		},
 		slots:            make(map[int]*responsesTextSlot),
+		reasoningSlots:   make(map[int]*responsesReasoningSlot),
 		toolSlots:        make(map[int]*responsesToolSlot),
 		completedOutputs: make(map[int]struct{}),
+		completedItemIDs: make(map[int]string),
+		completedPhases:  make(map[int]string),
+		pendingReasoning: make(map[int]*responsesCompletedReasoning),
 	}
 }
 
@@ -469,6 +500,61 @@ func (s *openAIResponsesStream) popEvent() llm.StreamEvent {
 	s.queue[0] = nil
 	s.queue = s.queue[1:]
 	return event
+}
+
+func (s *openAIResponsesStream) enqueueResponsesEvent(event llm.StreamEvent) {
+	if s.deferOutput {
+		s.deferredEvents = append(s.deferredEvents, responsesDeferredEvent{event: event})
+		return
+	}
+	s.queue = append(s.queue, event)
+}
+
+func (s *openAIResponsesStream) deferResponsesReasoningEnd(index int, reasoning *responsesCompletedReasoning) {
+	s.pendingReasoning[index] = reasoning
+	s.deferredEvents = append(s.deferredEvents, responsesDeferredEvent{
+		reasoningIndex: index,
+		reasoningEnd:   true,
+	})
+	s.deferOutput = true
+}
+
+func (s *openAIResponsesStream) flushResponsesDeferredEvents() error {
+	if !s.deferOutput {
+		return nil
+	}
+	materialized := make([]llm.StreamEvent, 0, len(s.deferredEvents))
+	for _, deferred := range s.deferredEvents {
+		if !deferred.reasoningEnd {
+			materialized = append(materialized, deferred.event)
+			continue
+		}
+		reasoning := s.pendingReasoning[deferred.reasoningIndex]
+		if reasoning == nil {
+			return errors.New("missing deferred reasoning item")
+		}
+		replay := &llm.OpenAIResponsesReasoning{
+			ItemID:           reasoning.itemID,
+			EncryptedContent: reasoning.encryptedContent,
+		}
+		block, err := llm.NewThinkingBlock(reasoning.text, replay)
+		if err != nil {
+			return err
+		}
+		end, err := llm.NewThinkingEndEvent(reasoning.contentIndex, block)
+		if err != nil {
+			return err
+		}
+		materialized = append(materialized, end)
+		delete(s.pendingReasoning, deferred.reasoningIndex)
+	}
+	if len(s.pendingReasoning) != 0 {
+		return errors.New("deferred reasoning item has no completion marker")
+	}
+	s.queue = append(s.queue, materialized...)
+	s.deferredEvents = nil
+	s.deferOutput = false
+	return nil
 }
 
 func invokeResponsesHTTPDoer(client HTTPDoer, request *http.Request) (response *http.Response, err error) {

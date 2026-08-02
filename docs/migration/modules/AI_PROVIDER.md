@@ -1,6 +1,7 @@
 # M-PROVIDER：AI 与 provider runtime charter
 
-状态：`ported`（`M-PROVIDER/v0.3-openai-tools-replay`；`R-PROVIDER-005` passed）
+状态：`ported`（`M-PROVIDER/v0.3-openai-tools-replay`；`R-PROVIDER-005` 与
+rich-content `R-BASE-003` passed，联合 integration gate 完成）
 
 最近完成里程碑：`M-PROVIDER/v0.3-openai-tools-replay`
 
@@ -128,9 +129,10 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 ## v0.3 OpenAI tools/replay 边界
 
 - `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，名称不满足 `[A-Za-z0-9_-]{1,64}`、重复/非 object/可变 caller bytes 均在 admission 失败。`strict:true` 还必须在 root/nested/array/anyOf/`$defs` 及 local `$ref` 可达节点中满足 Structured Outputs object closure：root object、每个 object 的 `additionalProperties` 必须是 raw boolean `false`、`required` 完整覆盖 properties；optional 必须改成 required-nullable。local `$ref` 按完整 root 解析 canonical JSON Pointer（含 `#` recursion、`~0/~1` 与 array token），缺失/非法/remote/非 schema target 在 constructor 和发送前 preflight 失败；visited/active 与 traversal budget 保证合法递归且有界。固定上游普通 tools 默认 non-strict，因此当前七个 built-ins 显式发送 `strict:false`。
-- replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。Request admission 按 successful assistant call 的 source order 配对 ToolResult，并拒绝 orphan、错序、ID/name mismatch、重复及未完成结果。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID；非 `fc_*` item ID 由完整 raw value 稳定散列为 bounded `fc_*`。
-- SSE 支持 source-order mixed text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
-- 本里程碑只覆盖 function tools。reasoning/image/custom tool、prompt cache，以及没有 M-BASE metadata storage 的 response/message provenance 仍延期；不创建无界 metadata map。当前 assistant domain 没有 source provider/API/model，因而只能保留 `fc_*` 形状，不能判断它是 native 还是 foreign，也不能实现上游 foreign `fc_*` re-hash / same-provider different-model pairing policy；`T-PROVIDER-012` 在 provenance 进入 Request 后重评。
+- replay 只发送完整 user、successful assistant reasoning/text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。Request admission 按 successful assistant call 的 source order 配对 text/image ToolResult，并拒绝 orphan、错序、ID/name mismatch、重复及未完成结果。
+- Opaque reasoning、text phase/ID 与 function item ID 只在 source/target provider、API、model 全等时原样重放。same-dialect different-model 删除 opaque item identity；foreign 或缺 provenance 的 item ID 使用完整 raw value 的 bounded stable replacement，可读 reasoning 降级为 text，redacted/opaque-only 内容丢弃。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID。
+- SSE 支持 source-order mixed reasoning/text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；reasoning terminal encrypted content 按 item ID 安全回填，commentary/final_answer message ID/phase 保持源顺序。unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
+- 本里程碑覆盖 function tools、Responses reasoning/reasoning-summary、user/tool-result `input_image` replay。custom tool、prompt cache、image generation/resize/vision executor 仍延期；不创建无界 metadata map。session 中 foreign/future signature 继续 raw-preserve，只把 unsigned readable 内容安全投影。
 - `RequestOptions.AllowParallelToolCalls` 是显式 capability，OpenAI wire 总是发送
   `parallel_tool_calls`。与 M-AGENT/v0.2 联合集成后，request 与 batch execution 复用同一有效
   mode：global parallel 且所有已广告 tools 均无 sequential override 时为 `true`；global
@@ -143,4 +145,7 @@ replay metadata 仍分别验收，不能用本地 fixture 冒充。
 | `B-PROVIDER-006` | Responses function tool schema encoding、tool replay、strict SSE function-call reducer | WF-003 | `ported` |
 
 `R-PROVIDER-005` 已以 0 Blocker / 0 Major / 0 Minor 通过 provider 本里程碑；随后完成的
-M-AGENT/v0.2 联合 gate 不重写该历史 review 范围。明确延期项不因 integration 改变。
+M-AGENT/v0.2 联合 gate 不重写该历史 review 范围；rich-content/session 子集仍由
+`R-BASE-003` 的独立结论负责。Production close/reopen oracle 已完成 Provider+rich 并集验证；
+M-AGENT context/retry 的 production integration 仍待后续 core 合并。明确延期项不因
+integration 改变。

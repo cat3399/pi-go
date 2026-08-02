@@ -60,6 +60,7 @@ type Request struct {
 	messages          []llm.ConversationMessage
 	tools             []ToolDefinition
 	parallelToolCalls bool
+	replayTarget      llm.AssistantProvenance
 }
 
 // RequestOptions contains provider capabilities that must be chosen by the
@@ -104,6 +105,7 @@ func NewRequestWithOptions(
 		messages:          append([]llm.ConversationMessage(nil), messages...),
 		tools:             append([]ToolDefinition(nil), options.Tools...),
 		parallelToolCalls: options.AllowParallelToolCalls,
+		replayTarget:      llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -144,6 +146,11 @@ type pendingToolCall struct {
 	messageIndex int
 }
 
+type toolResultIdentity interface {
+	ToolCallID() string
+	ToolName() string
+}
+
 // validateToolResultCausality validates the conversation itself rather than
 // relying on an adapter to notice malformed replay incidentally. One
 // successful assistant tool-use turn introduces its calls in source order;
@@ -182,40 +189,18 @@ func validateToolResultCausality(messages []llm.ConversationMessage) error {
 			}
 
 		case llm.ToolResultMessage:
-			if firstIndex, duplicate := seenResults[message.ToolCallID()]; duplicate {
-				return fmt.Errorf(
-					"message %d: duplicate tool result for call %q first supplied by message %d",
-					messageIndex,
-					message.ToolCallID(),
-					firstIndex,
-				)
-			}
-			if len(pending) == 0 {
-				return fmt.Errorf(
-					"message %d: orphan tool result for call %q",
-					messageIndex,
-					message.ToolCallID(),
-				)
+			var err error
+			pending, err = consumePendingToolResult(messageIndex, message, pending, seenResults)
+			if err != nil {
+				return err
 			}
 
-			expected := pending[0]
-			if message.ToolCallID() != expected.call.ID() {
-				for _, later := range pending[1:] {
-					if message.ToolCallID() == later.call.ID() {
-						return fmt.Errorf(
-							"message %d: out-of-order tool result for call %q; next call is %q",
-							messageIndex,
-							message.ToolCallID(),
-							expected.call.ID(),
-						)
-					}
-				}
+		case llm.ToolResultContentMessage:
+			var err error
+			pending, err = consumePendingToolResult(messageIndex, message, pending, seenResults)
+			if err != nil {
+				return err
 			}
-			if err := llm.ValidateToolResultAssociation(expected.call, message); err != nil {
-				return fmt.Errorf("message %d: %w", messageIndex, err)
-			}
-			seenResults[message.ToolCallID()] = messageIndex
-			pending = pending[1:]
 
 		default:
 			if len(pending) != 0 {
@@ -240,6 +225,63 @@ func validateToolResultCausality(messages []llm.ConversationMessage) error {
 	return nil
 }
 
+func consumePendingToolResult(
+	messageIndex int,
+	message toolResultIdentity,
+	pending []pendingToolCall,
+	seenResults map[string]int,
+) ([]pendingToolCall, error) {
+	if firstIndex, duplicate := seenResults[message.ToolCallID()]; duplicate {
+		return pending, fmt.Errorf(
+			"message %d: duplicate tool result for call %q first supplied by message %d",
+			messageIndex,
+			message.ToolCallID(),
+			firstIndex,
+		)
+	}
+	if len(pending) == 0 {
+		return pending, fmt.Errorf(
+			"message %d: orphan tool result for call %q",
+			messageIndex,
+			message.ToolCallID(),
+		)
+	}
+
+	expected := pending[0]
+	if message.ToolCallID() != expected.call.ID() {
+		for _, later := range pending[1:] {
+			if message.ToolCallID() == later.call.ID() {
+				return pending, fmt.Errorf(
+					"message %d: out-of-order tool result for call %q; next call is %q",
+					messageIndex,
+					message.ToolCallID(),
+					expected.call.ID(),
+				)
+			}
+		}
+	}
+	if message.ToolCallID() != expected.call.ID() {
+		return pending, fmt.Errorf(
+			"message %d: %w: result call id %q, want %q",
+			messageIndex,
+			llm.ErrToolResultMismatch,
+			message.ToolCallID(),
+			expected.call.ID(),
+		)
+	}
+	if message.ToolName() != expected.call.Name() {
+		return pending, fmt.Errorf(
+			"message %d: %w: result tool name %q, want %q",
+			messageIndex,
+			llm.ErrToolResultMismatch,
+			message.ToolName(),
+			expected.call.Name(),
+		)
+	}
+	seenResults[message.ToolCallID()] = messageIndex
+	return pending[1:], nil
+}
+
 func (r Request) clone() Request {
 	r.messages = append([]llm.ConversationMessage(nil), r.messages...)
 	r.tools = append([]ToolDefinition(nil), r.tools...)
@@ -259,6 +301,8 @@ func (r Request) Tools() []ToolDefinition {
 }
 
 func (r Request) ParallelToolCalls() bool { return r.parallelToolCalls }
+
+func (r Request) ReplayTarget() llm.AssistantProvenance { return r.replayTarget }
 
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.

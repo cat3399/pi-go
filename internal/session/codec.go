@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -404,14 +405,23 @@ func decodeUserMessage(entryID string, object map[string]json.RawMessage) (llm.C
 		message, err := llm.NewUserTextMessage(text, timestamp)
 		return message, nil, err
 	}
-	blocks, diagnostics, err := decodeBlocks(entryID, content, false)
+	userBlocks, diagnostics, err := decodeUserContentBlocks(entryID, content)
 	if err != nil {
 		return nil, nil, err
 	}
-	texts := textBlocks(blocks)
-	if len(texts) == 0 && len(diagnostics) > 0 {
+	texts := make([]llm.TextBlock, 0, len(userBlocks))
+	for _, block := range userBlocks {
+		if text, ok := block.(llm.TextBlock); ok {
+			texts = append(texts, text)
+		}
+	}
+	if len(userBlocks) == 0 && len(diagnostics) > 0 {
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 		return nil, diagnostics, nil
+	}
+	if len(userBlocks) != len(texts) {
+		message, err := llm.NewUserContentMessage(userBlocks, timestamp)
+		return message, diagnostics, err
 	}
 	message, err := llm.NewUserTextBlocksMessage(texts, timestamp)
 	return message, diagnostics, err
@@ -422,11 +432,7 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if err != nil {
 		return nil, nil, err
 	}
-	content, exists := object["content"]
-	if !exists {
-		return nil, nil, fmt.Errorf("assistant message is missing content")
-	}
-	blocks, diagnostics, err := decodeBlocks(entryID, content, true)
+	provenance, err := decodeLLMAssistantProvenance(object)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -434,9 +440,22 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if err != nil {
 		return nil, nil, err
 	}
+	content, exists := object["content"]
+	if !exists {
+		return nil, nil, fmt.Errorf("assistant message is missing content")
+	}
+	allowResponsesReplay := hasResponsesReplayProvenance(provenance) && stopReason != "error" && stopReason != "aborted"
+	blocks, diagnostics, err := decodeBlocks(entryID, content, true, allowResponsesReplay)
+	if err != nil {
+		return nil, nil, err
+	}
 	usage, err := decodeUsage(object["usage"])
 	if err != nil {
 		return nil, nil, err
+	}
+	replay, unsafeReplay := decodeResponsesMetadata(object, allowResponsesReplay)
+	if unsafeReplay {
+		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: -1})
 	}
 
 	switch stopReason {
@@ -445,16 +464,21 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		if stopReason == "length" {
 			finish = llm.FinishLength
 		}
-		message, err := llm.NewAssistantTextMessage(textBlocks(blocks), finish, usage, timestamp)
+		var message llm.AssistantTerminal
+		if hasThinking(blocks) {
+			message, err = llm.NewAssistantRichMessageWithReplay(blocks, finish, usage, timestamp, provenance, replay)
+		} else {
+			message, err = llm.NewAssistantTextMessageWithReplay(textBlocks(blocks), finish, usage, timestamp, provenance, replay)
+		}
 		if err != nil {
 			return nil, nil, err
 		}
-		if len(textBlocks(blocks)) != len(blocks) {
+		if hasToolCall(blocks) {
 			return nil, nil, fmt.Errorf("successful text assistant contains a tool call")
 		}
 		return message, diagnostics, nil
 	case "toolUse":
-		message, err := llm.NewAssistantToolUseMessage(blocks, usage, timestamp)
+		message, err := llm.NewAssistantToolUseMessageWithReplay(blocks, usage, timestamp, provenance, replay)
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 			return nil, diagnostics, nil
@@ -481,6 +505,51 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	}
 }
 
+func decodeLLMAssistantProvenance(object map[string]json.RawMessage) (*llm.AssistantProvenance, error) {
+	provider, err := requiredString(object, "provider")
+	if err != nil {
+		return nil, err
+	}
+	api, err := requiredString(object, "api")
+	if err != nil {
+		return nil, err
+	}
+	model, err := requiredString(object, "model")
+	if err != nil {
+		return nil, err
+	}
+	return &llm.AssistantProvenance{Provider: provider, API: api, Model: model}, nil
+}
+
+// hasResponsesReplayProvenance establishes the currently supported producer
+// and wire dialect. Model remains part of the provenance and is matched exactly
+// by the provider request adapter before any opaque handle is replayed.
+func hasResponsesReplayProvenance(provenance *llm.AssistantProvenance) bool {
+	return provenance != nil && provenance.Provider == "openai" && provenance.API == "openai-responses"
+}
+
+func decodeResponsesMetadata(object map[string]json.RawMessage, allowReplay bool) (*llm.OpenAIResponsesResponse, bool) {
+	rawID, hasID := object["responseId"]
+	rawStop, hasStop := object["rawStopReason"]
+	if !hasID && !hasStop {
+		return nil, false
+	}
+	if !allowReplay {
+		return nil, true
+	}
+	var value llm.OpenAIResponsesResponse
+	if hasID && !decodeJSONString(rawID, &value.ResponseID) {
+		return nil, true
+	}
+	if hasStop && !decodeJSONString(rawStop, &value.RawStopReason) {
+		return nil, true
+	}
+	if !utf8.ValidString(value.ResponseID) || !utf8.ValidString(value.RawStopReason) || len(value.ResponseID) > 256 || len(value.RawStopReason) > 128 {
+		return nil, true
+	}
+	return &value, false
+}
+
 func decodeToolResultMessage(entryID string, object map[string]json.RawMessage) (llm.ConversationMessage, []Diagnostic, error) {
 	timestamp, err := decodeMessageTimestamp(object)
 	if err != nil {
@@ -502,15 +571,25 @@ func decodeToolResultMessage(entryID string, object map[string]json.RawMessage) 
 	if !exists {
 		return nil, nil, fmt.Errorf("tool result is missing content")
 	}
-	blocks, diagnostics, err := decodeBlocks(entryID, content, false)
+	rich, diagnostics, err := decodeToolResultContentBlocks(entryID, content)
 	if err != nil {
 		return nil, nil, err
 	}
-	message, err := llm.NewToolResultMessage(toolCallID, toolName, textBlocks(blocks), isError, timestamp)
+	texts := make([]llm.TextBlock, 0, len(rich))
+	for _, block := range rich {
+		if text, ok := block.(llm.TextBlock); ok {
+			texts = append(texts, text)
+		}
+	}
+	if len(rich) != len(texts) {
+		message, err := llm.NewToolResultContentMessage(toolCallID, toolName, rich, isError, timestamp)
+		return message, diagnostics, err
+	}
+	message, err := llm.NewToolResultMessage(toolCallID, toolName, texts, isError, timestamp)
 	return message, diagnostics, err
 }
 
-func decodeBlocks(entryID string, raw []byte, allowToolCalls bool) ([]llm.AssistantBlock, []Diagnostic, error) {
+func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowResponsesReplay bool) ([]llm.AssistantBlock, []Diagnostic, error) {
 	var encoded []json.RawMessage
 	if err := json.Unmarshal(raw, &encoded); err != nil {
 		return nil, nil, fmt.Errorf("message content must be an array")
@@ -532,7 +611,31 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls bool) ([]llm.Assist
 			if err != nil {
 				return nil, nil, fmt.Errorf("content block %d has invalid text", index)
 			}
-			block, err := llm.NewTextBlock(text)
+			replay, hasMetadata, trusted := decodeTextReplay(object, allowResponsesReplay)
+			if hasMetadata && !trusted {
+				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})
+			}
+			if replay == nil && hasMetadata && !trusted && strings.TrimSpace(text) == "" {
+				continue
+			}
+			block, err := llm.NewTextBlockWithReplay(text, replay)
+			if err != nil {
+				return nil, nil, err
+			}
+			blocks = append(blocks, block)
+		case "thinking":
+			thinking, err := requiredString(object, "thinking")
+			if err != nil {
+				return nil, nil, fmt.Errorf("content block %d has invalid thinking", index)
+			}
+			replay, hasMetadata, trusted, redacted := decodeReasoningReplay(object, allowResponsesReplay)
+			if hasMetadata && !trusted {
+				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})
+			}
+			if replay == nil && hasMetadata && (redacted || strings.TrimSpace(thinking) == "") {
+				continue
+			}
+			block, err := llm.NewThinkingBlock(thinking, replay)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -576,6 +679,248 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls bool) ([]llm.Assist
 		}
 	}
 	return blocks, diagnostics, nil
+}
+
+func hasThinking(blocks []llm.AssistantBlock) bool {
+	for _, block := range blocks {
+		if _, ok := block.(llm.ThinkingBlock); ok {
+			return true
+		}
+	}
+	return false
+}
+func hasToolCall(blocks []llm.AssistantBlock) bool {
+	for _, block := range blocks {
+		if _, ok := block.(llm.ToolCallBlock); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeTextReplay separates durable metadata presence from trusted projection.
+// Invalid or future metadata is reported to the caller but never makes Open
+// fail; the entry's raw bytes remain the source of truth for later readers.
+func decodeTextReplay(object map[string]json.RawMessage, allowReplay bool) (*llm.TextReplay, bool, bool) {
+	raw, ok := object["textSignature"]
+	if !ok {
+		return nil, false, true
+	}
+	if !allowReplay {
+		return nil, true, false
+	}
+	var encoded string
+	if !decodeJSONString(raw, &encoded) {
+		return nil, true, false
+	}
+	trimmed := strings.TrimSpace(encoded)
+	if !strings.HasPrefix(trimmed, "{") {
+		return validatedTextReplay(llm.TextReplay{MessageID: encoded})
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &fields); err != nil {
+		return nil, true, false
+	}
+	if _, hasVersion := fields["v"]; hasVersion {
+		for name := range fields {
+			if name != "v" && name != "id" && name != "phase" {
+				return nil, true, false
+			}
+		}
+		var version int
+		var id, phase string
+		if json.Unmarshal(fields["v"], &version) != nil || version != 1 || !decodeJSONString(fields["id"], &id) {
+			return nil, true, false
+		}
+		if rawPhase, ok := fields["phase"]; ok && !decodeJSONString(rawPhase, &phase) {
+			return nil, true, false
+		}
+		return validatedTextReplay(llm.TextReplay{MessageID: id, Phase: phase})
+	}
+	// pi-go briefly emitted Go field names before adopting the coding-agent v3
+	// envelope. Accept only that exact legacy shape under Responses provenance.
+	for name := range fields {
+		if name != "MessageID" && name != "Phase" {
+			return nil, true, false
+		}
+	}
+	var id, phase string
+	if !decodeJSONString(fields["MessageID"], &id) {
+		return nil, true, false
+	}
+	if rawPhase, ok := fields["Phase"]; ok && !decodeJSONString(rawPhase, &phase) {
+		return nil, true, false
+	}
+	return validatedTextReplay(llm.TextReplay{MessageID: id, Phase: phase})
+}
+
+func validatedTextReplay(value llm.TextReplay) (*llm.TextReplay, bool, bool) {
+	if _, err := llm.NewTextBlockWithReplay("", &value); err != nil {
+		return nil, true, false
+	}
+	return &value, true, true
+}
+
+// decodeReasoningReplay follows the same fail-open storage policy as text
+// replay. The final bool is the conservative redaction state used when an
+// untrusted opaque block must be omitted from the provider projection.
+func decodeReasoningReplay(object map[string]json.RawMessage, allowReplay bool) (*llm.OpenAIResponsesReasoning, bool, bool, bool) {
+	raw, ok := object["thinkingSignature"]
+	redacted, redactedPresent, redactedValid := false, false, true
+	if rawRedacted, exists := object["redacted"]; exists {
+		redactedPresent = true
+		if !decodeJSONBool(rawRedacted, &redacted) {
+			redacted, redactedValid = true, false
+		}
+	}
+	if !ok {
+		if redactedPresent && (redacted || !redactedValid) {
+			return nil, true, false, true
+		}
+		return nil, false, true, false
+	}
+	if !allowReplay || !redactedValid {
+		return nil, true, false, redacted
+	}
+	var encoded string
+	if !decodeJSONString(raw, &encoded) {
+		return nil, true, false, redacted
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(encoded), &fields) != nil {
+		return nil, true, false, redacted
+	}
+	var value llm.OpenAIResponsesReasoning
+	if rawID, legacy := fields["ItemID"]; legacy {
+		for name := range fields {
+			if name != "ItemID" && name != "EncryptedContent" && name != "Redacted" {
+				return nil, true, false, redacted
+			}
+		}
+		if !decodeJSONString(rawID, &value.ItemID) {
+			return nil, true, false, redacted
+		}
+		if encrypted, exists := fields["EncryptedContent"]; exists && !decodeJSONString(encrypted, &value.EncryptedContent) {
+			return nil, true, false, redacted
+		}
+		if legacyRedacted, exists := fields["Redacted"]; exists {
+			if !decodeJSONBool(legacyRedacted, &value.Redacted) {
+				return nil, true, false, redacted
+			}
+		}
+	} else {
+		for name := range fields {
+			switch name {
+			case "type", "id", "encrypted_content", "summary", "content", "status":
+			default:
+				return nil, true, false, redacted
+			}
+		}
+		var typeName string
+		if !decodeJSONString(fields["type"], &typeName) || typeName != "reasoning" || !decodeJSONString(fields["id"], &value.ItemID) {
+			return nil, true, false, redacted
+		}
+		if encrypted, exists := fields["encrypted_content"]; exists && !decodeJSONString(encrypted, &value.EncryptedContent) {
+			return nil, true, false, redacted
+		}
+	}
+	if redactedPresent {
+		value.Redacted = redacted
+	}
+	if _, err := llm.NewThinkingBlock("", &value); err != nil {
+		return nil, true, false, redacted
+	}
+	return &value, true, true, value.Redacted
+}
+
+func decodeJSONString(raw json.RawMessage, value *string) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && trimmed[0] == '"' && json.Unmarshal(trimmed, value) == nil
+}
+
+func decodeJSONBool(raw json.RawMessage, value *bool) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return (bytes.Equal(trimmed, []byte("true")) || bytes.Equal(trimmed, []byte("false"))) && json.Unmarshal(trimmed, value) == nil
+}
+
+func decodeUserContentBlocks(entryID string, raw []byte) ([]llm.UserContentBlock, []Diagnostic, error) {
+	return decodeRichInputBlocks(entryID, raw, true)
+}
+func decodeToolResultContentBlocks(entryID string, raw []byte) ([]llm.ToolResultContentBlock, []Diagnostic, error) {
+	blocks, diags, err := decodeRichInputBlocks(entryID, raw, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]llm.ToolResultContentBlock, len(blocks))
+	for i, b := range blocks {
+		out[i] = b.(llm.ToolResultContentBlock)
+	}
+	return out, diags, nil
+}
+func decodeRichInputBlocks(entryID string, raw []byte, user bool) ([]llm.UserContentBlock, []Diagnostic, error) {
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, nil, fmt.Errorf("message content must be an array")
+	}
+	out := make([]llm.UserContentBlock, 0, len(values))
+	diags := []Diagnostic{}
+	for i, value := range values {
+		obj, err := decodeObject(value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("content block %d is invalid", i)
+		}
+		kind, err := requiredString(obj, "type")
+		if err != nil {
+			return nil, nil, fmt.Errorf("content block %d has invalid type", i)
+		}
+		switch kind {
+		case "text":
+			text, err := requiredString(obj, "text")
+			if err != nil {
+				return nil, nil, err
+			}
+			b, err := llm.NewTextBlock(text)
+			if err != nil {
+				return nil, nil, err
+			}
+			out = append(out, b)
+		case "image":
+			media, err := requiredString(obj, "mimeType")
+			if err != nil {
+				return nil, nil, err
+			}
+			var b llm.ImageBlock
+			if data, ok := obj["data"]; ok {
+				var encoded string
+				if json.Unmarshal(data, &encoded) != nil {
+					return nil, nil, fmt.Errorf("invalid image data")
+				}
+				decoded, err := base64.StdEncoding.DecodeString(encoded)
+				if err != nil {
+					return nil, nil, fmt.Errorf("invalid image base64")
+				}
+				b, err = llm.NewImageDataBlock(media, decoded)
+				if err != nil {
+					return nil, nil, err
+				}
+			} else if rawURL, ok := obj["url"]; ok {
+				var url string
+				if json.Unmarshal(rawURL, &url) != nil {
+					return nil, nil, fmt.Errorf("invalid image url")
+				}
+				b, err = llm.NewImageURLBlock(media, url)
+				if err != nil {
+					return nil, nil, err
+				}
+			} else {
+				return nil, nil, fmt.Errorf("image has no source")
+			}
+			out = append(out, b)
+		default:
+			diags = append(diags, Diagnostic{Code: DiagnosticUnknownContentBlock, EntryID: entryID, ContentIndex: i})
+		}
+	}
+	return out, diags, nil
 }
 
 func textBlocks(blocks []llm.AssistantBlock) []llm.TextBlock {

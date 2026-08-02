@@ -222,11 +222,16 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		clock:             clock,
 		timestamp:         clock(),
 		payload:           payload,
+		model:             request.Model(),
 		maxEventBytes:     p.maxEventBytes,
 		maxErrorBodyBytes: p.maxErrorBodyBytes,
 		slots:             make(map[int]*responsesTextSlot),
+		reasoningSlots:    make(map[int]*responsesReasoningSlot),
 		toolSlots:         make(map[int]*responsesToolSlot),
 		completedOutputs:  make(map[int]struct{}),
+		completedItemIDs:  make(map[int]string),
+		completedPhases:   make(map[int]string),
+		pendingReasoning:  make(map[int]*responsesCompletedReasoning),
 	}
 }
 

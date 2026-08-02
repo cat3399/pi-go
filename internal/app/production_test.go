@@ -20,6 +20,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
@@ -400,6 +401,419 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 	if firstResult.ToolCallID() != "call_slow|fc_slow" || firstResult.Content()[0].Text() != "slow-output" ||
 		secondResult.ToolCallID() != "call_fast|fc_fast" || secondResult.Content()[0].Text() != "fast-output" {
 		t.Fatalf("durable source-order results = %#v / %#v", firstResult, secondResult)
+	}
+}
+
+func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(workingDir, "rich-tool-restart.jsonl")
+	entryIDs := []string{"seed-user", "seed-assistant", "result-slow", "result-fast", "foreign-assistant"}
+	transcript, err := session.Create(sessionPath, session.CreateOptions{
+		ID:         "rich-tool-restart",
+		WorkingDir: workingDir,
+		Now:        func() time.Time { return productionTestTime },
+		NewEntryID: func() (string, error) {
+			id := entryIDs[0]
+			entryIDs = entryIDs[1:]
+			return id, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	png, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := llm.NewImageDataBlock("image/png", png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedText, err := llm.NewTextBlock("inspect the image with both tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedUser, err := llm.NewUserContentMessage([]llm.UserContentBlock{seedText, image}, productionTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning, err := llm.NewThinkingBlock("parallel plan", &llm.OpenAIResponsesReasoning{
+		ItemID:           "rs_integrated",
+		EncryptedContent: "integrated-cipher",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commentary, err := llm.NewTextBlockWithReplay("starting both tools", &llm.TextReplay{
+		MessageID: "msg_integrated",
+		Phase:     "commentary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slowCall, err := llm.NewToolCallBlock("call_slow|fc_slow", "bash", []byte(`{"command":"slow"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastCall, err := llm.NewToolCallBlock("call_fast|fc_fast", "bash", []byte(`{"command":"fast"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsesProvenance := llm.AssistantProvenance{
+		Provider: provider.OpenAIProviderID,
+		API:      provider.OpenAIResponsesAPI,
+		Model:    "gpt-rich-tools",
+	}
+	assistant, err := llm.NewAssistantToolUseMessageWithReplay(
+		[]llm.AssistantBlock{reasoning, commentary, slowCall, fastCall},
+		llm.Usage{},
+		productionTestTime,
+		&responsesProvenance,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slowResult, err := llm.NewToolResultMessage(slowCall.ID(), slowCall.Name(), []llm.TextBlock{mustProductionTextBlock(t, "slow-output")}, false, productionTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastResult, err := llm.NewToolResultMessage(fastCall.ID(), fastCall.Name(), []llm.TextBlock{mustProductionTextBlock(t, "fast-output")}, false, productionTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignReasoning, err := llm.NewThinkingBlock("foreign readable plan", &llm.OpenAIResponsesReasoning{
+		ItemID:           "rs_foreign",
+		EncryptedContent: "foreign-cipher",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignProvenance := llm.AssistantProvenance{Provider: "anthropic", API: "anthropic-messages", Model: "claude-test"}
+	foreignAssistant, err := llm.NewAssistantRichMessageWithReplay(
+		[]llm.AssistantBlock{foreignReasoning},
+		llm.FinishStop,
+		llm.Usage{},
+		productionTestTime,
+		&foreignProvenance,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsesStorage := session.AssistantProvenance{
+		Provider: responsesProvenance.Provider,
+		API:      responsesProvenance.API,
+		Model:    responsesProvenance.Model,
+		Cost:     session.ZeroUsageCost(),
+	}
+	foreignStorage := session.AssistantProvenance{
+		Provider: foreignProvenance.Provider,
+		API:      foreignProvenance.API,
+		Model:    foreignProvenance.Model,
+		Cost:     session.ZeroUsageCost(),
+	}
+	for _, appendCase := range []struct {
+		message llm.ConversationMessage
+		options session.AppendOptions
+	}{
+		{message: seedUser},
+		{message: assistant, options: session.AppendOptions{Assistant: responsesStorage}},
+		{message: slowResult},
+		{message: fastResult},
+		{message: foreignAssistant, options: session.AppendOptions{Assistant: foreignStorage}},
+	} {
+		if _, err := transcript.Append(context.Background(), appendCase.message, appendCase.options); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeRun, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(beforeRun, []byte("foreign-cipher")) {
+		t.Fatal("foreign signature was not durably preserved before restart")
+	}
+
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "rich tools resumed")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	var stdout, stderr bytes.Buffer
+	if code := app.RunProduction(context.Background(), config, []string{
+		"--model", "openai/gpt-rich-tools", "--session", sessionPath, "-p", "continue after restart",
+	}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "rich tools resumed\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
+	}
+
+	snapshot := capture.snapshot()
+	if snapshot.count != 1 {
+		t.Fatalf("request count = %d, want 1", snapshot.count)
+	}
+	if err := simulatedOpenAIResponsesAdmission(snapshot.payload, true); err != nil {
+		t.Fatal(err)
+	}
+	tools, ok := snapshot.payload["tools"].([]any)
+	if !ok || len(tools) != 7 {
+		t.Fatalf("tools = %#v, want seven production definitions", snapshot.payload["tools"])
+	}
+	encodedPayload, err := json.Marshal(snapshot.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"rs_foreign", "foreign-cipher"} {
+		if bytes.Contains(encodedPayload, []byte(forbidden)) {
+			t.Fatalf("foreign signature %q entered request: %s", forbidden, encodedPayload)
+		}
+	}
+
+	input, ok := snapshot.payload["input"].([]any)
+	if !ok {
+		t.Fatalf("input = %#v", snapshot.payload["input"])
+	}
+	positions := make(map[string]int)
+	foundPNG := false
+	foundForeignFallback := false
+	for index, raw := range input {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch item["type"] {
+		case "reasoning":
+			if item["id"] == "rs_integrated" && item["encrypted_content"] == "integrated-cipher" {
+				positions["reasoning"] = index
+			}
+		case "message":
+			content, _ := item["content"].([]any)
+			if len(content) == 1 {
+				block, _ := content[0].(map[string]any)
+				switch block["text"] {
+				case "starting both tools":
+					if item["id"] != "msg_integrated" || item["phase"] != "commentary" {
+						t.Fatalf("same-provenance text replay = %#v", item)
+					}
+					positions["text"] = index
+				case "foreign readable plan":
+					foundForeignFallback = true
+				}
+			}
+		case "function_call":
+			switch item["call_id"] {
+			case "call_slow":
+				if item["id"] != "fc_slow" {
+					t.Fatalf("slow function replay = %#v", item)
+				}
+				positions["call-slow"] = index
+			case "call_fast":
+				if item["id"] != "fc_fast" {
+					t.Fatalf("fast function replay = %#v", item)
+				}
+				positions["call-fast"] = index
+			}
+		case "function_call_output":
+			switch item["call_id"] {
+			case "call_slow":
+				if item["output"] != "slow-output" {
+					t.Fatalf("slow output replay = %#v", item)
+				}
+				positions["output-slow"] = index
+			case "call_fast":
+				if item["output"] != "fast-output" {
+					t.Fatalf("fast output replay = %#v", item)
+				}
+				positions["output-fast"] = index
+			}
+		}
+		content, _ := item["content"].([]any)
+		for _, rawBlock := range content {
+			block, _ := rawBlock.(map[string]any)
+			if block["type"] == "input_image" && block["image_url"] == "data:image/png;base64,"+pngBase64 {
+				foundPNG = true
+			}
+		}
+	}
+	for _, key := range []string{"reasoning", "text", "call-slow", "call-fast", "output-slow", "output-fast"} {
+		if _, ok := positions[key]; !ok {
+			t.Fatalf("missing %s in input: %#v", key, input)
+		}
+	}
+	if !(positions["reasoning"] < positions["text"] &&
+		positions["text"] < positions["call-slow"] &&
+		positions["call-slow"] < positions["call-fast"] &&
+		positions["call-fast"] < positions["output-slow"] &&
+		positions["output-slow"] < positions["output-fast"]) {
+		t.Fatalf("rich/tool replay order = %#v", positions)
+	}
+	if !foundPNG || !foundForeignFallback {
+		t.Fatalf("PNG/foreign safe fallback = %t/%t; input = %#v", foundPNG, foundForeignFallback, input)
+	}
+	afterRun, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(afterRun, beforeRun) || !bytes.Contains(afterRun, []byte("foreign-cipher")) {
+		t.Fatal("restart append did not preserve the original foreign signature bytes")
+	}
+}
+
+func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(workingDir, "reasoning.jsonl")
+	var mu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode: %v", err)
+			return
+		}
+		mu.Lock()
+		payloads = append(payloads, payload)
+		turn := len(payloads)
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if turn == 1 {
+			reasoningDone := map[string]any{"type": "reasoning", "id": "rs_persist"}
+			reasoningTerminal := map[string]any{"type": "reasoning", "id": "rs_persist", "encrypted_content": "cipher"}
+			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
+			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoningDone}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoningTerminal, text}}})
+			return
+		}
+		text := map[string]any{"type": "message", "id": "msg_next", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "second"}}}
+		writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{text}}})
+	}))
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	for _, prompt := range []string{"first prompt", "continue"} {
+		var stdout, stderr bytes.Buffer
+		if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-reason", "--session", sessionPath, "-p", prompt}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+			t.Fatalf("run %q: code=%d stdout=%q stderr=%q", prompt, code, stdout.String(), stderr.String())
+		}
+	}
+	mu.Lock()
+	received := append([]map[string]any(nil), payloads...)
+	mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("requests=%d", len(received))
+	}
+	input := received[1]["input"].([]any)
+	foundReasoning := false
+	foundText := false
+	for _, item := range input {
+		wire := item.(map[string]any)
+		if wire["type"] == "reasoning" {
+			foundReasoning = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher"
+		}
+		if wire["type"] == "message" && wire["id"] == "msg_persist" {
+			foundText = wire["phase"] == "final_answer"
+		}
+	}
+	if !foundReasoning || !foundText {
+		t.Fatalf("resumed input=%#v", input)
+	}
+	transcript, err := session.Open(sessionPath, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) != 4 {
+		t.Fatalf("durable messages=%#v", messages)
+	}
+	if _, ok := messages[1].(llm.AssistantRichMessage); !ok {
+		t.Fatalf("first assistant=%T", messages[1])
+	}
+	if replay, ok := messages[1].(llm.AssistantRichMessage).OpenAIResponsesMetadata(); !ok || replay.RawStopReason != "completed" {
+		t.Fatalf("response replay=%#v", replay)
+	}
+}
+
+func TestRunProductionReplaysDurableImageAfterRestart(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(workingDir, "image-restart.jsonl")
+	entryIDs := []string{"seed-image", "new-user", "assistant"}
+	transcript, err := session.Create(sessionPath, session.CreateOptions{
+		ID:         "image-restart",
+		WorkingDir: workingDir,
+		Now:        func() time.Time { return productionTestTime },
+		NewEntryID: func() (string, error) {
+			id := entryIDs[0]
+			entryIDs = entryIDs[1:]
+			return id, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	png, err := base64.StdEncoding.DecodeString(pngBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := llm.NewImageDataBlock("image/png", png)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caption, err := llm.NewTextBlock("seed image")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := llm.NewUserContentMessage([]llm.UserContentBlock{caption, image}, productionTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), seed, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "image resumed")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	config.NewSessionEntryID = func() (string, error) {
+		id := entryIDs[0]
+		entryIDs = entryIDs[1:]
+		return id, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-image", "--session", sessionPath, "-p", "continue"}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	if len(input) < 2 {
+		t.Fatalf("resumed input = %#v", input)
+	}
+	var imageWire map[string]any
+	for _, raw := range input {
+		message, ok := raw.(map[string]any)
+		if !ok || message["role"] != "user" {
+			continue
+		}
+		content, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawBlock := range content {
+			block, ok := rawBlock.(map[string]any)
+			if ok && block["type"] == "input_image" {
+				imageWire = block
+			}
+		}
+	}
+	if imageWire == nil || imageWire["image_url"] != "data:image/png;base64,"+pngBase64 {
+		t.Fatalf("durable image replay = %#v", imageWire)
 	}
 }
 
@@ -958,6 +1372,15 @@ func productionTestConfig(workingDir, agentDir string, environment []string) app
 		},
 		AgentNow: func() time.Time { return productionTestTime },
 	}
+}
+
+func mustProductionTextBlock(t *testing.T, text string) llm.TextBlock {
+	t.Helper()
+	block, err := llm.NewTextBlock(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return block
 }
 
 func newProductionTextServer(

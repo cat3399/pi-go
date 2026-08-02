@@ -106,16 +106,18 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 本地 production workflow、错误持久化、全仓 quality gate 与 `R-APP-002` 已通过。
 
-## WF-003：multi-tool control flow 与 production OpenAI replay
+## WF-003：multi-tool control flow 与 production OpenAI rich replay
 
-状态：`ported`（模块基线 `R-AGENT-002`、`R-PROVIDER-005`；联合 integration gate 完成）
+状态：`ported`（模块基线 `R-AGENT-002`、`R-PROVIDER-005`、`R-BASE-003`；联合
+integration gate 完成）
 
 ~~~text
 production request (built-in schemas, parallel_tool_calls=true)
-  -> SSE assistant(tool A, tool B, ...)
+  -> SSE assistant(reasoning, text IDs/phases, tool A, tool B, ...)
   -> concurrent execution / completion-order events
   -> source-order durable ToolResults
-  -> next request replays function_calls + function_call_outputs
+  -> close/reopen session
+  -> next request replays rich metadata + function_calls + function_call_outputs
   -> final assistant text / durable session
 ~~~
 
@@ -131,11 +133,17 @@ calls 必须同时启动，fast 必须先于 slow 完成，但 session 中 ToolR
 发送两个 function_call_output，最后打印 final text。两次请求都断言七个 built-ins 来自同一
 registry 且 `strict:false`，并保留 trusted system prompt、selected model、credential/OAuth
 source ownership 和无 lower-source/custom-model fallback。partial/error/aborted calls 不 replay；
-unknown/out-of-order/malformed events fail explicit。foreign `fc_*` provenance 仍由
-`T-PROVIDER-012` 延期重评。
+unknown/out-of-order/malformed events fail explicit。
 
-`R-AGENT-002` 与 `R-PROVIDER-005` 的原独立结论保持各自范围；联合 gate 不把一方的历史
-review 冒充为另一方。filesystem 基线仍由 `R-TOOL-005` 独立复审。
+Restart 联合 oracle 另将包含真实 PNG、reasoning、带 phase/ID text 和两个 tool calls/results
+的 assistant 写入 v3 session，关闭后由 production 重新打开；下一请求同时断言七个 tools、
+`parallel_tool_calls:true`、source-order causal outputs 与 exact provider/API/model metadata。
+Foreign signature 原 bytes 保持在 session prefix，但只产生 unsigned readable fallback，opaque
+ID/cipher 不进入请求；same-dialect different-model 也不能复用 opaque item identity。
+
+`R-AGENT-002`、`R-PROVIDER-005` 与 `R-BASE-003` 的原独立结论保持各自范围；联合 gate
+不把一方的历史 review 冒充为另一方。filesystem 基线仍由 `R-TOOL-005` 独立复审。
+M-AGENT context/retry 的 production integration 仍待后续 core 合并，不由本 gate 宣称完成。
 
 ## 后续 workflow 规则
 
