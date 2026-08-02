@@ -77,12 +77,14 @@ type FramerOptions struct {
 // never starts goroutines or timers: callers choose when to Flush incomplete
 // input, making cancellation and timeout ownership explicit.
 type Framer struct {
-	buf       []byte
-	paste     []byte
-	inPaste   bool
-	max       int
-	utf8Mode  InvalidUTF8Policy
-	pendingCP rune
+	buf        []byte
+	paste      []byte
+	pasteTerm  []byte
+	inPaste    bool
+	max        int
+	utf8Mode   InvalidUTF8Policy
+	pendingCP  rune
+	invalidRun bool
 }
 
 func NewFramer(opts FramerOptions) *Framer {
@@ -95,7 +97,9 @@ func NewFramer(opts FramerOptions) *Framer {
 
 func (f *Framer) Buffered() int { return len(f.buf) + len(f.paste) }
 
-func (f *Framer) Reset() { f.buf, f.paste, f.inPaste, f.pendingCP = nil, nil, false, 0 }
+func (f *Framer) Reset() {
+	f.buf, f.paste, f.pasteTerm, f.inPaste, f.pendingCP, f.invalidRun = nil, nil, nil, false, 0, false
+}
 
 func (f *Framer) Feed(chunk []byte) ([]InputEvent, error) {
 	if len(chunk) == 0 {
@@ -104,28 +108,28 @@ func (f *Framer) Feed(chunk []byte) ([]InputEvent, error) {
 	var out []InputEvent
 	for len(chunk) > 0 {
 		if f.inPaste {
-			room := f.max - len(f.paste)
-			if room == 0 {
-				f.Reset()
-				return out, ErrInputTooLarge
-			}
-			n := min(room, len(chunk))
-			f.paste = append(f.paste, chunk[:n]...)
-			chunk = chunk[n:]
+			var n int
 			var err error
-			out, err = f.drainPaste(out)
+			out, n, err = f.consumePaste(out, chunk)
+			chunk = chunk[n:]
 			if err != nil {
 				return out, err
-			}
-			if f.inPaste && len(f.paste) == f.max {
-				f.Reset()
-				return out, ErrInputTooLarge
 			}
 			continue
 		}
 
 		room := f.max - len(f.buf)
 		if room == 0 {
+			var released bool
+			var err error
+			out, released, err = f.releaseBoundedPrefix(out, chunk)
+			if err != nil {
+				f.Reset()
+				return out, err
+			}
+			if released {
+				continue
+			}
 			f.Reset()
 			return out, ErrInputTooLarge
 		}
@@ -136,10 +140,6 @@ func (f *Framer) Feed(chunk []byte) ([]InputEvent, error) {
 		out, err = f.drainNormal(out)
 		if err != nil {
 			return out, err
-		}
-		if !f.inPaste && len(f.buf) == f.max {
-			f.Reset()
-			return out, ErrInputTooLarge
 		}
 	}
 	return out, nil
@@ -168,34 +168,74 @@ func (f *Framer) FeedTo(chunk []byte, emit func(InputEvent) error) error {
 	return nil
 }
 
-func (f *Framer) drainPaste(out []InputEvent) ([]InputEvent, error) {
-	if at := bytes.Index(f.paste, []byte(pasteEnd)); at >= 0 {
-		data, err := f.text(f.paste[:at])
-		if err != nil {
-			f.Reset()
-			return out, err
+// consumePaste retains only paste content against max. A possible suffix of
+// the closing marker lives in pasteTerm, a fixed-size protocol overhead, so an
+// exactly-maximal paste can still be closed without being rejected.
+func (f *Framer) consumePaste(out []InputEvent, raw []byte) ([]InputEvent, int, error) {
+	end := []byte(pasteEnd)
+	for i, c := range raw {
+		f.pasteTerm = append(f.pasteTerm, c)
+		for len(f.pasteTerm) > 0 && !bytes.HasPrefix(end, f.pasteTerm) {
+			if len(f.paste) == f.max {
+				f.Reset()
+				return out, i + 1, ErrInputTooLarge
+			}
+			f.paste = append(f.paste, f.pasteTerm[0])
+			f.pasteTerm = f.pasteTerm[1:]
 		}
-		out = append(out, InputEvent{Kind: InputPaste, Data: data})
-		rest := f.paste[at+len(pasteEnd):]
-		f.paste, f.inPaste = nil, false
-		if len(rest) > 0 {
-			f.buf = rest
-			return f.drainNormal(out)
+		if bytes.Equal(f.pasteTerm, end) {
+			data, err := f.text(f.paste)
+			if err != nil {
+				f.Reset()
+				return out, i + 1, err
+			}
+			out = append(out, InputEvent{Kind: InputPaste, Data: data})
+			f.paste, f.pasteTerm, f.inPaste = nil, nil, false
+			return out, i + 1, nil
 		}
 	}
-	return out, nil
+	return out, len(raw), nil
 }
 
 func (f *Framer) drainNormal(out []InputEvent) ([]InputEvent, error) {
 	for len(f.buf) > 0 {
 		if bytes.HasPrefix(f.buf, []byte(pasteOpen)) {
-			f.buf = f.buf[len(pasteOpen):]
-			f.inPaste = true
-			f.paste = f.buf
+			f.invalidRun = false
+			rest := append([]byte(nil), f.buf[len(pasteOpen):]...)
 			f.buf = nil
-			return f.drainPaste(out)
+			f.inPaste = true
+			var consumed int
+			var err error
+			out, consumed, err = f.consumePaste(out, rest)
+			if err != nil {
+				return out, err
+			}
+			if consumed == len(rest) {
+				return out, nil
+			}
+			f.buf = append(f.buf, rest[consumed:]...)
+			continue
 		}
 		if f.buf[0] == esc {
+			f.invalidRun = false
+			// WezTerm can frame an Alt/escape prefix immediately before a full
+			// CSI/OSC/SS3 string. The first ESC is its own event; the second is
+			// the introducer. Two ESC bytes alone remain one legacy sequence.
+			if len(f.buf) >= 2 && f.buf[1] == esc {
+				if len(f.buf) == 2 {
+					return out, nil
+				}
+				if escapeIntroducer(f.buf[2]) {
+					var err error
+					out, err = f.emitRaw(out, f.buf[:1])
+					if err != nil {
+						f.Reset()
+						return out, err
+					}
+					f.buf = f.buf[1:]
+					continue
+				}
+			}
 			n, complete := escapeLength(f.buf)
 			if !complete {
 				return out, nil
@@ -213,6 +253,20 @@ func (f *Framer) drainNormal(out []InputEvent) ([]InputEvent, error) {
 		if r == utf8.RuneError && n == 1 && !utf8.FullRune(f.buf) {
 			return out, nil
 		}
+		if r == utf8.RuneError && n == 1 && f.utf8Mode == ReplaceInvalidUTF8 {
+			if !f.invalidRun {
+				var err error
+				out, err = f.emitRaw(out, f.buf[:1])
+				if err != nil {
+					f.Reset()
+					return out, err
+				}
+			}
+			f.invalidRun = true
+			f.buf = f.buf[1:]
+			continue
+		}
+		f.invalidRun = false
 		var err error
 		out, err = f.emitRaw(out, f.buf[:n])
 		if err != nil {
@@ -225,11 +279,36 @@ func (f *Framer) drainNormal(out []InputEvent) ([]InputEvent, error) {
 	return out, nil
 }
 
+func escapeIntroducer(c byte) bool {
+	return c == '[' || c == ']' || c == 'O' || c == 'P' || c == '_'
+}
+
+// releaseBoundedPrefix uses one byte of lookahead to split an exactly-full
+// double-ESC prefix without allowing genuinely pending data to grow past max.
+func (f *Framer) releaseBoundedPrefix(out []InputEvent, next []byte) ([]InputEvent, bool, error) {
+	if len(next) == 0 {
+		return out, false, nil
+	}
+	if len(f.buf) == 2 && f.buf[0] == esc && f.buf[1] == esc && escapeIntroducer(next[0]) {
+		var err error
+		out, err = f.emitRaw(out, f.buf[:1])
+		if err != nil {
+			return out, false, err
+		}
+		f.buf = f.buf[1:]
+		return out, true, nil
+	}
+	return out, false, nil
+}
+
 // Flush reports a partial control sequence or unfinished paste as a normal
 // sequence/paste according to the UTF-8 policy. It is safe to call on EOF.
 func (f *Framer) Flush() ([]InputEvent, error) {
 	if f.inPaste {
-		data, err := f.text(f.paste)
+		raw := make([]byte, 0, len(f.paste)+len(f.pasteTerm))
+		raw = append(raw, f.paste...)
+		raw = append(raw, f.pasteTerm...)
+		data, err := f.text(raw)
 		f.Reset()
 		if err != nil {
 			return nil, err
@@ -237,6 +316,13 @@ func (f *Framer) Flush() ([]InputEvent, error) {
 		return []InputEvent{{Kind: InputPaste, Data: data}}, nil
 	}
 	if len(f.buf) == 0 {
+		f.invalidRun = false
+		return nil, nil
+	}
+	if f.invalidRun {
+		// drainNormal only leaves bytes here when a UTF-8 prefix is
+		// incomplete. At EOF it belongs to the already-replaced invalid run.
+		f.Reset()
 		return nil, nil
 	}
 	data, err := f.text(f.buf)

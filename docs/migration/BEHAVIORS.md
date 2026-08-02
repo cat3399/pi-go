@@ -129,9 +129,9 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 
 | ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
 | --- | --- | --- | --- |
-| `B-TUI-001` | stdin chunk framing：partial UTF-8/ESC/CSI/X10/SGR、bracketed paste、Kitty raw duplicate、EOF/size bound/error policy | `packages/tui/src/stdin-buffer.ts`; `test/stdin-buffer.test.ts` | `in-progress` | bounded streaming/invalid-control regressions complete; awaiting `R-TUI-001` rereview |
+| `B-TUI-001` | stdin chunk framing：partial UTF-8/ESC/CSI/X10/SGR、bracketed paste、Kitty raw duplicate、EOF/size bound/error policy | `packages/tui/src/stdin-buffer.ts`; `test/stdin-buffer.test.ts` | `in-progress` | bounded streaming、WezTerm double-ESC、exact bound 与 maximal-run invalid regressions complete; awaiting `R-TUI-001` rereview |
 | `B-TUI-002` | legacy VT、modifyOtherKeys、CSI-u Kitty key/event/modifier parse and canonical matching | `src/keys.ts`; `test/keys.test.ts` | `in-progress` | strict grammar/canonical-ID matrix complete; awaiting rereview; remaining functional-key families stay deferred |
-| `B-TUI-003` | ANSI-invisible cell width, CJK/combining/emoji/RI/tab, contiguous truncate, whitespace wrap and cell slicing | `src/utils.ts`; width/wrap/truncate regression tests | `in-progress` | Myanmar/Indic and ANSI/OSC-8 continuation regressions complete; awaiting rereview |
+| `B-TUI-003` | ANSI-invisible cell width, CJK/combining/emoji/RI/tab, contiguous truncate, whitespace wrap and cell slicing | `src/utils.ts`; width/wrap/truncate regression tests | `in-progress` | Myanmar/Indic、indent/RI、wide ellipsis、ZWJ/control 与 stateful ANSI/OSC-8 slice regressions complete; awaiting rereview |
 | `B-TUI-004` | raw-mode/mode restoration, negotiation/capability/color parsing, deterministic dimensions and no hidden input goroutine | `src/terminal.ts`, `terminal-colors.ts`; corresponding tests | `in-progress` | partial-raw/concurrent mode-balance regressions complete; awaiting rereview; platform PTY runtime smoke belongs to interactive assembly |
 | `B-TUI-005` | whitespace/punctuation/CJK word navigation | `src/word-navigation.ts`; `test/word-navigation.test.ts` | `in-progress` | Go UTF-8 byte offsets documented; awaiting rereview |
 

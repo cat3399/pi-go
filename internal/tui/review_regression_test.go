@@ -46,15 +46,18 @@ func TestReviewFramerBoundsOnlyPendingControlAndPaste(t *testing.T) {
 	if _, err := f.Feed([]byte("ordinary text much longer than the bound")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.Feed([]byte("\x1b]123456")); !errors.Is(err, ErrInputTooLarge) {
-		t.Fatalf("control err=%v", err)
+	if _, err := f.Feed([]byte("\x1b]123456")); err != nil || f.Buffered() != 8 {
+		t.Fatalf("exact control buffered=%d err=%v", f.Buffered(), err)
+	}
+	if _, err := f.Feed([]byte("7")); !errors.Is(err, ErrInputTooLarge) {
+		t.Fatalf("over-limit control err=%v", err)
 	}
 	if f.Buffered() != 0 {
 		t.Fatalf("control retained=%d", f.Buffered())
 	}
 	f = NewFramer(FramerOptions{MaxBufferedBytes: 12})
 	var events []InputEvent
-	for _, chunk := range [][]byte{[]byte("\x1b[200~abc"), []byte("defghijkl"), []byte("\x1b[201~")} {
+	for _, chunk := range [][]byte{[]byte("\x1b[200~abc"), []byte("defghijklm"), []byte("\x1b[201~")} {
 		got, err := f.Feed(chunk)
 		events = append(events, got...)
 		if err != nil {
@@ -81,6 +84,133 @@ func TestReviewFramerBoundsOnlyPendingControlAndPaste(t *testing.T) {
 	last := events[len(events)-2:]
 	if last[0].Kind != InputPaste || last[0].Data != "abcd" || last[1].Data != "z" {
 		t.Fatalf("split paste=%#v", events)
+	}
+}
+
+func TestReviewWezTermDoubleEscapeKittyFraming(t *testing.T) {
+	fixtures := []string{"\x1b\x1b[27;129:3u", "\x1b\x1b[27;1:3u"}
+	for _, fixture := range fixtures {
+		variants := [][][]byte{
+			{[]byte(fixture)},
+			{[]byte(fixture[:1]), []byte(fixture[1:])},
+			{[]byte(fixture[:2]), []byte(fixture[2:5]), []byte(fixture[5:])},
+		}
+		var bytewise [][]byte
+		for i := range len(fixture) {
+			bytewise = append(bytewise, []byte(fixture[i:i+1]))
+		}
+		variants = append(variants, bytewise)
+		for variant, chunks := range variants {
+			f := NewFramer(FramerOptions{MaxBufferedBytes: 64})
+			var got []InputEvent
+			for _, chunk := range chunks {
+				events, err := f.Feed(chunk)
+				if err != nil {
+					t.Fatalf("fixture=%q variant=%d: %v", fixture, variant, err)
+				}
+				got = append(got, events...)
+			}
+			want := []string{"\x1b", fixture[1:]}
+			if !same(eventData(got), want) || f.Buffered() != 0 {
+				t.Fatalf("fixture=%q variant=%d got=%q buffered=%d", fixture, variant, eventData(got), f.Buffered())
+			}
+		}
+	}
+	f := NewFramer(FramerOptions{})
+	if got, err := f.Feed([]byte("\x1b\x1b")); err != nil || len(got) != 0 {
+		t.Fatalf("ambiguous double ESC=%q err=%v", eventData(got), err)
+	}
+	got, err := f.Flush()
+	if err != nil || !same(eventData(got), []string{"\x1b\x1b"}) {
+		t.Fatalf("double ESC flush=%q err=%v", eventData(got), err)
+	}
+}
+
+func TestReviewFramerExactBoundsAndPasteTerminator(t *testing.T) {
+	f := NewFramer(FramerOptions{MaxBufferedBytes: 5})
+	events, err := f.Feed([]byte("\x1b]12\a"))
+	if err != nil || !same(eventData(events), []string{"\x1b]12\a"}) || f.Buffered() != 0 {
+		t.Fatalf("exact complete control=%q buffered=%d err=%v", eventData(events), f.Buffered(), err)
+	}
+
+	f = NewFramer(FramerOptions{MaxBufferedBytes: 8})
+	var got []InputEvent
+	for _, chunk := range [][]byte{[]byte("\x1b[200~12345678"), []byte("\x1b[20"), []byte("1~z")} {
+		events, err = f.Feed(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, events...)
+		if f.Buffered() > 8 {
+			t.Fatalf("paste buffer=%d", f.Buffered())
+		}
+	}
+	if len(got) != 2 || got[0].Kind != InputPaste || got[0].Data != "12345678" || got[1].Data != "z" {
+		t.Fatalf("exact paste=%#v", got)
+	}
+
+	f = NewFramer(FramerOptions{MaxBufferedBytes: 8})
+	if _, err = f.Feed([]byte("\x1b[200~12345678")); err != nil || f.Buffered() != 8 {
+		t.Fatalf("exact pending paste buffered=%d err=%v", f.Buffered(), err)
+	}
+	if _, err = f.Feed([]byte("x")); !errors.Is(err, ErrInputTooLarge) || f.Buffered() != 0 {
+		t.Fatalf("over-limit paste buffered=%d err=%v", f.Buffered(), err)
+	}
+
+	f = NewFramer(FramerOptions{MaxBufferedBytes: 8})
+	if _, err = f.Feed([]byte("\x1b[200~12345678")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = f.Flush()
+	if err != nil || len(got) != 1 || got[0].Kind != InputPaste || got[0].Data != "12345678" {
+		t.Fatalf("exact paste flush=%#v err=%v", got, err)
+	}
+}
+
+func TestReviewReplaceInvalidUTF8MaximalRuns(t *testing.T) {
+	for variant, chunks := range [][][]byte{
+		{{0xff, 0xfe, 'x'}},
+		{{0xff}, {0xfe}, {'x'}},
+	} {
+		f := NewFramer(FramerOptions{InvalidUTF8: ReplaceInvalidUTF8})
+		var got strings.Builder
+		for _, chunk := range chunks {
+			events, err := f.Feed(chunk)
+			if err != nil {
+				t.Fatalf("variant=%d: %v", variant, err)
+			}
+			for _, event := range events {
+				got.WriteString(event.Data)
+			}
+		}
+		if got.String() != "�x" {
+			t.Fatalf("variant=%d got=%q", variant, got.String())
+		}
+	}
+	f := NewFramer(FramerOptions{InvalidUTF8: ReplaceInvalidUTF8})
+	events, err := f.Feed([]byte{0xff, 0xfe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flushed, err := f.Flush()
+	if err != nil || !same(eventData(events), []string{"�"}) || len(flushed) != 0 {
+		t.Fatalf("invalid run=%q flush=%q err=%v", eventData(events), eventData(flushed), err)
+	}
+
+	f = NewFramer(FramerOptions{InvalidUTF8: ReplaceInvalidUTF8})
+	events, err = f.Feed([]byte{0xff, 'a', 0xfe, 'b'})
+	if err != nil || strings.Join(eventData(events), "") != "�a�b" {
+		t.Fatalf("separated invalid runs=%q err=%v", eventData(events), err)
+	}
+
+	f = NewFramer(FramerOptions{InvalidUTF8: ReplaceInvalidUTF8})
+	events, err = f.Feed([]byte{0xff, 0xe2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flushed, err = f.Flush()
+	if err != nil || strings.Join(eventData(events), "") != "�" || len(flushed) != 0 {
+		t.Fatalf("invalid run with incomplete tail=%q flush=%q err=%v", eventData(events), eventData(flushed), err)
 	}
 }
 
@@ -237,6 +367,78 @@ func TestReviewWrapWhitespaceEmptyLinesAndANSIState(t *testing.T) {
 	got = Wrap(open+"abcdef"+close, 3)
 	if len(got) != 2 || !strings.HasSuffix(got[0], close) || !strings.HasPrefix(got[1], open) {
 		t.Fatalf("link=%q", got)
+	}
+}
+
+func TestReviewWrapPreservesIndentationAndBlankWhitespace(t *testing.T) {
+	got := Wrap("      - 🇨", 9)
+	if !equalStrings(got, []string{"      -", "🇨"}) || VisibleWidth(got[0]) != 7 || VisibleWidth(got[1]) != 2 {
+		t.Fatalf("regional indentation=%q widths=%d/%d", got, VisibleWidth(got[0]), VisibleWidth(got[1]))
+	}
+	if got = Wrap("  hello", 20); !equalStrings(got, []string{"  hello"}) {
+		t.Fatalf("leading spaces=%q", got)
+	}
+	if got = Wrap("   ", 2); !equalStrings(got, []string{"  ", " "}) {
+		t.Fatalf("blank whitespace=%q", got)
+	}
+	if got = Wrap("  a  b  ", 4); strings.Join(got, "|") != "  a|b  " {
+		t.Fatalf("break spaces=%q", got)
+	}
+}
+
+func TestReviewTruncateWideEllipsisBudget(t *testing.T) {
+	if got := Truncate("abcdef", 1, "🙂", false); got != "" {
+		t.Fatalf("wide ellipsis in one cell=%q", got)
+	}
+	if got := Truncate("abcdef", 2, "🙂", false); got != "\x1b[0m🙂\x1b[0m" {
+		t.Fatalf("wide ellipsis exact=%q", got)
+	}
+	if got := Truncate("a", 1, "🙂", false); got != "a" {
+		t.Fatalf("fitting source=%q", got)
+	}
+}
+
+func TestReviewZWJDoesNotConsumeTerminalControls(t *testing.T) {
+	red, reset := "\x1b[31m", "\x1b[0m"
+	s := "👨\u200d" + red + "X" + reset
+	if got := StripTerminalSequences(s); got != "👨\u200dX" {
+		t.Fatalf("strip=%q", got)
+	}
+	if got := VisibleWidth(s); got != 3 {
+		t.Fatalf("width=%d", got)
+	}
+	part, width := SliceColumns(s, 2, 1, true)
+	if part != red+"X"+reset || width != 1 {
+		t.Fatalf("slice=%q/%d", part, width)
+	}
+	lines := Wrap(s, 2)
+	if len(lines) != 2 || StripTerminalSequences(lines[0]) != "👨\u200d" || StripTerminalSequences(lines[1]) != "X" {
+		t.Fatalf("wrap=%q", lines)
+	}
+	if got := VisibleWidth("👩\u200d💻"); got != 2 {
+		t.Fatalf("valid ZWJ width=%d", got)
+	}
+}
+
+func TestReviewSliceColumnsReplaysAndClosesANSIState(t *testing.T) {
+	red, reset := "\x1b[31m", "\x1b[0m"
+	part, width := SliceColumns(red+"ab"+reset+"c", 1, 1, true)
+	if part != red+"b"+reset || width != 1 {
+		t.Fatalf("SGR slice=%q/%d", part, width)
+	}
+	part, width = SliceColumns(red+"ab"+reset+"c", 2, 1, true)
+	if part != "c" || width != 1 {
+		t.Fatalf("SGR pollution=%q/%d", part, width)
+	}
+
+	open, close := "\x1b]8;;https://example.test\x1b\\", "\x1b]8;;\x1b\\"
+	part, width = SliceColumns(open+"abc"+close+"x", 1, 1, true)
+	if part != open+"b"+close || width != 1 {
+		t.Fatalf("OSC8 slice=%q/%d", part, width)
+	}
+	part, width = SliceColumns(open+"abc"+close+"x", 3, 1, true)
+	if part != "x" || width != 1 {
+		t.Fatalf("OSC8 pollution=%q/%d", part, width)
 	}
 }
 

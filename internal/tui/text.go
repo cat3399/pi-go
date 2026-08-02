@@ -53,7 +53,13 @@ func tokenizeTerminal(s string) []terminalToken {
 			if q == 0x200d {
 				i += m
 				if i < len(s) {
-					_, z := utf8.DecodeRuneInString(s[i:])
+					next, z := utf8.DecodeRuneInString(s[i:])
+					// A ZWJ only joins a following printable rune. Consuming an
+					// ESC/control here would hide it from the ANSI tokenizer and
+					// turn the rest of the control string into visible text.
+					if (next == utf8.RuneError && z == 1) || unicode.IsControl(next) {
+						break
+					}
 					i += z
 				}
 				joinNext = false
@@ -247,11 +253,24 @@ func Truncate(s string, max int, ellipsis string, pad bool) string {
 	}
 	ew := VisibleWidth(ellipsis)
 	if ew >= max {
-		ellipsis = takeCells(ellipsis, max)
-		ew = VisibleWidth(ellipsis)
+		clipped := takeCells(ellipsis, max)
+		if VisibleWidth(clipped) == 0 {
+			return ""
+		}
+		result := "\x1b[0m" + clipped + "\x1b[0m"
+		if pad {
+			result += strings.Repeat(" ", max-VisibleWidth(result))
+		}
+		return result
 	}
 	prefix := takeCells(s, max-ew)
-	result := prefix + "\x1b[0m" + ellipsis + "\x1b[0m"
+	if VisibleWidth(prefix) == 0 && ew == 0 {
+		return ""
+	}
+	result := prefix + "\x1b[0m"
+	if ellipsis != "" {
+		result += ellipsis + "\x1b[0m"
+	}
 	if pad {
 		result += strings.Repeat(" ", max-VisibleWidth(result))
 	}
@@ -281,19 +300,32 @@ func SliceColumns(s string, start, length int, strict bool) (string, int) {
 	if length <= 0 {
 		return "", 0
 	}
+	if start < 0 {
+		start = 0
+	}
 	end := start + length
 	col := 0
 	var b strings.Builder
 	out := 0
+	started := false
+	state := ansiState{}
 	for _, t := range tokenizeTerminal(s) {
 		if t.control {
-			if col >= start && col < end {
+			if col >= end {
+				break
+			}
+			if started && col >= start {
 				b.WriteString(t.text)
 			}
+			state.process(t.text)
 			continue
 		}
 		w := clusterWidth(t.text)
 		if col >= start && col < end && (!strict || col+w <= end) {
+			if !started {
+				b.WriteString(state.prefix())
+				started = true
+			}
 			b.WriteString(t.text)
 			out += w
 		}
@@ -301,6 +333,15 @@ func SliceColumns(s string, start, length int, strict bool) (string, int) {
 		if col >= end {
 			break
 		}
+	}
+	if !started {
+		return "", 0
+	}
+	if state.hyperlinkClose != "" {
+		b.WriteString(state.hyperlinkClose)
+	}
+	if state.sgr != "" {
+		b.WriteString("\x1b[0m")
 	}
 	return b.String(), out
 }
@@ -368,54 +409,82 @@ func makeWrapChunks(s string) []wrapChunk {
 
 func wrapLine(s string, max int, state *ansiState) []string {
 	chunks := makeWrapChunks(s)
+	followingContent := make([]bool, len(chunks))
+	seenContent := false
+	for i := len(chunks) - 1; i >= 0; i-- {
+		followingContent[i] = seenContent
+		if !chunks[i].whitespace && chunks[i].width > 0 {
+			seenContent = true
+		}
+	}
 	var out []string
 	line := state.prefix()
 	lineWidth := 0
-	emit := func() {
-		out = append(out, trimTerminalSpace(line)+state.lineEndReset()+state.hyperlinkClose)
+	lineHasContent := false
+	emit := func(trimBreak bool) {
+		rendered := line
+		if trimBreak && lineHasContent {
+			rendered = trimTerminalSpace(rendered)
+		}
+		out = append(out, rendered+state.lineEndReset()+state.hyperlinkClose)
 		line = state.prefix()
 		lineWidth = 0
+		lineHasContent = false
 	}
-	appendRaw := func(raw string, w int) { line += raw; lineWidth += w; state.processText(raw) }
-	for _, chunk := range chunks {
+	appendRaw := func(raw string, w int, content bool) {
+		line += raw
+		lineWidth += w
+		lineHasContent = lineHasContent || content
+		state.processText(raw)
+	}
+	for chunkIndex, chunk := range chunks {
 		if chunk.whitespace {
-			if lineWidth == 0 {
-				appendRaw(terminalControls(chunk.text), 0)
+			// Whitespace is data too: retain indentation, blank lines, and
+			// trailing spaces. It is trimmed only when it is the legal break
+			// separator before a word moved to the next line.
+			if lineHasContent && lineWidth+chunk.width > max && followingContent[chunkIndex] {
+				appendRaw(terminalControls(chunk.text), 0, false)
+				emit(true)
 				continue
 			}
-			if lineWidth+chunk.width <= max {
-				appendRaw(chunk.text, chunk.width)
-			} else {
-				appendRaw(terminalControls(chunk.text), 0)
-				emit()
+			for _, token := range tokenizeTerminal(chunk.text) {
+				if token.control {
+					appendRaw(token.text, 0, false)
+					continue
+				}
+				w := clusterWidth(token.text)
+				if lineWidth > 0 && lineWidth+w > max {
+					emit(false)
+				}
+				appendRaw(token.text, w, false)
 			}
 			continue
 		}
 		if chunk.width <= max {
 			if lineWidth > 0 && lineWidth+chunk.width > max {
-				emit()
+				emit(lineHasContent)
 			}
-			appendRaw(chunk.text, chunk.width)
+			appendRaw(chunk.text, chunk.width, chunk.width > 0)
 			continue
 		}
 		if lineWidth > 0 {
-			emit()
+			emit(lineHasContent)
 		}
 		for _, token := range tokenizeTerminal(chunk.text) {
 			if token.control {
-				appendRaw(token.text, 0)
+				appendRaw(token.text, 0, false)
 				continue
 			}
 			w := clusterWidth(token.text)
 			if lineWidth > 0 && lineWidth+w > max {
-				emit()
+				emit(lineHasContent)
 			}
-			appendRaw(token.text, w)
+			appendRaw(token.text, w, true)
 		}
 	}
 	// Every physical input line yields one output line, including an explicit
 	// empty line or a line containing only terminal controls.
-	out = append(out, trimTerminalSpace(line)+state.hyperlinkClose)
+	out = append(out, line+state.hyperlinkClose)
 	return out
 }
 

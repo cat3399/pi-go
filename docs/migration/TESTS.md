@@ -146,8 +146,8 @@ JSON print mode 的 error exit、RPC、interactive、真实 provider 和 termina
 
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |
 | --- | --- | --- | --- | --- |
-| `T-TUI-001` | B-TUI-001 | `packages/tui/test/stdin-buffer.test.ts` — split CSI/mouse, Kitty, paste, timeout/flush and destroy cases | `deferred` | large chunk streaming, pending/paste bounds, invalid control UTF-8, split/EOF and fuzz regression complete; awaiting rereview |
+| `T-TUI-001` | B-TUI-001 | `packages/tui/test/stdin-buffer.test.ts` — split CSI/mouse, Kitty, paste, timeout/flush and destroy cases | `deferred` | large chunk streaming, WezTerm double-ESC, exact pending/paste bounds, maximal-run invalid UTF-8, split/EOF and fuzz regression complete; awaiting rereview |
 | `T-TUI-002` | B-TUI-002 | `packages/tui/test/keys.test.ts` legacy/CSI-u/modifyOtherKeys/keypad/event cases | `deferred` | strict malformed grammar, canonical ID, layout-base, lock/keypad/event matrix complete; remaining upstream functional families deferred |
-| `T-TUI-003` | B-TUI-003 | `wrap-ansi`, `truncate-to-width`, `tab-width`, regional-indicator regression tests | `deferred` | upstream Myanmar/Indic fixtures plus ANSI/OSC-8/empty-line wrap, truncate and slice regressions complete; awaiting rereview |
+| `T-TUI-003` | B-TUI-003 | `wrap-ansi`, `truncate-to-width`, `tab-width`, regional-indicator regression tests | `deferred` | upstream Myanmar/Indic/RI fixtures plus indentation/empty-line wrap, wide-ellipsis truncate, ZWJ/control boundary and stateful SGR/OSC-8 slice regressions complete; awaiting rereview |
 | `T-TUI-004` | B-TUI-004 | `terminal.test.ts`, `terminal-colors.test.ts` negotiation/dimensions/color intent | `deferred` | partial raw restore, late negotiation, concurrent balance and fake lifecycle complete; PTY and real Windows console smoke deferred to interactive assembly |
 | `T-TUI-005` | B-TUI-005 | `word-navigation.test.ts` whitespace/punctuation/CJK cases | `deferred` | Go UTF-8-byte navigation tests implemented; awaiting `R-TUI-001` rereview |
