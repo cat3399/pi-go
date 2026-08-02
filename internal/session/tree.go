@@ -137,27 +137,23 @@ func (s *Session) Tree() []TreeNode {
 // the root-to-leaf path. Source records are copied byte-for-byte and the source
 // session is never rewritten, even if target creation fails or is cancelled.
 func (s *Session) ExtractBranch(ctx context.Context, leafID string, options ExtractOptions) (*Session, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := s.acquireAppend(ctx); err != nil {
+	snapshot, err := s.snapshotForExport(ctx, &leafID)
+	if err != nil {
 		return nil, err
 	}
-	defer s.releaseAppend()
-	s.mu.RLock()
-	if s.closed {
-		s.mu.RUnlock()
-		return nil, ErrClosed
+	return extractWithStorage(ctx, snapshot.storage, snapshot.sourcePath, snapshot.entries, options)
+}
+
+// Fork atomically snapshots the complete forest of an active Session and
+// creates an independent target. Use this method when the source aggregate is
+// already open; unlike path-based ForkFrom it does not contend with its writer
+// claim. The append gate makes the snapshot linearize before or after Append.
+func (s *Session) Fork(ctx context.Context, options ExtractOptions) (*Session, error) {
+	snapshot, err := s.snapshotForExport(ctx, nil)
+	if err != nil {
+		return nil, err
 	}
-	index, ok := s.byID[leafID]
-	if !ok {
-		s.mu.RUnlock()
-		return nil, fmt.Errorf("%w: %s", ErrEntryNotFound, leafID)
-	}
-	entries := s.pathLocked(index)
-	sourcePath := s.path
-	s.mu.RUnlock()
-	return extractWithStorage(ctx, s.storage, sourcePath, entries, options)
+	return extractWithStorage(ctx, snapshot.storage, snapshot.sourcePath, snapshot.entries, options)
 }
 
 // ForkFrom copies the complete durable source forest into a new session. It is
@@ -169,21 +165,46 @@ func ForkFrom(ctx context.Context, sourcePath string, options ExtractOptions) (*
 		return nil, err
 	}
 	defer source.Close()
+	return source.Fork(ctx, options)
+}
+
+type exportSnapshot struct {
+	storage    sessionStorage
+	sourcePath string
+	entries    []Entry
+}
+
+// snapshotForExport holds the same gate used by Append only while copying
+// immutable records. Target filesystem I/O happens after releasing the gate,
+// so a slow destination cannot stall subsequent source appends.
+func (s *Session) snapshotForExport(ctx context.Context, leafID *string) (exportSnapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := source.acquireAppend(ctx); err != nil {
-		return nil, err
+	if err := s.acquireAppend(ctx); err != nil {
+		return exportSnapshot{}, err
 	}
-	defer source.releaseAppend()
-	source.mu.RLock()
-	entries := make([]Entry, len(source.entries))
-	for index := range source.entries {
-		entries[index] = source.entries[index].clone()
+	defer s.releaseAppend()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return exportSnapshot{}, ErrClosed
 	}
-	path := source.path
-	source.mu.RUnlock()
-	return extractWithStorage(ctx, source.storage, path, entries, options)
+	var entries []Entry
+	if leafID != nil {
+		index, ok := s.byID[*leafID]
+		if !ok {
+			return exportSnapshot{}, fmt.Errorf("%w: %s", ErrEntryNotFound, *leafID)
+		}
+		entries = s.pathLocked(index)
+	} else {
+		entries = make([]Entry, len(s.entries))
+		for index := range s.entries {
+			entries[index] = s.entries[index].clone()
+		}
+	}
+	return exportSnapshot{storage: s.storage, sourcePath: s.path, entries: entries}, nil
 }
 
 func extractWithStorage(ctx context.Context, storage sessionStorage, sourcePath string, entries []Entry, options ExtractOptions) (*Session, error) {

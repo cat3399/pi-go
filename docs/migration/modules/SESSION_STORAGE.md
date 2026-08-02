@@ -178,8 +178,9 @@ entry，保证行为可复现且不重写历史。
 
 - root-to-selected-leaf path、immutable forest snapshot、按 selected leaf 的 context；
 - serialized `SelectLeaf`/`ResetLeaf` 与 Append，确保新 entry 精确挂在已选 parent；
-- 从一个 selected leaf atomic extract 至新文件，及复制全 forest 的 `ForkFrom`；新 header
-  使用新的 ID/cwd/timestamp，`parentSession` 指向 source，source bytes 永不改写；
+- 从一个 selected leaf atomic extract 至新文件，及复制全 forest；活跃 aggregate 使用
+  `Session.Fork` 在 append gate 下取一致 snapshot，外部 path 使用严格解析的 `ForkFrom`；
+  新 header 使用新的 ID/cwd/timestamp，`parentSession` 指向 source，source bytes 永不改写；
 - create publication、取消和 writer claim 继续沿用 v0.1 的 data-safety contract。
 
 明确延期：`branch_summary`、compaction summary、label/custom/model/thinking entry 的创建和
@@ -190,10 +191,11 @@ compaction-aware context。这些 wire entry 可作为未知 entry 保留和走 
 post-publication fault、cancel-before-create、forest graph fuzz，以及 selection/append race。
 本段不构成独立 review 结论。
 
-上游 `session-manager` test 分类：`tree-traversal` 的 message/tree/path/branch/reset 和
-`createBranchedSession` 路径为 ported/strengthened（atomic target 与 source-preservation）；
-`build-context` 的 selected-path 部分 ported，compaction/branch-summary projection deferred；
-`custom-session-id` 的 Create 既有 coverage 保持，fork custom ID 在本模块 ported；
+上游 `session-manager` test 分类候选（待独立复审定稿）：`tree-traversal` 的
+message/tree/path/branch/reset 和 `createBranchedSession` 路径已有实现与加强测试（atomic
+target、active-source snapshot 与 source-preservation）；`build-context` 的 selected-path
+部分已有实现，compaction/branch-summary projection deferred；`custom-session-id` 的 Create
+既有 coverage 保持，fork custom ID 已有本模块实现与测试；
 `file-operations` 的 strict open 已在 v0.1，discovery/list 与空文件初始化属于 application
 selector policy deferred；`labels`、`save-entry` 的 extension entry 及 `migration` 的 v1/v2
 rewrite 均 deferred，不能因 tree reader 能保留 unknown entry 而宣称其 API 已实现。

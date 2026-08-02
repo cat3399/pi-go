@@ -54,9 +54,9 @@ commit 为 `a116523434806910336b9de3e38a41aa5860030b`。
 | `B-SESSION-007` | 同 session concurrent append 串行成一条 parent chain | `packages/agent/test/harness/session-backends.test.ts` 的 `serializes concurrent appends into one parent chain` | `ported` | R-SESSION-002 |
 | `B-SESSION-008` | coding-agent v1/v2 自动迁移到 v3 | coding migration tests/fixtures | `deferred` | v0.1 v3 writer/reader 稳定 |
 | `B-SESSION-009` | Harness `leaf`/retained-tail 与 coding JSONL reconciliation | Harness/coding session docs | `deferred` | branch/compaction 模块取证；不能假定互通 |
-| `B-SESSION-010` | 显式 leaf select/reset；append 从选中 leaf 加 child，reset 产生合法新 root；reopen 选择 physical tail | `session-manager.ts::branch/resetLeaf/_appendEntry/_buildIndex`；tree traversal tests | `ported` | M-SESSION/v0.2 独立 review 待进行 |
-| `B-SESSION-011` | tree、path、context 仅沿 selected leaf，siblings 不进入 context；malformed parent graph 仍拒绝 | `session-manager.ts::getBranch/getTree/buildSessionContext`；tree/build-context tests | `ported` | M-SESSION/v0.2 独立 review 待进行；summary/compaction projection deferred |
-| `B-SESSION-012` | selected path extract 与 full forest fork 创建新 header/parentSession，source 不覆写，target publication/cancel 可诊断 | `session-manager.ts::createBranchedSession/forkFrom`；tree/custom-id tests；Go atomic strengthening | `ported` | M-SESSION/v0.2 独立 review 待进行 |
+| `B-SESSION-010` | 显式 leaf select/reset；append 从选中 leaf 加 child，reset 产生合法新 root；reopen 选择 physical tail | `session-manager.ts::branch/resetLeaf/_appendEntry/_buildIndex`；tree traversal tests | `in-progress` | 实现与回归已提交；M-SESSION/v0.2 独立复审通过后再定稿状态 |
+| `B-SESSION-011` | tree、path、context 仅沿 selected leaf，siblings 不进入 context；malformed parent graph 仍拒绝 | `session-manager.ts::getBranch/getTree/buildSessionContext`；tree/build-context tests | `in-progress` | 实现与 property fuzz 已提交；M-SESSION/v0.2 独立复审待进行；summary/compaction projection deferred |
+| `B-SESSION-012` | selected path extract 与 full forest fork 创建新 header/parentSession，source 不覆写，target publication/cancel 可诊断 | `session-manager.ts::createBranchedSession/forkFrom`；tree/custom-id tests；Go atomic strengthening | `in-progress` | active aggregate snapshot、external strict open 与 fault/race 回归已提交；M-SESSION/v0.2 独立复审通过后再定稿状态 |
 
 ## M-TOOL
 

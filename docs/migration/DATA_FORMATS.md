@@ -39,7 +39,9 @@ M-SESSION/v0.2 仍只写同一 v3 header/entry wire，但 writer 可以在显式
 另一个 `parentId:null` root，或在 `SelectLeaf(id)` 后向非物理 tail 加 child。选择本身不写
 record；重开时 physical last entry 是 selected leaf。branch extract 创建独立 JSONL，保留
 selected path 的原始 entry bytes，并写 new header 的 `parentSession`；fork 保留 source forest
-的所有 entry bytes。目标 create 必须 no-replace/atomic，任一失败不得改 source。
+的所有 entry bytes。活跃 aggregate 通过 `Session.Fork` 在 append gate 下 snapshot；只有未由
+当前进程持有 writer claim 的外部文件才走 `ForkFrom(path)` 的 strict Open。目标 create
+必须 no-replace/atomic，任一失败不得改 source。
 
 ## D-SETTINGS-001
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -204,6 +205,160 @@ func TestForkFromCopiesForestAndCancellationCannotCreateTarget(t *testing.T) {
 	}
 	if _, err := os.Stat(canceledPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canceled fork created target: %v", err)
+	}
+}
+
+func TestForkFromStrictlyRejectsMalformedExternalSource(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "malformed-source.jsonl")
+	sourceBytes := []byte(testHeader + "\n" + propertyForestEntry("broken", `"missing"`) + "\n")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(directory, "must-not-exist.jsonl")
+	_, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "strict-fork", WorkingDir: directory})
+	if !errors.Is(err, ErrUnsupportedTree) {
+		t.Fatalf("ForkFrom malformed source error = %v, want ErrUnsupportedTree", err)
+	}
+	if _, err := os.Stat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed source created target: %v", err)
+	}
+	after, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(sourceBytes, after) {
+		t.Fatal("strict external fork changed rejected source")
+	}
+}
+
+func TestActiveSessionForkUsesConsistentSnapshotWithoutClosingSource(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "active-source.jsonl")
+	source, err := Create(sourcePath, CreateOptions{ID: "active", WorkingDir: directory, NewEntryID: sequenceIDs("a", "b", "c")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	a := appendUser(t, source, "a")
+	b := appendUser(t, source, "b")
+	if _, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: filepath.Join(directory, "path-fork.jsonl"), ID: "path-fork", WorkingDir: directory}); !errors.Is(err, ErrWriterActive) {
+		t.Fatalf("path ForkFrom(active source) error = %v, want ErrWriterActive and aggregate Fork guidance", err)
+	}
+	before, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := source.Fork(context.Background(), ExtractOptions{TargetPath: filepath.Join(directory, "active-fork.jsonl"), ID: "active-fork", WorkingDir: directory})
+	if err != nil {
+		t.Fatalf("active Session.Fork() error = %v", err)
+	}
+	if got, want := entryIDs(target.Entries()), []string{a.ID(), b.ID()}; !equalIDs(got, want) {
+		t.Fatalf("active fork entries = %v, want %v", got, want)
+	}
+	if parent, ok := target.Header().ParentSession(); !ok || parent != sourcePath {
+		t.Fatalf("active fork parent = (%q, %t)", parent, ok)
+	}
+	after, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("active fork changed source bytes")
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The source remains writable and advances independently after the fork.
+	c := appendUser(t, source, "after fork")
+	if parent, ok := c.ParentID(); !ok || parent != b.ID() {
+		t.Fatalf("source append after fork parent = (%q, %t), want %q", parent, ok, b.ID())
+	}
+}
+
+func TestConcurrentAppendAndActiveForkSnapshotsAreDurablePrefixes(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "concurrent-fork-source.jsonl")
+	source, err := Create(sourcePath, CreateOptions{
+		ID: "concurrent-fork", WorkingDir: directory,
+		NewEntryID: func() (string, error) { return NewSessionID(time.Now()) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	appendUser(t, source, "root")
+
+	const appendCount = 24
+	const forkCount = 24
+	messages := make([]llm.UserTextMessage, appendCount)
+	for index := range messages {
+		messages[index] = mustUserMessage(t, fmt.Sprintf("append-%d", index), time.UnixMilli(int64(index+1)))
+	}
+	type forkResult struct {
+		entries []Entry
+		err     error
+	}
+	start := make(chan struct{})
+	appendErrors := make(chan error, appendCount)
+	forks := make(chan forkResult, forkCount)
+	var group sync.WaitGroup
+	for index := 0; index < appendCount; index++ {
+		index := index
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, err := source.Append(context.Background(), messages[index], AppendOptions{})
+			appendErrors <- err
+		}()
+	}
+	for index := 0; index < forkCount; index++ {
+		index := index
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			target, err := source.Fork(context.Background(), ExtractOptions{
+				TargetPath: filepath.Join(directory, fmt.Sprintf("concurrent-fork-%02d.jsonl", index)),
+				ID:         fmt.Sprintf("concurrent-fork-%02d", index), WorkingDir: directory,
+			})
+			if err != nil {
+				forks <- forkResult{err: err}
+				return
+			}
+			entries := target.Entries()
+			err = target.Close()
+			forks <- forkResult{entries: entries, err: err}
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(appendErrors)
+	close(forks)
+	for err := range appendErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	finalEntries := source.Entries()
+	if len(finalEntries) != appendCount+1 {
+		t.Fatalf("final source entries = %d, want %d", len(finalEntries), appendCount+1)
+	}
+	for result := range forks {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if len(result.entries) == 0 || len(result.entries) > len(finalEntries) {
+			t.Fatalf("fork snapshot length = %d, final = %d", len(result.entries), len(finalEntries))
+		}
+		for index := range result.entries {
+			if !bytes.Equal(result.entries[index].RawJSON(), finalEntries[index].RawJSON()) {
+				t.Fatalf("fork snapshot is not a durable source prefix at entry %d", index)
+			}
+		}
 	}
 }
 

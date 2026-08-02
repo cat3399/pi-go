@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,6 +252,102 @@ func FuzzDecodeSessionFileNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _, _, _, _ = decodeSessionFile("fuzz.jsonl", data)
 	})
+}
+
+func FuzzAppendOnlyForestGraphProperties(f *testing.F) {
+	// Multiple roots, a deep path, and each malformed graph family are explicit
+	// corpus seeds. Fuzz mutations then vary both topology bytes and fault kind.
+	for _, seed := range []struct {
+		ops   []byte
+		fault uint8
+	}{
+		{ops: []byte{0, 0, 0}, fault: 0},
+		{ops: []byte{1, 1, 1, 1}, fault: 0},
+		{ops: []byte{0, 1, 0, 3, 2}, fault: 0},
+		{ops: []byte{0, 1}, fault: 1}, // duplicate
+		{ops: []byte{0, 1}, fault: 2}, // forward
+		{ops: []byte{0, 1}, fault: 3}, // broken
+		{ops: []byte{0, 1}, fault: 4}, // self-cycle
+	} {
+		f.Add(seed.ops, seed.fault)
+	}
+
+	f.Fuzz(func(t *testing.T, ops []byte, fault uint8) {
+		if len(ops) > 256 {
+			ops = ops[:256]
+		}
+		if len(ops) == 0 {
+			ops = []byte{0}
+		}
+		fault %= 5
+
+		records := make([]string, 0, len(ops)+3)
+		rootCount := 0
+		for index, operation := range ops {
+			parent := "null"
+			if index > 0 && operation&3 != 0 {
+				parent = fmt.Sprintf("%q", fmt.Sprintf("node-%d", int(operation)%index))
+			} else {
+				rootCount++
+			}
+			records = append(records, propertyForestEntry(fmt.Sprintf("node-%d", index), parent))
+		}
+
+		var wantError error
+		switch fault {
+		case 1:
+			records = append(records, propertyForestEntry("node-0", "null"))
+			wantError = ErrInvalidEntry
+		case 2:
+			records = append(records,
+				propertyForestEntry("forward", `"future"`),
+				propertyForestEntry("future", "null"),
+			)
+			wantError = ErrUnsupportedTree
+		case 3:
+			records = append(records, propertyForestEntry("broken", `"missing"`))
+			wantError = ErrUnsupportedTree
+		case 4:
+			records = append(records, propertyForestEntry("cycle", `"cycle"`))
+			wantError = ErrUnsupportedTree
+		}
+
+		data := []byte(testHeader + "\n" + strings.Join(records, "\n") + "\n")
+		before := bytes.Clone(data)
+		header, entries, byID, _, err := decodeSessionFile("property.jsonl", data)
+		if !bytes.Equal(data, before) {
+			t.Fatal("decoder mutated source bytes")
+		}
+		if wantError != nil {
+			if !errors.Is(err, wantError) {
+				t.Fatalf("fault %d error = %v, want %v", fault, err, wantError)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("valid append-only forest rejected: %v", err)
+		}
+		if len(entries) != len(ops) || len(byID) != len(ops) {
+			t.Fatalf("decoded graph sizes = entries:%d index:%d, want %d", len(entries), len(byID), len(ops))
+		}
+		session := &Session{header: header, entries: entries, byID: byID, leaf: len(entries) - 1}
+		if roots := session.Tree(); len(roots) != rootCount {
+			t.Fatalf("forest roots = %d, want %d", len(roots), rootCount)
+		}
+		for _, entry := range entries {
+			path, err := session.PathTo(entry.ID())
+			if err != nil || len(path) == 0 || path[len(path)-1].ID() != entry.ID() {
+				t.Fatalf("PathTo(%q) = %v, %v", entry.ID(), entryIDs(path), err)
+			}
+			if _, hasParent := path[0].ParentID(); hasParent {
+				t.Fatalf("PathTo(%q) does not begin at a root", entry.ID())
+			}
+		}
+	})
+}
+
+func propertyForestEntry(id, parentJSON string) string {
+	return fmt.Sprintf(`{"type":"property","id":%q,"parentId":%s,"timestamp":"2026-08-01T00:00:00.000Z","payload":{"preserve":true}}`, id, parentJSON)
 }
 
 func userEntryJSON(text, id, parent string, second int) string {
