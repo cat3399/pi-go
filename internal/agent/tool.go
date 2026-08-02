@@ -117,6 +117,19 @@ func (e *FilesystemExecutor) Name() string { return "filesystem" }
 func (e *FilesystemExecutor) Supports(name string) bool {
 	return e != nil && e.registry != nil && e.registry.Supports(name)
 }
+func (e *FilesystemExecutor) ToolExecutionMode(name string) (ToolExecutionMode, bool) {
+	if e == nil || e.registry == nil {
+		return 0, false
+	}
+	mode, ok := e.registry.ExecutionMode(name)
+	if !ok {
+		return 0, false
+	}
+	if mode == tool.ExecutionSequential {
+		return ToolExecutionSequential, true
+	}
+	return ToolExecutionParallel, true
+}
 func (e *FilesystemExecutor) Execute(_ context.Context, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
 	return ToolOutput{Text: "Filesystem executor requires a tool name"}, errors.New("filesystem executor requires a tool name")
 }

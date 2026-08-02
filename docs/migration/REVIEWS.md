@@ -236,6 +236,32 @@
   等待 M-BASE 表达能力，不能用 text-only length 冒充。
 - 最终结论：`passed`，0 Blocker，0 剩余 in-scope Major/Minor；关闭 `F-STAGE0-003`。
 
+## R-AGENT-002：M-AGENT/v0.2 multi-tool queues 最终复审
+
+- 范围：实现 `80d4094` 及修订 `84a8c93`、`7e587b9`、`7cbc1c5`；multiple tool calls、
+  parallel/sequential override、completion/source-order split、queue/Continue、transform seam、
+  Abort/late update/settlement 与对应 durable fault/race evidence。reviewer 未参与实现。
+- 首轮结论：`changes-required`，0 Blocker / 3 Major / 3 Minor。修订关闭 Continue admission
+  与 queue consume race、terminating batch 的统一 steering/follow-up stop path、sequential cancel
+  的未执行 call 关联结算，以及 ClearAllQueues 原子性、batch 后 pending/phase 状态和不可达 v0.1
+  控制器；`84a8c93` 使 v2 成为唯一控制流并补 deterministic interleaving/fault/race 回归。
+- 第二轮结论：`changes-required`，0 Blocker / 1 Major / 1 Minor。`7e587b9` 以两阶段
+  admission reservation 避免持 `Agent.mu` 调用 transcript storage port，并让 sequential/parallel
+  pending tool state 成为 immutable multi-call snapshot；blocking/reentrant storage 与 state/event
+  时点回归确认 slot、queue 和 settlement 不死锁、不误报。
+- 第三轮结论：`changes-required`，0 Blocker / 1 Major / 0 Minor。`7cbc1c5` 将 queue drain
+  改为 reserved prefix 与逐条 durable ack：Append 成功后才移除，首写/中途 fault 保留失败项和
+  后继 FIFO，成功 prefix 不重复；concurrent enqueue/clear/Abort 均有明确线性化和 race oracle。
+- 最终核验：定点 normal/error/cancel/fault/concurrency tests、agent suite 重复 20 次、
+  `go test ./...`、`go vet ./...`、`go build ./...`、`go test -race ./...`、llm/session fuzz、
+  Linux/Windows amd64 与 Darwin arm64 cross-build，以及累计 diff check 全部通过。
+- 依赖与债务：M-TOOL/v0.2 filesystem 已由主线 `R-TOOL-005` 独立复审通过；Windows ACL
+  runtime 仍是 M-TOOL 平台验证边界，不归入 Agent finding。Agent 无未关闭 in-scope finding；
+  mixed `length + toolCall`、provider tool schema、retry/compaction 与 Harness 独有能力继续按
+  charter 中既有 `B-AGENT-006/T-AGENT-007`、`B/T-AGENT-009` 及后续模块重评条件延期。
+- 最终结论：`passed`，0 Blocker / 0 Major / 0 Minor；`B-AGENT-010..014` 标为 `ported`，
+  `T-AGENT-010..013` 标为 `strengthened`，WF-003 通过。
+
 ## R-APP-001：M-APP/v0.1 与 WF-001 完整联合审查
 
 - 范围：`internal/app`、`cmd/pi-go` 及 M-BASE/M-PROVIDER/M-TOOL/M-SESSION/M-AGENT

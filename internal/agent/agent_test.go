@@ -978,7 +978,7 @@ func TestTranscriptCommitFailuresStopCausalSuccessors(t *testing.T) {
 	})
 }
 
-func TestUnsupportedAdditionalToolCallsBecomeOneSafeTerminal(t *testing.T) {
+func TestMultipleToolCallsExecuteAsOneBatch(t *testing.T) {
 	t.Run("multiple calls in first response", func(t *testing.T) {
 		transcript := newSession(t)
 		callOne, err := llm.NewToolCallBlock("one", "bash", []byte(`{"command":"one"}`))
@@ -998,19 +998,19 @@ func TestUnsupportedAdditionalToolCallsBecomeOneSafeTerminal(t *testing.T) {
 			t.Fatal(err)
 		}
 		executor := &fakeTool{name: "bash"}
-		scripted := newScriptedProvider(t, terminal)
+		scripted := newScriptedProvider(t, terminal, mustTextTerminal(t, "done"))
 		runtime := newAgent(t, transcript, scripted, executor)
 
 		result, err := runtime.Run(context.Background(), "run")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if executor.CallCount() != 0 || result.ToolExecutions() != 0 {
-			t.Fatalf("unsupported calls executed %d/%d tools", executor.CallCount(), result.ToolExecutions())
+		if executor.CallCount() != 2 || result.ToolExecutions() != 2 {
+			t.Fatalf("batch calls executed %d/%d tools", executor.CallCount(), result.ToolExecutions())
 		}
 		messages := transcript.Context().Messages()
-		if len(messages) != 2 || failureAt(t, messages, 1).ErrorMessage() != "Agent v0.1 supports one tool call in the first provider turn" {
-			t.Fatalf("unsupported terminal = %#v", messages)
+		if !reflect.DeepEqual(messageRoles(messages), []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult, llm.RoleAssistant}) {
+			t.Fatalf("batch transcript = %#v", messages)
 		}
 	})
 
@@ -1033,12 +1033,12 @@ func TestUnsupportedAdditionalToolCallsBecomeOneSafeTerminal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if executor.CallCount() != 1 || result.ToolExecutions() != 1 || scripted.CallCount() != 2 {
+		if executor.CallCount() != 2 || result.ToolExecutions() != 2 || scripted.CallCount() != 3 {
 			t.Fatalf("counts = tool %d/%d, provider %d", executor.CallCount(), result.ToolExecutions(), scripted.CallCount())
 		}
 		messages := transcript.Context().Messages()
-		if len(messages) != 4 || failureAt(t, messages, 3).ErrorMessage() != "Agent v0.1 supports one tool call in the first provider turn" {
-			t.Fatalf("second tool terminal = %#v", messages)
+		if !reflect.DeepEqual(messageRoles(messages), []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleAssistant, llm.RoleToolResult, llm.RoleAssistant}) {
+			t.Fatalf("second batch transcript = %#v", messages)
 		}
 	})
 }

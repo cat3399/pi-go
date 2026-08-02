@@ -10,7 +10,6 @@ import (
 	"runtime/debug"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -29,11 +28,11 @@ type activeRun struct {
 	done             chan struct{}
 	phase            Phase
 	turn             uint32
-	pendingToolCall  string
-	pendingToolName  string
+	pendingToolCalls []string
 	providerTurns    uint32
 	toolExecutions   uint32
 	terminalAccepted bool
+	queueReservation *queueReservation
 }
 
 type observerEntry struct {
@@ -41,8 +40,10 @@ type observerEntry struct {
 	observer Observer
 }
 
-// Agent is the single owner of volatile run state. Provider, tool, transcript,
-// and observers are always called without holding mu.
+// Agent is the single owner of volatile run state. Provider, tool, transcript
+// append, and observers are always called without holding mu. Continue reserves
+// its single-run slot under mu, reads its transcript snapshot without mu, then
+// validates the snapshot and consumes queues under mu.
 type Agent struct {
 	mu sync.Mutex
 	// clockMu serializes an injected clock independently from coordinator state.
@@ -57,6 +58,13 @@ type Agent struct {
 
 	observers      []observerEntry
 	nextObserverID uint64
+
+	steeringQueue []llm.UserTextMessage
+	followUpQueue []llm.UserTextMessage
+	// Reserved entries are always a prefix. Clear operations preserve this
+	// prefix; durable per-message acknowledgements remove it one entry at a time.
+	steeringReserved int
+	followUpReserved int
 }
 
 func New(config Config) (*Agent, error) {
@@ -107,10 +115,10 @@ func (a *Agent) State() State {
 		return State{phase: PhaseIdle}
 	}
 	return State{
-		phase:           a.active.phase,
-		runID:           a.active.id,
-		turn:            a.active.turn,
-		pendingToolCall: a.active.pendingToolCall,
+		phase:            a.active.phase,
+		runID:            a.active.id,
+		turn:             a.active.turn,
+		pendingToolCalls: append([]string(nil), a.active.pendingToolCalls...),
 	}
 }
 
@@ -177,35 +185,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr e
 	if err != nil {
 		return Result{}, err
 	}
-	result.runID = active.id
-
-	defer a.finishRun(active)
-	defer func() {
-		a.enterSettling(active)
-		result.providerTurns, result.toolExecutions = a.runCounts(active)
-		a.notify(active.ctx, Event{
-			Kind:     EventRunSettled,
-			RunID:    active.id,
-			Turn:     a.runTurn(active),
-			Terminal: result.terminal,
-			RunError: runErr,
-		})
-	}()
-
-	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
-	a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: 1})
-	if err := a.commit(active, 1, user); err != nil {
-		return result, err
-	}
-
-	terminal, err := a.providerTurn(active, 1)
-	if err != nil {
-		return result, err
-	}
-	if toolUse, ok := terminal.(llm.AssistantToolUseMessage); ok {
-		return a.runToolTurn(active, toolUse, result)
-	}
-	return a.commitTerminal(active, 1, terminal, result)
+	return a.runV2(active, []llm.UserTextMessage{user})
 }
 
 func (a *Agent) beginRun(
@@ -277,6 +257,7 @@ func (a *Agent) beginRun(
 func (a *Agent) finishRun(active *activeRun) {
 	a.mu.Lock()
 	if a.active == active {
+		a.releaseQueueReservationLocked(active)
 		a.active = nil
 		active.cancel(context.Canceled)
 		close(active.done)
@@ -288,8 +269,7 @@ func (a *Agent) enterSettling(active *activeRun) {
 	a.mu.Lock()
 	if a.active == active {
 		active.phase = PhaseSettling
-		active.pendingToolCall = ""
-		active.pendingToolName = ""
+		active.pendingToolCalls = nil
 	}
 	a.mu.Unlock()
 }
@@ -315,43 +295,6 @@ func (a *Agent) runCause(active *activeRun) error {
 	return context.Cause(active.ctx)
 }
 
-func (a *Agent) acceptTerminal(
-	active *activeRun,
-	terminal llm.AssistantTerminal,
-) (llm.AssistantTerminal, error) {
-	a.mu.Lock()
-	if a.active != active {
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: accepted terminal belongs to an inactive run", ErrInvariant)
-	}
-	if active.terminalAccepted {
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: run already accepted a terminal", ErrInvariant)
-	}
-	cause := context.Cause(active.ctx)
-	active.terminalAccepted = true
-	active.phase = PhaseSettling
-	a.mu.Unlock()
-
-	// Abort and terminal acceptance share the mutex above. If cancellation won,
-	// it replaces a non-aborted provider outcome exactly once. A terminal that
-	// already represents provider or tool cancellation remains authoritative.
-	if cause != nil && terminal.FinishReason() != llm.FinishAborted {
-		cancelled, err := a.failureTerminal(
-			nil,
-			llm.FinishAborted,
-			"Run cancelled during provider execution",
-			cause,
-			llm.Usage{},
-		)
-		if err != nil {
-			return nil, err
-		}
-		return cancelled, nil
-	}
-	return terminal, nil
-}
-
 func (a *Agent) notify(ctx context.Context, event Event) {
 	a.mu.Lock()
 	observers := make([]Observer, 0, len(a.observers))
@@ -367,6 +310,15 @@ func (a *Agent) notify(ctx context.Context, event Event) {
 }
 
 func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) error {
+	return a.commitAfterAppend(active, turn, message, nil)
+}
+
+func (a *Agent) commitAfterAppend(
+	active *activeRun,
+	turn uint32,
+	message llm.ConversationMessage,
+	afterAppend func() error,
+) error {
 	settlementBase := context.WithoutCancel(active.ctx)
 	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
 	options := session.AppendOptions{}
@@ -383,6 +335,11 @@ func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationM
 	if err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 	}
+	if afterAppend != nil {
+		if err := afterAppend(); err != nil {
+			return err
+		}
+	}
 	a.notify(active.ctx, Event{
 		Kind:    EventMessageCommitted,
 		RunID:   active.id,
@@ -390,118 +347,6 @@ func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationM
 		Message: message,
 	})
 	return nil
-}
-
-func (a *Agent) commitTerminal(
-	active *activeRun,
-	turn uint32,
-	terminal llm.AssistantTerminal,
-	result Result,
-) (Result, error) {
-	terminal, err := a.acceptTerminal(active, terminal)
-	if err != nil {
-		return result, err
-	}
-	if err := a.commit(active, turn, terminal); err != nil {
-		return result, err
-	}
-	a.notify(active.ctx, Event{
-		Kind:     EventTurnSettled,
-		RunID:    active.id,
-		Turn:     turn,
-		Terminal: terminal,
-	})
-	result.terminal = terminal
-	return result, nil
-}
-
-func (a *Agent) providerTurn(active *activeRun, turn uint32) (llm.AssistantTerminal, error) {
-	messages := a.config.transcript.Context().Messages()
-	request, err := provider.NewRequest(a.config.model, a.config.systemPrompt, messages)
-	if err != nil {
-		return nil, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
-	}
-
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return nil, fmt.Errorf("%w: provider turn belongs to an inactive or terminal run", ErrInvariant)
-	}
-	active.phase = PhaseProvider
-	active.turn = turn
-	active.providerTurns++
-	a.mu.Unlock()
-
-	terminal, streamErr := a.collectProvider(active, turn, request)
-	if streamErr != nil {
-		reason := llm.FinishError
-		message := "Provider stream failed"
-		cause := streamErr
-		if runCause := a.runCause(active); runCause != nil {
-			reason = llm.FinishAborted
-			message = "Run cancelled during provider execution"
-			cause = errors.Join(runCause, streamErr)
-		}
-		terminal, err = a.failureTerminal(nil, reason, message, cause, llm.Usage{})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if cause := a.runCause(active); cause != nil && terminal.FinishReason() != llm.FinishAborted {
-		terminal, err = a.failureTerminal(
-			nil,
-			llm.FinishAborted,
-			"Run cancelled during provider execution",
-			cause,
-			llm.Usage{},
-		)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	toolUse, isToolUse := terminal.(llm.AssistantToolUseMessage)
-	if !isToolUse {
-		return terminal, nil
-	}
-	calls := toolCalls(toolUse)
-	if turn == 1 && len(calls) == 1 {
-		a.mu.Lock()
-		cause := context.Cause(active.ctx)
-		if cause == nil && a.active == active && !active.terminalAccepted {
-			active.phase = PhaseTool
-			a.mu.Unlock()
-			return terminal, nil
-		}
-		a.mu.Unlock()
-		if cause == nil {
-			return nil, fmt.Errorf("%w: tool-use outcome belongs to an inactive run", ErrInvariant)
-		}
-		terminal, err = a.failureTerminal(
-			nil,
-			llm.FinishAborted,
-			"Run cancelled during provider execution",
-			cause,
-			llm.Usage{},
-		)
-		if err != nil {
-			return nil, err
-		}
-		return terminal, nil
-	}
-	text := assistantTextBlocks(toolUse)
-	terminal, err = a.failureTerminal(
-		text,
-		llm.FinishError,
-		"Agent v0.1 supports one tool call in the first provider turn",
-		ErrUnsupportedToolTurn,
-		toolUse.Usage(),
-	)
-	if err != nil {
-		return nil, err
-	}
-	return terminal, nil
 }
 
 func (a *Agent) collectProvider(
@@ -575,202 +420,6 @@ func (a *Agent) collectProvider(
 	return terminal, nil
 }
 
-func (a *Agent) runToolTurn(
-	active *activeRun,
-	toolUse llm.AssistantToolUseMessage,
-	result Result,
-) (Result, error) {
-	calls := toolCalls(toolUse)
-	if len(calls) != 1 {
-		return result, fmt.Errorf("%w: normalized tool turn has %d calls", ErrInvariant, len(calls))
-	}
-	call := calls[0]
-	if err := a.commit(active, 1, toolUse); err != nil {
-		return result, err
-	}
-
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return result, fmt.Errorf("%w: tool turn belongs to an inactive or terminal run", ErrInvariant)
-	}
-	active.phase = PhaseTool
-	active.pendingToolCall = call.ID()
-	active.pendingToolName = call.Name()
-	a.mu.Unlock()
-	a.notify(active.ctx, Event{
-		Kind:       EventToolStarted,
-		RunID:      active.id,
-		Turn:       1,
-		ToolCallID: call.ID(),
-		ToolName:   call.Name(),
-	})
-
-	output, toolErr, cancelled := a.executeToolCall(active, call)
-	if cancelled {
-		output = ToolOutput{Text: toolCancellationText}
-		toolErr = errors.Join(ErrAgentAborted, a.contextCause(active))
-	}
-	a.notify(active.ctx, Event{
-		Kind:       EventToolSettled,
-		RunID:      active.id,
-		Turn:       1,
-		ToolCallID: call.ID(),
-		ToolName:   call.Name(),
-		ToolOutput: output,
-		ToolError:  toolErr,
-	})
-
-	block, err := llm.NewTextBlock(output.Text)
-	if err != nil {
-		return result, fmt.Errorf("%w: tool result text: %w", ErrInvariant, err)
-	}
-	timestamp, err := a.now()
-	if err != nil {
-		return result, err
-	}
-	toolResult, err := llm.NewToolResultMessage(
-		call.ID(),
-		call.Name(),
-		[]llm.TextBlock{block},
-		toolErr != nil,
-		timestamp,
-	)
-	if err != nil {
-		return result, fmt.Errorf("%w: construct tool result: %w", ErrInvariant, err)
-	}
-	if err := llm.ValidateToolResultAssociation(call, toolResult); err != nil {
-		return result, fmt.Errorf("%w: %w", ErrInvariant, err)
-	}
-	if err := a.commit(active, 1, toolResult); err != nil {
-		return result, err
-	}
-
-	a.mu.Lock()
-	if a.active != active {
-		a.mu.Unlock()
-		return result, fmt.Errorf("%w: tool result committed to an inactive run", ErrInvariant)
-	}
-	active.pendingToolCall = ""
-	active.pendingToolName = ""
-	a.mu.Unlock()
-	a.notify(active.ctx, Event{
-		Kind:     EventTurnSettled,
-		RunID:    active.id,
-		Turn:     1,
-		Terminal: toolUse,
-	})
-
-	if cancelled || a.runCause(active) != nil {
-		return a.commitToolCancellationTerminal(active, result)
-	}
-
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return result, fmt.Errorf("%w: cannot start second provider turn", ErrInvariant)
-	}
-	if cause := context.Cause(active.ctx); cause != nil {
-		a.mu.Unlock()
-		return a.commitToolCancellationTerminal(active, result)
-	}
-	active.turn = 2
-	active.phase = PhaseProvider
-	a.mu.Unlock()
-	a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: 2})
-
-	terminal, err := a.providerTurn(active, 2)
-	if err != nil {
-		return result, err
-	}
-	return a.commitTerminal(active, 2, terminal, result)
-}
-
-func (a *Agent) executeToolCall(
-	active *activeRun,
-	call llm.ToolCallBlock,
-) (ToolOutput, error, bool) {
-	if a.runCause(active) != nil {
-		return ToolOutput{Text: toolCancellationText}, ErrAgentAborted, true
-	}
-	if a.config.tool == nil || !toolSupports(a.config.tool, a.config.toolName, call.Name()) {
-		return ToolOutput{Text: fmt.Sprintf("Tool %s not found", call.Name())},
-			fmt.Errorf("%w: %s", ErrToolNotFound, call.Name()), false
-	}
-
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return ToolOutput{}, fmt.Errorf("%w: tool execution belongs to an inactive run", ErrInvariant), false
-	}
-	active.toolExecutions++
-	a.mu.Unlock()
-
-	var updateMu sync.Mutex
-	acceptingUpdates := true
-	report := func(update ToolUpdate) {
-		updateMu.Lock()
-		defer updateMu.Unlock()
-		if !acceptingUpdates || !utf8.ValidString(update.Text) {
-			return
-		}
-		a.notify(active.ctx, Event{
-			Kind:       EventToolProgress,
-			RunID:      active.id,
-			Turn:       1,
-			ToolCallID: call.ID(),
-			ToolName:   call.Name(),
-			ToolUpdate: update,
-		})
-	}
-	output, toolErr := executeNamedToolSafely(a.config.tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
-	updateMu.Lock()
-	acceptingUpdates = false
-	updateMu.Unlock()
-	output, toolErr = normalizeToolOutcome(output, toolErr)
-
-	// This is the normal-outcome/cancel linearization point. Abort uses the
-	// same mutex; parent cancellation is classified by what the coordinator
-	// observes here.
-	a.mu.Lock()
-	cancelled := a.active == active && context.Cause(active.ctx) != nil
-	a.mu.Unlock()
-	return output, toolErr, cancelled
-}
-
-func toolSupports(executor ToolExecutor, configuredName, requestedName string) bool {
-	if named, ok := executor.(NamedToolExecutor); ok {
-		return named.Supports(requestedName)
-	}
-	return configuredName == requestedName
-}
-
-func (a *Agent) commitToolCancellationTerminal(
-	active *activeRun,
-	result Result,
-) (Result, error) {
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return result, fmt.Errorf("%w: cannot settle tool cancellation", ErrInvariant)
-	}
-	active.turn = 2
-	a.mu.Unlock()
-	a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: 2})
-
-	terminal, err := a.failureTerminal(
-		nil,
-		llm.FinishAborted,
-		runToolCancelText,
-		a.contextCause(active),
-		llm.Usage{},
-	)
-	if err != nil {
-		return result, err
-	}
-	return a.commitTerminal(active, 2, terminal, result)
-}
-
 func (a *Agent) contextCause(active *activeRun) error {
 	cause := context.Cause(active.ctx)
 	if cause == nil {
@@ -825,16 +474,6 @@ func toolCalls(message llm.AssistantToolUseMessage) []llm.ToolCallBlock {
 		}
 	}
 	return calls
-}
-
-func assistantTextBlocks(message llm.AssistantToolUseMessage) []llm.TextBlock {
-	text := make([]llm.TextBlock, 0, len(message.Blocks()))
-	for _, block := range message.Blocks() {
-		if value, ok := block.(llm.TextBlock); ok {
-			text = append(text, value)
-		}
-	}
-	return text
 }
 
 func isNilInterface(value any) bool {
