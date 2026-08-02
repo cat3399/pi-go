@@ -255,7 +255,7 @@ func Truncate(s string, max int, ellipsis string, pad bool) string {
 	if ew >= max {
 		clipped := takeCells(ellipsis, max)
 		if VisibleWidth(clipped) == 0 {
-			return ""
+			return truncateEmpty(max, pad)
 		}
 		result := "\x1b[0m" + clipped + "\x1b[0m"
 		if pad {
@@ -265,7 +265,7 @@ func Truncate(s string, max int, ellipsis string, pad bool) string {
 	}
 	prefix := takeCells(s, max-ew)
 	if VisibleWidth(prefix) == 0 && ew == 0 {
-		return ""
+		return truncateEmpty(max, pad)
 	}
 	result := prefix + "\x1b[0m"
 	if ellipsis != "" {
@@ -276,6 +276,14 @@ func Truncate(s string, max int, ellipsis string, pad bool) string {
 	}
 	return result
 }
+
+func truncateEmpty(max int, pad bool) string {
+	if pad {
+		return strings.Repeat(" ", max)
+	}
+	return ""
+}
+
 func takeCells(s string, max int) string {
 	var b strings.Builder
 	w := 0

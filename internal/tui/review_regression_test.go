@@ -396,6 +396,27 @@ func TestReviewTruncateWideEllipsisBudget(t *testing.T) {
 	if got := Truncate("a", 1, "🙂", false); got != "a" {
 		t.Fatalf("fitting source=%q", got)
 	}
+	cases := []struct {
+		name, input, ellipsis, want string
+		max                         int
+	}{
+		{"wide ellipsis padded", "abcdef", "🙂", " ", 1},
+		{"wide source empty ellipsis padded", "🙂", "", " ", 1},
+		{"ANSI source discarded", "\x1b[31m🙂\x1b[0m", "", " ", 1},
+		{"ANSI ellipsis discarded", "abcdef", "\x1b[31m🙂\x1b[0m", " ", 1},
+		{"zero-width ellipsis discarded", "🙂", "\u200d", " ", 1},
+		{"wide prefix exact boundary", "🙂x", "", "🙂\x1b[0m", 2},
+		{"wide suffix keeps contiguous prefix", "x🙂", "", "x\x1b[0m ", 2},
+	}
+	for _, tc := range cases {
+		got := Truncate(tc.input, tc.max, tc.ellipsis, true)
+		if got != tc.want || VisibleWidth(got) != tc.max {
+			t.Errorf("%s: got=%q width=%d want=%q/%d", tc.name, got, VisibleWidth(got), tc.want, tc.max)
+		}
+		if tc.want == strings.Repeat(" ", tc.max) && strings.Contains(got, "\x1b") {
+			t.Errorf("%s: empty result leaked terminal state: %q", tc.name, got)
+		}
+	}
 }
 
 func TestReviewZWJDoesNotConsumeTerminalControls(t *testing.T) {

@@ -1,7 +1,7 @@
 # M-TUI：terminal foundation / v0.1 charter
 
-状态：最近复审为 0 Blocker / 5 Major / 2 Minor；两轮修复候选已完成，
-`awaiting independent rereview`。
+状态：最近复审为 0 Blocker / 0 Major / 1 Minor；最后一项 padding 修复候选已完成，
+`awaiting final rereview`。
 
 ## 职责与边界
 
