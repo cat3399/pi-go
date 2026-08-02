@@ -49,15 +49,18 @@ type Diagnostic struct{ Source, Path, Message string }
 func (d Diagnostic) Error() string { return fmt.Sprintf("%s %s: %s", d.Source, d.Path, d.Message) }
 
 type Model struct {
-	Provider          string            `json:"provider"`
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	API               string            `json:"api"`
-	BaseURL           string            `json:"baseUrl"`
-	Headers           map[string]string `json:"headers,omitempty"`
-	Reasoning         bool              `json:"reasoning"`
-	UnsupportedFields []string          `json:"-"`
-	UnknownFields     []string          `json:"-"`
+	Provider  string            `json:"provider"`
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	API       string            `json:"api"`
+	BaseURL   string            `json:"baseUrl"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Reasoning bool              `json:"reasoning"`
+	// UnsupportedFields and UnknownFields are parser diagnostics attached to a
+	// runtime projection. They are not model metadata and are intentionally not
+	// part of CachedCatalog's durable model contract.
+	UnsupportedFields []string `json:"-"`
+	UnknownFields     []string `json:"-"`
 }
 
 func (m Model) Ref() (provider.ModelRef, error) { return provider.NewModelRef(m.Provider, m.API, m.ID) }
@@ -96,6 +99,9 @@ type Snapshot struct {
 }
 
 type Options struct {
+	// AgentDir may be absent for read-only startup. SetGlobalSettings requires
+	// it to have been created by the application before mutation so one leaf
+	// rename never masquerades as durable creation of missing ancestors.
 	AgentDir   string
 	WorkingDir string
 	// ModelsStorePath is the optional, local catalog cache. It is read into the
@@ -141,7 +147,7 @@ func (r *Runtime) Snapshot() Snapshot {
 func (r *Runtime) Provider(id string) (ProviderConfig, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p, ok := r.providers[strings.ToLower(id)]
+	p, ok := r.providers[canonicalKey(id)]
 	return cloneProvider(p), ok
 }
 
@@ -151,7 +157,7 @@ func (r *Runtime) Provider(id string) (ProviderConfig, bool) {
 func (r *Runtime) ValidateRoute(selected Model) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	providerID := strings.ToLower(selected.Provider)
+	providerID := canonicalKey(selected.Provider)
 	if err := r.storeErrors[providerID]; err != nil {
 		return fmt.Errorf("%w: selected provider has an invalid cached catalog", ErrUnsupported)
 	}
@@ -224,8 +230,8 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 		return err
 	}
 	defer releaseLocal()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("%w: create settings directory", ErrInvalidConfig)
+	if err := requireExistingDirectory(filepath.Dir(path), "global settings directory"); err != nil {
+		return err
 	}
 	release, err := acquireFileLock(ctx, path)
 	if err != nil {
@@ -432,7 +438,7 @@ func filterPattern(models []Model, pattern string) []Model {
 func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings) Snapshot {
 	// The hand-written baseline is deliberately tiny because the fixed upstream
 	// catalog cannot be regenerated from its absent manifest/source data.
-	byKey := map[string]Model{OpenAIProviderID + "/" + DefaultOpenAIModel: {Provider: OpenAIProviderID, ID: DefaultOpenAIModel, Name: DefaultOpenAIModel, API: OpenAIResponsesAPI}}
+	byKey := map[string]Model{modelKey(OpenAIProviderID, DefaultOpenAIModel): {Provider: OpenAIProviderID, ID: DefaultOpenAIModel, Name: DefaultOpenAIModel, API: OpenAIResponsesAPI}}
 	ids := make([]string, 0, len(providers)+len(cached))
 	for id := range providers {
 		ids = append(ids, id)
@@ -441,8 +447,9 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 		if _, exists := providers[id]; !exists {
 			ids = append(ids, id)
 		}
-		for _, m := range entry.Models {
-			byKey[m.Provider+"/"+m.ID] = cloneModel(m)
+		for index, cached := range entry.Models {
+			m := cachedRuntimeModel(entry, index)
+			byKey[modelKey(cached.Provider, cached.ID)] = m
 		}
 	}
 	sort.Strings(ids)
@@ -459,10 +466,10 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 				m.Name = m.ID
 			}
 			m.Provider = p.ID
-			byKey[m.Provider+"/"+m.ID] = m
+			byKey[modelKey(m.Provider, m.ID)] = m
 		}
 		if id == OpenAIProviderID {
-			key := id + "/" + DefaultOpenAIModel
+			key := modelKey(id, DefaultOpenAIModel)
 			m := byKey[key]
 			if p.API != "" {
 				m.API = p.API
@@ -473,7 +480,7 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 			byKey[key] = m
 		}
 		for modelID, override := range p.overrides {
-			key := p.ID + "/" + modelID
+			key := modelKey(p.ID, modelID)
 			m, ok := byKey[key]
 			if !ok {
 				continue
@@ -496,11 +503,11 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 func (r *Runtime) applyModelOverride(providerID, modelID string, model Model) Model {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	provider, ok := r.providers[strings.ToLower(providerID)]
+	provider, ok := r.providers[canonicalKey(providerID)]
 	if !ok {
 		return model
 	}
-	override, ok := provider.overrides[modelID]
+	override, ok := provider.overrides[canonicalKey(modelID)]
 	if !ok {
 		return model
 	}
@@ -530,15 +537,25 @@ func loadModels(path string) (map[string]ProviderConfig, error) {
 		return nil, Diagnostic{"models.json", "providers", "must be an object"}
 	}
 	result := make(map[string]ProviderConfig, len(providers))
-	for id, data := range providers {
+	ids := make([]string, 0, len(providers))
+	for id := range providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		data := providers[id]
 		if !validID(id) {
 			return nil, Diagnostic{"models.json", "providers", "provider identifier is invalid"}
 		}
-		p, err := parseProvider(id, data)
+		canonical := canonicalKey(id)
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, Diagnostic{"models.json", "providers", "contains case-fold duplicate provider id"}
+		}
+		p, err := parseProvider(canonical, data)
 		if err != nil {
 			return nil, err
 		}
-		result[strings.ToLower(id)] = p
+		result[canonical] = p
 	}
 	return result, nil
 }
@@ -579,10 +596,10 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 			if e != nil {
 				return p, e
 			}
-			if seen[strings.ToLower(m.ID)] {
+			if seen[canonicalKey(m.ID)] {
 				return p, Diagnostic{"models.json", "providers." + id + ".models", "contains duplicate model id"}
 			}
-			seen[strings.ToLower(m.ID)] = true
+			seen[canonicalKey(m.ID)] = true
 			p.Models = append(p.Models, m)
 		}
 	}
@@ -592,15 +609,25 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 			return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "must be an object"}
 		}
 		p.overrides = make(map[string]modelOverride, len(overrides))
-		for modelID, value := range overrides {
+		modelIDs := make([]string, 0, len(overrides))
+		for modelID := range overrides {
+			modelIDs = append(modelIDs, modelID)
+		}
+		sort.Strings(modelIDs)
+		for _, modelID := range modelIDs {
+			value := overrides[modelID]
 			if !validValue(modelID) {
 				return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "contains invalid model id"}
+			}
+			canonical := canonicalKey(modelID)
+			if _, duplicate := p.overrides[canonical]; duplicate {
+				return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "contains case-fold duplicate model id"}
 			}
 			override, err := parseOverride(id, modelID, value)
 			if err != nil {
 				return p, err
 			}
-			p.overrides[modelID] = override
+			p.overrides[canonical] = override
 		}
 	}
 	for key := range o {
@@ -959,8 +986,9 @@ func normalizeJSONC(data []byte) []byte {
 }
 
 type atomicWriteFaults struct {
-	beforeRename func() error
-	afterRename  func() error
+	beforeRename  func() error
+	afterRename   func() error
+	syncDirectory func(string) error
 }
 
 func atomicWrite(ctx context.Context, path string, data []byte, label string, faults atomicWriteFaults) error {
@@ -970,8 +998,8 @@ func atomicWrite(ctx context.Context, path string, data []byte, label string, fa
 	if err := contextCause(ctx); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("%w: create %s directory", ErrInvalidConfig, label)
+	if err := requireExistingDirectory(filepath.Dir(path), label+" directory"); err != nil {
+		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".model-config-*")
 	if err != nil {
@@ -1015,16 +1043,40 @@ func atomicWrite(ctx context.Context, path string, data []byte, label string, fa
 			return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
 		}
 	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
+	syncDirectory := faults.syncDirectory
+	if syncDirectory == nil {
+		syncDirectory = syncModelDirectory
 	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	if syncErr != nil || closeErr != nil {
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("%w: %s", ErrCommitUnknown, label)
 	}
 	return nil
+}
+
+// Mutation requires an already-created parent directory. Files are created
+// mode 0600 and admitted as private. This mirrors session's
+// durable-parent precondition: atomically publishing one leaf cannot make a
+// newly-created ancestor durable without syncing every ancestor's parent.
+func requireExistingDirectory(path, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%w: %s must already exist", ErrPersistence, label)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: %s is not a directory", ErrPersistence, label)
+	}
+	return nil
+}
+
+func syncModelDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		return errors.Join(err, directory.Close())
+	}
+	return directory.Close()
 }
 
 // acquireFileLock deliberately does not reclaim a stale lock. Guessing that a
@@ -1073,6 +1125,31 @@ func contextCause(ctx context.Context) error {
 	return nil
 }
 func validID(v string) bool { return validValue(v) && !strings.ContainsAny(v, "/\\") }
+
+// canonicalKey returns one stable representative for the same equivalence
+// class used by strings.EqualFold. Provider and model lookup maps must never
+// be keyed by user casing directly.
+func canonicalKey(value string) string {
+	var result strings.Builder
+	result.Grow(len(value))
+	for _, character := range value {
+		representative := character
+		hasLower := unicode.IsLower(character)
+		for folded := unicode.SimpleFold(character); folded != character; folded = unicode.SimpleFold(folded) {
+			isLower := unicode.IsLower(folded)
+			if isLower && (!hasLower || folded < representative) || !isLower && !hasLower && folded < representative {
+				representative = folded
+				hasLower = isLower
+			}
+		}
+		result.WriteRune(representative)
+	}
+	return result.String()
+}
+
+func modelKey(providerID, modelID string) string {
+	return canonicalKey(providerID) + "/" + canonicalKey(modelID)
+}
 func validValue(v string) bool {
 	return utf8.ValidString(v) && strings.TrimSpace(v) != "" && !strings.ContainsFunc(v, unicode.IsControl)
 }

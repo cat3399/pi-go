@@ -28,7 +28,7 @@
 | `T-MODEL-001` | B-MODEL-001 | `model-config` malformed/schema/comments | strengthened | strict JSONC, duplicate IDs, fuzz/no panic, secret-safe production error |
 | `T-MODEL-002` | B-MODEL-002 | `model-runtime-*`, `model-registry` | strengthened | overlay headers/base URL, custom ID, explicit API preflight |
 | `T-MODEL-003` | B-MODEL-003 | `model-resolver`, regressions 3217/6949 | ported-exact-v0.1 | provider prefix, default, ordered scope/unavailable diagnostic; fuzzy deferred |
-| `T-MODEL-004` | B-MODEL-004 | `models-store`, settings reload regressions 6999/3616/2753 | strengthened | store provider merge, unknown preservation, reload health, race snapshot/read |
+| `T-MODEL-004` | B-MODEL-004 | `models-store`, settings reload regressions 6999/3616/2753 | strengthened | case-fold key/duplicate matrix、全部 public cached-model fields 与 opaque raw round-trip、missing-parent/pre-post-fault/parent-sync、re-exec merge、reload health、race snapshot/read |
 | `T-MODEL-005` | B-MODEL-005 | `model-runtime-*`/`model-registry` configured request-option and provider route intent | deferred | active M-MODEL review: secret-safe selected-route preflight, unselected-provider preservation, no HTTP/session side effect; final status awaits independent review |
 
 | ID | Behavior | 上游 test intent | 当前状态 | 目标与重评条件 |

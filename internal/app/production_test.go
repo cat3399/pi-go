@@ -325,6 +325,19 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 			secrets: []string{"ambient-secret", "future-secret"},
 		},
 		{
+			name:        "mixed-case selected custom override is not ignored",
+			args:        []string{"--model", "OPENAI/gpt-test", "-p", "hello"},
+			environment: []string{"OPENAI_API_KEY=ambient-secret"},
+			prepare: func(t *testing.T, agentDir string) {
+				content := `{"providers":{"OpEnAi":{"baseUrl":"https://fixture.invalid/v1","modelOverrides":{"GPT-TEST":{"compat":{"token":"case-secret"}}}}}}`
+				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want:    "selected model configuration is not migrated",
+			secrets: []string{"ambient-secret", "case-secret"},
+		},
+		{
 			name: "missing all credential sources",
 			args: []string{"--model", "openai/gpt-test", "-p", "hello"},
 			prepare: func(t *testing.T, agentDir string) {

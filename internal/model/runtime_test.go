@@ -104,6 +104,41 @@ func TestRuntimeOnlySelectedProviderRejectsFutureFields(t *testing.T) {
 	}
 }
 
+func TestRuntimeCanonicalIdentifiersRejectDuplicatesAndApplyOverrides(t *testing.T) {
+	for _, pair := range [][2]string{{"OpenAI", "openai"}, {"K", "K"}, {"Σ", "ς"}} {
+		if !strings.EqualFold(pair[0], pair[1]) || canonicalKey(pair[0]) != canonicalKey(pair[1]) {
+			t.Fatalf("canonical mismatch for %q and %q", pair[0], pair[1])
+		}
+	}
+	if strings.EqualFold("İ", "i") || canonicalKey("İ") == canonicalKey("i") {
+		t.Fatal("canonical key collapsed identifiers outside strings.EqualFold")
+	}
+	for _, content := range []string{
+		`{"providers":{"OpenAI":{},"openai":{}}}`,
+		`{"providers":{"openai":{"modelOverrides":{"GPT-5.5":{},"gpt-5.5":{}}}}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "models.json")
+		writeFile(t, path, content)
+		if _, err := loadModels(path); err == nil || !strings.Contains(err.Error(), "case-fold duplicate") {
+			t.Fatalf("case-fold duplicate = %v", err)
+		}
+	}
+	r, _, _ := newTestRuntime(t, `{"providers":{"OpEnAi":{"modelOverrides":{"GPT-5.5":{"compat":{"token":"case-secret"}},"CUSTOM":{"futureOption":"case-secret"}}}}}`, "", false)
+	for _, selection := range []Selection{{Provider: "OPENAI", Model: "gPt-5.5"}, {Provider: "openai", Model: "custom"}} {
+		resolved, err := r.Resolve(selection)
+		if err != nil {
+			t.Fatalf("resolve %#v: %v", selection, err)
+		}
+		err = r.ValidateRoute(resolved.Model)
+		if !errors.Is(err, ErrUnsupported) || strings.Contains(err.Error(), "case-secret") {
+			t.Fatalf("canonical selected override = %v", err)
+		}
+		if resolved.Model.Provider != OpenAIProviderID {
+			t.Fatalf("provider was not canonical: %#v", resolved.Model)
+		}
+	}
+}
+
 func TestRuntimeStrictDiagnosticsAndKeepsLastHealthySnapshot(t *testing.T) {
 	r, agent, _ := newTestRuntime(t, `{"providers":{"openai":{"models":[{"id":"first","api":"openai-responses"}]}}}`, "", false)
 	before := r.Snapshot()
@@ -223,11 +258,36 @@ func TestGlobalSettingsCancellationFaultAndPrivateAdmission(t *testing.T) {
 		t.Fatalf("post-rename did not publish: %q, %v", content, err)
 	}
 	r.faults.afterRename = nil
+	synced := false
+	r.faults.syncDirectory = func(path string) error { synced = true; return syncModelDirectory(path) }
+	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "durable"; return nil }); err != nil || !synced {
+		t.Fatalf("successful settings publication did not sync parent: %v, synced=%t", err, synced)
+	}
+	r.faults.syncDirectory = nil
 	if err := os.Chmod(filepath.Join(agent, "settings.json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Reload(context.Background()); !errors.Is(err, ErrUnsafeMode) {
 		t.Fatalf("unsafe settings mode = %v", err)
+	}
+}
+
+func TestGlobalSettingsRequiresPreexistingDurableParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows v0.1 fails closed earlier")
+	}
+	root := t.TempDir()
+	agent := filepath.Join(root, "missing", "agent")
+	r, err := NewRuntime(Options{AgentDir: agent, WorkingDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "model"; return nil })
+	if !errors.Is(err, ErrPersistence) {
+		t.Fatalf("missing parent settings write = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "missing")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing ancestor was created: %v", statErr)
 	}
 }
 

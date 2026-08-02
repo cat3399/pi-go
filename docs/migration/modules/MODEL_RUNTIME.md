@@ -5,10 +5,12 @@
 ## 职责与边界
 
 `internal/model` 拥有严格的 `models.json`（JSONC）与 global `settings.json`
-快照、provider/model overlay、最小 builtin OpenAI baseline、精确 model
+快照、case-fold canonical provider/model overlay、最小 builtin OpenAI baseline、精确 model
 解析、enabled-model 顺序、provider-scoped `models-store.json` 与原子 reload。
 它的 snapshot 为值拷贝；失败 reload 不发布半成品。全局 settings 写入在进程内 mutex
-和跨进程 lock 下重读、合并并原子 publish，未知 root fields 保留。
+和跨进程 lock 下重读、合并并原子 publish，未知 root fields 保留。mutation 要求 durable
+parent 已由 application create phase 建立；模块只同步临时文件、rename 后的 leaf parent，
+不会以未同步祖先的 `MkdirAll` 冒充 durable success。
 
 它不拥有 credential resolution（`internal/auth`）、provider request adapter、session/tool、
 project trust decision、remote refresh、fuzzy selection 或 model cycling。项目

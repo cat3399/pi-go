@@ -230,3 +230,7 @@
 - 首轮结论为 0 Blocker / 4 Major / 1 Minor；本条只记录修订范围，**不构成 passed 结论**。
 - 已修订：JSONC 全树 duplicate-field admission 与 model fuzz；selected-route 的 compat/oauth/authHeader/model/override 未实现或未知字段 secret-safe preflight；settings/store 的 context-aware local + file-lock serialization、private admission、temp fsync/rename/directory sync、fault/cancel/re-exec coverage；`models-store.json` read-only runtime projection 及 opaque root/entry/model data write-back preservation。
 - 明确仍延后：remote refresh HTTP/auth contract、完整 compat schema、fuzzy selection/model cycling 和正式 project-trust decision；这些不是本轮通过的替代品。
+- 第二轮复审结论为 0 Blocker / 3 Major / 0 Minor；后续修订统一 provider/override/store
+  case-fold identity 并拒绝等价 duplicate，拆出完整 `CachedModel` durable contract 且保留 raw
+  future fields，同时将 settings/store mutation 固定为 pre-existing parent + leaf-parent sync。
+  本记录仍为进行中，等待独立复审，不构成 `passed`。
