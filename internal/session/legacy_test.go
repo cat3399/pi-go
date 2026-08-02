@@ -12,6 +12,33 @@ import (
 	"time"
 )
 
+type lockNewIdentityAfterReplaceStorage struct {
+	osSessionStorage
+	identityUnlock func()
+	identityErr    error
+	replacement    []byte
+}
+
+func (storage *lockNewIdentityAfterReplaceStorage) replace(path string, data []byte) (bool, error) {
+	replaced, err := storage.osSessionStorage.replace(path, data)
+	if err != nil || !replaced {
+		return replaced, err
+	}
+	storage.replacement = append([]byte(nil), data...)
+	storage.identityUnlock, storage.identityErr = claimProcessIdentityWriter(path)
+	if storage.identityErr == nil && storage.identityUnlock == nil {
+		storage.identityErr = errors.New("test identity lock was not acquired")
+	}
+	return true, nil
+}
+
+func (storage *lockNewIdentityAfterReplaceStorage) releaseIdentity() {
+	if storage.identityUnlock != nil {
+		storage.identityUnlock()
+		storage.identityUnlock = nil
+	}
+}
+
 func TestOpenMigratesV1ThroughDurableV3Rewrite(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "v1.jsonl")
@@ -170,6 +197,51 @@ func TestMigrationPublicationUncertaintyDoesNotPublishWritableSession(t *testing
 	}
 }
 
+func TestMigrationPostPublicationIdentityLockFailureIsDurabilityUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.jsonl")
+	legacy := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
+		`{"type":"message","timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"hello","timestamp":1}}` + "\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage := &lockNewIdentityAfterReplaceStorage{}
+	defer storage.releaseIdentity()
+	session, err := openWithStorage(storage, path, OpenOptions{NewEntryID: sequenceIDs("root")})
+	if session != nil {
+		_ = session.Close()
+		t.Fatal("post-publication identity failure returned a writable session")
+	}
+	if storage.identityErr != nil {
+		t.Fatalf("install post-publication identity lock: %v", storage.identityErr)
+	}
+	if !errors.Is(err, ErrDurabilityUnknown) || !errors.Is(err, ErrWriterActive) {
+		t.Fatalf("post-publication migration error = %v, want durability-unknown + writer-active", err)
+	}
+	published, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(published, storage.replacement) || bytes.Equal(published, legacy) {
+		t.Fatalf("post-publication migration bytes = %q, read %v", published, readErr)
+	}
+	blocked, blockedErr := Open(path, OpenOptions{})
+	if blocked != nil {
+		_ = blocked.Close()
+	}
+	if !errors.Is(blockedErr, ErrWriterActive) {
+		t.Fatalf("reopen while new identity is locked = %v, want writer-active", blockedErr)
+	}
+	storage.releaseIdentity()
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("reopen migrated publication: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	afterReopen, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(afterReopen, published) {
+		t.Fatalf("reopen rewrote migrated publication: %v / %q", err, afterReopen)
+	}
+}
+
 func TestMigrationUnsupportedAtomicReplacementFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.jsonl")
 	data := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n")
@@ -217,6 +289,53 @@ func TestRecoverTrailingPartialRequiresExplicitBackupThenReopens(t *testing.T) {
 	defer session.Close()
 	if _, err := RecoverTrailingPartial(path); !errors.Is(err, ErrWriterActive) {
 		t.Fatalf("recovery during active Open = %v, want writer active", err)
+	}
+}
+
+func TestRecoveryPostPublicationIdentityLockFailureIsDurabilityUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "partial.jsonl")
+	prefix := []byte(testHeader + "\n" + userEntryJSON("root", "entry-1", "null", 1) + "\n")
+	original := append(append([]byte(nil), prefix...), '{')
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage := &lockNewIdentityAfterReplaceStorage{}
+	defer storage.releaseIdentity()
+	result, err := recoverTrailingPartialWithStorage(storage, path)
+	if storage.identityErr != nil {
+		t.Fatalf("install post-publication identity lock: %v", storage.identityErr)
+	}
+	if !errors.Is(err, ErrDurabilityUnknown) || !errors.Is(err, ErrWriterActive) {
+		t.Fatalf("post-publication recovery error = %v, want durability-unknown + writer-active", err)
+	}
+	if result.BackupPath != backupName(path) || result.TruncatedBytes != 1 {
+		t.Fatalf("post-publication recovery result = %#v", result)
+	}
+	published, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(published, prefix) || !bytes.Equal(published, storage.replacement) {
+		t.Fatalf("post-publication recovery bytes = %q, read %v", published, readErr)
+	}
+	backup, backupErr := os.ReadFile(result.BackupPath)
+	if backupErr != nil || !bytes.Equal(backup, original) {
+		t.Fatalf("post-publication recovery backup = %q, read %v", backup, backupErr)
+	}
+	blocked, blockedErr := Open(path, OpenOptions{})
+	if blocked != nil {
+		_ = blocked.Close()
+	}
+	if !errors.Is(blockedErr, ErrWriterActive) {
+		t.Fatalf("reopen recovered file while new identity is locked = %v, want writer-active", blockedErr)
+	}
+	storage.releaseIdentity()
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("reopen recovered publication: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecoverTrailingPartial(path); !errors.Is(err, ErrRecoveryNotApplicable) {
+		t.Fatalf("repeat recovery = %v, want not-applicable", err)
 	}
 }
 

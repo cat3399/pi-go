@@ -31,9 +31,14 @@ func claimProcessPathWriter(path string) (func(), error) {
 }
 
 func claimProcessIdentityWriter(path string) (func(), error) {
+	unlock, _, err := claimProcessIdentityWriterWithInfo(path)
+	return unlock, err
+}
+
+func claimProcessIdentityWriterWithInfo(path string) (func(), os.FileInfo, error) {
 	pathPointer, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	spec := sessionWindowsIdentityHandleSpec()
 	handle, err := syscall.CreateFile(
@@ -47,11 +52,25 @@ func claimProcessIdentityWriter(path string) (func(), error) {
 	)
 	if err != nil {
 		if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("CreateFileW session identity: %w", err)
+		return nil, nil, fmt.Errorf("CreateFileW session identity: %w", err)
 	}
-	return claimWindowsWriterHandle(handle, func() error { return syscall.CloseHandle(handle) })
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = syscall.CloseHandle(handle)
+		return nil, nil, errors.New("wrap Windows session identity handle")
+	}
+	unlock, err := claimWindowsWriterFile(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		unlock()
+		return nil, nil, fmt.Errorf("stat Windows session identity handle: %w", err)
+	}
+	return unlock, info, nil
 }
 
 func claimWindowsWriterFile(file *os.File) (func(), error) {
@@ -59,9 +78,14 @@ func claimWindowsWriterFile(file *os.File) (func(), error) {
 }
 
 func claimWindowsWriterHandle(handle syscall.Handle, closeHandle func() error) (func(), error) {
-	overlapped := syscall.Overlapped{}
+	lockRange := sessionWindowsIdentityLockRange()
+	overlapped := syscall.Overlapped{
+		Offset:     lockRange.OffsetLow,
+		OffsetHigh: lockRange.OffsetHigh,
+	}
 	ok, _, callErr := lockFileEx.Call(
-		uintptr(handle), lockfileExclusiveLock|lockfileFailImmediately, 0, 1, 0,
+		uintptr(handle), lockfileExclusiveLock|lockfileFailImmediately, 0,
+		uintptr(lockRange.LengthLow), uintptr(lockRange.LengthHigh),
 		uintptr(unsafePointer(&overlapped)),
 	)
 	if ok == 0 {
@@ -72,7 +96,11 @@ func claimWindowsWriterHandle(handle syscall.Handle, closeHandle func() error) (
 		return nil, errors.Join(fmt.Errorf("LockFileEx: %w", callErr), closeErr)
 	}
 	return func() {
-		_, _, _ = unlockFileEx.Call(uintptr(handle), 0, 1, 0, uintptr(unsafePointer(&overlapped)))
+		_, _, _ = unlockFileEx.Call(
+			uintptr(handle), 0,
+			uintptr(lockRange.LengthLow), uintptr(lockRange.LengthHigh),
+			uintptr(unsafePointer(&overlapped)),
+		)
 		_ = closeHandle()
 	}, nil
 }

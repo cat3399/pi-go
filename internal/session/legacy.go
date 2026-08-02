@@ -234,6 +234,10 @@ func migrateV2Message(entry map[string]json.RawMessage) {
 // original bytes into a no-clobber backup, then atomically replaces the source
 // only when the sole bad data is one unterminated final, non-JSON line.
 func RecoverTrailingPartial(path string) (RecoveryResult, error) {
+	return recoverTrailingPartialWithStorage(osSessionStorage{}, path)
+}
+
+func recoverTrailingPartialWithStorage(storage sessionStorage, path string) (RecoveryResult, error) {
 	resolved, err := resolveSessionPath(path)
 	if err != nil {
 		return RecoveryResult{}, err
@@ -243,7 +247,6 @@ func RecoverTrailingPartial(path string) (RecoveryResult, error) {
 		return RecoveryResult{}, err
 	}
 	defer releaseSessionWriter(claim)
-	storage := osSessionStorage{}
 	data, err := storage.read(resolved)
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("%w: read %s: %w", ErrStorage, resolved, err)
@@ -287,7 +290,9 @@ func RecoverTrailingPartial(path string) (RecoveryResult, error) {
 	}
 	result := RecoveryResult{BackupPath: backup, TruncatedBytes: int64(len(partial))}
 	if err := refreshSessionWriterAfterRewrite(claim, resolved); err != nil {
-		return result, err
+		// Replacement has committed the recovered prefix. Preserve the writer
+		// adoption cause, but classify the operation as post-publication.
+		return result, fmt.Errorf("%w: adopt recovered session identity: %w", ErrDurabilityUnknown, err)
 	}
 	return result, nil
 }

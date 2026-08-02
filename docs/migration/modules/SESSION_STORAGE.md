@@ -289,7 +289,8 @@ replace/platform metadata durability request 发布。rewrite 后 claim 同时�
 因此 hardlink alias 不能绕过仍活跃的 writer；final-component symlink 在 admission 时解析为
 同一 target。多 hardlink 的 migration/recovery 会以 `ErrUnsafeWriterAlias` fail-closed，因为
 atomic replace 会把各 link 分裂成不同历史；普通单路径以及不发生 rewrite 的 v3 resume
-不退化。rename 或 publication 后 durability error 返回 durability-unknown 且不发布可写
+不退化。rename、publication 后 durability error，或 publication 后新 identity 的
+stat/lock/adoption 失败，都返回 durability-unknown 并保留底层 typed cause，且不发布可写
 aggregate；
 原文件可由下一次
 严格 Open reconcile。普通 Open 对 future version、UTF-8、duplicate/graph、middle malformed
@@ -300,7 +301,11 @@ aggregate；
 此前完整 v3 prefix 可严格 decode 时工作；先 no-clobber 创建 `.partial-recovery.backup`，再
 atomic replace 截断。它绝不处理 middle corruption 或完整 tail，且不会由 Open/Application
 自动调用。Unix 使用 kernel-released `flock`，Windows 使用 `LockFileEx`；两者都不采用会在
-crash 后变成安全风险的 stale-directory sentinel。Windows identity handle 由明确的
+crash 后变成安全风险的 stale-directory sentinel。Windows byte-range lock 是 mandatory lock，
+因此 identity coordination 固定锁定 EOF 之外的 `[1<<62, 1<<62+1)`，避免阻塞 session data
+区间上的第二 handle read/append；所有 writer 使用同一 offset，unlock 使用完全相同的 64-bit
+range。Microsoft 明确允许 byte-range lock 延伸到 EOF 之外。Unix `flock` contract 不变。
+Windows identity handle 由明确的
 `CreateFileW(GENERIC_READ, SHARE_READ|SHARE_WRITE|SHARE_DELETE, OPEN_EXISTING)` 建立，允许
 持锁期间删除旧 directory entry，同时旧 handle 继续锁定旧 identity。replacement 只接受
 `SetFileInformationByHandle(FileRenameInfoEx)`，同目录 temporary handle 以
@@ -309,7 +314,8 @@ flags 必须同时包含 `FILE_RENAME_REPLACE_IF_EXISTS|FILE_RENAME_POSIX_SEMANT
 POSIX flag 的 contract 是：即使旧 target 仍有 open handle 也可替换，旧 handle 继续指向旧
 文件，后续按 target name 打开获得新文件；因此 replacement 不需要先释放旧 identity lock，
 publication 后仍在 path lock 与旧 identity lock 下取得新 identity lock，成功返回前同时持有
-两者。temporary 与 target 必须同 directory，且没有
+两者；新 handle 的 `FileInfo` 还会与 publication path 的锁前、锁后 stat 各比对一次，identity
+缺失或 rename race 均 fail-closed。temporary 与 target 必须同 directory，且没有
 `MoveFileExW`、普通 `FileRenameInfo`、`COPY_ALLOWED` 或 copy/delete fallback，因此请求不能
 退化成跨卷/非原子 replacement。
 
@@ -319,7 +325,8 @@ runtime capability check，并把 `ERROR_INVALID_FUNCTION`、`ERROR_NOT_SUPPORTE
 `ERROR_INVALID_PARAMETER`、`ERROR_CALL_NOT_IMPLEMENTED` 作为
 `ErrAtomicReplaceUnsupported` 在 publication 前 fail-closed，绝不尝试较弱 fallback。
 对应参考：[FILE_RENAME_INFORMATION flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)、
-[Windows product behavior](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/d4bc551b-7aaf-4b4f-ba0e-3a75e7c528f0)。
+[Windows product behavior](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/d4bc551b-7aaf-4b4f-ba0e-3a75e7c528f0)、
+[Locking and Unlocking Byte Ranges](https://learn.microsoft.com/en-us/windows/win32/fileio/locking-and-unlocking-byte-ranges-in-files)。
 
 durability 顺序是 temporary `fsync`/close、以 write-through handle 发出原子 rename、再对已改名
 的同一 file handle 调用 `FlushFileBuffers`。Microsoft 明确说明 write-through request 会让 NTFS
@@ -331,8 +338,9 @@ flush 为持久化边界；rename 后 flush/close 失败返回 publication=true�
 [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)、
 [Directory Handles](https://learn.microsoft.com/en-us/windows/win32/fileio/obtaining-a-handle-to-a-directory)。
 
-Windows-only runtime suite 必须实际执行 open-destination replacement、migration 与 recovery，
-并验证旧 open handle 仍读到旧 identity、target name 已读到新 identity；非 Windows ABI seam
+Windows-only runtime suite 必须实际执行 high-range identity lock 下的第二 handle read/append、
+hardlink alias writer rejection、open-destination replacement、migration 与 recovery，并验证旧
+open handle 仍读到旧 identity、target name 已读到新 identity；非 Windows ABI seam
 明确只验证 32/64-bit buffer/flags/handle 参数 contract，不能当作 runtime 通过证据。当前 macOS
 工作机只做 Windows 386/amd64/arm64 compile，真实 runtime 结果仍是 independent review gate。
 

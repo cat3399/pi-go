@@ -23,6 +23,18 @@ func TestWindowsIdentityAndReplacementContractOnly(t *testing.T) {
 	if identity.CreationDisposition != windowsOpenExisting || identity.FlagsAndAttributes != windowsFileAttributeNormal {
 		t.Fatalf("Windows identity open contract = disposition %#x, flags %#x", identity.CreationDisposition, identity.FlagsAndAttributes)
 	}
+	lockRange := sessionWindowsIdentityLockRange()
+	gotOffset := uint64(lockRange.OffsetHigh)<<32 | uint64(lockRange.OffsetLow)
+	gotLength := uint64(lockRange.LengthHigh)<<32 | uint64(lockRange.LengthLow)
+	if gotOffset != windowsIdentityLockOffset || gotOffset < 1<<60 {
+		t.Fatalf("Windows identity lock offset = %#x, want stable high offset %#x", gotOffset, windowsIdentityLockOffset)
+	}
+	if gotLength != 1 {
+		t.Fatalf("Windows identity lock length = %d, want 1", gotLength)
+	}
+	if gotOffset <= maxSessionBytes {
+		t.Fatalf("Windows identity lock offset %d overlaps admitted session data", gotOffset)
+	}
 
 	replacement := sessionWindowsReplacementHandleSpec()
 	wantAccess := windowsGenericRead | windowsGenericWrite | windowsDeleteAccess

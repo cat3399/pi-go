@@ -25,14 +25,28 @@ func claimProcessPathWriter(path string) (func(), error) {
 }
 
 func claimProcessIdentityWriter(path string) (func(), error) {
+	unlock, _, err := claimProcessIdentityWriterWithInfo(path)
+	return unlock, err
+}
+
+func claimProcessIdentityWriterWithInfo(path string) (func(), os.FileInfo, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
-	return claimUnixWriterFile(file)
+	unlock, err := claimUnixWriterFile(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return unlock, info, nil
 }
 
 func claimUnixWriterFile(file *os.File) (func(), error) {

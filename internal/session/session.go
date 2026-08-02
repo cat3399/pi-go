@@ -191,10 +191,13 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 			}
 			return nil, fmt.Errorf("%w: legacy migration publication: %w", ErrStorage, replaceErr)
 		}
-		data = migrated
 		if err := refreshSessionWriterAfterRewrite(claim, resolvedPath); err != nil {
-			return nil, err
+			// The target already names the migrated bytes. Identity adoption is
+			// therefore a post-publication failure even when the new inode cannot
+			// be statted or locked; never return a writable aggregate.
+			return nil, fmt.Errorf("%w: adopt migrated session identity: %w", ErrDurabilityUnknown, err)
 		}
+		data = migrated
 	}
 	header, entries, byID, needsSeparator, err := decodeSessionFile(resolvedPath, data)
 	if err != nil {

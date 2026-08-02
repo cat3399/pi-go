@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,6 +157,103 @@ func (storage *fakeStorage) replace(_ string, data []byte) (bool, error) {
 }
 
 func (storage *fakeStorage) validateReplace(string) error { return storage.validateReplaceErr }
+
+func TestRefreshAfterRewriteVerifiesLockedIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		claim       func(t *testing.T, directory string) processIdentityWriterClaimer
+		wantCause   error
+		wantUnlocks int
+	}{
+		{
+			name: "missing lock",
+			claim: func(*testing.T, string) processIdentityWriterClaimer {
+				return func(string) (func(), os.FileInfo, error) { return nil, nil, nil }
+			},
+			wantCause: errRewrittenIdentityLockMissing,
+		},
+		{
+			name: "locked handle has different identity",
+			claim: func(t *testing.T, directory string) processIdentityWriterClaimer {
+				otherPath := filepath.Join(directory, "other.jsonl")
+				if err := os.WriteFile(otherPath, []byte("other"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				otherInfo, err := os.Stat(otherPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return func(string) (func(), os.FileInfo, error) {
+					return func() {}, otherInfo, nil
+				}
+			},
+			wantCause:   errRewrittenIdentityChanged,
+			wantUnlocks: rewrittenIdentityLockAttempts,
+		},
+		{
+			name: "path changes after matching handle is locked",
+			claim: func(t *testing.T, directory string) processIdentityWriterClaimer {
+				attempt := 0
+				return func(path string) (func(), os.FileInfo, error) {
+					unlock, info, err := claimProcessIdentityWriterWithInfo(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					moved := filepath.Join(directory, fmt.Sprintf("moved-%d.jsonl", attempt))
+					attempt++
+					if err := os.Rename(path, moved); err != nil {
+						unlock()
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("raced"), 0o600); err != nil {
+						unlock()
+						t.Fatal(err)
+					}
+					return unlock, info, nil
+				}
+			},
+			wantCause:   errRewrittenIdentityChanged,
+			wantUnlocks: rewrittenIdentityLockAttempts,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "session.jsonl")
+			if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := claimSessionWriter(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer releaseSessionWriter(claim)
+			replaced, err := (osSessionStorage{}).replace(path, []byte("new"))
+			if err != nil || !replaced {
+				t.Fatalf("prepare rewritten identity = (%t, %v)", replaced, err)
+			}
+
+			claimIdentity := test.claim(t, directory)
+			unlockCalls := 0
+			wrappedClaim := func(path string) (func(), os.FileInfo, error) {
+				unlock, info, err := claimIdentity(path)
+				if unlock == nil {
+					return nil, info, err
+				}
+				return func() {
+					unlockCalls++
+					unlock()
+				}, info, err
+			}
+			err = refreshSessionWriterAfterRewriteWith(claim, path, wrappedClaim)
+			if !errors.Is(err, ErrStorage) || !errors.Is(err, test.wantCause) {
+				t.Fatalf("refresh rewritten identity = %v, want storage + %v", err, test.wantCause)
+			}
+			if unlockCalls != test.wantUnlocks {
+				t.Fatalf("mismatched identity unlock calls = %d, want %d", unlockCalls, test.wantUnlocks)
+			}
+		})
+	}
+}
 
 func TestRewriteTemporaryIsRemovedOnEveryPrePublicationFailure(t *testing.T) {
 	t.Parallel()

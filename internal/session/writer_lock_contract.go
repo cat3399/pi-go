@@ -25,6 +25,11 @@ const (
 	windowsMoveFileCopyAllowed  uint32 = 0x00000002
 	windowsMoveFileWrite        uint32 = 0x00000008
 	windowsMaximumPathCodeUnits        = 32767
+	// Windows byte-range locks are mandatory even for another handle in the
+	// locking process. Keep the coordination byte far beyond any realistic
+	// session or supported Windows filesystem, while remaining below MaxInt64.
+	windowsIdentityLockOffset uint64 = 1 << 62
+	windowsIdentityLockLength uint64 = 1
 )
 
 type windowsIdentityHandleSpec struct {
@@ -46,6 +51,13 @@ type windowsRenameInfoLayout struct {
 	fileNameLengthOffset int
 	fileNameOffset       int
 	minimumSize          int
+}
+
+type windowsIdentityLockRange struct {
+	OffsetLow  uint32
+	OffsetHigh uint32
+	LengthLow  uint32
+	LengthHigh uint32
 }
 
 func sessionWindowsCreatePublishFlags() uint32 {
@@ -79,6 +91,15 @@ func sessionWindowsIdentityHandleSpec() windowsIdentityHandleSpec {
 		ShareMode:           windowsFileShareRead | windowsFileShareWrite | windowsFileShareDelete,
 		CreationDisposition: windowsOpenExisting,
 		FlagsAndAttributes:  windowsFileAttributeNormal,
+	}
+}
+
+func sessionWindowsIdentityLockRange() windowsIdentityLockRange {
+	return windowsIdentityLockRange{
+		OffsetLow:  uint32(windowsIdentityLockOffset & 0xffffffff),
+		OffsetHigh: uint32(windowsIdentityLockOffset >> 32),
+		LengthLow:  uint32(windowsIdentityLockLength & 0xffffffff),
+		LengthHigh: uint32(windowsIdentityLockLength >> 32),
 	}
 }
 

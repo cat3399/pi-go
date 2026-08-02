@@ -4,11 +4,13 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestWindowsFailedIdentityLockClosesHandle(t *testing.T) {
@@ -23,6 +25,57 @@ func TestWindowsFailedIdentityLockClosesHandle(t *testing.T) {
 	if !errors.Is(err, syscall.Errno(6)) { // ERROR_INVALID_HANDLE
 		t.Fatalf("failed identity lock cause = %v", err)
 	}
+}
+
+func TestWindowsHighIdentityLockAllowsDataIOAndRejectsAliasWriter(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "locked.jsonl")
+	session, err := Create(path, CreateOptions{
+		ID:         "windows-high-lock",
+		WorkingDir: directory,
+		NewEntryID: sequenceIDs("entry-1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read session through a second handle while identity-locked: %v", err)
+	}
+	afterRead, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRead.Size() != before.Size() || uint64(afterRead.Size()) >= windowsIdentityLockOffset {
+		t.Fatalf("high identity lock changed session size from %d to %d", before.Size(), afterRead.Size())
+	}
+	if !bytes.Contains(data, []byte(`"id":"windows-high-lock"`)) {
+		t.Fatalf("second-handle read returned unexpected session: %q", data)
+	}
+
+	if _, err := session.Append(
+		context.Background(),
+		mustUserMessage(t, "append through second handle", time.UnixMilli(1)),
+		AppendOptions{},
+	); err != nil {
+		t.Fatalf("append through a second handle while identity-locked: %v", err)
+	}
+	appended, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(appended, []byte("append through second handle")) {
+		t.Fatalf("read appended identity-locked session = %q, %v", appended, err)
+	}
+
+	hardLink := filepath.Join(directory, "locked-alias.jsonl")
+	if err := os.Link(path, hardLink); err != nil {
+		t.Skipf("hardlink alias unavailable: %v", err)
+	}
+	runWriterClaimHelper(t, hardLink, "active")
 }
 
 func TestWindowsFileRenameInfoExReplacesOpenDestinationUnderIdentityLock(t *testing.T) {

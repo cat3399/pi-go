@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,15 @@ import (
 	"strings"
 	"sync"
 )
+
+const rewrittenIdentityLockAttempts = 3
+
+var (
+	errRewrittenIdentityLockMissing = errors.New("rewritten session identity lock was not acquired")
+	errRewrittenIdentityChanged     = errors.New("rewritten session identity changed while acquiring its lock")
+)
+
+type processIdentityWriterClaimer func(string) (func(), os.FileInfo, error)
 
 // A writer claim uses both a canonical path and kernel locks on every file
 // identity it has owned. The path lock survives atomic replacement; identity
@@ -95,35 +105,78 @@ func refreshSessionWriter(claim *writerClaim, path string) error {
 // a normal Open must reject a changed file, while a successful migration has
 // just made exactly that change under the same process lock.
 func refreshSessionWriterAfterRewrite(claim *writerClaim, path string) error {
-	key, lockPath, info, err := sessionWriterDescriptor(path)
-	if err != nil {
-		return fmt.Errorf("%w: identify rewritten session %s: %v", ErrStorage, path, err)
-	}
-	if info == nil {
-		return fmt.Errorf("%w: rewritten session disappeared: %s", ErrStorage, path)
-	}
+	return refreshSessionWriterAfterRewriteWith(claim, path, claimProcessIdentityWriterWithInfo)
+}
+
+func refreshSessionWriterAfterRewriteWith(claim *writerClaim, path string, claimIdentity processIdentityWriterClaimer) error {
 	activeSessionWriters.Lock()
 	defer activeSessionWriters.Unlock()
 	if _, active := activeSessionWriters.claims[claim]; !active {
 		return fmt.Errorf("%w: writer claim for %s is inactive", ErrStorage, path)
 	}
-	if conflict := conflictingWriterLocked(claim, key, info); conflict != nil {
-		return fmt.Errorf("%w: %s", ErrWriterActive, path)
-	}
-	// The stable path lock remains held across replacement. Retain the old
-	// identity lock as well, and add a lock for the newly published inode so a
-	// hard-link alias to either generation cannot become a concurrent writer.
-	identityUnlock, lockErr := claimProcessIdentityWriter(lockPath)
-	if lockErr != nil {
-		return fmt.Errorf("%w: acquire rewritten file identity lock for %s: %v", ErrWriterActive, path, lockErr)
-	}
-	if identityUnlock != nil {
+
+	var lastErr error
+	for attempt := 0; attempt < rewrittenIdentityLockAttempts; attempt++ {
+		key, lockPath, info, err := sessionWriterDescriptor(path)
+		if err != nil {
+			lastErr = fmt.Errorf("identify rewritten session: %w", err)
+			continue
+		}
+		if info == nil {
+			lastErr = fmt.Errorf("rewritten session disappeared: %w", os.ErrNotExist)
+			continue
+		}
+		if conflict := conflictingWriterLocked(claim, key, info); conflict != nil {
+			return fmt.Errorf("%w: %s", ErrWriterActive, path)
+		}
+
+		// The stable path lock remains held across replacement. Retain the old
+		// identity lock as well, and lock the newly published inode. Stat the
+		// locked handle itself and compare it with the path stat so a rename race
+		// cannot make the claim record one inode while locking another.
+		identityUnlock, lockedInfo, lockErr := claimIdentity(lockPath)
+		if lockErr != nil {
+			if identityUnlock != nil {
+				identityUnlock()
+			}
+			return fmt.Errorf("%w: acquire rewritten file identity lock for %s: %w", ErrWriterActive, path, lockErr)
+		}
+		if identityUnlock == nil || lockedInfo == nil {
+			if identityUnlock != nil {
+				identityUnlock()
+			}
+			lastErr = errRewrittenIdentityLockMissing
+			continue
+		}
+		if !os.SameFile(info, lockedInfo) {
+			identityUnlock()
+			lastErr = errRewrittenIdentityChanged
+			continue
+		}
+		verifiedKey, _, verifiedInfo, verifyErr := sessionWriterDescriptor(path)
+		if verifyErr != nil {
+			identityUnlock()
+			lastErr = fmt.Errorf("verify locked rewritten session: %w", verifyErr)
+			continue
+		}
+		if verifiedInfo == nil {
+			identityUnlock()
+			lastErr = fmt.Errorf("rewritten session disappeared after locking: %w", os.ErrNotExist)
+			continue
+		}
+		if verifiedKey != key || !os.SameFile(lockedInfo, verifiedInfo) {
+			identityUnlock()
+			lastErr = errRewrittenIdentityChanged
+			continue
+		}
+
 		claim.unlocks = append(claim.unlocks, identityUnlock)
+		claim.paths[verifiedKey] = struct{}{}
+		activeSessionWriters.paths[verifiedKey] = claim
+		claim.info = lockedInfo
+		return nil
 	}
-	claim.paths[key] = struct{}{}
-	activeSessionWriters.paths[key] = claim
-	claim.info = info
-	return nil
+	return fmt.Errorf("%w: adopt rewritten session identity for %s after %d attempts: %w", ErrStorage, path, rewrittenIdentityLockAttempts, lastErr)
 }
 
 func releaseSessionWriter(claim *writerClaim) {
