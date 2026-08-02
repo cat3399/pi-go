@@ -25,7 +25,14 @@ func (q *mutationQueue) with(ctx context.Context, key string, fn func() error) e
 		select {
 		case <-previous:
 		case <-ctx.Done():
-			q.release(key, current)
+			// This cancelled node is still the predecessor observed by any
+			// operation registered after it. Relay predecessor completion before
+			// releasing our barrier; closing current immediately would let C pass
+			// a still-running A when queued B is cancelled.
+			go func() {
+				<-previous
+				q.release(key, current)
+			}()
 			return context.Cause(ctx)
 		}
 	}

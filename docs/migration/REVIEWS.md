@@ -44,6 +44,13 @@
 | `F-SESSION-002` | Major | M-SESSION | Create 隐式 MkdirAll，但未同步新 ancestor 在父目录中的目录项 | parent precondition 与缺目录回归 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-003` | Minor | M-SESSION | 超出 RFC3339 四位年份的 clock 值可写但不可 reopen | create/append 可重开时间验证 | R-SESSION-001 | `closed-by-R-SESSION-002` |
 | `F-SESSION-004` | Minor | M-AGENT | bounded settlement 容易被误解为 write 后仍可由 deadline 中断 | 首次 write 线性化边界写入 charter | R-SESSION-001 | `closed-by-R-SESSION-002` |
+| `F-TOOL-001` | Major | M-TOOL | queued cancellation 提前关闭 barrier，使后继越过仍运行 predecessor | A/B-cancel/C 顺序与 race 定点复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-002` | Major | M-TOOL | atomic rename 替换 symlink alias，并可绕过只读 target mode | follow-symlink、identity/TOCTOU、mode/0444 回归复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-003` | Major | M-TOOL | edit patch hunk/count/context 不可应用 | single/distant multi-hunk 实际 apply oracle 复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-004` | Major | M-TOOL | malformed ignore rule nil-call panic、I/O error 被吞且缺 parent rule | compiled scoped rules、typed failure、parent/nested/cancel 复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-005` | Major | M-TOOL | grep context 被 2,000-line cap 截断却报告 byte limit | >2,000 lines 且 <50KiB regression 与 metadata 复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-006` | Minor | M-TOOL | read NFD fallback no-op，AM/PM fallback 仅大写 | x/text NFD 与 lowercase AM/PM tests 复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
+| `F-TOOL-007` | Minor | M-TOOL | entry I/O/ignore discovery cancellation 不完整 | cancelled empty ls 与 deterministic mid-walk cancel 复审 | R-TOOL-003 | `fix-applied-awaiting-review` |
 
 ## R-STAGE0-001：事实基线首轮独立审查
 
@@ -132,6 +139,17 @@
   和 Plan 9 交叉编译通过；32/64 位 Job Object layout 有尺寸断言。
 - 最终结论：`passed`，没有未关闭 Blocker 或 Major。真实 Windows Job Object lifecycle
   尚未在本机执行，保留为跨平台验证债务。
+
+## R-TOOL-003：M-TOOL/v0.2 filesystem suite 首轮独立审查
+
+- 范围：commit `3b6773d` 的 read/write/edit/grep/find/ls suite、registry/agent adapter、
+  charter/ledger 与固定上游 filesystem tool 证据；reviewer 未参与实现。
+- 结论：`changes-required`，0 Blocker / 5 Major / 2 Minor；finding 见
+  `F-TOOL-001..007`。核心边界与纯 Go 方向成立，但 queue cancellation、symlink atomicity、
+  patch correctness、ignore discovery、grep truncation、path normalization 与 cancellation
+  contract 必须在复审前闭合。
+- 修订：实现者已追加候选修复与故障/race/apply/cancel 回归，全部 finding 保持
+  `fix-applied-awaiting-review`，不得在定点复审前标记 behavior/test 为完成。
 
 ## R-SESSION-001：M-SESSION/v0.1 首轮联合审查
 

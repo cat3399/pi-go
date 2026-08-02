@@ -85,11 +85,11 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 
 | ID | Behavior | 上游测试/证据 | 当前 disposition | 覆盖或重评条件 |
 | --- | --- | --- | --- | --- |
-| `T-TOOL-008` | B-TOOL-006 | `tools.test.ts` read range/limit/truncate；`path-utils.test.ts` | `deferred` | Go `filesystem_test.go` covers range, binary, truncation and path variants; awaiting R-TOOL-003 |
-| `T-TOOL-009` | B-TOOL-007 | `file-mutation-queue.test.ts` all cases；write/edit tests | `deferred` | Go queue alias/cancel/parallel and atomic write/edit tests; race gate pending final review |
-| `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `deferred` | Go original-snapshot, conflict, BOM/CRLF and supported fuzzy tests; NFKC subset debt |
-| `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `deferred` | Go deterministic tree/ignore/context/limit tests; external rg/fd-specific test intents classified by debt |
-| `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `deferred` | Go fuzz JSON/edit and cancellation/race tests; awaiting R-TOOL-003 |
+| `T-TOOL-008` | B-TOOL-006 | `tools.test.ts` read range/limit/truncate；`path-utils.test.ts` | `deferred` | range/binary/truncation + NFD/lowercase AM/PM variants；R-TOOL-003 fix awaiting review |
+| `T-TOOL-009` | B-TOOL-007 | `file-mutation-queue.test.ts` all cases；write/edit tests | `deferred` | A/B-cancel/C barrier、alias/target/mode/0444/retarget、race；awaiting review |
+| `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `deferred` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；awaiting review |
+| `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `deferred` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；awaiting review |
+| `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `deferred` | JSON/edit/unified-patch fuzz、symlink TOCTOU、cancel/race strengthening；awaiting R-TOOL-003 re-review |
 
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。

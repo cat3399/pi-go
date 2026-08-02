@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -34,6 +33,9 @@ type LsInput struct {
 }
 
 func (s *FilesystemSuite) Find(ctx context.Context, input FindInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if err := validText("pattern", input.Pattern); err != nil {
 		return inputError(err)
 	}
@@ -55,6 +57,9 @@ func (s *FilesystemSuite) Find(ctx context.Context, input FindInput) (ToolResult
 	if !info.IsDir() {
 		return ToolResult{}, fmt.Errorf("not a directory: %s", root)
 	}
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	limit := DefaultFindResults
 	if input.Limit != nil {
 		limit = *input.Limit
@@ -73,6 +78,9 @@ func (s *FilesystemSuite) Find(ctx context.Context, input FindInput) (ToolResult
 	var result []string
 	more := false
 	for _, entry := range entries {
+		if err := contextFailure(ctx); err != nil {
+			return ToolResult{Text: operationErrorText(err)}, err
+		}
 		if matcher(entry.relative) {
 			if len(result) >= limit {
 				more = true
@@ -92,6 +100,9 @@ func (s *FilesystemSuite) Find(ctx context.Context, input FindInput) (ToolResult
 }
 
 func (s *FilesystemSuite) Ls(ctx context.Context, input LsInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	rootInput := "."
 	if input.Path != nil {
 		rootInput = *input.Path
@@ -120,6 +131,9 @@ func (s *FilesystemSuite) Ls(ctx context.Context, input LsInput) (ToolResult, er
 	directoryEntries, err := os.ReadDir(root)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("cannot read directory: %w", err)
+	}
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
 	}
 	sort.Slice(directoryEntries, func(left, right int) bool {
 		l, r := strings.ToLower(directoryEntries[left].Name()), strings.ToLower(directoryEntries[right].Name())
@@ -151,6 +165,9 @@ func (s *FilesystemSuite) Ls(ctx context.Context, input LsInput) (ToolResult, er
 }
 
 func (s *FilesystemSuite) Grep(ctx context.Context, input GrepInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if err := validText("pattern", input.Pattern); err != nil {
 		return inputError(err)
 	}
@@ -168,6 +185,9 @@ func (s *FilesystemSuite) Grep(ctx context.Context, input GrepInput) (ToolResult
 	info, err := os.Stat(root)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("path not found: %s", root)
+	}
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
 	}
 	limit := DefaultGrepMatches
 	if input.Limit != nil {
@@ -224,11 +244,17 @@ func (s *FilesystemSuite) Grep(ctx context.Context, input GrepInput) (ToolResult
 			return ToolResult{Text: operationErrorText(err)}, errorsJoinCancel(err)
 		}
 		data, readErr := os.ReadFile(candidate.absolute)
+		if err := contextFailure(ctx); err != nil {
+			return ToolResult{Text: operationErrorText(err)}, err
+		}
 		if readErr != nil || isBinary(data) || !utf8.Valid(data) {
 			continue
 		}
 		lines := strings.Split(normalizeLF(string(data)), "\n")
 		for lineIndex, line := range lines {
+			if err := contextFailure(ctx); err != nil {
+				return ToolResult{Text: operationErrorText(err)}, err
+			}
 			if !expression.MatchString(line) {
 				continue
 			}
@@ -259,7 +285,7 @@ func (s *FilesystemSuite) Grep(ctx context.Context, input GrepInput) (ToolResult
 	if matches == 0 {
 		return ToolResult{Text: "No matches found"}, nil
 	}
-	result := s.searchResult(output, more, limit, "matches")
+	result := s.grepResult(output, more, limit)
 	if linesTruncated {
 		if result.Details == nil {
 			result.Details = map[string]any{}
@@ -276,7 +302,7 @@ type walkEntry struct {
 }
 
 func (s *FilesystemSuite) walk(ctx context.Context, root string) ([]walkEntry, error) {
-	matcher, err := newIgnoreMatcher(root)
+	matcher, err := newIgnoreMatcher(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -296,11 +322,16 @@ func (s *FilesystemSuite) walk(ctx context.Context, root string) ([]walkEntry, e
 			return err
 		}
 		relative = filepath.ToSlash(relative)
-		if matcher.ignored(relative, entry.IsDir()) {
+		if matcher.ignored(current, entry.IsDir()) {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if entry.IsDir() {
+			if err := matcher.addFile(ctx, current); err != nil {
+				return err
+			}
 		}
 		entries = append(entries, walkEntry{absolute: current, relative: relative, isDir: entry.IsDir()})
 		return nil
@@ -323,6 +354,33 @@ func (s *FilesystemSuite) searchResult(lines []string, reached bool, limit int, 
 	}
 	if truncation.Truncated {
 		details["truncation"] = s.truncationDetails(truncation)
+		output += fmt.Sprintf("\n\n[%s limit reached.]", formatSize(s.maxBytes))
+	}
+	if len(details) == 0 {
+		details = nil
+	}
+	return ToolResult{Text: output, Details: details}
+}
+
+func (s *FilesystemSuite) grepResult(lines []string, reached bool, limit int) ToolResult {
+	raw := strings.Join(lines, "\n")
+	// Grep's match limit already bounds matches, while context can legitimately
+	// exceed 2,000 lines. Only the byte ceiling applies to the formatted output.
+	truncation := truncateFilesystemHead(raw, len(lines)+1, s.maxBytes)
+	output := truncation.Content
+	details := map[string]any{}
+	if reached {
+		details["matchesLimitReached"] = limit
+		output += fmt.Sprintf("\n\n[%d matches limit reached. Use limit=%d for more, or refine pattern.]", limit, limit*2)
+	}
+	if truncation.Truncated {
+		details["truncation"] = map[string]any{
+			"truncated": truncation.Truncated, "truncatedBy": truncation.TruncatedBy,
+			"totalLines": truncation.TotalLines, "totalBytes": truncation.TotalBytes,
+			"outputLines": truncation.OutputLines, "outputBytes": truncation.OutputBytes,
+			"maxLines": len(lines) + 1, "maxBytes": s.maxBytes,
+			"firstLineExceedsLimit": truncation.FirstLineLarge,
+		}
 		output += fmt.Sprintf("\n\n[%s limit reached.]", formatSize(s.maxBytes))
 	}
 	if len(details) == 0 {
@@ -363,8 +421,17 @@ func compileGlob(pattern string) (func(string) bool, error) {
 			if end == len(pattern) {
 				return nil, fmt.Errorf("unterminated character class")
 			}
-			expression += pattern[index : end+1]
+			class := pattern[index+1 : end]
+			if class == "" {
+				return nil, fmt.Errorf("empty character class")
+			}
+			if strings.HasPrefix(class, "!") || strings.HasPrefix(class, "^") {
+				class = "^" + class[1:]
+			}
+			expression += "[" + class + "]"
 			index = end
+		case '\\':
+			return nil, fmt.Errorf("%w: backslash escapes are not supported in glob patterns", ErrUnsupportedFilesystemFeature)
 		default:
 			expression += regexp.QuoteMeta(string(character))
 		}
@@ -377,55 +444,119 @@ func compileGlob(pattern string) (func(string) bool, error) {
 	return compiled.MatchString, nil
 }
 
-type ignoreMatcher struct {
-	root  string
-	rules []ignoreRule
-}
+type ignoreMatcher struct{ rules []ignoreRule }
 type ignoreRule struct {
+	base              string
 	pattern           string
+	match             func(string) bool
+	basename          bool
 	negate, directory bool
 }
 
-func newIgnoreMatcher(root string) (ignoreMatcher, error) {
-	matcher := ignoreMatcher{root: root}
-	_ = filepath.WalkDir(root, func(current string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+func newIgnoreMatcher(ctx context.Context, root string) (*ignoreMatcher, error) {
+	if err := contextFailure(ctx); err != nil {
+		return nil, err
+	}
+	matcher := &ignoreMatcher{}
+	boundary, err := gitIgnoreBoundary(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	for _, directory := range directoryChain(boundary, root) {
+		if err := matcher.addFile(ctx, directory); err != nil {
+			return nil, err
 		}
-		if !entry.IsDir() {
-			return nil
-		}
-		data, readErr := os.ReadFile(filepath.Join(current, ".gitignore"))
-		if readErr != nil {
-			return nil
-		}
-		base, _ := filepath.Rel(root, current)
-		for _, line := range strings.Split(normalizeLF(string(data)), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			rule := ignoreRule{negate: strings.HasPrefix(line, "!")}
-			if rule.negate {
-				line = line[1:]
-			}
-			rule.directory = strings.HasSuffix(line, "/")
-			line = strings.TrimSuffix(line, "/")
-			if line == "" {
-				continue
-			}
-			if base != "." {
-				line = path.Join(filepath.ToSlash(base), line)
-			}
-			rule.pattern = line
-			matcher.rules = append(matcher.rules, rule)
-		}
-		return nil
-	})
+	}
 	return matcher, nil
 }
-func (m ignoreMatcher) ignored(relative string, isDirectory bool) bool {
-	if relative == ".git" || strings.HasPrefix(relative, ".git/") || relative == "node_modules" || strings.HasPrefix(relative, "node_modules/") {
+
+func gitIgnoreBoundary(ctx context.Context, root string) (string, error) {
+	root = filepath.Clean(root)
+	for current := root; ; current = filepath.Dir(current) {
+		if err := contextFailure(ctx); err != nil {
+			return "", err
+		}
+		_, err := os.Lstat(filepath.Join(current, ".git"))
+		if err == nil {
+			return current, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("inspect git boundary: %w", err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return root, nil
+		}
+	}
+}
+
+func directoryChain(first, last string) []string {
+	first, last = filepath.Clean(first), filepath.Clean(last)
+	chain := []string{last}
+	for current := last; current != first; {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return []string{last}
+		}
+		chain = append(chain, parent)
+		current = parent
+	}
+	for left, right := 0, len(chain)-1; left < right; left, right = left+1, right-1 {
+		chain[left], chain[right] = chain[right], chain[left]
+	}
+	return chain
+}
+
+func (m *ignoreMatcher) addFile(ctx context.Context, directory string) error {
+	if err := contextFailure(ctx); err != nil {
+		return err
+	}
+	ignorePath := filepath.Join(directory, ".gitignore")
+	data, err := os.ReadFile(ignorePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read ignore rules %s: %w", ignorePath, err)
+	}
+	if err := contextFailure(ctx); err != nil {
+		return err
+	}
+	for lineNumber, line := range strings.Split(normalizeLF(string(data)), "\n") {
+		if err := contextFailure(ctx); err != nil {
+			return err
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rule := ignoreRule{base: directory, negate: strings.HasPrefix(line, "!")}
+		if rule.negate {
+			line = strings.TrimPrefix(line, "!")
+		}
+		if strings.Contains(line, `\`) {
+			return fmt.Errorf("%w: %s:%d uses unsupported escape syntax", ErrUnsupportedFilesystemFeature, ignorePath, lineNumber+1)
+		}
+		rule.directory = strings.HasSuffix(line, "/")
+		line = strings.TrimSuffix(line, "/")
+		anchored := strings.HasPrefix(line, "/")
+		line = strings.TrimPrefix(line, "/")
+		if line == "" {
+			return fmt.Errorf("%w: %s:%d has an empty rule", ErrInvalidFilesystemInput, ignorePath, lineNumber+1)
+		}
+		rule.basename = !anchored && !strings.Contains(line, "/")
+		rule.pattern = line
+		rule.match, err = compileGlob(line)
+		if err != nil {
+			return fmt.Errorf("%w: invalid .gitignore pattern at %s:%d: %v", ErrInvalidFilesystemInput, ignorePath, lineNumber+1, err)
+		}
+		m.rules = append(m.rules, rule)
+	}
+	return nil
+}
+
+func (m *ignoreMatcher) ignored(absolute string, isDirectory bool) bool {
+	baseName := filepath.Base(absolute)
+	if baseName == ".git" || baseName == "node_modules" {
 		return true
 	}
 	ignored := false
@@ -433,8 +564,16 @@ func (m ignoreMatcher) ignored(relative string, isDirectory bool) bool {
 		if rule.directory && !isDirectory {
 			continue
 		}
-		match, _ := compileGlob(rule.pattern)
-		if match(relative) || (!strings.Contains(rule.pattern, "/") && match(path.Base(relative))) {
+		relative, err := filepath.Rel(rule.base, absolute)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		relative = filepath.ToSlash(relative)
+		candidate := relative
+		if rule.basename {
+			candidate = filepath.Base(relative)
+		}
+		if rule.match(candidate) {
 			ignored = !rule.negate
 		}
 	}

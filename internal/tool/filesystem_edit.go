@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 func (s *FilesystemSuite) Edit(ctx context.Context, input EditInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if err := validText("path", input.Path); err != nil {
 		return inputError(err)
 	}
@@ -35,7 +39,18 @@ func (s *FilesystemSuite) Edit(ctx context.Context, input EditInput) (ToolResult
 	}
 	var outcome ToolResult
 	err = s.mutations.with(ctx, key, func() error {
-		data, err := os.ReadFile(path)
+		currentKey, err := mutationKey(path)
+		if err != nil {
+			return err
+		}
+		if filepath.Clean(currentKey) != filepath.Clean(key) {
+			return fmt.Errorf("%w: edit target changed before read", ErrFilesystemPath)
+		}
+		readPath, err := resolveMutationDestination(path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(readPath)
 		if err != nil {
 			return fmt.Errorf("could not edit file %s: %w", input.Path, err)
 		}
@@ -50,7 +65,7 @@ func (s *FilesystemSuite) Edit(ctx context.Context, input EditInput) (ToolResult
 		if err != nil {
 			return err
 		}
-		if err := atomicWrite(ctx, path, []byte(after)); err != nil {
+		if err := atomicWrite(ctx, path, key, []byte(after)); err != nil {
 			return err
 		}
 		diff, patch, firstChanged := makeEditDiff(input.Path, before, after)
@@ -238,39 +253,194 @@ func fuzzyByteRange(content, target string, normalizedStart, normalizedLength in
 }
 
 func makeEditDiff(path, before, after string) (display, patch string, firstChangedLine int) {
-	beforeLines, afterLines := strings.Split(before, "\n"), strings.Split(after, "\n")
-	first := 0
-	for first < len(beforeLines) && first < len(afterLines) && beforeLines[first] == afterLines[first] {
-		first++
+	operations := lineDiff(splitDiffLines(before), splitDiffLines(after))
+	hunks := diffHunks(operations, 4)
+	if len(hunks) == 0 {
+		return "", fmt.Sprintf("--- %s\n+++ %s\n", path, path), 0
 	}
-	firstChangedLine = first + 1
-	lastBefore, lastAfter := len(beforeLines)-1, len(afterLines)-1
-	for lastBefore >= first && lastAfter >= first && beforeLines[lastBefore] == afterLines[lastAfter] {
-		lastBefore--
-		lastAfter--
+	for index, operation := range operations {
+		if operation.kind != ' ' {
+			firstChangedLine = hunkLineStarts(operations, index).new
+			break
+		}
 	}
-	var lines []string
-	for index := maxInt(0, first-4); index < first; index++ {
-		lines = append(lines, fmt.Sprintf(" %d %s", index+1, beforeLines[index]))
+	var patchBuilder strings.Builder
+	fmt.Fprintf(&patchBuilder, "--- %s\n+++ %s\n", path, path)
+	var displayLines []string
+	for hunkIndex, hunk := range hunks {
+		starts := hunkLineStarts(operations, hunk.first)
+		oldCount, newCount := hunkCounts(operations[hunk.first:hunk.last])
+		oldStart, newStart := starts.old, starts.new
+		if oldCount == 0 {
+			oldStart--
+		}
+		if newCount == 0 {
+			newStart--
+		}
+		fmt.Fprintf(&patchBuilder, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
+		if hunkIndex > 0 {
+			displayLines = append(displayLines, " ...")
+		}
+		oldLine, newLine := starts.old, starts.new
+		for _, operation := range operations[hunk.first:hunk.last] {
+			writePatchLine(&patchBuilder, operation.kind, operation.text)
+			displayText := strings.TrimSuffix(operation.text, "\n")
+			switch operation.kind {
+			case '-':
+				displayLines = append(displayLines, fmt.Sprintf("-%d %s", oldLine, displayText))
+				oldLine++
+			case '+':
+				displayLines = append(displayLines, fmt.Sprintf("+%d %s", newLine, displayText))
+				newLine++
+			default:
+				displayLines = append(displayLines, fmt.Sprintf(" %d %s", newLine, displayText))
+				oldLine++
+				newLine++
+			}
+		}
 	}
-	for index := first; index <= lastBefore; index++ {
-		lines = append(lines, fmt.Sprintf("-%d %s", index+1, beforeLines[index]))
+	return strings.Join(displayLines, "\n"), patchBuilder.String(), firstChangedLine
+}
+
+type lineDiffOperation struct {
+	kind byte
+	text string
+}
+
+type diffHunk struct{ first, last int }
+
+func splitDiffLines(value string) []string {
+	if value == "" {
+		return nil
 	}
-	for index := first; index <= lastAfter; index++ {
-		lines = append(lines, fmt.Sprintf("+%d %s", index+1, afterLines[index]))
+	lines := make([]string, 0, strings.Count(value, "\n")+1)
+	for len(value) > 0 {
+		newline := strings.IndexByte(value, '\n')
+		if newline < 0 {
+			lines = append(lines, value)
+			break
+		}
+		lines = append(lines, value[:newline+1])
+		value = value[newline+1:]
 	}
-	for index := lastAfter + 1; index <= minInt(len(afterLines)-1, lastAfter+4); index++ {
-		lines = append(lines, fmt.Sprintf(" %d %s", index+1, afterLines[index]))
+	return lines
+}
+
+// lineDiff emits a deterministic transformation. At each mismatch it chooses
+// the nearest common line as a resynchronization anchor; the result need not be
+// the mathematically shortest diff, but every operation is exact and yields an
+// applicable patch without quadratic memory on large source files.
+func lineDiff(before, after []string) []lineDiffOperation {
+	operations := make([]lineDiffOperation, 0, len(before)+len(after))
+	for oldIndex, newIndex := 0, 0; oldIndex < len(before) || newIndex < len(after); {
+		if oldIndex < len(before) && newIndex < len(after) && before[oldIndex] == after[newIndex] {
+			operations = append(operations, lineDiffOperation{kind: ' ', text: before[oldIndex]})
+			oldIndex++
+			newIndex++
+			continue
+		}
+		anchorOld, anchorNew := nearestLineAnchor(before, after, oldIndex, newIndex)
+		if anchorOld < 0 {
+			for ; oldIndex < len(before); oldIndex++ {
+				operations = append(operations, lineDiffOperation{kind: '-', text: before[oldIndex]})
+			}
+			for ; newIndex < len(after); newIndex++ {
+				operations = append(operations, lineDiffOperation{kind: '+', text: after[newIndex]})
+			}
+			break
+		}
+		for ; oldIndex < anchorOld; oldIndex++ {
+			operations = append(operations, lineDiffOperation{kind: '-', text: before[oldIndex]})
+		}
+		for ; newIndex < anchorNew; newIndex++ {
+			operations = append(operations, lineDiffOperation{kind: '+', text: after[newIndex]})
+		}
 	}
-	display = strings.Join(lines, "\n")
-	patch = fmt.Sprintf("--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n", path, path, first+1, maxInt(0, lastBefore-first+1), first+1, maxInt(0, lastAfter-first+1))
-	for index := first; index <= lastBefore; index++ {
-		patch += "-" + beforeLines[index] + "\n"
+	return operations
+}
+
+func nearestLineAnchor(before, after []string, oldStart, newStart int) (int, int) {
+	afterPositions := make(map[string]int, len(after)-newStart)
+	for index := newStart; index < len(after); index++ {
+		if _, exists := afterPositions[after[index]]; !exists {
+			afterPositions[after[index]] = index
+		}
 	}
-	for index := first; index <= lastAfter; index++ {
-		patch += "+" + afterLines[index] + "\n"
+	bestOld, bestNew, bestDistance := -1, -1, int(^uint(0)>>1)
+	for oldIndex := oldStart; oldIndex < len(before); oldIndex++ {
+		newIndex, exists := afterPositions[before[oldIndex]]
+		if !exists {
+			continue
+		}
+		distance := oldIndex - oldStart + newIndex - newStart
+		if distance < bestDistance {
+			bestOld, bestNew, bestDistance = oldIndex, newIndex, distance
+		}
+		if distance == 0 {
+			break
+		}
 	}
-	return display, patch, firstChangedLine
+	return bestOld, bestNew
+}
+
+func diffHunks(operations []lineDiffOperation, contextLines int) []diffHunk {
+	var changed []int
+	for index, operation := range operations {
+		if operation.kind != ' ' {
+			changed = append(changed, index)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	start := maxInt(0, changed[0]-contextLines)
+	lastChange := changed[0]
+	var hunks []diffHunk
+	for _, change := range changed[1:] {
+		if change-lastChange > contextLines*2+1 {
+			hunks = append(hunks, diffHunk{first: start, last: minInt(len(operations), lastChange+contextLines+1)})
+			start = maxInt(0, change-contextLines)
+		}
+		lastChange = change
+	}
+	hunks = append(hunks, diffHunk{first: start, last: minInt(len(operations), lastChange+contextLines+1)})
+	return hunks
+}
+
+type lineStarts struct{ old, new int }
+
+func hunkLineStarts(operations []lineDiffOperation, limit int) lineStarts {
+	starts := lineStarts{old: 1, new: 1}
+	for _, operation := range operations[:limit] {
+		if operation.kind != '+' {
+			starts.old++
+		}
+		if operation.kind != '-' {
+			starts.new++
+		}
+	}
+	return starts
+}
+
+func hunkCounts(operations []lineDiffOperation) (old, new int) {
+	for _, operation := range operations {
+		if operation.kind != '+' {
+			old++
+		}
+		if operation.kind != '-' {
+			new++
+		}
+	}
+	return old, new
+}
+
+func writePatchLine(builder *strings.Builder, kind byte, text string) {
+	builder.WriteByte(kind)
+	builder.WriteString(text)
+	if strings.HasSuffix(text, "\n") {
+		return
+	}
+	builder.WriteString("\n\\ No newline at end of file\n")
 }
 
 func maxInt(left, right int) int {

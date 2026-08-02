@@ -132,6 +132,9 @@ type EditInput struct {
 }
 
 func (s *FilesystemSuite) Read(ctx context.Context, input ReadInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if err := validText("path", input.Path); err != nil {
 		return inputError(err)
 	}
@@ -190,6 +193,9 @@ func (s *FilesystemSuite) Read(ctx context.Context, input ReadInput) (ToolResult
 		next := start + len(selected) + 1
 		output += fmt.Sprintf("\n\n[%d more lines in file. Use offset=%d to continue.]", len(lines)-(start+len(selected)), next)
 	}
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if len(details) == 0 {
 		details = nil
 	}
@@ -208,6 +214,9 @@ func (s *FilesystemSuite) truncationDetails(value FilesystemTruncation) map[stri
 }
 
 func (s *FilesystemSuite) Write(ctx context.Context, input WriteInput) (ToolResult, error) {
+	if err := contextFailure(ctx); err != nil {
+		return ToolResult{Text: operationErrorText(err)}, err
+	}
 	if err := validText("path", input.Path); err != nil {
 		return inputError(err)
 	}
@@ -223,7 +232,7 @@ func (s *FilesystemSuite) Write(ctx context.Context, input WriteInput) (ToolResu
 		return ToolResult{}, err
 	}
 	err = s.mutations.with(ctx, key, func() error {
-		if err := atomicWrite(ctx, path, []byte(input.Content)); err != nil {
+		if err := atomicWrite(ctx, path, key, []byte(input.Content)); err != nil {
 			return err
 		}
 		return nil
@@ -234,50 +243,229 @@ func (s *FilesystemSuite) Write(ctx context.Context, input WriteInput) (ToolResu
 	return ToolResult{Text: fmt.Sprintf("Successfully wrote %d bytes to %s", len(input.Content), input.Path)}, nil
 }
 
-func atomicWrite(ctx context.Context, destination string, contents []byte) error {
-	if err := context.Cause(ctx); err != nil {
-		return errors.Join(ErrOperationCancelled, err)
+type pathSnapshot struct {
+	exists bool
+	info   fs.FileInfo
+	link   string
+}
+
+type atomicWritePlan struct {
+	requested         string
+	target            string
+	mutationKey       string
+	temporaryName     string
+	requestedSnapshot pathSnapshot
+	targetSnapshot    pathSnapshot
+	committed         bool
+}
+
+func atomicWrite(ctx context.Context, destination, expectedKey string, contents []byte) error {
+	plan, err := prepareAtomicWrite(ctx, destination, expectedKey, contents)
+	if err != nil {
+		return err
 	}
-	directory := filepath.Dir(destination)
+	defer plan.cleanup()
+	return plan.commit(ctx)
+}
+
+func prepareAtomicWrite(ctx context.Context, destination, expectedKey string, contents []byte) (*atomicWritePlan, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, errors.Join(ErrOperationCancelled, err)
+	}
+	requested := filepath.Clean(destination)
+	directory := filepath.Dir(requested)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return fmt.Errorf("create parent directory: %w", err)
+		return nil, fmt.Errorf("create parent directory: %w", err)
+	}
+	target, err := resolveMutationDestination(requested)
+	if err != nil {
+		return nil, err
+	}
+	key, err := mutationKey(requested)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Clean(key) != filepath.Clean(expectedKey) {
+		return nil, fmt.Errorf("%w: mutation target changed before write", ErrFilesystemPath)
+	}
+	requestedSnapshot, err := snapshotPath(requested)
+	if err != nil {
+		return nil, err
+	}
+	targetSnapshot, err := snapshotPath(target)
+	if err != nil {
+		return nil, err
 	}
 	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(destination); err == nil {
-		mode = info.Mode().Perm()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("inspect destination: %w", err)
+	if targetSnapshot.exists {
+		mode = targetSnapshot.info.Mode().Perm()
+		if mode&0o222 == 0 {
+			return nil, fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
+		}
 	}
-	temporary, err := os.CreateTemp(directory, ".pi-go-write-*")
+	targetDirectory := filepath.Dir(target)
+	temporary, err := os.CreateTemp(targetDirectory, ".pi-go-write-*")
 	if err != nil {
-		return fmt.Errorf("create temporary file: %w", err)
+		return nil, fmt.Errorf("create temporary file: %w", err)
 	}
 	temporaryName := temporary.Name()
-	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("set temporary mode: %w", err)
+		_ = os.Remove(temporaryName)
+		return nil, fmt.Errorf("set temporary mode: %w", err)
 	}
 	if _, err := temporary.Write(contents); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("write temporary file: %w", err)
+		_ = os.Remove(temporaryName)
+		return nil, fmt.Errorf("write temporary file: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
-		return fmt.Errorf("sync temporary file: %w", err)
+		_ = os.Remove(temporaryName)
+		return nil, fmt.Errorf("sync temporary file: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary file: %w", err)
+		_ = os.Remove(temporaryName)
+		return nil, fmt.Errorf("close temporary file: %w", err)
+	}
+	return &atomicWritePlan{requested: requested, target: target, mutationKey: key, temporaryName: temporaryName, requestedSnapshot: requestedSnapshot, targetSnapshot: targetSnapshot}, nil
+}
+
+func (p *atomicWritePlan) commit(ctx context.Context) error {
+	if p == nil {
+		return errors.New("atomic write plan is nil")
 	}
 	if err := context.Cause(ctx); err != nil {
 		return errors.Join(ErrOperationCancelled, err)
 	}
-	if err := os.Rename(temporaryName, destination); err != nil {
+	if err := verifyPathSnapshot(p.requested, p.requestedSnapshot); err != nil {
+		return fmt.Errorf("%w: requested path changed before commit: %v", ErrFilesystemPath, err)
+	}
+	currentTarget, err := resolveMutationDestination(p.requested)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(currentTarget) != filepath.Clean(p.target) {
+		return fmt.Errorf("%w: symlink target changed before commit", ErrFilesystemPath)
+	}
+	currentKey, err := mutationKey(p.requested)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(currentKey) != filepath.Clean(p.mutationKey) {
+		return fmt.Errorf("%w: mutation target changed before commit", ErrFilesystemPath)
+	}
+	if err := verifyPathSnapshot(p.target, p.targetSnapshot); err != nil {
+		return fmt.Errorf("%w: destination changed before commit: %v", ErrFilesystemPath, err)
+	}
+	if p.targetSnapshot.exists && p.targetSnapshot.info.Mode().Perm()&0o222 == 0 {
+		return fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
+	}
+	if err := os.Rename(p.temporaryName, p.target); err != nil {
 		return fmt.Errorf("atomically replace destination: %w", err)
 	}
-	if directoryHandle, err := os.Open(directory); err == nil {
+	p.committed = true
+	if directoryHandle, err := os.Open(filepath.Dir(p.target)); err == nil {
 		_ = directoryHandle.Sync()
 		_ = directoryHandle.Close()
+	}
+	return nil
+}
+
+func (p *atomicWritePlan) cleanup() {
+	if p == nil || p.committed || p.temporaryName == "" {
+		return
+	}
+	_ = os.Remove(p.temporaryName)
+}
+
+func resolveMutationDestination(requested string) (string, error) {
+	current := filepath.Clean(requested)
+	for depth := 0; depth < 255; depth++ {
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			return resolveMissingDestination(current)
+		}
+		if err != nil {
+			return "", fmt.Errorf("inspect destination: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved, resolveErr := filepath.EvalSymlinks(current)
+			if resolveErr != nil {
+				return "", fmt.Errorf("%w: resolve destination: %w", ErrFilesystemPath, resolveErr)
+			}
+			return filepath.Clean(resolved), nil
+		}
+		link, readErr := os.Readlink(current)
+		if readErr != nil {
+			return "", fmt.Errorf("%w: read destination symlink: %w", ErrFilesystemPath, readErr)
+		}
+		if filepath.IsAbs(link) {
+			current = filepath.Clean(link)
+		} else {
+			current = filepath.Join(filepath.Dir(current), link)
+		}
+	}
+	return "", fmt.Errorf("%w: too many destination symlinks", ErrFilesystemPath)
+}
+
+func resolveMissingDestination(destination string) (string, error) {
+	parent := filepath.Dir(destination)
+	remainder := filepath.Base(destination)
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			return filepath.Join(resolved, remainder), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("%w: resolve destination parent: %w", ErrFilesystemPath, err)
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return filepath.Clean(destination), nil
+		}
+		remainder = filepath.Join(filepath.Base(parent), remainder)
+		parent = next
+	}
+}
+
+func snapshotPath(path string) (pathSnapshot, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return pathSnapshot{}, nil
+	}
+	if err != nil {
+		return pathSnapshot{}, fmt.Errorf("inspect path snapshot: %w", err)
+	}
+	snapshot := pathSnapshot{exists: true, info: info}
+	if info.Mode()&os.ModeSymlink != 0 {
+		snapshot.link, err = os.Readlink(path)
+		if err != nil {
+			return pathSnapshot{}, fmt.Errorf("read symlink snapshot: %w", err)
+		}
+	}
+	return snapshot, nil
+}
+
+func verifyPathSnapshot(path string, expected pathSnapshot) error {
+	current, err := snapshotPath(path)
+	if err != nil {
+		return err
+	}
+	if current.exists != expected.exists {
+		return errors.New("path existence changed")
+	}
+	if !current.exists {
+		return nil
+	}
+	if current.info.Mode().Type() != expected.info.Mode().Type() || current.link != expected.link {
+		return errors.New("path type or symlink changed")
+	}
+	if !os.SameFile(current.info, expected.info) {
+		return errors.New("path identity changed")
+	}
+	if current.info.Mode().Perm() != expected.info.Mode().Perm() {
+		return errors.New("path permissions changed")
 	}
 	return nil
 }
@@ -287,6 +475,16 @@ func operationErrorText(err error) string {
 		return "Filesystem operation cancelled"
 	}
 	return err.Error()
+}
+
+func contextFailure(ctx context.Context) error {
+	if ctx == nil {
+		return ErrOperationCancelled
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return errors.Join(ErrOperationCancelled, cause)
+	}
+	return nil
 }
 
 func validText(name, value string) error {

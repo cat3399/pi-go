@@ -1,16 +1,19 @@
 package tool
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const narrowNoBreakSpace = "\u202f"
+
+var screenshotAMPM = regexp.MustCompile(` (?i:(am|pm))\.`)
 
 // resolveToolPath has one shared policy for every filesystem operation. The
 // Pi-compatible @ prefix and Unicode-space normalization are input ergonomics,
@@ -63,7 +66,7 @@ func resolveReadPath(cwd, supplied string) (string, error) {
 		return resolved, err
 	}
 	variants := []string{
-		strings.ReplaceAll(strings.ReplaceAll(resolved, " AM.", narrowNoBreakSpace+"AM."), " PM.", narrowNoBreakSpace+"PM."),
+		screenshotAMPM.ReplaceAllString(resolved, narrowNoBreakSpace+"${1}."),
 		resolvedNFD(resolved),
 		strings.ReplaceAll(resolved, "'", "’"),
 	}
@@ -76,54 +79,16 @@ func resolveReadPath(cwd, supplied string) (string, error) {
 	return resolved, nil
 }
 
-// Go's standard library intentionally has no Unicode normalization package.
-// On Darwin HFS/APFS the filesystem itself performs canonical matching, and on
-// other platforms this explicit unsupported normalization is safer than a
-// lossy hand-written decomposition. Curly quote/AM-PM variants remain exact.
-func resolvedNFD(value string) string { return value }
+func resolvedNFD(value string) string { return norm.NFD.String(value) }
 
 func pathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
 }
 
-func requireContext(ctxDone <-chan struct{}) error {
-	if ctxDone == nil {
-		return nil
-	}
-	select {
-	case <-ctxDone:
-		return ErrOperationCancelled
-	default:
-		return nil
-	}
-}
-
 // mutationKey resolves existing aliases and the deepest existing parent for a
 // not-yet-created target. This serializes target/alias writes without turning
 // the entire suite into a global lock.
 func mutationKey(path string) (string, error) {
-	path = filepath.Clean(path)
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return filepath.Clean(resolved), nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("%w: resolve mutation path: %w", ErrFilesystemPath, err)
-	}
-	parent := filepath.Dir(path)
-	base := filepath.Base(path)
-	for {
-		resolved, err := filepath.EvalSymlinks(parent)
-		if err == nil {
-			return filepath.Join(resolved, base), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("%w: resolve mutation parent: %w", ErrFilesystemPath, err)
-		}
-		next := filepath.Dir(parent)
-		if next == parent {
-			return path, nil
-		}
-		base = filepath.Join(filepath.Base(parent), base)
-		parent = next
-	}
+	return resolveMutationDestination(filepath.Clean(path))
 }

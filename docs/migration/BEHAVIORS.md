@@ -73,9 +73,9 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 | ID | 可观察行为 | 上游证据 | 状态 | 依赖或重评条件 |
 | --- | --- | --- | --- | --- |
 | `B-TOOL-006` | read shared cwd path、line range、UTF-8-safe head truncation；binary 不 silent decode | `core/tools/read.ts`、`path-utils.ts`、`truncate.ts`；`tools.test.ts` read suite | `in-progress` | R-TOOL-003；image/NFKC gap 见 TOOL_SYSTEM debt |
-| `B-TOOL-007` | write/edit atomic replace、same target/alias serialize、queued cancellation 不提前释放锁 | `write.ts`、`edit.ts`、`file-mutation-queue.ts` 与 queue tests | `in-progress` | R-TOOL-003；跨进程 locking 另建 slice |
-| `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与 diff/patch details | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `in-progress` | R-TOOL-003；full NFKC fuzzy mapping deferred |
-| `B-TOOL-009` | stable ls/find/grep ordering、glob/ignore、regex/literal/context/limits/cancel | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `in-progress` | R-TOOL-003；Rust regex/fd/gitignore parity debt |
+| `B-TOOL-007` | follow-symlink atomic replace、mode/writability、same target/alias serialize、cancelled queue node 转发 predecessor barrier | `write.ts`、`edit.ts`、`file-mutation-queue.ts` 与 queue tests | `in-progress` | R-TOOL-003 findings fixed awaiting review；跨进程 locking 另建 slice |
+| `B-TOOL-008` | original-snapshot unique/non-overlap edit，BOM/CRLF preservation 与可应用 multi-hunk patch | `edit.ts`、`edit-diff.ts`；tools CRLF/multi-edit tests | `in-progress` | R-TOOL-003 finding fixed awaiting review；full NFKC fuzzy mapping deferred |
+| `B-TOOL-009` | stable ls/find/grep、compiled scoped ignore、grep byte-only truncation、entry/discovery/walk cancellation | `ls.ts`、`find.ts`、`grep.ts`；tools search suites | `in-progress` | R-TOOL-003 findings fixed awaiting review；Rust regex/fd/gitignore parity debt |
 | `B-TOOL-010` | registry dispatch and agent named executor preserve normal unknown-tool result | tools creation/Agent tool loop evidence | `in-progress` | R-TOOL-003；provider tool-schema advertisement remains separate slice |
 
 ## M-APP
