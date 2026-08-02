@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,7 +32,7 @@ var (
 	ErrInvalidQueueMessage   = errors.New("invalid queued message")
 	ErrCannotContinue        = errors.New("agent cannot continue from current transcript")
 	ErrCompactionUnavailable = errors.New("agent compaction is not configured")
-	ErrRetryPolicy           = errors.New("invalid agent retry policy")
+	ErrRetryPolicy           = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
 	// v0.1 internal implementation; v0.2 no longer returns it for batches.
 	ErrUnsupportedToolTurn = errors.New("unsupported tool turn")
@@ -55,17 +54,9 @@ type sessionCompactor interface {
 	Compact(context.Context, session.CompactRequest) (session.CompactResult, error)
 }
 
-// RetryPolicy bounds retries for a single provider turn. MaxAttempts includes
-// the first attempt; zero means one attempt. RetryAfter is capped independently
-// so a remote header cannot hold the active run indefinitely.
-type RetryPolicy struct {
-	MaxAttempts   uint32
-	InitialDelay  time.Duration
-	MaxDelay      time.Duration
-	MaxRetryAfter time.Duration
-	Sleep         func(context.Context, time.Duration) error
-	Jitter        func(attempt uint32, delay time.Duration) time.Duration
-}
+// RetryPolicy is shared with provider.ContextSummarizer so both request paths
+// use identical attempt, Retry-After, jitter, cap, and cancellation semantics.
+type RetryPolicy = provider.RetryPolicy
 
 // ToolOutput is the provider-visible final text returned by one tool. A
 // non-nil Execute error makes the associated ToolResult an error result.
@@ -154,16 +145,7 @@ type runtimeConfig struct {
 	keepRecentTokens  uint64
 	summarizer        session.Summarizer
 	compactor         sessionCompactor
-	retry             retryRuntime
-}
-
-type retryRuntime struct {
-	maxAttempts   uint32
-	initialDelay  time.Duration
-	maxDelay      time.Duration
-	maxRetryAfter time.Duration
-	sleep         func(context.Context, time.Duration) error
-	jitter        func(uint32, time.Duration) time.Duration
+	retry             provider.RetryController
 }
 
 // ToolExecutionMode controls one assistant message's complete tool batch.
@@ -273,9 +255,9 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if config.ContextWindow != 0 && compactor == nil {
 		return runtimeConfig{}, fmt.Errorf("%w: automatic compaction requires Session", ErrInvalidConfig)
 	}
-	retry, err := normalizeRetryPolicy(config.Retry)
+	retry, err := provider.NewRetryController(config.Retry)
 	if err != nil {
-		return runtimeConfig{}, err
+		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 	now := config.Now
 	if now == nil {
@@ -302,41 +284,6 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		compactor:         compactor,
 		retry:             retry,
 	}, nil
-}
-
-func normalizeRetryPolicy(policy RetryPolicy) (retryRuntime, error) {
-	maxAttempts := policy.MaxAttempts
-	if maxAttempts == 0 {
-		maxAttempts = 1
-	}
-	if policy.InitialDelay < 0 || policy.MaxDelay < 0 || policy.MaxRetryAfter < 0 {
-		return retryRuntime{}, fmt.Errorf("%w: negative delay", ErrRetryPolicy)
-	}
-	if policy.MaxDelay != 0 && policy.InitialDelay > policy.MaxDelay {
-		return retryRuntime{}, fmt.Errorf("%w: initial delay exceeds maximum", ErrRetryPolicy)
-	}
-	if maxAttempts > math.MaxUint32/2 { // keeps event/count arithmetic bounded.
-		return retryRuntime{}, fmt.Errorf("%w: too many attempts", ErrRetryPolicy)
-	}
-	sleep := policy.Sleep
-	if sleep == nil {
-		sleep = sleepWithContext
-	}
-	return retryRuntime{maxAttempts: maxAttempts, initialDelay: policy.InitialDelay, maxDelay: policy.MaxDelay, maxRetryAfter: policy.MaxRetryAfter, sleep: sleep, jitter: policy.Jitter}, nil
-}
-
-func sleepWithContext(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		return context.Cause(ctx)
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	}
 }
 
 func configuredToolName(tool ToolExecutor) (name string, err error) {
@@ -430,6 +377,7 @@ const (
 	EventCompactionSettled
 	EventRetryScheduled
 	EventRetryAttempt
+	EventRetryFinished
 )
 
 func (k EventKind) String() string {
@@ -460,6 +408,8 @@ func (k EventKind) String() string {
 		return "retry_scheduled"
 	case EventRetryAttempt:
 		return "retry_attempt"
+	case EventRetryFinished:
+		return "retry_finished"
 	default:
 		return "unknown"
 	}
@@ -482,6 +432,9 @@ type Event struct {
 	RunError         error
 	RetryAttempt     uint32
 	RetryDelay       time.Duration
+	RetryFailureKind provider.FailureKind
+	RetryHTTPStatus  int
+	RetrySucceeded   bool
 	Compaction       *session.CompactResult
 }
 

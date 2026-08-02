@@ -44,6 +44,7 @@
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
 | `T-PROVIDER-011` | B-PROVIDER-002 + 后续真实 tool adapter | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `deferred` | 不属于 text-only B-PROVIDER-005；真实 tool-call slice 重评 |
+| `T-PROVIDER-012` | B-PROVIDER-006 | OpenAI error wrapper + `AgentSession._checkCompaction` classification intent | `strengthened-awaiting-rereview` | code/type/message/ordinary-400 secret-safe matrix；Retry-After seconds/date/past/malformed/default-cap/jitter/cancel；transient status matrix |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -65,7 +66,7 @@ Prompt cache、multiple model、unregister 以外的 compat/global registry test
 | `T-AGENT-011` | B-AGENT-011 | `agent-loop.test.ts` — parallel execution completion vs artifact order, blocked/missing/failing tool cases | `strengthened` | R-AGENT-002；cancel/terminate/missing/failure、late update、fault barrier 与 race |
 | `T-AGENT-012` | B-AGENT-012 | `packages/agent/test/agent.test.ts` — steering/follow-up mode, clear queue and continue cases | `strengthened` | R-AGENT-002；one/all、Continue admission、reentrant storage、durable prefix ack、clear/enqueue/Abort fault/race |
 | `T-AGENT-013` | B-AGENT-013/014 | `agent-loop.test.ts` transformContext and abort/settled event cases; coding AgentSession settlement regressions | `strengthened` | R-AGENT-002；immutable request、transform error/cancel、multi-worker abort、pending state 与 settlement race |
-| `T-AGENT-014` | B-AGENT-015..017 | coding/Harness compaction and retry paths; regressions 5217/6647 and pre-prompt/settlement intent | `implemented-pending-review` | local HTTP/SSE summary→chunked stream-drop→retry→success/no-duplicate integration；manual/conflict/cancel/error/Retry-After/race additions require independent review |
+| `T-AGENT-014` | B-AGENT-015..017 | coding/Harness `_checkCompaction`, compact/retry/event paths；regressions 5217/6647 and pre-prompt/settlement intent | `strengthened-awaiting-rereview` | local HTTP/SSE threshold + explicit overflow；summarizer drop/503/exhaust/no-write；ordinary/second-overflow；safe lifecycle/no-duplicate/accepted-usage；Abort/queue/idle/race/repeat |
 
 AgentSession 与低层 Agent 中重复证明相同 invariant 的测试，在 Go 中由一套
 contract/scenario suite 覆盖，不复制两套 runtime test。

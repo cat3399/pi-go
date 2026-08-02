@@ -261,8 +261,8 @@ func responsesRetryAfter(value string, now time.Time) *time.Duration {
 		return nil
 	}
 	delay := when.Sub(now)
-	if delay < 0 {
-		delay = 0
+	if delay <= 0 {
+		return nil
 	}
 	return &delay
 }

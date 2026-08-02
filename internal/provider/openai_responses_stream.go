@@ -313,6 +313,7 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 			Error struct {
 				Message string `json:"message"`
 				Code    string `json:"code"`
+				Type    string `json:"type"`
 			} `json:"error"`
 		}
 		if json.Unmarshal(body, &payload) == nil {
@@ -320,6 +321,19 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 				message = payload.Error.Message
 			}
 			vendorCode = normalizeResponsesVendorCode(payload.Error.Code)
+			if isOpenAIContextOverflow(response.StatusCode, payload.Error.Type, payload.Error.Code, payload.Error.Message) {
+				// Do not retain the vendor message/code on this classification path:
+				// providers sometimes echo request fragments. The stable normalized
+				// category is sufficient for coordinator policy and diagnostics.
+				const safeCode = "context_length_exceeded"
+				cause := &OpenAIResponsesHTTPError{status: response.StatusCode, message: "context window exceeded", vendorCode: safeCode, truncated: truncated}
+				status := response.StatusCode
+				return &responsesFailureSpec{
+					kind: FailureContextOverflow, cause: cause,
+					message: "OpenAI context window exceeded", httpStatus: &status,
+					vendorCode: safeCode,
+				}
+			}
 		}
 	}
 	cause := &OpenAIResponsesHTTPError{
@@ -341,6 +355,32 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 		vendorCode: vendorCode,
 		retryAfter: retryAfter,
 	}
+}
+
+func isOpenAIContextOverflow(status int, errorType, code, message string) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	normalizeIdentifier := func(value string) string {
+		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.NewReplacer("-", "_", " ", "_", ".", "_").Replace(value)
+		return value
+	}
+	for _, identifier := range []string{normalizeIdentifier(errorType), normalizeIdentifier(code)} {
+		switch identifier {
+		case "context_length_exceeded", "context_window_exceeded", "maximum_context_length_exceeded",
+			"prompt_too_long", "input_too_long", "too_many_input_tokens":
+			return true
+		}
+	}
+	if !utf8.ValidString(message) {
+		return false
+	}
+	lower := strings.ToLower(message)
+	over := strings.Contains(lower, "exceed") || strings.Contains(lower, "too long") || strings.Contains(lower, "too large")
+	contextLimit := strings.Contains(lower, "context length") || strings.Contains(lower, "context window") || strings.Contains(lower, "maximum context")
+	tokenLimit := strings.Contains(lower, "too many") && strings.Contains(lower, "token") && strings.Contains(lower, "maximum")
+	return over && contextLimit || tokenLimit
 }
 
 func (s *openAIResponsesStream) finishCancellation(cause error) (llm.StreamEvent, error) {

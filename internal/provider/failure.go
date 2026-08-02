@@ -23,6 +23,7 @@ const (
 	FailureFactory
 	FailureTransport
 	FailureHTTPStatus
+	FailureContextOverflow
 	FailureInvalidResponse
 	FailureCancelled
 )
@@ -41,6 +42,8 @@ func (k FailureKind) String() string {
 		return "transport"
 	case FailureHTTPStatus:
 		return "httpStatus"
+	case FailureContextOverflow:
+		return "contextOverflow"
 	case FailureInvalidResponse:
 		return "invalidResponse"
 	case FailureCancelled:

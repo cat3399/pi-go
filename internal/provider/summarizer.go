@@ -19,9 +19,20 @@ type ContextSummarizer struct {
 	provider Provider
 	model    ModelRef
 	now      func() time.Time
+	retry    RetryController
 }
 
 func NewContextSummarizer(implementation Provider, model ModelRef, now func() time.Time) (*ContextSummarizer, error) {
+	return NewContextSummarizerWithRetry(implementation, model, now, RetryPolicy{
+		MaxAttempts: 3, InitialDelay: 250 * time.Millisecond, MaxDelay: 2 * time.Second,
+	})
+}
+
+// NewContextSummarizerWithRetry exposes deterministic timing seams for tests
+// and product policy. Retry remains entirely inside this one summary request;
+// Session sees either one accepted SummaryOutput or one error and therefore
+// never appends a checkpoint for a failed attempt.
+func NewContextSummarizerWithRetry(implementation Provider, model ModelRef, now func() time.Time, policy RetryPolicy) (*ContextSummarizer, error) {
 	if implementation == nil || isTypedNil(implementation) {
 		return nil, errors.New("context summarizer requires a provider")
 	}
@@ -31,7 +42,11 @@ func NewContextSummarizer(implementation Provider, model ModelRef, now func() ti
 	if now == nil {
 		now = time.Now
 	}
-	return &ContextSummarizer{provider: implementation, model: model, now: now}, nil
+	retry, err := NewRetryController(policy)
+	if err != nil {
+		return nil, fmt.Errorf("context summarizer retry: %w", err)
+	}
+	return &ContextSummarizer{provider: implementation, model: model, now: now, retry: retry}, nil
 }
 
 func (s *ContextSummarizer) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
@@ -50,11 +65,41 @@ func (s *ContextSummarizer) Summarize(ctx context.Context, input session.Summary
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary request: %w", err)
 	}
+	for attempt := uint32(1); ; attempt++ {
+		terminal, streamErr := s.collectAttempt(ctx, request)
+		var failure *ProviderFailure
+		if terminalFailure, ok := terminal.(llm.AssistantFailureMessage); ok {
+			_ = errors.As(terminalFailure.Failure().Cause(), &failure)
+		}
+		retryable := IsTransientStreamError(streamErr) || IsTransientFailure(failure)
+		if !retryable || attempt >= s.retry.MaxAttempts() {
+			if streamErr != nil {
+				return session.SummaryOutput{}, fmt.Errorf("summary stream: %w", streamErr)
+			}
+			text, usage, err := summaryTerminal(terminal)
+			if err != nil {
+				return session.SummaryOutput{}, err
+			}
+			return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.ZeroUsageCost()}}, nil
+		}
+		delay := s.retry.Delay(attempt+1, failure)
+		if err := s.retry.Wait(ctx, delay); err != nil {
+			return session.SummaryOutput{}, fmt.Errorf("summary retry cancelled: %w", err)
+		}
+	}
+}
+
+func (s *ContextSummarizer) collectAttempt(ctx context.Context, request Request) (llm.AssistantTerminal, error) {
 	stream := s.provider.Stream(ctx, request)
 	if stream == nil || isTypedNil(stream) {
-		return session.SummaryOutput{}, errors.New("context summarizer provider returned nil stream")
+		return nil, errors.New("context summarizer provider returned nil stream")
 	}
-	defer stream.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = stream.Close()
+		}
+	}()
 	collector := &llm.StreamCollector{}
 	for {
 		event, nextErr := stream.Next()
@@ -62,24 +107,24 @@ func (s *ContextSummarizer) Summarize(ctx context.Context, input session.Summary
 			break
 		}
 		if nextErr != nil {
-			return session.SummaryOutput{}, fmt.Errorf("summary stream: %w", nextErr)
+			return nil, nextErr
 		}
 		if err := collector.Accept(event); err != nil {
-			return session.SummaryOutput{}, fmt.Errorf("summary stream event: %w", err)
+			return nil, fmt.Errorf("summary stream event: %w", err)
 		}
 	}
+	closed = true
+	if err := stream.Close(); err != nil {
+		return nil, fmt.Errorf("summary stream transport close: %w", err)
+	}
 	if err := collector.Close(); err != nil {
-		return session.SummaryOutput{}, fmt.Errorf("summary stream close: %w", err)
+		return nil, fmt.Errorf("summary stream close: %w", err)
 	}
 	terminal, err := collector.Result()
 	if err != nil {
-		return session.SummaryOutput{}, fmt.Errorf("summary result: %w", err)
+		return nil, fmt.Errorf("summary result: %w", err)
 	}
-	text, usage, err := summaryTerminal(terminal)
-	if err != nil {
-		return session.SummaryOutput{}, err
-	}
-	return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.ZeroUsageCost()}}, nil
+	return terminal, nil
 }
 
 func summaryTerminal(terminal llm.AssistantTerminal) (string, llm.Usage, error) {
