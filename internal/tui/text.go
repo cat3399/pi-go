@@ -42,10 +42,12 @@ func tokenizeTerminal(s string) []terminalToken {
 		i += n
 		// Extend a grapheme enough for terminal cell contracts: combining marks,
 		// variation selectors, ZWJ chains, skin tones, and flag pairs.
+		joinNext := false
 		for i < len(s) {
 			q, m := utf8.DecodeRuneInString(s[i:])
 			if unicode.IsMark(q) || q == 0xfe0e || q == 0xfe0f || (q >= 0x1f3fb && q <= 0x1f3ff) {
 				i += m
+				joinNext = joinNext || isVirama(q)
 				continue
 			}
 			if q == 0x200d {
@@ -54,6 +56,12 @@ func tokenizeTerminal(s string) []terminalToken {
 					_, z := utf8.DecodeRuneInString(s[i:])
 					i += z
 				}
+				joinNext = false
+				continue
+			}
+			if joinNext && (unicode.IsLetter(q) || unicode.IsNumber(q)) {
+				i += m
+				joinNext = false
 				continue
 			}
 			if regional(r) && regional(q) {
@@ -94,6 +102,14 @@ func terminalControlLength(s string) int {
 	return 0
 }
 func regional(r rune) bool { return r >= 0x1f1e6 && r <= 0x1f1ff }
+func isVirama(r rune) bool {
+	switch r {
+	case 0x094d, 0x09cd, 0x0a4d, 0x0acd, 0x0b4d, 0x0bcd, 0x0c4d, 0x0ccd, 0x0d4d:
+		return true
+	default:
+		return false
+	}
+}
 func clusterWidth(s string) int {
 	if s == "\t" {
 		return TabWidth
@@ -102,14 +118,66 @@ func clusterWidth(s string) int {
 	if len(rs) == 0 {
 		return 0
 	}
-	base := rs[0]
-	if unicode.IsControl(base) || unicode.IsMark(base) || base == 0x200d {
+	allSpacingMarks := true
+	for _, r := range rs {
+		if !terminalSpacingMark(r) {
+			allSpacingMarks = false
+			break
+		}
+	}
+	if allSpacingMarks {
+		return len(rs)
+	}
+	baseIndex := -1
+	for i, r := range rs {
+		if !nonPrinting(r) {
+			baseIndex = i
+			break
+		}
+	}
+	if baseIndex < 0 {
 		return 0
 	}
+	base := rs[baseIndex]
 	if regional(base) || hasEmoji(rs) || isWide(base) {
 		return 2
 	}
-	return 1
+	w := runeWidth(base)
+	followsMark := false
+	for _, r := range rs[baseIndex+1:] {
+		switch {
+		case terminalSpacingMark(r):
+			w++
+			followsMark = false
+		case unicode.IsMark(r):
+			followsMark = true
+		case nonPrinting(r):
+			// Keep followsMark across format/default-ignorable code points.
+		default:
+			if followsMark || (r >= 0xff00 && r <= 0xffef) {
+				w += runeWidth(r)
+			}
+			if r == 0x0e33 || r == 0x0eb3 {
+				w++
+			}
+			followsMark = false
+		}
+	}
+	return w
+}
+
+func terminalSpacingMark(r rune) bool {
+	if r == 0x1734 || r == 0x302e || r == 0x302f {
+		return false
+	}
+	if unicode.Is(unicode.Mc, r) {
+		return true
+	}
+	return r == 0x065f || r == 0x0f7f || r == 0x102b || r == 0x102c || r == 0x1031 ||
+		(r >= 0x1033 && r <= 0x1035) || r == 0x1038 || (r >= 0x103a && r <= 0x103e)
+}
+func nonPrinting(r rune) bool {
+	return unicode.IsControl(r) || unicode.IsMark(r) || unicode.Is(unicode.Cf, r) || r == 0x200d
 }
 func hasEmoji(rs []rune) bool {
 	for _, r := range rs {
@@ -122,6 +190,12 @@ func hasEmoji(rs []rune) bool {
 func isWide(r rune) bool {
 	p := width.LookupRune(r).Kind()
 	return p == width.EastAsianWide || p == width.EastAsianFullwidth || r >= 0x1100 && r <= 0x115f
+}
+func runeWidth(r rune) int {
+	if isWide(r) {
+		return 2
+	}
+	return 1
 }
 
 // StripTerminalSequences removes complete CSI/OSC/DCS/APC/SS3 strings and
@@ -232,41 +306,247 @@ func SliceColumns(s string, start, length int, strict bool) (string, int) {
 }
 
 // Wrap splits at whitespace when possible and otherwise at grapheme cells.
-// ANSI controls are carried with their adjacent visible cluster; it never
-// splits UTF-8 or a grapheme cluster.
+// Explicit empty lines are preserved. SGR and OSC-8 state is replayed on
+// continuation lines, and active hyperlinks are closed at every line edge.
 func Wrap(s string, max int) []string {
 	if max <= 0 {
 		return []string{""}
 	}
-	var lines []string
-	for _, raw := range strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == '\r' }) {
-		lines = append(lines, wrapLine(raw, max)...)
-	}
-	if len(lines) == 0 {
-		return []string{""}
+	state := ansiState{}
+	physical := splitPhysicalLines(s)
+	lines := make([]string, 0, len(physical))
+	for _, raw := range physical {
+		lines = append(lines, wrapLine(raw, max, &state)...)
 	}
 	return lines
 }
-func wrapLine(s string, max int) []string {
-	if VisibleWidth(s) <= max {
-		return []string{s}
+
+type wrapChunk struct {
+	text       string
+	width      int
+	whitespace bool
+}
+
+func makeWrapChunks(s string) []wrapChunk {
+	var chunks []wrapChunk
+	var pending strings.Builder
+	for _, token := range tokenizeTerminal(s) {
+		if token.control {
+			pending.WriteString(token.text)
+			continue
+		}
+		space := true
+		for _, r := range token.text {
+			if !unicode.IsSpace(r) {
+				space = false
+				break
+			}
+		}
+		w := clusterWidth(token.text)
+		first, _ := utf8.DecodeRuneInString(token.text)
+		if !space && isCJK(first) {
+			chunks = append(chunks, wrapChunk{text: pending.String() + token.text, width: w})
+			pending.Reset()
+			continue
+		}
+		if len(chunks) == 0 || chunks[len(chunks)-1].whitespace != space {
+			chunks = append(chunks, wrapChunk{whitespace: space})
+		}
+		chunk := &chunks[len(chunks)-1]
+		chunk.text += pending.String() + token.text
+		pending.Reset()
+		chunk.width += w
 	}
+	if pending.Len() > 0 {
+		if len(chunks) == 0 {
+			chunks = append(chunks, wrapChunk{})
+		}
+		chunks[len(chunks)-1].text += pending.String()
+	}
+	return chunks
+}
+
+func wrapLine(s string, max int, state *ansiState) []string {
+	chunks := makeWrapChunks(s)
 	var out []string
-	var b strings.Builder
-	w := 0
-	for _, t := range tokenizeTerminal(s) {
-		cw := 0
-		if !t.control {
-			cw = clusterWidth(t.text)
-		}
-		if cw > 0 && w+cw > max && w > 0 {
-			out = append(out, strings.TrimRight(b.String(), " \t"))
-			b.Reset()
-			w = 0
-		}
-		b.WriteString(t.text)
-		w += cw
+	line := state.prefix()
+	lineWidth := 0
+	emit := func() {
+		out = append(out, trimTerminalSpace(line)+state.lineEndReset()+state.hyperlinkClose)
+		line = state.prefix()
+		lineWidth = 0
 	}
-	out = append(out, strings.TrimRight(b.String(), " \t"))
+	appendRaw := func(raw string, w int) { line += raw; lineWidth += w; state.processText(raw) }
+	for _, chunk := range chunks {
+		if chunk.whitespace {
+			if lineWidth == 0 {
+				appendRaw(terminalControls(chunk.text), 0)
+				continue
+			}
+			if lineWidth+chunk.width <= max {
+				appendRaw(chunk.text, chunk.width)
+			} else {
+				appendRaw(terminalControls(chunk.text), 0)
+				emit()
+			}
+			continue
+		}
+		if chunk.width <= max {
+			if lineWidth > 0 && lineWidth+chunk.width > max {
+				emit()
+			}
+			appendRaw(chunk.text, chunk.width)
+			continue
+		}
+		if lineWidth > 0 {
+			emit()
+		}
+		for _, token := range tokenizeTerminal(chunk.text) {
+			if token.control {
+				appendRaw(token.text, 0)
+				continue
+			}
+			w := clusterWidth(token.text)
+			if lineWidth > 0 && lineWidth+w > max {
+				emit()
+			}
+			appendRaw(token.text, w)
+		}
+	}
+	// Every physical input line yields one output line, including an explicit
+	// empty line or a line containing only terminal controls.
+	out = append(out, trimTerminalSpace(line)+state.hyperlinkClose)
 	return out
+}
+
+func terminalControls(s string) string {
+	var b strings.Builder
+	for _, t := range tokenizeTerminal(s) {
+		if t.control {
+			b.WriteString(t.text)
+		}
+	}
+	return b.String()
+}
+
+func splitPhysicalLines(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\r' && s[i] != '\n' {
+			continue
+		}
+		out = append(out, s[start:i])
+		if s[i] == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+			i++
+		}
+		start = i + 1
+	}
+	return append(out, s[start:])
+}
+
+func trimTerminalSpace(s string) string {
+	tokens := tokenizeTerminal(s)
+	last := -1
+	for i, t := range tokens {
+		if t.control {
+			continue
+		}
+		space := true
+		for _, r := range t.text {
+			if !unicode.IsSpace(r) {
+				space = false
+				break
+			}
+		}
+		if !space {
+			last = i
+		}
+	}
+	if last < 0 {
+		var b strings.Builder
+		for _, t := range tokens {
+			if t.control {
+				b.WriteString(t.text)
+			}
+		}
+		return b.String()
+	}
+	var b strings.Builder
+	for i, t := range tokens {
+		if i <= last || t.control {
+			b.WriteString(t.text)
+		}
+	}
+	return b.String()
+}
+
+type ansiState struct {
+	sgr            string
+	hyperlink      string
+	hyperlinkClose string
+	underline      bool
+}
+
+func (s *ansiState) prefix() string { return s.sgr + s.hyperlink }
+func (s *ansiState) lineEndReset() string {
+	if s.underline {
+		return "\x1b[24m"
+	}
+	return ""
+}
+func (s *ansiState) processText(text string) {
+	for _, t := range tokenizeTerminal(text) {
+		if t.control {
+			s.process(t.text)
+		}
+	}
+}
+func (s *ansiState) process(code string) {
+	if strings.HasPrefix(code, "\x1b[") && strings.HasSuffix(code, "m") {
+		body := code[2 : len(code)-1]
+		parts := strings.Split(body, ";")
+		reset := body == ""
+		nonzero := false
+		for _, p := range parts {
+			switch p {
+			case "0":
+				reset = true
+			case "4":
+				s.underline = true
+			case "24":
+				s.underline = false
+			}
+			if p != "" && p != "0" {
+				nonzero = true
+			}
+		}
+		if reset {
+			s.sgr = ""
+			s.underline = false
+		}
+		if nonzero {
+			s.sgr += code
+		}
+		return
+	}
+	if !strings.HasPrefix(code, "\x1b]8;") {
+		return
+	}
+	term := "\x1b\\"
+	if strings.HasSuffix(code, "\a") {
+		term = "\a"
+	}
+	body := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(code, "\x1b]8;"), "\a"), "\x1b\\")
+	parts := strings.SplitN(body, ";", 2)
+	if len(parts) != 2 {
+		return
+	}
+	if parts[1] == "" {
+		s.hyperlink = ""
+		s.hyperlinkClose = ""
+		return
+	}
+	s.hyperlink = code
+	s.hyperlinkClose = "\x1b]8;;" + term
 }

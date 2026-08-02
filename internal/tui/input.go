@@ -6,7 +6,7 @@ package tui
 import (
 	"bytes"
 	"errors"
-	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -51,10 +51,13 @@ type InputEvent struct {
 }
 
 type MouseEvent struct {
-	Button    int
-	X, Y      int // zero-based terminal cells
-	Press     bool
-	Motion    bool
+	Button int
+	X, Y   int // zero-based terminal cells
+	Press  bool
+	Motion bool
+	// Scroll is +1 for wheel up and -1 for wheel down. Wheel events use
+	// Button=-1 and never masquerade as a primary mouse button.
+	Scroll    int
 	Modifiers Modifiers
 }
 
@@ -63,8 +66,9 @@ func ResizeEvent(width, height int) InputEvent {
 }
 
 type FramerOptions struct {
-	// MaxBufferedBytes bounds an unfinished control string or paste. Zero uses
-	// 1 MiB. A bound violation clears only the untrusted pending input.
+	// MaxBufferedBytes bounds incomplete UTF-8/control data and paste content.
+	// Non-positive values use 1 MiB. Complete ordinary text is emitted without
+	// counting the caller-owned chunk against this limit.
 	MaxBufferedBytes int
 	InvalidUTF8      InvalidUTF8Policy
 }
@@ -83,7 +87,7 @@ type Framer struct {
 
 func NewFramer(opts FramerOptions) *Framer {
 	max := opts.MaxBufferedBytes
-	if max == 0 {
+	if max <= 0 {
 		max = 1 << 20
 	}
 	return &Framer{max: max, utf8Mode: opts.InvalidUTF8}
@@ -97,69 +101,127 @@ func (f *Framer) Feed(chunk []byte) ([]InputEvent, error) {
 	if len(chunk) == 0 {
 		return nil, nil
 	}
-	if f.inPaste {
-		f.paste = append(f.paste, chunk...)
-		return f.consumePaste(nil)
-	}
-	f.buf = append(f.buf, chunk...)
-	if len(f.buf) > f.max {
-		f.Reset()
-		return nil, ErrInputTooLarge
-	}
 	var out []InputEvent
-	for len(f.buf) > 0 {
-		if bytes.HasPrefix(f.buf, []byte(pasteOpen)) {
-			f.buf = f.buf[len(pasteOpen):]
-			f.inPaste = true
-			f.paste = append(f.paste, f.buf...)
-			f.buf = nil
-			more, err := f.consumePaste(out)
-			return more, err
-		}
-		if f.buf[0] == esc {
-			n, complete := escapeLength(f.buf)
-			if !complete {
-				break
+	for len(chunk) > 0 {
+		if f.inPaste {
+			room := f.max - len(f.paste)
+			if room == 0 {
+				f.Reset()
+				return out, ErrInputTooLarge
 			}
-			out = f.emit(out, string(f.buf[:n]))
-			f.buf = f.buf[n:]
+			n := min(room, len(chunk))
+			f.paste = append(f.paste, chunk[:n]...)
+			chunk = chunk[n:]
+			var err error
+			out, err = f.drainPaste(out)
+			if err != nil {
+				return out, err
+			}
+			if f.inPaste && len(f.paste) == f.max {
+				f.Reset()
+				return out, ErrInputTooLarge
+			}
 			continue
 		}
-		r, n := utf8.DecodeRune(f.buf)
-		if r == utf8.RuneError && n == 1 {
-			if !utf8.FullRune(f.buf) {
-				break
-			}
-			if f.utf8Mode == RejectInvalidUTF8 {
-				f.Reset()
-				return nil, ErrInvalidUTF8
-			}
+
+		room := f.max - len(f.buf)
+		if room == 0 {
+			f.Reset()
+			return out, ErrInputTooLarge
 		}
-		out = f.emit(out, string(f.buf[:n]))
-		f.buf = f.buf[n:]
+		n := min(room, len(chunk))
+		f.buf = append(f.buf, chunk[:n]...)
+		chunk = chunk[n:]
+		var err error
+		out, err = f.drainNormal(out)
+		if err != nil {
+			return out, err
+		}
+		if !f.inPaste && len(f.buf) == f.max {
+			f.Reset()
+			return out, ErrInputTooLarge
+		}
 	}
 	return out, nil
 }
 
-func (f *Framer) consumePaste(out []InputEvent) ([]InputEvent, error) {
-	if len(f.paste) > f.max {
-		f.Reset()
-		return nil, ErrInputTooLarge
+// FeedTo is the bounded-allocation streaming form of Feed. It advances one
+// input byte at a time, so a sink failure never consumes later input from the
+// same chunk and no result slice scales with chunk size. Feed remains convenient
+// for tests and callers that explicitly want a slice.
+func (f *Framer) FeedTo(chunk []byte, emit func(InputEvent) error) error {
+	if emit == nil {
+		return errors.New("tui: nil input event sink")
 	}
+	for len(chunk) > 0 {
+		events, feedErr := f.Feed(chunk[:1])
+		for _, event := range events {
+			if err := emit(event); err != nil {
+				return err
+			}
+		}
+		if feedErr != nil {
+			return feedErr
+		}
+		chunk = chunk[1:]
+	}
+	return nil
+}
+
+func (f *Framer) drainPaste(out []InputEvent) ([]InputEvent, error) {
 	if at := bytes.Index(f.paste, []byte(pasteEnd)); at >= 0 {
 		data, err := f.text(f.paste[:at])
 		if err != nil {
 			f.Reset()
-			return nil, err
+			return out, err
 		}
 		out = append(out, InputEvent{Kind: InputPaste, Data: data})
-		rest := append([]byte(nil), f.paste[at+len(pasteEnd):]...)
+		rest := f.paste[at+len(pasteEnd):]
 		f.paste, f.inPaste = nil, false
 		if len(rest) > 0 {
-			more, err := f.Feed(rest)
-			return append(out, more...), err
+			f.buf = rest
+			return f.drainNormal(out)
 		}
 	}
+	return out, nil
+}
+
+func (f *Framer) drainNormal(out []InputEvent) ([]InputEvent, error) {
+	for len(f.buf) > 0 {
+		if bytes.HasPrefix(f.buf, []byte(pasteOpen)) {
+			f.buf = f.buf[len(pasteOpen):]
+			f.inPaste = true
+			f.paste = f.buf
+			f.buf = nil
+			return f.drainPaste(out)
+		}
+		if f.buf[0] == esc {
+			n, complete := escapeLength(f.buf)
+			if !complete {
+				return out, nil
+			}
+			var err error
+			out, err = f.emitRaw(out, f.buf[:n])
+			if err != nil {
+				f.Reset()
+				return out, err
+			}
+			f.buf = f.buf[n:]
+			continue
+		}
+		r, n := utf8.DecodeRune(f.buf)
+		if r == utf8.RuneError && n == 1 && !utf8.FullRune(f.buf) {
+			return out, nil
+		}
+		var err error
+		out, err = f.emitRaw(out, f.buf[:n])
+		if err != nil {
+			f.Reset()
+			return out, err
+		}
+		f.buf = f.buf[n:]
+	}
+	f.buf = nil
 	return out, nil
 }
 
@@ -192,17 +254,23 @@ func (f *Framer) text(raw []byte) (string, error) {
 	if f.utf8Mode == RejectInvalidUTF8 {
 		return "", ErrInvalidUTF8
 	}
+	// Replacement mode emits one U+FFFD for each maximal run of malformed
+	// bytes. It applies equally to printable data and completed control strings.
 	return string(bytes.ToValidUTF8(raw, []byte(string(utf8.RuneError)))), nil
 }
 
-func (f *Framer) emit(out []InputEvent, s string) []InputEvent {
+func (f *Framer) emitRaw(out []InputEvent, raw []byte) ([]InputEvent, error) {
+	s, err := f.text(raw)
+	if err != nil {
+		return out, err
+	}
 	// Kitty can report an unmodified printable key and terminals such as
 	// WezTerm may also send the raw rune. Suppress only that exact duplicate.
 	if r, ok := kittyPrintable(s); ok {
 		f.pendingCP = r
 	} else if r, n := utf8.DecodeRuneInString(s); n == len(s) && r == f.pendingCP {
 		f.pendingCP = 0
-		return out
+		return out, nil
 	} else {
 		f.pendingCP = 0
 	}
@@ -217,15 +285,21 @@ func (f *Framer) emit(out []InputEvent, s string) []InputEvent {
 			ev.Kind, ev.Mouse = InputMouse, &mouse
 		}
 	}
-	return append(out, ev)
+	return append(out, ev), nil
 }
 
 // ParseMouse supports SGR 1006 and legacy X10 reporting. Coordinates are
 // normalized to zero-based cells and malformed reports are never guessed.
 func ParseMouse(s string) (MouseEvent, bool) {
 	if strings.HasPrefix(s, "\x1b[<") && len(s) > 5 && (s[len(s)-1] == 'M' || s[len(s)-1] == 'm') {
-		var code, x, y int
-		if _, err := fmt.Sscanf(s, "\x1b[<%d;%d;%d", &code, &x, &y); err != nil || x < 1 || y < 1 {
+		fields := strings.Split(s[3:len(s)-1], ";")
+		if len(fields) != 3 {
+			return MouseEvent{}, false
+		}
+		code, ok1 := strictDecimal(fields[0])
+		x, ok2 := strictDecimal(fields[1])
+		y, ok3 := strictDecimal(fields[2])
+		if !ok1 || !ok2 || !ok3 || x < 1 || y < 1 {
 			return MouseEvent{}, false
 		}
 		return mouseFromCode(code, x-1, y-1, s[len(s)-1] == 'M')
@@ -237,35 +311,76 @@ func ParseMouse(s string) (MouseEvent, bool) {
 }
 
 func mouseFromCode(code, x, y int, press bool) (MouseEvent, bool) {
-	if code < 0 || x < 0 || y < 0 {
+	const supported = 3 | 4 | 8 | 16 | 32 | 64
+	if code < 0 || code & ^supported != 0 || x < 0 || y < 0 {
 		return MouseEvent{}, false
 	}
-	m := MouseEvent{Button: code & 3, X: x, Y: y, Press: press, Motion: code&32 != 0}
-	if code&4 != 0 {
-		m.Modifiers |= Shift
+	button := code & 3
+	if code&64 != 0 {
+		if code&32 != 0 || button > 1 || !press {
+			return MouseEvent{}, false
+		}
+		delta := 1
+		if button == 1 {
+			delta = -1
+		}
+		return MouseEvent{Button: -1, X: x, Y: y, Press: true, Scroll: delta, Modifiers: mouseModifiers(code)}, true
 	}
-	if code&8 != 0 {
-		m.Modifiers |= Alt
-	}
-	if code&16 != 0 {
-		m.Modifiers |= Ctrl
+	m := MouseEvent{Button: button, X: x, Y: y, Press: press && button != 3, Motion: code&32 != 0, Modifiers: mouseModifiers(code)}
+	if button == 3 {
+		m.Button = -1
 	}
 	return m, true
 }
 
+func mouseModifiers(code int) Modifiers {
+	var modifiers Modifiers
+	if code&4 != 0 {
+		modifiers |= Shift
+	}
+	if code&8 != 0 {
+		modifiers |= Alt
+	}
+	if code&16 != 0 {
+		modifiers |= Ctrl
+	}
+	return modifiers
+}
+
 func kittyPrintable(s string) (rune, bool) {
-	var cp int
-	if _, err := fmt.Sscanf(s, "\x1b[%d", &cp); err != nil || cp < 32 {
+	if !strings.HasPrefix(s, "\x1b[") || !strings.HasSuffix(s, "u") || strings.Contains(s, ";") {
 		return 0, false
 	}
-	if len(s) < 4 || s[len(s)-1] != 'u' {
+	body := s[2 : len(s)-1]
+	fields := strings.Split(body, ":")
+	if len(fields) > 3 || fields[0] == "" {
 		return 0, false
 	}
-	// Only plain CSI-u (or alternate key fields), never a modified event.
-	if bytes.Contains([]byte(s), []byte(";")) {
+	cp, ok := strictDecimal(fields[0])
+	if !ok || cp < 32 || !utf8.ValidRune(rune(cp)) {
 		return 0, false
 	}
-	return rune(cp), utf8.ValidRune(rune(cp))
+	for _, field := range fields[1:] {
+		if field != "" {
+			if _, ok := strictDecimal(field); !ok {
+				return 0, false
+			}
+		}
+	}
+	return rune(cp), true
+}
+
+func strictDecimal(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil
 }
 
 func escapeLength(b []byte) (int, bool) {

@@ -335,7 +335,9 @@
 
 ## R-TUI-001：M-TUI/v0.1 terminal foundation
 
-- 状态：`awaiting independent review`。
+- 首轮结论：`changes-required`，0 Blocker / 6 Major / 1 Minor。
+- 当前状态：7 项修复候选与正式 regression 已完成，`awaiting independent rereview`；不声明 review passed。
 - 范围：`internal/tui`、其 unit/fuzz/race coverage、`TUI_FOUNDATION.md` 与对应 behavior/test ledger。
-- 待核验：固定上游 evidence、input framing 的 EOF/partial/size/invalid-UTF-8 contract、no-goroutine lifecycle、raw-mode restoration、key modifier semantics、Unicode cell boundaries 与 platform isolation。
-- 实现者已运行全仓 test/vet/build/race、fuzz seed 与 Linux/Windows cross-build；该记录不构成 review passed，测试 intents 在 review 前保持 `deferred`。
+- 修复：large-chunk bounded streaming、control-wide UTF-8 policy、strict/canonical key grammar、Myanmar/Indic cell fixtures、whitespace/empty-line/ANSI wrap、partial-raw 与 concurrent mode balance，以及 explicit wheel semantics。
+- 实现者 gate：最终 TUI suite 重复 10 次与 race 重复 5 次、全仓 test/vet/build/race、两组各 5 秒 fuzz、Linux/Windows build 与 TUI test-binary cross-compile、diff check 均通过。
+- 待复核：上述 finding 的正式 regression、固定上游 evidence 与 platform isolation；测试 intents 在 rereview 前保持 `deferred`。

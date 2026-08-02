@@ -13,7 +13,10 @@ import (
 	"golang.org/x/term"
 )
 
-var ErrTerminalStarted = errors.New("tui: terminal already started")
+var (
+	ErrTerminalStarted        = errors.New("tui: terminal already started")
+	ErrTerminalCleanupPending = errors.New("tui: terminal cleanup is pending")
+)
 
 type RGB struct{ R, G, B uint8 }
 type ColorScheme string
@@ -75,10 +78,16 @@ func ParseColorSchemeReport(s string) (ColorScheme, bool) {
 }
 func ParseKeyboardNegotiation(s string) (kitty bool, flags int, deviceAttributes bool, ok bool) {
 	if strings.HasPrefix(s, "\x1b[?") && strings.HasSuffix(s, "u") {
-		n, e := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(s, "\x1b[?"), "u"))
-		return true, n, false, e == nil
+		n, valid := strictDecimal(strings.TrimSuffix(strings.TrimPrefix(s, "\x1b[?"), "u"))
+		return true, n, false, valid
 	}
 	if strings.HasPrefix(s, "\x1b[?") && strings.HasSuffix(s, "c") {
+		body := strings.TrimSuffix(strings.TrimPrefix(s, "\x1b[?"), "c")
+		for i := range len(body) {
+			if (body[i] < '0' || body[i] > '9') && body[i] != ';' {
+				return false, 0, false, false
+			}
+		}
 		return false, 0, true, true
 	}
 	return false, 0, false, false
@@ -117,14 +126,16 @@ func (systemRawMode) MakeRaw(fd int) (func() error, error) {
 // synchronous: callers own input pumping and can cancel without an orphaned
 // reader goroutine. Stop is idempotent and always attempts every restoration.
 type Terminal struct {
-	In          *os.File
-	Out         io.Writer
-	Raw         RawMode
-	mu          sync.Mutex
-	restore     func() error
-	started     bool
-	kitty       bool
-	modifyOther bool
+	In             *os.File
+	Out            io.Writer
+	Raw            RawMode
+	mu             sync.Mutex
+	restore        func() error
+	started        bool
+	paste          bool
+	keyboardPushed bool
+	kitty          bool
+	modifyOther    bool
 }
 
 func NewTerminal(in *os.File, out io.Writer) *Terminal {
@@ -136,6 +147,9 @@ func (t *Terminal) Start() error {
 	if t.started {
 		return ErrTerminalStarted
 	}
+	if t.restore != nil || t.paste || t.keyboardPushed || t.modifyOther {
+		return ErrTerminalCleanupPending
+	}
 	if t.In == nil || t.Out == nil {
 		return errors.New("tui: terminal requires input and output")
 	}
@@ -145,65 +159,139 @@ func (t *Terminal) Start() error {
 	}
 	restore, e := raw.MakeRaw(int(t.In.Fd()))
 	if e != nil {
-		return fmt.Errorf("tui: raw mode: %w", e)
+		var restoreErr error
+		if restore != nil {
+			restoreErr = restore()
+			if restoreErr != nil {
+				t.restore = restore
+			}
+		}
+		return errors.Join(fmt.Errorf("tui: raw mode: %w", e), wrapRestoreError(restoreErr))
+	}
+	if restore == nil {
+		return errors.New("tui: raw mode returned no restore function")
 	}
 	t.restore = restore
 	t.started = true
-	t.write("\x1b[?2004h\x1b[>7u\x1b[?u\x1b[c")
+	t.paste = true
+	e = t.write("\x1b[?2004h")
+	if e == nil {
+		t.keyboardPushed = true
+		e = t.write("\x1b[>7u")
+	}
+	if e == nil {
+		e = t.write("\x1b[?u")
+	}
+	if e == nil {
+		e = t.write("\x1b[c")
+	}
+	if e != nil {
+		return errors.Join(fmt.Errorf("tui: enable terminal modes: %w", e), t.stopLocked())
+	}
 	return nil
 }
-func (t *Terminal) HandleNegotiation(sequence string) bool {
+func (t *Terminal) HandleNegotiation(sequence string) (bool, error) {
 	kitty, flags, da, ok := ParseKeyboardNegotiation(sequence)
 	if !ok {
-		return false
+		return false, nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.started {
+		return false, nil
+	}
 	if kitty && flags != 0 {
+		var err error
+		if t.modifyOther {
+			err = t.write("\x1b[>4;0m")
+			if err == nil {
+				t.modifyOther = false
+			}
+		}
 		t.kitty = true
-		t.modifyOther = false
-		return true
+		return true, err
 	}
 	if da || kitty {
 		if !t.kitty && !t.modifyOther {
-			t.write("\x1b[>4;2m")
 			t.modifyOther = true
+			if err := t.write("\x1b[>4;2m"); err != nil {
+				return true, err
+			}
 		}
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 func (t *Terminal) KittyActive() bool { t.mu.Lock(); defer t.mu.Unlock(); return t.kitty }
-func (t *Terminal) Write(s string)    { t.mu.Lock(); defer t.mu.Unlock(); t.write(s) }
-func (t *Terminal) write(s string) {
-	if t.Out != nil {
-		_, _ = io.WriteString(t.Out, s)
+func (t *Terminal) Write(s string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.started {
+		return errors.New("tui: terminal is stopped")
 	}
+	return t.write(s)
+}
+func (t *Terminal) write(s string) error {
+	if t.Out != nil {
+		n, err := io.WriteString(t.Out, s)
+		if err != nil {
+			return err
+		}
+		if n != len(s) {
+			return io.ErrShortWrite
+		}
+		return nil
+	}
+	return errors.New("tui: terminal output is nil")
 }
 func (t *Terminal) Stop() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !t.started {
+	return t.stopLocked()
+}
+func (t *Terminal) stopLocked() error {
+	if !t.started && !t.paste && !t.keyboardPushed && !t.modifyOther && t.restore == nil {
 		return nil
 	}
+	t.started = false
 	var errs []error
-	t.write("\x1b[?2004l")
-	if t.kitty {
-		t.write("\x1b[<u")
+	if t.paste {
+		if err := t.write("\x1b[?2004l"); err != nil {
+			errs = append(errs, fmt.Errorf("disable bracketed paste: %w", err))
+		} else {
+			t.paste = false
+		}
+	}
+	if t.keyboardPushed {
+		if err := t.write("\x1b[<u"); err != nil {
+			errs = append(errs, fmt.Errorf("disable kitty keyboard: %w", err))
+		} else {
+			t.keyboardPushed = false
+		}
 	}
 	if t.modifyOther {
-		t.write("\x1b[>4;0m")
+		if err := t.write("\x1b[>4;0m"); err != nil {
+			errs = append(errs, fmt.Errorf("disable modifyOtherKeys: %w", err))
+		} else {
+			t.modifyOther = false
+		}
 	}
 	if t.restore != nil {
 		if e := t.restore(); e != nil {
-			errs = append(errs, e)
+			errs = append(errs, fmt.Errorf("restore raw mode: %w", e))
+		} else {
+			t.restore = nil
 		}
 	}
-	t.restore = nil
-	t.started = false
 	t.kitty = false
-	t.modifyOther = false
 	return errors.Join(errs...)
+}
+
+func wrapRestoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("tui: restore partial raw mode: %w", err)
 }
 
 // Pump reads terminal data until EOF, cancellation, or framing error. Context
@@ -217,14 +305,8 @@ func Pump(ctx context.Context, r io.Reader, f *Framer, handle func(InputEvent) e
 		}
 		n, e := r.Read(buf)
 		if n > 0 {
-			events, x := f.Feed(buf[:n])
-			if x != nil {
+			if x := f.FeedTo(buf[:n], handle); x != nil {
 				return x
-			}
-			for _, ev := range events {
-				if x = handle(ev); x != nil {
-					return x
-				}
 			}
 		}
 		if e != nil {

@@ -1,6 +1,7 @@
 # M-TUI：terminal foundation / v0.1 charter
 
-状态：实现候选已完成，`awaiting independent review`。
+状态：首轮审查为 0 Blocker / 6 Major / 1 Minor；修复候选已完成，
+`awaiting independent rereview`。
 
 ## 职责与边界
 
@@ -11,9 +12,11 @@ renderer 或 interactive application assembly。
 
 实现位于 `internal/tui`。`Framer` 只拥有未完成的输入字节，调用者明确拥有 timeout、EOF
 和 cancellation；`Terminal` 只拥有 raw-mode 与写出的 terminal mode 的恢复。没有后台 input
-goroutine，因此停止不能遗留 reader 或 terminal state。输入上限默认 1 MiB；超限清空当前
-不可信片段并返回错误。非法 UTF-8 可配置为 replacement 或 reject，partial UTF-8/escape 在
-`Flush`（timeout/EOF）时有确定结果。
+goroutine，因此停止不能遗留 reader 或 terminal state。输入上限默认 1 MiB，只约束尚未完成
+的 UTF-8/control 与必须聚合的 paste；普通输入由 `FeedTo` 分批交付，不因单个大 chunk 被拒绝。
+超限清空当前不可信片段并返回错误。非法 UTF-8 可配置为 reject，或将每个 maximal invalid
+byte run 替换为一个 U+FFFD；该策略同样覆盖 control payload。partial UTF-8/escape 在 `Flush`
+（timeout/EOF）时有确定结果。
 
 ## 上游证据
 
@@ -33,6 +36,7 @@ goroutine，因此停止不能遗留 reader 或 terminal state。输入上限默
 ## 当前决策与后续
 
 Go 的 word offsets 使用 UTF-8 byte offsets（不是 JS UTF-16 offsets）；cell API 从不切开
-grapheme。当前 wrap 保证 cell/UTF-8 边界，不迁移下游 renderer 的完整 ANSI-style replay；当
-renderer 模块需要具体 style state 时再扩展为单独 slice。真实 Windows console runtime 与
-pseudo-terminal smoke 留给平台/interactive assembly，不以 host-specific test 假装覆盖。
+grapheme。Wrap 在 whitespace 优先断行并跨 continuation 重放 SGR/OSC-8 state；renderer 的
+incremental diff 仍不属于本模块。Mouse wheel 以 `Scroll=+1/-1`、`Button=-1` 明确表达，未知
+扩展按钮严格拒绝。真实 Windows console runtime 与 pseudo-terminal smoke 留给平台/interactive
+assembly，不以 host-specific test 假装覆盖。

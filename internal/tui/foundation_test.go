@@ -169,7 +169,8 @@ func TestTerminalLifecycleAndNegotiation(t *testing.T) {
 	if !strings.Contains(out.String(), "\x1b[?2004h") {
 		t.Fatal(out.String())
 	}
-	if !term.HandleNegotiation("\x1b[?7u") || !term.KittyActive() {
+	handled, err := term.HandleNegotiation("\x1b[?7u")
+	if err != nil || !handled || !term.KittyActive() {
 		t.Fatal("kitty")
 	}
 	if err := term.Stop(); err != nil {
