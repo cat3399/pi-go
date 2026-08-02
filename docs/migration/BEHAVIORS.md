@@ -110,11 +110,11 @@ WorkingDir 不是 sandbox root。上游允许 command 使用当前 OS account �
 
 | ID | 行为 | 上游证据 | 状态 | Go 说明 |
 | --- | --- | --- | --- | --- |
-| `B-RESOURCE-001` | agent-dir global 与 explicit-trusted project resource precedence | `resource-loader.ts`、`project-trust.ts` | `implemented-awaiting-independent-review` | no record is untrusted; cwd resources are not probed |
-| `B-RESOURCE-002` | nearest-ancestor durable trust decision | `trust-manager.ts`、`trust-manager.test.ts` | `implemented-awaiting-independent-review` | strict/private/atomic/lock/cancel; Windows persistent store fail-closed |
-| `B-RESOURCE-003` | AGENTS/CLAUDE, templates and nested skills | `resource-loader.ts`、`prompt-templates.ts`、`skills.ts` | `implemented-awaiting-independent-review` | UTF-8/size/symlink validation and deterministic collision diagnostics strengthened |
-| `B-RESOURCE-004` | snapshot reload and system prompt composition | `resource-loader.ts`、`system-prompt.ts`、regressions 2753/2781 | `implemented-awaiting-independent-review` | failed reload retains health; no extension/package source in v0.1 |
-| `B-APP-009` | production uses trusted assembled system prompt | `main.ts` resource/runtime assembly | `implemented-awaiting-independent-review` | pre-session/pre-network failure boundary |
+| `B-RESOURCE-001` | agent-dir global 与 explicit-trusted project resource precedence | `resource-loader.ts`、`project-trust.ts` | `ported` | non-probe/physical-anchor strengthening；R-RESOURCE-001 |
+| `B-RESOURCE-002` | nearest-ancestor durable trust decision | `trust-manager.ts`、`trust-manager.test.ts` | `ported` | private/atomic/lock/cancel/raw preservation strengthened；Windows persistence fail-closed；R-RESOURCE-001 |
+| `B-RESOURCE-003` | AGENTS/CLAUDE, templates and nested skills | `resource-loader.ts`、`prompt-templates.ts`、`skills.ts` | `ported` | UTF-8/size/symlink/collision strengthening；R-RESOURCE-001 |
+| `B-RESOURCE-004` | snapshot reload and system prompt composition | `resource-loader.ts`、`system-prompt.ts`、regressions 2753/2781 | `ported` | generation-gated reload strengthening；extensions/packages deferred；R-RESOURCE-001 |
+| `B-APP-009` | production uses trusted assembled system prompt | `main.ts` resource/runtime assembly | `ported` | pre-session/pre-network assembly and template expansion；R-RESOURCE-001 |
 
 - Prompt cache、multiple models、thinking/image、parallel tools、steering/follow-up、retry、
   compaction、branch/tree、settings/auth、dynamic catalog、JSON/RPC/interactive/TUI 均为

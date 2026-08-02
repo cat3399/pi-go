@@ -1,6 +1,6 @@
 # M-RESOURCE：可信 prompt assets charter
 
-状态：`implemented-awaiting-independent-review`（`M-RESOURCE/v0.1-trusted-prompt-assets`）
+状态：`passed`（`M-RESOURCE/v0.1-trusted-prompt-assets`，`R-RESOURCE-001`）
 
 ## 负责
 
@@ -30,8 +30,8 @@
 
 | ID | 行为 | 状态 |
 | --- | --- | --- |
-| `B-RESOURCE-001` | trust-first global/project discovery 与 untrusted non-probe | `implemented-awaiting-independent-review` |
-| `B-RESOURCE-002` | strict private durable trust decision | `implemented-awaiting-independent-review` |
-| `B-RESOURCE-003` | instruction/template/skill validation, collision and expansion | `implemented-awaiting-independent-review` |
-| `B-RESOURCE-004` | immutable snapshot/reload and bounded system prompt | `implemented-awaiting-independent-review` |
-| `B-APP-009` | production prompt assembly before session/network | `implemented-awaiting-independent-review` |
+| `B-RESOURCE-001` | trust-first global/project discovery 与 untrusted non-probe | `ported` |
+| `B-RESOURCE-002` | strict private durable trust decision | `ported` |
+| `B-RESOURCE-003` | instruction/template/skill validation, collision and expansion | `ported` |
+| `B-RESOURCE-004` | immutable snapshot/reload and bounded system prompt | `ported` |
+| `B-APP-009` | production prompt assembly before session/network | `ported` |
