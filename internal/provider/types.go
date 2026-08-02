@@ -58,6 +58,7 @@ type Request struct {
 	model        ModelRef
 	systemPrompt string
 	messages     []llm.ConversationMessage
+	tools        []ToolDefinition
 }
 
 func NewRequest(
@@ -65,10 +66,22 @@ func NewRequest(
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 ) (Request, error) {
+	return NewRequestWithTools(model, systemPrompt, messages, nil)
+}
+
+// NewRequestWithTools creates one immutable provider request. The legacy
+// NewRequest convenience remains deliberately tool-free for existing callers.
+func NewRequestWithTools(
+	model ModelRef,
+	systemPrompt string,
+	messages []llm.ConversationMessage,
+	tools []ToolDefinition,
+) (Request, error) {
 	request := Request{
 		model:        model,
 		systemPrompt: systemPrompt,
 		messages:     append([]llm.ConversationMessage(nil), messages...),
+		tools:        append([]ToolDefinition(nil), tools...),
 	}
 	if err := request.validate(); err != nil {
 		return Request{}, err
@@ -88,11 +101,22 @@ func (r Request) validate() error {
 			return fmt.Errorf("%w: message %d: %w", ErrInvalidRequest, index, err)
 		}
 	}
+	seenTools := make(map[string]struct{}, len(r.tools))
+	for index, definition := range r.tools {
+		if err := definition.validate(); err != nil {
+			return fmt.Errorf("%w: tool %d: %w", ErrInvalidRequest, index, err)
+		}
+		if _, duplicate := seenTools[definition.Name()]; duplicate {
+			return fmt.Errorf("%w: duplicate tool name %q", ErrInvalidRequest, definition.Name())
+		}
+		seenTools[definition.Name()] = struct{}{}
+	}
 	return nil
 }
 
 func (r Request) clone() Request {
 	r.messages = append([]llm.ConversationMessage(nil), r.messages...)
+	r.tools = append([]ToolDefinition(nil), r.tools...)
 	return r
 }
 
@@ -102,6 +126,10 @@ func (r Request) SystemPrompt() string { return r.systemPrompt }
 
 func (r Request) Messages() []llm.ConversationMessage {
 	return append([]llm.ConversationMessage(nil), r.messages...)
+}
+
+func (r Request) Tools() []ToolDefinition {
+	return append([]ToolDefinition(nil), r.tools...)
 }
 
 // EventStream is a single-consumer pull stream. All expected provider failures

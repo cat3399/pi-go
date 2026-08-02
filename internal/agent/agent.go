@@ -417,7 +417,7 @@ func (a *Agent) commitTerminal(
 
 func (a *Agent) providerTurn(active *activeRun, turn uint32) (llm.AssistantTerminal, error) {
 	messages := a.config.transcript.Context().Messages()
-	request, err := provider.NewRequest(a.config.model, a.config.systemPrompt, messages)
+	request, err := provider.NewRequestWithTools(a.config.model, a.config.systemPrompt, messages, a.config.tools)
 	if err != nil {
 		return nil, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
 	}

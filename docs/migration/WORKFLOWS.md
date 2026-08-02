@@ -110,3 +110,18 @@ tool-call wire、settings/trust 和完整 system prompt 不属于这条 text-onl
 
 新增 workflow 必须说明用户入口、可观察成功与失败、跨模块 ownership、durable data
 影响和验收证据。只把多个 unit test 罗列在一起不算 workflow。
+
+## WF-003：production OpenAI single tool replay
+
+状态：`in-progress`（awaiting M-PROVIDER/M-TOOL/M-APP independent review）
+
+~~~text
+production OpenAI request (built-in tool schemas)
+  -> SSE function_call arguments stream
+  -> M-AGENT v0.1 one local tool execution
+  -> durable ToolResult in source order
+  -> second OpenAI request replays function_call + function_call_output
+  -> final assistant text / session
+~~~
+
+本地 HTTP/SSE E2E 断言 request1 有 bash/filesystem schemas，call ID 与 `fc_*` item identity 正确归一，empty result 使用 `(no tool output)`，request2 只发送完整 durable state。partial/error/aborted calls 不 replay；unknown/out-of-order/malformed events fail explicit。M-AGENT/v0.2 的 multi-call scheduler 是集成前提，不由本 workflow 宣称完成。

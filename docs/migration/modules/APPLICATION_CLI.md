@@ -1,8 +1,10 @@
 # M-APP：Coding-agent application 与 headless CLI charter
 
-状态：`ported`（`M-APP/v0.1-print-workflow`、`M-APP/v0.2-production-assembly`）
+状态：`in-progress`（`M-APP/v0.3-production-tool-replay`；v0.1/v0.2 已复审）
 
 最近通过里程碑：`M-APP/v0.2-production-assembly`
+
+当前里程碑：`M-APP/v0.3-production-tool-replay`。production assembly 以同一个 immutable built-in registry 生成 agent executor 与 provider tool definitions；本地 HTTP/SSE 只验收一个 sequential tool call 的 durable replay，不改变 auth/model/resource selection，也不宣称 M-AGENT/v0.2 multi-call scheduler 已合入。
 
 ## 负责
 

@@ -4,6 +4,8 @@
 
 首个里程碑：`M-AGENT/v0.1-single-tool-loop`
 
+M-PROVIDER/v0.3 增加了 immutable request tool definitions port：v0.1 coordinator 将其与每个 provider request snapshot 一起发送，仍只执行一个 accepted call。多-call scheduling/parallelism 是单独的 M-AGENT/v0.2 milestone，不能由这个 compatibility port 暗示完成。
+
 ## 负责
 
 - Accepted run 与 turn lifecycle；

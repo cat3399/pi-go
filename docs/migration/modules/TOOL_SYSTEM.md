@@ -1,10 +1,12 @@
 # M-TOOL：Tool 与系统能力 charter
 
-状态：`ported`（`M-TOOL/v0.1-bash`、`M-TOOL/v0.2-filesystem-suite`）
+状态：`in-progress`（`M-TOOL/v0.3-provider-tool-registry`；v0.1/v0.2 已复审）
 
 首个里程碑：`M-TOOL/v0.1-bash`
 
 最近通过里程碑：`M-TOOL/v0.2-filesystem-suite`
+
+当前里程碑：`M-TOOL/v0.3-provider-tool-registry`。Registry 将 bash 与 filesystem 的 immutable JSON Schema、严格标记和 executor 同时注册；不能只广告不可执行名称。provider-neutral spec 保持在 tool 边界，OpenAI wire encoding 属 M-PROVIDER。
 
 ## v0.2 filesystem suite
 

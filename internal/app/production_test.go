@@ -147,6 +147,86 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 	}
 }
 
+func TestRunProductionOpenAIToolWorkflowReplaysDurableResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the production Bash executor is covered by platform-specific process tests")
+	}
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	sessionPath := filepath.Join(workingDir, "tool-workflow.jsonl")
+	var mu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		payloads = append(payloads, payload)
+		turn := len(payloads)
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if turn == 1 {
+			call := map[string]any{"type": "function_call", "id": "fc_prod", "call_id": "call_prod", "name": "bash", "arguments": `{"command":"printf tool-ok"}`}
+			writeProductionSSE(t, writer,
+				map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc_prod", "call_id": "call_prod", "name": "bash", "arguments": ""}},
+				map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_prod", "delta": `{"command":"printf tool-ok"}`},
+				map[string]any{"type": "response.function_call_arguments.done", "output_index": 0, "item_id": "fc_prod", "arguments": `{"command":"printf tool-ok"}`},
+				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": call},
+				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{call}}},
+			)
+			return
+		}
+		item := map[string]any{"type": "message", "id": "msg_final", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "tool completed"}}}
+		writeProductionSSE(t, writer,
+			map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
+			map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{item}}},
+		)
+	}))
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-tool", "--session", sessionPath, "-p", "use bash"}, &stdout, &stderr)
+	if exitCode != app.ExitSuccess || stdout.String() != "tool completed\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction() = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
+	}
+	mu.Lock()
+	received := append([]map[string]any(nil), payloads...)
+	mu.Unlock()
+	if len(received) != 2 {
+		t.Fatalf("request count = %d", len(received))
+	}
+	tools, ok := received[0]["tools"].([]any)
+	if !ok || len(tools) != 7 {
+		t.Fatalf("first request tools = %#v", received[0]["tools"])
+	}
+	input, ok := received[1]["input"].([]any)
+	if !ok || len(input) != 3 {
+		t.Fatalf("second request input = %#v", received[1]["input"])
+	}
+	function, ok := input[1].(map[string]any)
+	if !ok || function["type"] != "function_call" || function["call_id"] != "call_prod" || function["id"] != "fc_prod" {
+		t.Fatalf("second request function = %#v", input[1])
+	}
+	output, ok := input[2].(map[string]any)
+	if !ok || output["type"] != "function_call_output" || output["call_id"] != "call_prod" || output["output"] != "tool-ok" {
+		t.Fatalf("second request result = %#v", input[2])
+	}
+	transcript, err := session.Open(sessionPath, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	if len(messages) != 4 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant || messages[2].Role() != llm.RoleToolResult || messages[3].Role() != llm.RoleAssistant {
+		t.Fatalf("durable roles = %#v", messages)
+	}
+}
+
 func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 	testCases := []struct {
 		name          string

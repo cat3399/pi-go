@@ -1,9 +1,10 @@
 # M-PROVIDER：AI 与 provider runtime charter
 
-状态：`ported`（`M-PROVIDER/v0.1-deterministic-script`、
-`M-PROVIDER/v0.2-openai-responses-text`）
+状态：`in-progress`（`M-PROVIDER/v0.3-openai-tools-replay`；v0.1/v0.2 已复审）
 
 最近完成里程碑：`M-PROVIDER/v0.2-openai-responses-text`
+
+当前里程碑：`M-PROVIDER/v0.3-openai-tools-replay`
 
 ## 负责
 
@@ -123,3 +124,15 @@ Provider dispatch 与真实 adapter 分别形成后续独立里程碑和 review�
 v0.2 已由 R-PROVIDER-004 通过整模块复审。本地 HTTP/SSE、race、fuzz、全仓 gate 和多平台
 test compile 是本里程碑证据；真实 credential smoke、production assembler 以及 B-BASE-005
 replay metadata 仍分别验收，不能用本地 fixture 冒充。
+
+## v0.3 OpenAI tools/replay 边界
+
+- `provider.Request` 增加 immutable neutral function definitions（name、description、strict、JSON-schema object）；OpenAI Responses request 逐项编码为 `tools`，重复/非 object/可变 caller bytes 在 admission 失败。
+- replay 只发送完整 user、successful assistant text/function_call 与 durable ToolResult；failure/aborted partial assistant 绝不重放。function call 的 domain ID 是 `call_id|item_id`，wire output 只使用前一段 call ID；item ID 仅在可证明的 `fc_*` 形状时保留，否则稳定规范化。
+- SSE 支持 source-order mixed text/function_call、arguments start/delta/done、JSON object finalization 和 `toolUse` terminal；unknown、duplicate、orphan、out-of-order、partial/invalid JSON 和 dirty EOF 显式失败，不能产生可执行 partial call。
+- 本里程碑只覆盖 function tools。reasoning/image/custom tool、prompt cache，以及没有 M-BASE metadata storage 的 response/message ID 仍延期；不创建无界 metadata map。
+- M-AGENT/v0.1 只消费一个 call，但 adapter/replay 可表达多个完整 calls；并行 dispatch 属 M-AGENT/v0.2。M-APP 的 local HTTP/SSE scenario 验证一个 bash call、durable ToolResult 和第二 request replay。
+
+| ID | 行为 | Workflow | 状态 |
+| --- | --- | --- | --- |
+| `B-PROVIDER-006` | Responses function tool schema encoding、tool replay、strict SSE function-call reducer | WF-003 | `in-progress` |

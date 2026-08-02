@@ -33,7 +33,8 @@
 | `T-PROVIDER-008` | B-PROVIDER-005 | `packages/ai/test/openai-responses-terminal-event.test.ts` 的 premature EOF、wrapper error 与唯一 terminal cases | `strengthened` | R-PROVIDER-004；另覆盖 dirty EOF、staged terminal/usage、race 与 fuzz |
 | `T-PROVIDER-009` | B-PROVIDER-005 | `packages/ai/test/fetch-option.test.ts` — `passes fetch through streamSimple to OpenAI SDK adapters` | `strengthened` | R-PROVIDER-004；显式 HTTP client、request/error/cancel fixture |
 | `T-PROVIDER-010` | B-PROVIDER-005 | `packages/ai/test/stream.test.ts` / `OpenAI Responses Provider (gpt-5.4)` — `should complete basic text generation`、`should handle streaming` | `deferred` | 本地 fixture 先完成；真实 credential smoke 仅显式启用，目标 `ported` |
-| `T-PROVIDER-011` | B-PROVIDER-002 + 后续真实 tool adapter | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `deferred` | 不属于 text-only B-PROVIDER-005；真实 tool-call slice 重评 |
+| `T-PROVIDER-011` | B-PROVIDER-006 | `packages/ai/test/openai-responses-partial-json-cleanup.test.ts` — function-call argument cleanup cases | `strengthened` | final JSON object validation, delta-prefix reconciliation and no executable partial call；awaiting module review |
+| `T-PROVIDER-012` | B-PROVIDER-006 | `openai-responses-shared.ts::convertResponsesMessages/processResponsesStream`；`openai-responses-{partial-json-cleanup,foreign-toolcall-id,message-id,empty-tool-result,terminal-event}.test.ts` | `strengthened` | Go request immutability, local SSE tool start/delta/done, malformed/order failure and replay fixture；awaiting module review |
 
 Prompt cache、multiple model、unregister 以外的 compat/global registry test 不进入 fake v0.1；
 每项在相关 behavior 开始时重新分类，不能批量 skip。
@@ -92,6 +93,7 @@ contract/scenario suite 覆盖，不复制两套 runtime test。
 | `T-TOOL-010` | B-TOOL-008 | `tools.test.ts` multi-edit/fuzzy/CRLF/BOM suites | `strengthened` | original snapshot/BOM/CRLF + single/distant multi-hunk actual patch apply；R-TOOL-005 |
 | `T-TOOL-011` | B-TOOL-009 | `tools.test.ts` grep/find/ls suites | `strengthened` | parent/nested/malformed/I/O ignore、>2,000 context、entry/mid-walk cancel；R-TOOL-005 |
 | `T-TOOL-012` | B-TOOL-006..010 | no direct upstream equivalent | `strengthened` | JSON/edit/unified-patch fuzz、symlink TOCTOU、effective permission、cancel/race strengthening；R-TOOL-005 |
+| `T-TOOL-013` | B-TOOL-011 | `coding-agent` built-in tool definitions + Responses tool conversion | `strengthened` | built-in registry schema/name/executor co-admission and WF-003 request assertion；awaiting module review |
 
 Command prefix、extension reuse、remote BashOperations、renderer 和 direct user bash tests 在
 相应产品 behavior 出现前保持 `deferred`，不混入内置 model tool v0.1。
@@ -108,6 +110,7 @@ Command prefix、extension reuse、remote BashOperations、renderer 和 direct u
 | `T-APP-006` | B-APP-005/007 | `args.test.ts` provider/model/api-key cases；`model-resolver.test.ts` provider-prefixed/custom model cases | `strengthened` | production request/model/exit integration；R-APP-002 |
 | `T-APP-007` | B-APP-006 | `models-runtime.test.ts` explicit/stored/ambient 与 wrong-handler cases；`auth-storage.test.ts` read/malformed intent | `strengthened` | 四层 precedence、secret-safe、无 session/network 副作用 matrix；R-APP-002 |
 | `T-APP-008` | B-APP-008 | `session-manager.ts` default cwd-encoded directory/new filename；上游缺同等 crash-safe create test | `strengthened` | filename/header ID/time、explicit resume advancing clock；R-APP-002 |
+| `T-APP-009` | B-APP-009 | `agent-session` prompt/tool persistence flow + Responses request/stream evidence | `strengthened` | local HTTP/SSE request1 tools → function call → durable result → request2 replay → final print；awaiting module review |
 
 ## M-AUTH
 

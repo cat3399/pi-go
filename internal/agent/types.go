@@ -71,11 +71,15 @@ type NamedToolExecutor interface {
 // Config is immutable after New. Tool may be nil so a model request for an
 // unavailable tool can still become a normal error ToolResult.
 type Config struct {
-	Provider          provider.Provider
-	Transcript        Transcript
-	Model             provider.ModelRef
-	SystemPrompt      string
-	Tool              ToolExecutor
+	Provider     provider.Provider
+	Transcript   Transcript
+	Model        provider.ModelRef
+	SystemPrompt string
+	Tool         ToolExecutor
+	// Tools is the immutable model-visible schema snapshot for this run. It is
+	// separate from Tool because an executor may intentionally support fewer
+	// names than a future model registry; admission rejects that mismatch.
+	Tools             []provider.ToolDefinition
 	Now               func() time.Time
 	SettlementTimeout time.Duration
 }
@@ -87,6 +91,7 @@ type runtimeConfig struct {
 	systemPrompt      string
 	tool              ToolExecutor
 	toolName          string
+	tools             []provider.ToolDefinition
 	now               func() time.Time
 	settlementTimeout time.Duration
 }
@@ -98,7 +103,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Transcript) {
 		return runtimeConfig{}, fmt.Errorf("%w: transcript is required", ErrInvalidConfig)
 	}
-	if _, err := provider.NewRequest(config.Model, config.SystemPrompt, nil); err != nil {
+	if _, err := provider.NewRequestWithTools(config.Model, config.SystemPrompt, nil, config.Tools); err != nil {
 		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 	}
 
@@ -136,6 +141,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		systemPrompt:      config.SystemPrompt,
 		tool:              configuredTool,
 		toolName:          toolName,
+		tools:             append([]provider.ToolDefinition(nil), config.Tools...),
 		now:               now,
 		settlementTimeout: settlementTimeout,
 	}, nil
