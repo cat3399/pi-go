@@ -239,6 +239,192 @@ func TestToolDefinitionStrictSchemaAdmission(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionStrictSchemaResolvesLocalJSONPointers(t *testing.T) {
+	t.Parallel()
+
+	valid := []struct {
+		name   string
+		schema string
+	}{
+		{
+			name:   "root recursion",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"children":{"type":"array","items":{"$ref":"#"}}},"required":["children"]}`,
+		},
+		{
+			name:   "escaped definition token",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"entry":{"$ref":"#/%24defs/a~1b~0c"}},"required":["entry"],"$defs":{"a/b~c":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}},"required":["name"]}}}`,
+		},
+		{
+			name:   "array token",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"entry":{"$ref":"#/$defs/choice/anyOf/1"}},"required":["entry"],"$defs":{"choice":{"anyOf":[{"type":"string"},{"type":"object","additionalProperties":false,"properties":{},"required":[]}]}}}`,
+		},
+		{
+			name:   "recursive definition",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"node":{"$ref":"#/$defs/node"}},"required":["node"],"$defs":{"node":{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"},"next":{"anyOf":[{"$ref":"#/$defs/node"},{"type":"null"}]}},"required":["value","next"]}}}`,
+		},
+	}
+	for _, test := range valid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := provider.NewToolDefinition("valid_ref", "valid local reference", true, []byte(test.schema)); err != nil {
+				t.Fatalf("valid strict schema rejected: %v", err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name   string
+		schema string
+	}{
+		{
+			name:   "missing target",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/missing"}},"required":["value"],"$defs":{}}`,
+		},
+		{
+			name:   "pointer must start with slash",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#$defs/value"}},"required":["value"]}`,
+		},
+		{
+			name:   "invalid tilde escape",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/a~2b"}},"required":["value"],"$defs":{}}`,
+		},
+		{
+			name:   "incomplete tilde escape",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/value~"}},"required":["value"],"$defs":{}}`,
+		},
+		{
+			name:   "invalid percent escape",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/%zz"}},"required":["value"],"$defs":{}}`,
+		},
+		{
+			name:   "noncanonical array token",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/choice/anyOf/01"}},"required":["value"],"$defs":{"choice":{"anyOf":[{"type":"string"},{"type":"number"}]}}}`,
+		},
+		{
+			name:   "null type beside reference",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":null,"$ref":"#/$defs/value"}},"required":["value"],"$defs":{"value":{"type":"string"}}}`,
+		},
+		{
+			name:   "array token out of range",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/choice/anyOf/2"}},"required":["value"],"$defs":{"choice":{"anyOf":[{"type":"string"}]}}}`,
+		},
+		{
+			name:   "scalar target",
+			schema: `{"type":"object","description":"not a schema","additionalProperties":false,"properties":{"value":{"$ref":"#/description"}},"required":["value"]}`,
+		},
+		{
+			name:   "array target",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/required"}},"required":["value"]}`,
+		},
+		{
+			name:   "schema container target",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs"}},"required":["value"],"$defs":{"value":{"type":"string"}}}`,
+		},
+		{
+			name:   "remote target",
+			schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"https://example.test/schema"}},"required":["value"]}`,
+		},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := provider.NewToolDefinition("invalid_ref", "invalid local reference", true, []byte(test.schema)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+				t.Fatalf("NewToolDefinition() error = %v, want ErrInvalidToolDefinition", err)
+			}
+		})
+	}
+}
+
+func TestToolDefinitionStrictAdditionalPropertiesRequiresBooleanFalseEverywhere(t *testing.T) {
+	t.Parallel()
+
+	invalid := []struct {
+		name   string
+		schema string
+	}{
+		{name: "root null", schema: `{"type":"object","additionalProperties":null,"properties":{},"required":[]}`},
+		{name: "root true", schema: `{"type":"object","additionalProperties":true,"properties":{},"required":[]}`},
+		{name: "root string", schema: `{"type":"object","additionalProperties":"false","properties":{},"required":[]}`},
+		{name: "root number", schema: `{"type":"object","additionalProperties":0,"properties":{},"required":[]}`},
+		{name: "nested object", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"object","additionalProperties":null,"properties":{},"required":[]}},"required":["value"]}`},
+		{name: "array items", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"type":"array","items":{"type":"object","additionalProperties":"false","properties":{},"required":[]}}},"required":["value"]}`},
+		{name: "anyOf branch", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"anyOf":[{"type":"object","additionalProperties":0,"properties":{},"required":[]},{"type":"null"}]}},"required":["value"]}`},
+		{name: "definition", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/value"}},"required":["value"],"$defs":{"value":{"type":"object","additionalProperties":true,"properties":{},"required":[]}}}`},
+		{name: "reference-only target", schema: `{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/x-target"}},"required":["value"],"x-target":{"type":"object","additionalProperties":null,"properties":{},"required":[]}}`},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := provider.NewToolDefinition("invalid_additional", "invalid additional properties", true, []byte(test.schema)); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+				t.Fatalf("NewToolDefinition() error = %v, want ErrInvalidToolDefinition", err)
+			}
+		})
+	}
+}
+
+func TestToolDefinitionStrictSchemaTraversalIsBounded(t *testing.T) {
+	t.Parallel()
+
+	var nested any = map[string]any{"type": "string"}
+	for range 300 {
+		nested = map[string]any{"type": "array", "items": nested}
+	}
+	schema, err := json.Marshal(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           map[string]any{"value": nested},
+		"required":             []string{"value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.NewToolDefinition("too_deep", "deep strict schema", true, schema); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+		t.Fatalf("NewToolDefinition() error = %v, want ErrInvalidToolDefinition", err)
+	}
+
+	referenceSchema, err := json.Marshal(map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"value": map[string]any{"$ref": "#/" + strings.Repeat("segment/", 300) + "target"},
+		},
+		"required": []string{"value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.NewToolDefinition("ref_too_deep", "deep local reference", true, referenceSchema); !errors.Is(err, provider.ErrInvalidToolDefinition) {
+		t.Fatalf("deep reference error = %v, want ErrInvalidToolDefinition", err)
+	}
+}
+
+func FuzzToolDefinitionStrictLocalReferenceNeverPanics(f *testing.F) {
+	for _, reference := range []string{"#", "#/$defs/value", "#/%24defs/a~1b~0c", "#/$defs/choice/anyOf/0", "#/$defs/missing", "https://example.test/schema"} {
+		f.Add(reference)
+	}
+	f.Fuzz(func(t *testing.T, reference string) {
+		schema, err := json.Marshal(map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"value": map[string]any{"$ref": reference},
+			},
+			"required": []string{"value"},
+			"$defs": map[string]any{
+				"value": map[string]any{"type": "string"},
+				"a/b~c": map[string]any{"type": "number"},
+				"choice": map[string]any{
+					"anyOf": []any{map[string]any{"type": "boolean"}},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = provider.NewToolDefinition("fuzz_ref", "fuzz local reference", true, schema)
+	})
+}
+
 func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
 	t.Parallel()
 

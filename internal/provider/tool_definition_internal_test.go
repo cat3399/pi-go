@@ -66,9 +66,16 @@ func TestOpenAIResponsesRejectsInvalidStrictSchemaBeforeNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, schema := range [][]byte{
-		[]byte(`{"type":"object","properties":{},"required":[]}`),
-		[]byte(`{"type":"object","additionalProperties":false,"properties":{"optional":{"type":"string"}},"required":[]}`),
+	for _, test := range []struct {
+		name   string
+		schema []byte
+	}{
+		{name: "missing object closure", schema: []byte(`{"type":"object","properties":{},"required":[]}`)},
+		{name: "optional property", schema: []byte(`{"type":"object","additionalProperties":false,"properties":{"optional":{"type":"string"}},"required":[]}`)},
+		{name: "missing reference", schema: []byte(`{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/missing"}},"required":["value"],"$defs":{}}`)},
+		{name: "invalid pointer", schema: []byte(`{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/$defs/value~2"}},"required":["value"],"$defs":{}}`)},
+		{name: "non-schema reference target", schema: []byte(`{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/required"}},"required":["value"]}`)},
+		{name: "referenced object non-boolean closure", schema: []byte(`{"type":"object","additionalProperties":false,"properties":{"value":{"$ref":"#/x-target"}},"required":["value"],"x-target":{"type":"object","additionalProperties":null,"properties":{},"required":[]}}`)},
 	} {
 		transport := &rejectNetworkDoer{}
 		implementation, err := NewOpenAIResponsesProvider(OpenAIResponsesConfig{
@@ -85,20 +92,20 @@ func TestOpenAIResponsesRejectsInvalidStrictSchemaBeforeNetwork(t *testing.T) {
 				name:        "strict_tool",
 				description: "invalid strict schema",
 				strict:      true,
-				parameters:  schema,
+				parameters:  test.schema,
 			}},
 		}
 		stream := implementation.Stream(context.Background(), request)
 		event, err := stream.Next()
 		if err != nil || event == nil {
-			t.Fatalf("preflight failure = (%T, %v), want error event", event, err)
+			t.Fatalf("%s preflight failure = (%T, %v), want error event", test.name, event, err)
 		}
 		failure, ok := event.(llm.ErrorEvent)
 		if !ok || !errors.Is(failure.Failure(), ErrInvalidRequest) || !errors.Is(failure.Failure(), ErrInvalidToolDefinition) {
-			t.Fatalf("preflight event = %#v, want invalid request/tool definition", event)
+			t.Fatalf("%s preflight event = %#v, want invalid request/tool definition", test.name, event)
 		}
 		if transport.calls != 0 {
-			t.Fatalf("HTTP calls = %d, want 0", transport.calls)
+			t.Fatalf("%s HTTP calls = %d, want 0", test.name, transport.calls)
 		}
 		if err := stream.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
