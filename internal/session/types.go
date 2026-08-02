@@ -22,6 +22,7 @@ var (
 	ErrPoisoned              = errors.New("session writer is poisoned")
 	ErrClosed                = errors.New("session is closed")
 	ErrWriterActive          = errors.New("session already has an active writer")
+	ErrUnsafeWriterAlias     = errors.New("session writer alias cannot be made safe")
 	ErrIDGeneration          = errors.New("session id generation failed")
 	ErrEntryIDExhausted      = errors.New("unique session entry id exhausted")
 	ErrEntryNotFound         = errors.New("session entry not found")
@@ -31,7 +32,14 @@ var (
 	ErrCompactionConflict    = errors.New("session changed while compaction summary was in progress")
 	ErrSummaryFailed         = errors.New("session compaction summary failed")
 	ErrTokenEstimateOverflow = errors.New("session token estimate overflow")
+	ErrRecoveryNotApplicable = errors.New("session recovery is not applicable")
+	ErrRecoveryBackupExists  = errors.New("session recovery backup already exists")
+	ErrSessionTooLarge       = errors.New("session exceeds safety limit")
 )
+
+// ErrAtomicReplaceUnsupported reports that the host cannot replace an open
+// session target atomically. The operation fails before publication.
+var ErrAtomicReplaceUnsupported = errors.New("atomic session replacement unsupported")
 
 // CompactionSummaryPrefix and CompactionSummarySuffix are the v3 context
 // representation of a durable compaction record. They make the checkpoint an
@@ -59,6 +67,14 @@ type CreateOptions struct {
 type OpenOptions struct {
 	Now        Clock
 	NewEntryID IDGenerator
+}
+
+// RecoveryResult describes an explicit, user-requested repair. Ordinary Open
+// never calls this operation: malformed history is evidence, not disposable
+// whitespace. Recovery only removes one unterminated, non-JSON final line.
+type RecoveryResult struct {
+	BackupPath     string
+	TruncatedBytes int64
 }
 
 // AssistantProvenance supplies the coding-agent v3 storage fields for the

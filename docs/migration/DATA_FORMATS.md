@@ -5,7 +5,7 @@
 
 | ID | 数据 | 固定上游证据 | 兼容要求 | 当前状态 |
 | --- | --- | --- | --- | --- |
-| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v3 首个目标；v1/v2 后续 migration；unknown/corrupt 不破坏 | `classified` |
+| `D-SESSION-001` | coding-agent session JSONL v1-v3 | `packages/coding-agent/docs/session-format.md`；`src/core/session-manager.ts` | v1/v2 Open migration → strict v3 rewrite；unknown 保留；corrupt/partial 不自动破坏 | `ported`（R-SESSION-005） |
 | `D-SESSION-002` | AgentHarness JSONL v3 | `packages/agent/src/harness/session/jsonl-store.ts` | 只提取 strict parse/storage invariant；不能假定与 D-SESSION-001 wire 等价 | `classified` |
 | `D-SESSION-003` | AgentHarness SQLite | `packages/storage/sqlite-node/src/sqlite/` 和 migrations | 后续 storage backend；不阻塞 standalone JSONL | `deferred` |
 | `D-SESSION-004` | legacy `~/.pi/agent/*.jsonl` root location | `packages/coding-agent/src/migrations.ts::migrateSessionsFromAgentRoot` | 校验 header/cwd 与 destination collision；迁移成功前不覆盖或丢失 source | `deferred` |
@@ -52,6 +52,12 @@ malformed/unsupported version、未知 phase 或未来字段继续由 raw entry 
 context 只取得安全可读的 unsigned 内容，redacted 或 opaque-only block 被省略并诊断。
 该 v3 子集的 reopen/fork 与 projection 已由 `R-BASE-003` 通过；它只保证 raw preservation
 和安全降级，不声称已经实现 Anthropic、Google 或未来 signature 的 typed replay。
+
+M-SESSION/v0.4 将同一 inventory 的 v1/v2 作为 `Open` 的 legacy 输入：v1 物理链与
+compaction index、v2 tree envelope 与 hook rename 转成 strict v3，同时保留 unknown raw JSON。
+普通 Open 不修改 corrupt 或 trailing-partial v3；后者只能经显式 `RecoverTrailingPartial`
+先建立 no-clobber backup，再发布已严格校验的完整 prefix。migration/recovery 的完整 rewrite、
+writer-lock 与平台债务 contract 见 `R-SESSION-005` 和 SESSION_STORAGE charter。
 
 ## D-SETTINGS-001
 

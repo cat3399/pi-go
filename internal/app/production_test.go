@@ -1356,6 +1356,77 @@ func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 	}
 }
 
+func TestRunProductionPreservesInvalidExplicitSessionBeforeProviderCall(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("fixture-key"), nil)
+	sessionPath := filepath.Join(workingDir, "invalid.jsonl")
+	original := []byte(`{"type":"event","data":"not a session"}` + "\n")
+	if err := os.WriteFile(sessionPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	exitCode := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-invalid", "--session", sessionPath, "-p", "must not call provider",
+	}, &stdout, &stderr)
+	if exitCode != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "open session "+sessionPath) {
+		t.Fatalf("RunProduction = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(sessionPath)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatalf("production changed invalid session: %v / %q", err, after)
+	}
+}
+
+func TestRunProductionOpensLegacySessionIntoCurrentContext(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "legacy production answer")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	sessionPath := filepath.Join(workingDir, "legacy-production.jsonl")
+	legacy := []byte(fmt.Sprintf(
+		`{"type":"session","version":2,"id":"legacy-production","timestamp":"2026-08-01T00:00:00.000Z","cwd":%q}`+"\n"+
+			`{"type":"message","id":"legacy-root","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"legacy production context"}],"timestamp":1785542401000}}`+"\n",
+		workingDir,
+	))
+	if err := os.WriteFile(sessionPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := app.RunProduction(
+		context.Background(),
+		productionTestConfig(workingDir, agentDir, nil),
+		[]string{"--model", "openai/gpt-legacy", "--session", sessionPath, "-p", "resume migrated context"},
+		&stdout,
+		&stderr,
+	)
+	if exitCode != app.ExitSuccess || stdout.String() != "legacy production answer\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction legacy = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
+	}
+	payload, err := json.Marshal(capture.snapshot().payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(payload), "legacy production context") != 1 || strings.Count(string(payload), "resume migrated context") != 1 {
+		t.Fatalf("production request lost migrated context: %s", payload)
+	}
+	data, err := os.ReadFile(sessionPath)
+	if err != nil || !bytes.Contains(data, []byte(`"version":3`)) {
+		t.Fatalf("production legacy publication = %v / %s", err, data)
+	}
+	transcript, err := session.Open(sessionPath, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	if messages := transcript.BuildContext().Messages(); len(messages) != 3 {
+		t.Fatalf("production reopened migrated context = %#v", messages)
+	}
+}
+
 func productionTestConfig(workingDir, agentDir string, environment []string) app.ProductionConfig {
 	var entryIDs atomic.Uint64
 	environmentCopy := make([]string, len(environment))
