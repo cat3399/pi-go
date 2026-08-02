@@ -335,11 +335,12 @@
 
 ## R-TUI-001：M-TUI/v0.1 terminal foundation
 
-- 首轮结论：`changes-required`，0 Blocker / 6 Major / 1 Minor。
-- 第二轮结论：`changes-required`，0 Blocker / 5 Major / 2 Minor。
-- 最近复审结论：`changes-required`，0 Blocker / 0 Major / 1 Minor。
-- 当前状态：最后一项 padding finding 的修复候选与正式 regression 已完成，`awaiting final rereview`；不声明 review passed。
+- 实现提交：`47eacd1`；首轮结论 `changes-required`，0 Blocker / 6 Major / 1 Minor。
+- 首轮修复：`6a064b5`；第二轮结论 `changes-required`，0 Blocker / 5 Major / 2 Minor。
+- 第二轮修复：`efa07ce`；第三轮结论 `changes-required`，0 Blocker / 0 Major / 1 Minor。
+- 最后一项 exact-padding 修复：`33b6649`；最终复审 `passed`，0 Blocker / 0 Major / 0 Minor。
 - 范围：`internal/tui`、其 unit/fuzz/race coverage、`TUI_FOUNDATION.md` 与对应 behavior/test ledger。
 - 修复：large-chunk bounded streaming、control-wide/maximal-run UTF-8 policy、exact pending/paste bounds、WezTerm double-ESC framing、strict/canonical key grammar、Myanmar/Indic/ZWJ cell fixtures、indent-preserving ANSI wrap、wide/empty-ellipsis exact padding、stateful SGR/OSC-8 slice、partial-raw 与 concurrent mode balance，以及 explicit wheel semantics。
-- 实现者 gate：最终 TUI suite 重复 10 次与 race 重复 5 次、全仓 test/vet/build/race、两组各 5 秒 fuzz、Linux/Windows build 与 TUI test-binary cross-compile、diff check 均通过。
-- 待复核：上述 finding 的正式 regression、固定上游 evidence 与 platform isolation；测试 intents 在 rereview 前保持 `deferred`。
+- 最终 gate：TUI suite 重复 10 次与 race 重复 5 次、全仓 test/vet/build/race、两组各 5 秒 fuzz、Linux/Windows build 与 TUI test-binary cross-compile、exact-padding 定点 100 次及 diff check 均通过。
+- 明确延期：editor、renderer、autocomplete，以及真实 PTY/Windows runtime；由 interactive assembly 后续里程碑负责。
+- 最终结论：`passed`，Blocker 0 / Major 0 / Minor 0；behavior 为 `ported`，对应 test intents 为 `strengthened`。

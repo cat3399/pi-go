@@ -1,7 +1,6 @@
 # M-TUI：terminal foundation / v0.1 charter
 
-状态：最近复审为 0 Blocker / 0 Major / 1 Minor；最后一项 padding 修复候选已完成，
-`awaiting final rereview`。
+状态：`ported`；`R-TUI-001` 最终复审 `passed`，0 Blocker / 0 Major / 0 Minor。
 
 ## 职责与边界
 
@@ -40,5 +39,5 @@ Go 的 word offsets 使用 UTF-8 byte offsets（不是 JS UTF-16 offsets）；ce
 grapheme。Wrap 在 whitespace 优先断行并跨 continuation 重放 SGR/OSC-8 state；renderer 的
 incremental diff 仍不属于本模块。Mouse wheel 以 `Scroll=+1/-1`、`Button=-1` 明确表达，未知
 扩展按钮严格拒绝。Slice 在起始列重放有效 SGR/OSC-8 状态并在右边界关闭；ZWJ 不跨
-ESC/control 边界吞并 terminal sequence。真实 Windows console runtime 与 pseudo-terminal smoke 留给平台/interactive
-assembly，不以 host-specific test 假装覆盖。
+ESC/control 边界吞并 terminal sequence。Editor、renderer、autocomplete，以及真实 pseudo-terminal
+和 Windows console runtime 仍 `deferred` 到 interactive assembly，不以 host-specific test 假装覆盖。
