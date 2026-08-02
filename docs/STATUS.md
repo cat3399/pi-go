@@ -1,7 +1,7 @@
 # 当前状态
 
-本文记录 2026-08-02 对 commit `8ab9029` 的实现审查结论。结论来自当前 Go 代码、测试和
-实际 production assembly，不沿用旧迁移台账中的“已完成”判断。
+本文记录 2026-08-02 对 commit `8ab9029` 的实现审查及其后的第一阶段核心改造。结论来自
+当前 Go 代码、测试和实际 production assembly，不沿用旧迁移台账中的“已完成”判断。
 
 参考版本：
 
@@ -11,24 +11,24 @@
 
 ## 总体判断
 
-pi-go 目前是一个质量较好的“OpenAI Responses + 内置工具 + durable transcript”的单次
-Agent 内核，但还不是完整 Pi 的 Go 重写，也还不能让 pi-web 只做少量修改后获得完整
-功能。
+pi-go 目前具备一个质量较好的“OpenAI Responses + 内置工具 + durable transcript”的
+Agent 内核，以及可运行的 `AgentSession` 第一层；但还不是完整 Pi 的 Go 重写，也还不能
+让 pi-web 只做少量修改后获得完整功能。
 
-问题不在于所有已有代码都要重做，而在于产品级 AgentSession 层缺失，导致底层能力
-没有形成长期运行、动态可配置的 Agent 产品闭环。
+问题不在于所有已有代码都要重做，而在于长期 runtime、完整 Provider 语义和富内容仍未
+形成产品闭环。
 
 ## 能力概览
 
 | 区域 | 当前已经存在 | 主要缺口 |
 | --- | --- | --- |
-| Application | `-p` headless 入口、signal、stdout/stderr、session 打开与创建 | 只有一次同步运行；没有 interactive 或长期 RPC runtime |
-| Agent | streaming、连续 tool loop、多 tool 并行/顺序、abort、continue、steer/follow-up queue、retry/compaction 机制 | 配置在 `New` 后固化；职责混合；没有产品级 AgentSession |
-| Provider | deterministic scripted provider、OpenAI Responses text/thinking/tool stream 与 replay | production 只允许 OpenAI Responses；通用类型带有 OpenAI 形状 |
-| Model | settings/models catalog、provider/model 选择、部分 metadata | Agent 实际只拿到最小 `ModelRef`；能力和 request options 没有贯通 |
+| Application | `-p` headless 入口、signal、stdout/stderr、session 打开与创建；入口使用 `AgentSession` | 只有一次同步运行；没有 interactive 或长期 RPC runtime |
+| Agent | 长期 `AgentSession`、每轮 snapshot、streaming、连续 tool loop、多 tool 并行/顺序、abort、continue、steer/follow-up queue、retry/compaction 机制 | 现有 `Agent` 仍是状态ful coordinator；完整低层 loop 抽取、queue/retry/compaction 的产品控制面和 resource reload 仍未完成 |
+| Provider | deterministic scripted provider、OpenAI Responses text/thinking/tool stream 与 replay；通用 request 含 thinking 和 portable metadata | production 只允许 OpenAI Responses；更多 adapter 尚未移植 |
+| Model | settings/models catalog、provider/model 选择；ModelRef 已携带通用 model metadata | catalog 尚未完整承载原版所有 model capabilities/cost/compat 字段 |
 | Message | text、thinking、tool call/result 和 image 的部分 value type | Agent 入口与队列只收 string；tool adapter 只返回 text；富内容未贯通 |
 | Session | JSONL v3、原子追加、锁、恢复、tree/branch/fork、compaction、legacy import、unknown raw 保留 | 只语义化 message/compaction；不能完整恢复 model/thinking/branch summary 状态 |
-| Tool | production 已装配 bash、read、write、edit、grep、find、ls | registry 的结构化 details 在 Agent adapter 中丢失；缺少 session/runtime 级动态管理 |
+| Tool | production 已装配 bash、read、write、edit、grep、find、ls；registry details 保留在 runtime event | 缺少 session/runtime 级动态管理；rich provider-visible output 尚未由内置工具产生 |
 | Auth/Resource | API key、OpenAI OAuth、settings/model/resource/prompt 加载与 trust boundary | 主要在进程启动时读取，不能由长期 AgentSession 动态刷新 |
 | TUI | terminal/input/text 的基础实现和测试 | 未进入 executable，距离原版 interactive 产品仍很远 |
 
@@ -43,13 +43,14 @@ Agent 内核，但还不是完整 Pi 的 Go 重写，也还不能让 pi-web 只�
 
 ## 主要架构偏差
 
-### 1. 缺少 AgentSession
+### 1. AgentSession 已建立，但长期运行闭环尚未完成
 
-当前 `internal/agent.Agent` 同时承担部分 loop、队列、重试、压缩和 session 协调，却又
-不能在运行期间更新 model、thinking、system prompt 或 tools。它位于一个尴尬的中间层：
-对纯 AgentLoop 来说职责过多，对产品 AgentSession 来说能力不足。
+当前状态ful `Agent` 尚未被假称为低层 loop；`AgentSession` 作为长期配置 owner，且
+headless executable 已由它创建。每个 provider 请求前都会取得新的不可变
+snapshot；tool chain 中的 model、thinking、system prompt 和 tools 更新会用于下一轮。
 
-这是下一阶段必须先修正的问题。
+仍缺少长期 RPC、完整 settings/resource reload、以及 model/thinking change 的 durable
+session entry 语义；这些不能再通过向 loop 固化配置来补。
 
 ### 2. 通用层受 OpenAI Responses 约束
 
@@ -57,7 +58,9 @@ Agent 内核，但还不是完整 Pi 的 Go 重写，也还不能让 pi-web 只�
 同时 `llm` 通用层保存 OpenAI Responses replay 类型。继续沿这个边界增加 Provider，
 会迫使每个新 adapter 改动核心消息或 Agent 逻辑。
 
-下一版直接移植原版通用 Model、Message、Provider 语义，不另造一套抽象。
+第一阶段已将 portable model metadata、thinking level 和 request metadata 放入通用层，并由
+OpenAI Responses adapter 消费 reasoning setting；但更多 Provider 的 adapter 与全部 catalog
+语义仍未移植。
 
 ### 3. 富内容没有端到端闭环
 

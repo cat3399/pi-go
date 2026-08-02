@@ -14,10 +14,11 @@ pi-go 的目标是用 Go 完整重写 [pi](https://github.com/cat3399/pi)，保�
 
 但当前还不是完整的 Pi，也不适合直接作为 pi-web backend：
 
-- 缺少产品级 `AgentSession`，模型、system prompt 和 tools 在一次 Agent 创建后固化；
+- 已有产品级 `AgentSession` 和每轮不可变 snapshot；模型、thinking、system prompt 和
+  tools 可以在运行期间改变，并作用于 tool chain 的下一次 provider 请求；
 - 通用 model/provider/message 边界仍受 OpenAI Responses 数据形状影响；
 - 图片和富工具结果只在部分底层类型中存在，没有贯通产品运行路径；
-- 重试、自动压缩、队列和 TUI 等已实现能力没有全部进入实际 executable；
+- 重试、自动压缩、队列和 TUI 等已实现能力尚未全部形成完整长期 runtime；
 - CLI 目前只是单次 `-p` headless 运行，没有长期运行的 RPC/session runtime。
 
 详细事实见 [当前状态](docs/STATUS.md)，目标边界见
