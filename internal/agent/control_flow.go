@@ -1184,6 +1184,13 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, snapshot Tur
 			if after.Details != nil {
 				outcome.output.Details = *after.Details
 			}
+			if after.Usage != nil {
+				usage := *after.Usage
+				outcome.output.Usage = &usage
+			}
+			if after.AddedToolNames != nil {
+				outcome.output.AddedToolNames = append([]string(nil), (*after.AddedToolNames)...)
+			}
 			if after.Terminate != nil {
 				outcome.output.Terminate = *after.Terminate
 			}
@@ -1223,7 +1230,29 @@ func callAfterToolHook(hook AfterToolCallHook, ctx context.Context, input AfterT
 	return hook(ctx, input)
 }
 
-func validToolUpdate(update ToolUpdate) bool { return utf8.ValidString(update.Text) }
+func validToolUpdate(update ToolUpdate) bool {
+	if !utf8.ValidString(update.Text) {
+		return false
+	}
+	for _, block := range update.Content {
+		switch block.(type) {
+		case llm.TextBlock, llm.ImageBlock:
+		default:
+			return false
+		}
+	}
+	seen := map[string]struct{}{}
+	for _, name := range update.AddedToolNames {
+		if !utf8.ValidString(name) || name == "" {
+			return false
+		}
+		if _, ok := seen[name]; ok {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return true
+}
 
 // supportsToolCall turns registry/name lookup failures into associated tool
 // results. A registry is extension code, so even a panicking Supports method
@@ -1261,14 +1290,15 @@ func (a *Agent) commitToolResultV2(active *activeRun, turn uint32, outcome batch
 		}
 		details = encoded
 	}
+	metadata := llm.ToolResultMetadata{Details: details, Usage: outcome.output.Usage, AddedToolNames: outcome.output.AddedToolNames}
 	if len(outcome.output.Content) != 0 {
-		message, err = llm.NewToolResultContentMessageWithDetails(outcome.call.ID(), outcome.call.Name(), outcome.output.Content, outcome.err != nil, timestamp, details)
+		message, err = llm.NewToolResultContentMessageWithMetadata(outcome.call.ID(), outcome.call.Name(), outcome.output.Content, outcome.err != nil, timestamp, metadata)
 	} else {
 		block, blockErr := llm.NewTextBlock(outcome.output.Text)
 		if blockErr != nil {
 			return fmt.Errorf("%w: tool text: %w", ErrInvariant, blockErr)
 		}
-		message, err = llm.NewToolResultMessageWithDetails(outcome.call.ID(), outcome.call.Name(), []llm.TextBlock{block}, outcome.err != nil, timestamp, details)
+		message, err = llm.NewToolResultMessageWithMetadata(outcome.call.ID(), outcome.call.Name(), []llm.TextBlock{block}, outcome.err != nil, timestamp, metadata)
 	}
 	if err != nil {
 		return fmt.Errorf("%w: tool result: %w", ErrInvariant, err)

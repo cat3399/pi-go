@@ -87,6 +87,10 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 			encoded = append(encoded, `,"details":`...)
 			encoded = append(encoded, details...)
 		}
+		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames)
+		if err != nil {
+			return nil, err
+		}
 		return append(encoded, '}'), nil
 	case llm.ToolResultContentMessage:
 		content, err := encodeToolResultContentBlocks(message.Content())
@@ -113,10 +117,70 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 			encoded = append(encoded, `,"details":`...)
 			encoded = append(encoded, details...)
 		}
+		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames)
+		if err != nil {
+			return nil, err
+		}
 		return append(encoded, '}'), nil
 	default:
 		return nil, fmt.Errorf("invalid conversation message %T", message)
 	}
+}
+
+func appendToolResultMetadata(encoded []byte, usageFn func() (llm.Usage, bool), namesFn func() []string) ([]byte, error) {
+	if usage, ok := usageFn(); ok {
+		usageJSON, err := encodePortableUsage(usage)
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, `,"usage":`...)
+		encoded = append(encoded, usageJSON...)
+	}
+	if names := namesFn(); len(names) != 0 {
+		namesJSON, err := json.Marshal(names)
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, `,"addedToolNames":`...)
+		encoded = append(encoded, namesJSON...)
+	}
+	return encoded, nil
+}
+
+func encodePortableUsage(usage llm.Usage) (json.RawMessage, error) {
+	encoded := append([]byte(nil), `{"input":`...)
+	encoded = strconv.AppendUint(encoded, usage.Input(), 10)
+	encoded = append(encoded, `,"output":`...)
+	encoded = strconv.AppendUint(encoded, usage.Output(), 10)
+	encoded = append(encoded, `,"cacheRead":`...)
+	encoded = strconv.AppendUint(encoded, usage.CacheRead(), 10)
+	encoded = append(encoded, `,"cacheWrite":`...)
+	encoded = strconv.AppendUint(encoded, usage.CacheWrite(), 10)
+	if reasoning, ok := usage.Reasoning(); ok {
+		encoded = append(encoded, `,"reasoning":`...)
+		encoded = strconv.AppendUint(encoded, reasoning, 10)
+	}
+	if cacheWrite1h, ok := usage.CacheWrite1h(); ok {
+		encoded = append(encoded, `,"cacheWrite1h":`...)
+		encoded = strconv.AppendUint(encoded, cacheWrite1h, 10)
+	}
+	encoded = append(encoded, `,"totalTokens":`...)
+	encoded = strconv.AppendUint(encoded, usage.TotalTokens(), 10)
+	if cost, ok := usage.Cost(); ok {
+		costJSON, err := json.Marshal(struct {
+			Input      float64 `json:"input"`
+			Output     float64 `json:"output"`
+			CacheRead  float64 `json:"cacheRead"`
+			CacheWrite float64 `json:"cacheWrite"`
+			Total      float64 `json:"total"`
+		}{cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite, cost.Total})
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, `,"cost":`...)
+		encoded = append(encoded, costJSON...)
+	}
+	return append(encoded, '}'), nil
 }
 
 type llmAssistantProvenanceCarrier interface {
@@ -472,6 +536,92 @@ func encodeCompactionUsage(value CompactionUsage) (json.RawMessage, error) {
 	encoded = append(encoded, `,"cost":`...)
 	encoded = append(encoded, cost...)
 	return append(encoded, '}'), nil
+}
+
+// encodePayloadEntry is the durable half of the v3 non-message entry union.
+// Standard LLM messages continue through encodeMessage because their assistant
+// provenance has a separate append boundary.
+func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time, payload EntryPayload) (json.RawMessage, error) {
+	base := map[string]any{"id": id, "parentId": any(nil), "timestamp": formatISOTime(timestamp)}
+	if hasParent {
+		base["parentId"] = parentID
+	}
+	switch value := payload.(type) {
+	case ThinkingLevelChangePayload:
+		base["type"] = "thinking_level_change"
+		base["thinkingLevel"] = value.ThinkingLevel
+	case ModelChangePayload:
+		base["type"] = "model_change"
+		base["provider"] = value.Provider
+		if value.HasModelID || value.ModelID != "" {
+			base["modelId"] = value.ModelID
+		}
+	case BranchSummaryPayload:
+		base["type"] = "branch_summary"
+		base["fromId"] = value.FromID
+		base["summary"] = value.Summary
+		if len(value.Details) != 0 {
+			base["details"] = value.Details
+		}
+		if value.Usage != nil {
+			usage, err := encodeCompactionUsage(*value.Usage)
+			if err != nil {
+				return nil, err
+			}
+			base["usage"] = usage
+		}
+		if value.HasFromHook {
+			base["fromHook"] = value.FromHook
+		}
+	case CustomPayload:
+		base["type"] = "custom"
+		base["customType"] = value.CustomType
+		if len(value.Data) != 0 {
+			base["data"] = value.Data
+		}
+	case CustomMessagePayload:
+		base["type"] = "custom_message"
+		base["customType"] = value.Message.CustomType
+		base["display"] = value.Message.Display
+		base["details"] = value.Message.Details
+		content, err := encodeUserContentBlocks(value.Message.Content)
+		if err != nil {
+			return nil, err
+		}
+		base["content"] = content
+	case LabelPayload:
+		base["type"] = "label"
+		base["targetId"] = value.TargetID
+		if value.Label != nil {
+			base["label"] = *value.Label
+		}
+	case SessionInfoPayload:
+		base["type"] = "session_info"
+		if value.Name != nil {
+			base["name"] = *value.Name
+		}
+	case CompactionPayload:
+		base["type"] = "compaction"
+		base["summary"] = value.Record.Summary
+		base["firstKeptEntryId"] = value.Record.FirstKeptEntryID
+		base["tokensBefore"] = value.Record.TokensBefore
+		if len(value.Details) != 0 {
+			base["details"] = value.Details
+		}
+		if value.Record.Usage != nil {
+			usage, err := encodeCompactionUsage(*value.Record.Usage)
+			if err != nil {
+				return nil, err
+			}
+			base["usage"] = usage
+		}
+		if value.HasFromHook {
+			base["fromHook"] = value.FromHook
+		}
+	default:
+		return nil, fmt.Errorf("unsupported session payload %T", payload)
+	}
+	return json.Marshal(base)
 }
 
 func appendJSONArray(destination []byte, values []json.RawMessage) []byte {

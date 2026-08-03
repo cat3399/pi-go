@@ -289,6 +289,18 @@ type ToolResultContentMessage struct {
 	isError              bool
 	timestamp            time.Time
 	details              json.RawMessage
+	usage                *Usage
+	addedToolNames       []string
+}
+
+// ToolResultMetadata is the information carried by pi's ToolResultMessage
+// beyond provider-visible content. Details never enters an LLM request;
+// Usage and AddedToolNames remain available to provider adapters that support
+// deferred tools and to lifecycle observers.
+type ToolResultMetadata struct {
+	Details        json.RawMessage
+	Usage          *Usage
+	AddedToolNames []string
 }
 
 func (ToolResultContentMessage) conversationMessage() {}
@@ -296,7 +308,17 @@ func NewToolResultContentMessage(id, name string, content []ToolResultContentBlo
 	return NewToolResultContentMessageWithDetails(id, name, content, isError, timestamp, nil)
 }
 func NewToolResultContentMessageWithDetails(id, name string, content []ToolResultContentBlock, isError bool, timestamp time.Time, details json.RawMessage) (ToolResultContentMessage, error) {
-	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(details)}
+	return NewToolResultContentMessageWithMetadata(id, name, content, isError, timestamp, ToolResultMetadata{Details: details})
+}
+func NewToolResultContentMessageWithMetadata(id, name string, content []ToolResultContentBlock, isError bool, timestamp time.Time, metadata ToolResultMetadata) (ToolResultContentMessage, error) {
+	if err := validateToolNames(metadata.AddedToolNames); err != nil {
+		return ToolResultContentMessage{}, err
+	}
+	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(metadata.Details), addedToolNames: cloneToolNames(metadata.AddedToolNames)}
+	if metadata.Usage != nil {
+		usage := *metadata.Usage
+		m.usage = &usage
+	}
 	if err := m.validate(); err != nil {
 		return ToolResultContentMessage{}, err
 	}
@@ -326,6 +348,9 @@ func (m ToolResultContentMessage) validate() error {
 			return fmt.Errorf("%w: tool result block %T", ErrInvalidRichContent, b)
 		}
 	}
+	if err := validateToolNames(m.addedToolNames); err != nil {
+		return err
+	}
 	return nil
 }
 func (ToolResultContentMessage) Role() Role           { return RoleToolResult }
@@ -337,6 +362,15 @@ func (m ToolResultContentMessage) Content() []ToolResultContentBlock {
 func (m ToolResultContentMessage) IsError() bool            { return m.isError }
 func (m ToolResultContentMessage) Timestamp() time.Time     { return m.timestamp }
 func (m ToolResultContentMessage) Details() json.RawMessage { return bytes.Clone(m.details) }
+func (m ToolResultContentMessage) Usage() (Usage, bool) {
+	if m.usage == nil {
+		return Usage{}, false
+	}
+	return *m.usage, true
+}
+func (m ToolResultContentMessage) AddedToolNames() []string {
+	return append([]string(nil), m.addedToolNames...)
+}
 
 func (m AssistantToolUseMessage) validate() error {
 	_, err := NewAssistantToolUseMessage(m.content, m.usage, m.timestamp)
@@ -388,12 +422,14 @@ func (m AssistantToolUseMessage) Timestamp() time.Time {
 // ToolResultMessage records one tool execution outcome. The agent runtime owns
 // pairing it with the pending call and committing it to the transcript.
 type ToolResultMessage struct {
-	toolCallID string
-	toolName   string
-	content    []TextBlock
-	isError    bool
-	timestamp  time.Time
-	details    json.RawMessage
+	toolCallID     string
+	toolName       string
+	content        []TextBlock
+	isError        bool
+	timestamp      time.Time
+	details        json.RawMessage
+	usage          *Usage
+	addedToolNames []string
 }
 
 func (ToolResultMessage) conversationMessage() {}
@@ -409,13 +445,24 @@ func NewToolResultMessage(
 }
 
 func NewToolResultMessageWithDetails(toolCallID string, toolName string, content []TextBlock, isError bool, timestamp time.Time, details json.RawMessage) (ToolResultMessage, error) {
+	return NewToolResultMessageWithMetadata(toolCallID, toolName, content, isError, timestamp, ToolResultMetadata{Details: details})
+}
+func NewToolResultMessageWithMetadata(toolCallID string, toolName string, content []TextBlock, isError bool, timestamp time.Time, metadata ToolResultMetadata) (ToolResultMessage, error) {
+	if err := validateToolNames(metadata.AddedToolNames); err != nil {
+		return ToolResultMessage{}, err
+	}
 	result := ToolResultMessage{
-		toolCallID: toolCallID,
-		toolName:   toolName,
-		content:    append([]TextBlock(nil), content...),
-		isError:    isError,
-		timestamp:  timestamp,
-		details:    bytes.Clone(details),
+		toolCallID:     toolCallID,
+		toolName:       toolName,
+		content:        append([]TextBlock(nil), content...),
+		isError:        isError,
+		timestamp:      timestamp,
+		details:        bytes.Clone(metadata.Details),
+		addedToolNames: cloneToolNames(metadata.AddedToolNames),
+	}
+	if metadata.Usage != nil {
+		usage := *metadata.Usage
+		result.usage = &usage
 	}
 	if len(result.details) != 0 && !json.Valid(result.details) {
 		return ToolResultMessage{}, fmt.Errorf("%w: details are not valid JSON", ErrInvalidToolResult)
@@ -437,6 +484,9 @@ func (m ToolResultMessage) validate() error {
 		if err := block.validate(); err != nil {
 			return err
 		}
+	}
+	if err := validateToolNames(m.addedToolNames); err != nil {
+		return err
 	}
 	return nil
 }
@@ -465,6 +515,35 @@ func (m ToolResultMessage) Timestamp() time.Time {
 	return m.timestamp
 }
 func (m ToolResultMessage) Details() json.RawMessage { return bytes.Clone(m.details) }
+func (m ToolResultMessage) Usage() (Usage, bool) {
+	if m.usage == nil {
+		return Usage{}, false
+	}
+	return *m.usage, true
+}
+func (m ToolResultMessage) AddedToolNames() []string {
+	return append([]string(nil), m.addedToolNames...)
+}
+
+func cloneToolNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	return append([]string(nil), names...)
+}
+func validateToolNames(names []string) error {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if !utf8.ValidString(name) || strings.TrimSpace(name) == "" {
+			return fmt.Errorf("%w: invalid added tool name", ErrInvalidToolResult)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("%w: duplicate added tool name %q", ErrInvalidToolResult, name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
 
 func ValidateToolResultAssociation(call ToolCallBlock, result ToolResultMessage) error {
 	if err := call.validate(); err != nil {

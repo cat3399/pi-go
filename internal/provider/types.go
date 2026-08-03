@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -54,7 +55,20 @@ const (
 // does not calculate prices, but keeping this with Model prevents a provider
 // wire format becoming the product's model contract.
 type CostRates struct {
-	Input, Output, CacheRead, CacheWrite float64
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	// Tiers are request-wide: the highest threshold not exceeding input usage
+	// prices the whole request, matching pi's ModelCost.tiers semantics.
+	Tiers []CostTier `json:"tiers,omitempty"`
+}
+type CostTier struct {
+	InputTokensAbove uint64  `json:"inputTokensAbove"`
+	Input            float64 `json:"input"`
+	Output           float64 `json:"output"`
+	CacheRead        float64 `json:"cacheRead"`
+	CacheWrite       float64 `json:"cacheWrite"`
 }
 
 // OpenAIResponsesCompat is the adapter-owned subset of pi's Responses
@@ -92,12 +106,37 @@ type OpenAICompletionsCompat struct {
 	SendSessionAffinityHeaders                  *bool
 	SessionAffinityFormat                       *string
 	SupportsLongCacheRetention                  *bool
+	CacheControlFormat                          *string
+	DeferredToolsMode                           *string
+	ZaiToolStream                               *bool
+	ChatTemplateKwargs                          map[string]any
+	OpenRouterRouting                           map[string]any
+	VercelGatewayRouting                        map[string]any
 }
 
 type ModelCompat struct {
 	OpenAIResponses   *OpenAIResponsesCompat
 	OpenAICompletions *OpenAICompletionsCompat
+	AnthropicMessages *AnthropicMessagesCompat
+	Bedrock           *BedrockCompat
+	// Additional carries API-specific compatibility values for current or
+	// future dialects that have no provider implementation yet. Values are
+	// immutable JSON objects; generic Agent code never inspects them.
+	Additional map[string]json.RawMessage
 }
+
+type AnthropicMessagesCompat struct {
+	SupportsEagerToolInputStreaming *bool
+	SupportsLongCacheRetention      *bool
+	SendSessionAffinityHeaders      *bool
+	SupportsCacheControlOnTools     *bool
+	SupportsTemperature             *bool
+	ForceAdaptiveThinking           *bool
+	AllowEmptySignature             *bool
+	SupportsStrictTools             *bool
+	SupportsToolReferences          *bool
+}
+type BedrockCompat struct{ SupportsStrictMode *bool }
 
 // ModelSpec is pi's generic model contract in Go form. Compatibility is an
 // adapter-owned, JSON-like value: the loop never reads vendor-specific keys.
@@ -155,8 +194,8 @@ func NewModel(spec ModelSpec) (ModelRef, error) {
 	}
 	model := ModelRef{provider: spec.Provider, api: spec.API, id: spec.ID, metadata: &modelMetadata{
 		name: spec.Name, baseURL: spec.BaseURL, reasoning: spec.Reasoning,
-		thinkingLevelMap: cloneThinkingLevelMap(spec.ThinkingLevelMap), input: input, cost: spec.Cost,
-		contextWindow: spec.ContextWindow, maxTokens: spec.MaxTokens, headers: cloneStrings(spec.Headers), compat: cloneModelCompat(spec.Compat),
+		thinkingLevelMap: cloneThinkingLevelMap(spec.ThinkingLevelMap), input: input, cost: cloneCostRates(spec.Cost),
+		contextWindow: spec.ContextWindow, maxTokens: spec.MaxTokens, headers: cloneStrings(spec.Headers), compat: CloneModelCompat(spec.Compat),
 	}}
 	if err := model.validate(); err != nil {
 		return ModelRef{}, err
@@ -171,6 +210,18 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 	for _, rate := range []float64{spec.Cost.Input, spec.Cost.Output, spec.Cost.CacheRead, spec.Cost.CacheWrite} {
 		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
 			return fmt.Errorf("%w: cost rates must be finite and non-negative", ErrInvalidModel)
+		}
+	}
+	lastTier := uint64(0)
+	for index, tier := range spec.Cost.Tiers {
+		if index != 0 && tier.InputTokensAbove <= lastTier {
+			return fmt.Errorf("%w: cost tiers must be strictly increasing", ErrInvalidModel)
+		}
+		lastTier = tier.InputTokensAbove
+		for _, rate := range []float64{tier.Input, tier.Output, tier.CacheRead, tier.CacheWrite} {
+			if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
+				return fmt.Errorf("%w: tier cost rates must be finite and non-negative", ErrInvalidModel)
+			}
 		}
 	}
 	seenInput := map[InputKind]struct{}{}
@@ -267,7 +318,33 @@ func (m ModelRef) Cost() CostRates {
 	if m.metadata == nil {
 		return CostRates{}
 	}
-	return m.metadata.cost
+	return cloneCostRates(m.metadata.cost)
+}
+
+// CalculateCost implements pi's request-wide tier selection. The highest
+// threshold strictly below total input/cache tokens applies to the whole
+// request; one-hour Anthropic cache writes cost 2x input rate.
+func (m ModelRef) CalculateCost(usage llm.Usage) llm.Cost {
+	rates := m.Cost()
+	inputTokens := usage.Input() + usage.CacheRead() + usage.CacheWrite()
+	matched := int64(-1)
+	for _, tier := range rates.Tiers {
+		if inputTokens > tier.InputTokensAbove && int64(tier.InputTokensAbove) > matched {
+			rates.Input = tier.Input
+			rates.Output = tier.Output
+			rates.CacheRead = tier.CacheRead
+			rates.CacheWrite = tier.CacheWrite
+			matched = int64(tier.InputTokensAbove)
+		}
+	}
+	longWrite := uint64(0)
+	if value, ok := usage.CacheWrite1h(); ok {
+		longWrite = value
+	}
+	shortWrite := usage.CacheWrite() - longWrite
+	cost := llm.Cost{Input: rates.Input * float64(usage.Input()) / 1_000_000, Output: rates.Output * float64(usage.Output()) / 1_000_000, CacheRead: rates.CacheRead * float64(usage.CacheRead()) / 1_000_000, CacheWrite: (rates.CacheWrite*float64(shortWrite) + rates.Input*2*float64(longWrite)) / 1_000_000}
+	cost.Total = cost.Input + cost.Output + cost.CacheRead + cost.CacheWrite
+	return cost
 }
 func (m ModelRef) Input() []InputKind {
 	if m.metadata == nil {
@@ -285,7 +362,7 @@ func (m ModelRef) Compat() ModelCompat {
 	if m.metadata == nil {
 		return ModelCompat{}
 	}
-	return cloneModelCompat(m.metadata.compat)
+	return CloneModelCompat(m.metadata.compat)
 }
 func (m ModelRef) ThinkingLevelMap() map[ThinkingLevel]*string {
 	if m.metadata == nil {
@@ -391,6 +468,10 @@ func cloneStrings(values map[string]string) map[string]string {
 	}
 	return copy
 }
+func cloneCostRates(value CostRates) CostRates {
+	value.Tiers = append([]CostTier(nil), value.Tiers...)
+	return value
+}
 func cloneAny(values map[string]any) map[string]any {
 	if values == nil {
 		return nil
@@ -401,6 +482,17 @@ func cloneAny(values map[string]any) map[string]any {
 	}
 	return copy
 }
+func CloneStreamOptions(value StreamOptions) StreamOptions {
+	value.Headers = cloneStrings(value.Headers)
+	value.Metadata = cloneAny(value.Metadata)
+	value.Extra = cloneAny(value.Extra)
+	value.Env = cloneStrings(value.Env)
+	if value.Temperature != nil {
+		copy := *value.Temperature
+		value.Temperature = &copy
+	}
+	return value
+}
 func cloneBool(value *bool) *bool {
 	if value == nil {
 		return nil
@@ -408,7 +500,7 @@ func cloneBool(value *bool) *bool {
 	copy := *value
 	return &copy
 }
-func cloneModelCompat(value ModelCompat) ModelCompat {
+func CloneModelCompat(value ModelCompat) ModelCompat {
 	copy := ModelCompat{}
 	if value.OpenAIResponses != nil {
 		copy.OpenAIResponses = &OpenAIResponsesCompat{
@@ -431,6 +523,20 @@ func cloneModelCompat(value ModelCompat) ModelCompat {
 			ThinkingFormat: cloneString(value.OpenAICompletions.ThinkingFormat), SupportsOpenAIGrammarTools: cloneBool(value.OpenAICompletions.SupportsOpenAIGrammarTools),
 			SupportsStrictMode: cloneBool(value.OpenAICompletions.SupportsStrictMode), SendSessionAffinityHeaders: cloneBool(value.OpenAICompletions.SendSessionAffinityHeaders),
 			SessionAffinityFormat: cloneString(value.OpenAICompletions.SessionAffinityFormat), SupportsLongCacheRetention: cloneBool(value.OpenAICompletions.SupportsLongCacheRetention),
+			CacheControlFormat: cloneString(value.OpenAICompletions.CacheControlFormat), DeferredToolsMode: cloneString(value.OpenAICompletions.DeferredToolsMode), ZaiToolStream: cloneBool(value.OpenAICompletions.ZaiToolStream), ChatTemplateKwargs: cloneAny(value.OpenAICompletions.ChatTemplateKwargs), OpenRouterRouting: cloneAny(value.OpenAICompletions.OpenRouterRouting), VercelGatewayRouting: cloneAny(value.OpenAICompletions.VercelGatewayRouting),
+		}
+	}
+	if value.AnthropicMessages != nil {
+		v := value.AnthropicMessages
+		copy.AnthropicMessages = &AnthropicMessagesCompat{SupportsEagerToolInputStreaming: cloneBool(v.SupportsEagerToolInputStreaming), SupportsLongCacheRetention: cloneBool(v.SupportsLongCacheRetention), SendSessionAffinityHeaders: cloneBool(v.SendSessionAffinityHeaders), SupportsCacheControlOnTools: cloneBool(v.SupportsCacheControlOnTools), SupportsTemperature: cloneBool(v.SupportsTemperature), ForceAdaptiveThinking: cloneBool(v.ForceAdaptiveThinking), AllowEmptySignature: cloneBool(v.AllowEmptySignature), SupportsStrictTools: cloneBool(v.SupportsStrictTools), SupportsToolReferences: cloneBool(v.SupportsToolReferences)}
+	}
+	if value.Bedrock != nil {
+		copy.Bedrock = &BedrockCompat{SupportsStrictMode: cloneBool(value.Bedrock.SupportsStrictMode)}
+	}
+	if value.Additional != nil {
+		copy.Additional = make(map[string]json.RawMessage, len(value.Additional))
+		for key, value := range value.Additional {
+			copy.Additional[key] = append(json.RawMessage(nil), value...)
 		}
 	}
 	return copy
@@ -512,11 +618,40 @@ type RequestOptions struct {
 // properties of an API dialect: a model/provider selection resolves them for
 // each request.
 type StreamOptions struct {
-	APIKey    string
-	Headers   map[string]string
-	MaxTokens uint64
-	SessionID string
+	Temperature               *float64
+	APIKey                    string
+	Headers                   map[string]string
+	MaxTokens                 uint64
+	SessionID                 string
+	Transport                 Transport
+	CacheRetention            CacheRetention
+	TimeoutMS                 uint64
+	WebsocketConnectTimeoutMS uint64
+	MaxRetries                uint32
+	MaxRetryDelayMS           uint64
+	Metadata                  map[string]any
+	Env                       map[string]string
+	// Extra preserves future/provider-specific options without putting vendor
+	// request structs into AgentLoop. Adapters opt in to recognized keys.
+	Extra map[string]any
 }
+
+type Transport string
+
+const (
+	TransportSSE             Transport = "sse"
+	TransportWebsocket       Transport = "websocket"
+	TransportWebsocketCached Transport = "websocket-cached"
+	TransportAuto            Transport = "auto"
+)
+
+type CacheRetention string
+
+const (
+	CacheRetentionNone  CacheRetention = "none"
+	CacheRetentionShort CacheRetention = "short"
+	CacheRetentionLong  CacheRetention = "long"
+)
 
 func NewRequest(
 	model ModelRef,
@@ -554,7 +689,7 @@ func NewRequestWithOptions(
 		parallelToolCalls: options.AllowParallelToolCalls,
 		thinkingLevel:     options.ThinkingLevel,
 		metadata:          cloneAny(options.Metadata),
-		stream:            StreamOptions{APIKey: options.Stream.APIKey, Headers: cloneStrings(options.Stream.Headers), MaxTokens: options.Stream.MaxTokens, SessionID: options.Stream.SessionID},
+		stream:            CloneStreamOptions(options.Stream),
 		replayTarget:      llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	}
 	if options.ToolChoice != nil {
@@ -579,6 +714,15 @@ func (r Request) validate() error {
 	}
 	if !utf8.ValidString(r.stream.APIKey) || !utf8.ValidString(r.stream.SessionID) {
 		return fmt.Errorf("%w: stream credentials/session are not valid UTF-8", ErrInvalidRequest)
+	}
+	if r.stream.Temperature != nil && (math.IsNaN(*r.stream.Temperature) || math.IsInf(*r.stream.Temperature, 0)) {
+		return fmt.Errorf("%w: invalid temperature", ErrInvalidRequest)
+	}
+	if r.stream.Transport != "" && r.stream.Transport != TransportSSE && r.stream.Transport != TransportWebsocket && r.stream.Transport != TransportWebsocketCached && r.stream.Transport != TransportAuto {
+		return fmt.Errorf("%w: invalid transport", ErrInvalidRequest)
+	}
+	if r.stream.CacheRetention != "" && r.stream.CacheRetention != CacheRetentionNone && r.stream.CacheRetention != CacheRetentionShort && r.stream.CacheRetention != CacheRetentionLong {
+		return fmt.Errorf("%w: invalid cache retention", ErrInvalidRequest)
 	}
 	for name, value := range r.stream.Headers {
 		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
@@ -794,7 +938,7 @@ func (r Request) ToolChoice() (ToolChoice, bool) {
 func (r Request) ThinkingLevel() ThinkingLevel { return r.thinkingLevel }
 func (r Request) Metadata() map[string]any     { return cloneAny(r.metadata) }
 func (r Request) StreamOptions() StreamOptions {
-	return StreamOptions{APIKey: r.stream.APIKey, Headers: cloneStrings(r.stream.Headers), MaxTokens: r.stream.MaxTokens, SessionID: r.stream.SessionID}
+	return CloneStreamOptions(r.stream)
 }
 
 func (r Request) ReplayTarget() llm.AssistantProvenance { return r.replayTarget }

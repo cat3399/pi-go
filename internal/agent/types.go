@@ -69,6 +69,11 @@ type ToolOutput struct {
 	// request payloads.
 	Content []llm.ToolResultContentBlock
 	Details any
+	// Usage and AddedToolNames are retained exactly as pi's AgentToolResult.
+	// They are not part of the main model token accounting; deferred-tool-aware
+	// adapters consume AddedToolNames at the ToolResult boundary.
+	Usage          *llm.Usage
+	AddedToolNames []string
 	// Terminate asks the coordinator to stop after this batch. A batch stops
 	// early only when every finalized call asks to terminate; this prevents a
 	// concurrent success from silently hiding another call's continuation.
@@ -94,10 +99,12 @@ type AfterToolCallContext struct {
 	IsError   bool
 }
 type AfterToolCallResult struct {
-	Content   *[]llm.ToolResultContentBlock
-	Details   *any
-	IsError   *bool
-	Terminate *bool
+	Content        *[]llm.ToolResultContentBlock
+	Details        *any
+	IsError        *bool
+	Usage          *llm.Usage
+	AddedToolNames *[]string
+	Terminate      *bool
 }
 type BeforeToolCallHook func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
 type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
@@ -132,10 +139,17 @@ type TurnContext struct {
 	Turn  uint32
 }
 
-// ToolUpdate is an ephemeral progress snapshot. It is never persisted or fed
-// to the provider. Updates arriving after Execute settles are discarded.
+// ToolUpdate is an ephemeral partial AgentToolResult. It is never persisted or
+// fed to the provider. Updates arriving after Execute settles are discarded.
+// Keeping the full result shape lets extension-neutral observers render rich
+// output without forcing a future hook loader to invent a second protocol.
 type ToolUpdate struct {
-	Text string
+	Text           string
+	Content        []llm.ToolResultContentBlock
+	Details        any
+	Usage          *llm.Usage
+	AddedToolNames []string
+	Terminate      bool
 }
 
 // ToolExecutor is the compatibility execution port used by the first

@@ -295,7 +295,7 @@ func parseCatalogModel(providerID string, index int, raw json.RawMessage) (Cache
 	if err != nil {
 		return CachedModel{}, Model{}, Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 	}
-	model, err := parseModel(providerID, index, withoutProvider)
+	model, err := parseModel(providerID, "", index, withoutProvider)
 	if err != nil {
 		return CachedModel{}, Model{}, Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 	}

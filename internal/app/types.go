@@ -138,7 +138,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	return runtimeDependencies{
 		provider:           deps.Provider,
 		model:              deps.Model,
-		stream:             provider.StreamOptions{APIKey: deps.Stream.APIKey, Headers: cloneStringMap(deps.Stream.Headers), MaxTokens: deps.Stream.MaxTokens, SessionID: deps.Stream.SessionID},
+		stream:             provider.CloneStreamOptions(deps.Stream),
 		systemPrompt:       deps.SystemPrompt,
 		workingDir:         filepath.Clean(workingDir),
 		defaultSessionPath: deps.DefaultSessionPath,

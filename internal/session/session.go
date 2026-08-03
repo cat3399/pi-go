@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
@@ -302,6 +303,10 @@ func (s *Session) buildContextLocked() Context {
 		summary, err := llm.NewUserTextMessage(CompactionSummaryPrefix+compaction.compaction.Summary+CompactionSummarySuffix, compaction.timestamp)
 		if err == nil {
 			context.messages = append(context.messages, summary)
+			checkpoint, checkpointErr := agentmsg.NewCompactionSummary(agentmsg.CompactionSummary{Summary: compaction.compaction.Summary, TokensBefore: compaction.compaction.TokensBefore, At: compaction.timestamp})
+			if checkpointErr == nil {
+				context.agentMessages = append(context.agentMessages, checkpoint)
+			}
 		}
 		firstKeptIndex := -1
 		for index := 0; index < len(path); index++ {
@@ -318,9 +323,7 @@ func (s *Session) buildContextLocked() Context {
 				continue
 			}
 			entry := s.entries[path[index]]
-			if entry.message != nil {
-				context.messages = append(context.messages, entry.message)
-			}
+			appendEntryToContext(&context, entry)
 			if entry.hasAssistant {
 				context.assistant = entry.assistant
 				context.hasAssistant = true
@@ -332,9 +335,7 @@ func (s *Session) buildContextLocked() Context {
 
 	for index := len(path) - 1; index >= 0; index-- {
 		entry := s.entries[path[index]]
-		if entry.message != nil {
-			context.messages = append(context.messages, entry.message)
-		}
+		appendEntryToContext(&context, entry)
 		if entry.hasAssistant {
 			context.assistant = entry.assistant
 			context.hasAssistant = true
@@ -342,6 +343,34 @@ func (s *Session) buildContextLocked() Context {
 		context.diagnostics = append(context.diagnostics, entry.diagnostics...)
 	}
 	return context
+}
+
+func appendEntryToContext(context *Context, entry Entry) {
+	if entry.message != nil {
+		context.messages = append(context.messages, entry.message)
+		if message, ok := entry.AgentMessage(); ok {
+			context.agentMessages = append(context.agentMessages, message)
+		}
+		return
+	}
+	switch payload := entry.Payload().(type) {
+	case CustomMessagePayload:
+		context.agentMessages = append(context.agentMessages, payload.Message)
+		converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{payload.Message})
+		if err == nil {
+			context.messages = append(context.messages, converted...)
+		}
+	case BranchSummaryPayload:
+		message, err := agentmsg.NewBranchSummary(agentmsg.BranchSummary{FromID: payload.FromID, Summary: payload.Summary, At: entry.timestamp})
+		if err != nil {
+			return
+		}
+		context.agentMessages = append(context.agentMessages, message)
+		converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{message})
+		if err == nil {
+			context.messages = append(context.messages, converted...)
+		}
+	}
 }
 
 // Append commits one entry. Cancellation can win while waiting for another
@@ -430,6 +459,85 @@ func (s *Session) Append(ctx context.Context, message llm.ConversationMessage, o
 		return Entry{}, fmt.Errorf("%w: append %s: %w", ErrStorage, s.path, err)
 	}
 
+	s.entries = append(s.entries, entry)
+	s.leaf = len(s.entries) - 1
+	s.byID[entry.id] = s.leaf
+	s.needsSeparator = false
+	s.generation++
+	return entry.clone(), nil
+}
+
+// AppendPayload appends one non-message member of pi's v3 SessionEntry union.
+// MessagePayload is intentionally rejected: callers must use Append so
+// assistant provenance and replay metadata cannot be accidentally omitted.
+func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entry, error) {
+	if payload == nil {
+		return Entry{}, fmt.Errorf("%w: nil entry payload", ErrInvalidEntry)
+	}
+	if _, ok := payload.(MessagePayload); ok {
+		return Entry{}, fmt.Errorf("%w: message payload requires Append", ErrInvalidEntry)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.acquireAppend(ctx); err != nil {
+		return Entry{}, err
+	}
+	defer s.releaseAppend()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return Entry{}, ErrClosed
+	}
+	if s.poisoned {
+		s.mu.Unlock()
+		return Entry{}, ErrPoisoned
+	}
+	entryID, err := s.nextEntryID()
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
+	}
+	timestamp := canonicalTime(s.runtime.now())
+	if timestamp.IsZero() || validateISOTime(timestamp) != nil {
+		s.mu.Unlock()
+		return Entry{}, fmt.Errorf("%w: invalid entry timestamp", ErrInvalidEntry)
+	}
+	parentID := ""
+	hasParent := s.leaf >= 0
+	if hasParent {
+		parentID = s.entries[s.leaf].id
+	}
+	raw, err := encodePayloadEntry(entryID, parentID, hasParent, timestamp, payload.CloneEntryPayload())
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, fmt.Errorf("%w: encode payload: %w", ErrInvalidEntry, err)
+	}
+	entry, err := decodeEntry(raw)
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, fmt.Errorf("%w: decode payload: %w", ErrInvalidEntry, err)
+	}
+	appendBytes := make([]byte, 0, len(raw)+2)
+	if s.needsSeparator {
+		appendBytes = append(appendBytes, '\n')
+	}
+	appendBytes = append(appendBytes, raw...)
+	appendBytes = append(appendBytes, '\n')
+	s.mu.Unlock()
+	started, err := s.storage.append(ctx, s.path, appendBytes)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		if started {
+			s.poisoned = true
+			return Entry{}, fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+		}
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return Entry{}, fmt.Errorf("%w: %w", ErrAppendCanceled, err)
+		}
+		return Entry{}, fmt.Errorf("%w: append %s: %w", ErrStorage, s.path, err)
+	}
 	s.entries = append(s.entries, entry)
 	s.leaf = len(s.entries) - 1
 	s.byID[entry.id] = s.leaf

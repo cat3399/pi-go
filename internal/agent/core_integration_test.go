@@ -419,7 +419,9 @@ func assertCoreIntegrationSession(t *testing.T, transcript *session.Session) {
 		t.Fatalf("tool assistant blocks = %#v", blocks)
 	}
 	reasoning, ok := blocks[0].(llm.ThinkingBlock).ThinkingSignature()
-	if !ok || reasoning != `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher"}` {
+	// Responses replay must retain the complete reasoning item.  OpenAI's
+	// summary is part of the replay provenance, not disposable display text.
+	if !ok || reasoning != `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher","summary":[{"type":"summary_text","text":"parallel plan"}]}` {
 		t.Fatalf("durable reasoning signature = (%q, %t)", reasoning, ok)
 	}
 	textSignature, ok := blocks[1].(llm.TextBlock).TextSignature()

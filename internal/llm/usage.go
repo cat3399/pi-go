@@ -3,6 +3,7 @@ package llm
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/bits"
 )
 
@@ -20,7 +21,17 @@ type UsageSpec struct {
 	CacheWrite   uint64
 	Reasoning    *uint64
 	CacheWrite1h *uint64
+	// Cost is optional because providers may report token accounting without
+	// pricing. Nil means unknown, which is distinct from a real zero-priced
+	// request. Rates and arithmetic belong to Model; this is the normalized
+	// observed/request cost carried by messages and tool results.
+	Cost *Cost
 }
+
+// Cost mirrors pi's usage.cost object.  It intentionally uses float64 rather
+// than a decimal string because provider pricing is a calculated runtime
+// value; callers must keep nil when the provider did not report/calculate it.
+type Cost struct{ Input, Output, CacheRead, CacheWrite, Total float64 }
 
 // Usage is immutable normalized token accounting. TotalTokens is always the
 // checked sum of Input, Output, CacheRead, and CacheWrite.
@@ -34,9 +45,18 @@ type Usage struct {
 	hasReasoning    bool
 	cacheWrite1h    uint64
 	hasCacheWrite1h bool
+	cost            Cost
+	hasCost         bool
 }
 
 func NewUsage(spec UsageSpec) (Usage, error) {
+	if spec.Cost != nil {
+		for _, value := range []float64{spec.Cost.Input, spec.Cost.Output, spec.Cost.CacheRead, spec.Cost.CacheWrite, spec.Cost.Total} {
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+				return Usage{}, fmt.Errorf("invalid usage cost")
+			}
+		}
+	}
 	if spec.Reasoning != nil && *spec.Reasoning > spec.Output {
 		return Usage{}, fmt.Errorf(
 			"%w: reasoning (%d) exceeds output (%d)",
@@ -82,6 +102,10 @@ func NewUsage(spec UsageSpec) (Usage, error) {
 		usage.cacheWrite1h = *spec.CacheWrite1h
 		usage.hasCacheWrite1h = true
 	}
+	if spec.Cost != nil {
+		usage.cost = *spec.Cost
+		usage.hasCost = true
+	}
 
 	return usage, nil
 }
@@ -113,3 +137,5 @@ func (u Usage) Reasoning() (uint64, bool) {
 func (u Usage) CacheWrite1h() (uint64, bool) {
 	return u.cacheWrite1h, u.hasCacheWrite1h
 }
+
+func (u Usage) Cost() (Cost, bool) { return u.cost, u.hasCost }

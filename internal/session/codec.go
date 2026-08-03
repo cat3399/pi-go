@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
@@ -184,14 +185,31 @@ func decodeEntry(raw []byte) (Entry, error) {
 		if err != nil {
 			return Entry{}, err
 		}
+		if entry.message != nil {
+			wrapped, wrapErr := agentmsg.NewLLM(entry.message)
+			if wrapErr != nil {
+				return Entry{}, wrapErr
+			}
+			entry.payload = MessagePayload{Message: wrapped}
+		}
 	} else if typeName == "compaction" {
 		compaction, err := decodeCompactionRecord(object)
 		if err != nil {
 			return Entry{}, err
 		}
 		entry.compaction = &compaction
+		_, hasFromHook := object["fromHook"]
+		entry.payload = CompactionPayload{Record: compaction, Details: bytes.Clone(object["details"]), FromHook: decodeOptionalBool(object, "fromHook"), HasFromHook: hasFromHook}
 	} else {
-		entry.diagnostics = []Diagnostic{{Code: DiagnosticUnknownEntry, EntryID: id, ContentIndex: -1}}
+		payload, payloadErr := decodeKnownEntryPayload(typeName, object, timestamp)
+		if payloadErr != nil {
+			return Entry{}, payloadErr
+		}
+		if payload != nil {
+			entry.payload = payload
+		} else {
+			entry.diagnostics = []Diagnostic{{Code: DiagnosticUnknownEntry, EntryID: id, ContentIndex: -1}}
+		}
 	}
 	return entry, nil
 }
@@ -576,10 +594,18 @@ func decodeToolResultMessage(entryID string, object map[string]json.RawMessage) 
 		}
 	}
 	if len(rich) != len(texts) {
-		message, err := llm.NewToolResultContentMessageWithDetails(toolCallID, toolName, rich, isError, timestamp, toolResultDetails(object))
+		metadata, err := decodeToolResultMetadata(object)
+		if err != nil {
+			return nil, nil, err
+		}
+		message, err := llm.NewToolResultContentMessageWithMetadata(toolCallID, toolName, rich, isError, timestamp, metadata)
 		return message, diagnostics, err
 	}
-	message, err := llm.NewToolResultMessageWithDetails(toolCallID, toolName, texts, isError, timestamp, toolResultDetails(object))
+	metadata, err := decodeToolResultMetadata(object)
+	if err != nil {
+		return nil, nil, err
+	}
+	message, err := llm.NewToolResultMessageWithMetadata(toolCallID, toolName, texts, isError, timestamp, metadata)
 	return message, diagnostics, err
 }
 
@@ -589,6 +615,185 @@ func toolResultDetails(object map[string]json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), raw...)
+}
+
+func decodeOptionalBool(object map[string]json.RawMessage, key string) bool {
+	raw, ok := object[key]
+	if !ok {
+		return false
+	}
+	var value bool
+	return json.Unmarshal(raw, &value) == nil && value
+}
+
+func decodeKnownEntryPayload(typeName string, object map[string]json.RawMessage, timestamp time.Time) (EntryPayload, error) {
+	switch typeName {
+	case "thinking_level_change":
+		value, err := requiredString(object, "thinkingLevel")
+		if err != nil {
+			return nil, fmt.Errorf("invalid thinking level change")
+		}
+		return ThinkingLevelChangePayload{ThinkingLevel: value}, nil
+	case "model_change":
+		providerID, e1 := requiredString(object, "provider")
+		modelID := ""
+		_, hasModelID := object["modelId"]
+		if raw, ok := object["modelId"]; ok && json.Unmarshal(raw, &modelID) != nil {
+			return nil, fmt.Errorf("invalid model change")
+		}
+		if e1 != nil {
+			return nil, fmt.Errorf("invalid model change")
+		}
+		return ModelChangePayload{Provider: providerID, ModelID: modelID, HasModelID: hasModelID}, nil
+	case "branch_summary":
+		fromID, e1 := requiredString(object, "fromId")
+		summary, e2 := requiredString(object, "summary")
+		if e1 != nil || e2 != nil {
+			return nil, fmt.Errorf("invalid branch summary")
+		}
+		payload := BranchSummaryPayload{FromID: fromID, Summary: summary, Details: bytes.Clone(object["details"]), FromHook: decodeOptionalBool(object, "fromHook")}
+		_, payload.HasFromHook = object["fromHook"]
+		if raw, ok := object["usage"]; ok {
+			usage, e := decodeCompactionUsage(raw)
+			if e != nil {
+				return nil, e
+			}
+			payload.Usage = &usage
+		}
+		return payload, nil
+	case "custom":
+		customType, e := requiredString(object, "customType")
+		if e != nil {
+			return nil, fmt.Errorf("invalid custom entry")
+		}
+		return CustomPayload{CustomType: customType, Data: bytes.Clone(object["data"])}, nil
+	case "custom_message":
+		customType, e := requiredString(object, "customType")
+		if e != nil {
+			return nil, fmt.Errorf("invalid custom message")
+		}
+		display := decodeOptionalBool(object, "display")
+		contentRaw, ok := object["content"]
+		if !ok {
+			return nil, fmt.Errorf("invalid custom message content")
+		}
+		content, _, e := decodeUserContentBlocks("", contentRaw)
+		if e != nil {
+			var text string
+			if json.Unmarshal(contentRaw, &text) != nil {
+				return nil, e
+			}
+			block, blockErr := llm.NewTextBlock(text)
+			if blockErr != nil {
+				return nil, blockErr
+			}
+			content = []llm.UserContentBlock{block}
+		}
+		message, e := agentmsg.NewCustom(agentmsg.Custom{CustomType: customType, Content: content, Display: display, Details: bytes.Clone(object["details"]), At: timestamp})
+		if e != nil {
+			return nil, e
+		}
+		return CustomMessagePayload{Message: message}, nil
+	case "label":
+		target, e := requiredString(object, "targetId")
+		if e != nil {
+			return nil, fmt.Errorf("invalid label entry")
+		}
+		payload := LabelPayload{TargetID: target}
+		if raw, ok := object["label"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			var label string
+			if json.Unmarshal(raw, &label) != nil {
+				return nil, fmt.Errorf("invalid label entry")
+			}
+			payload.Label = &label
+		}
+		return payload, nil
+	case "session_info":
+		payload := SessionInfoPayload{}
+		if raw, ok := object["name"]; ok {
+			var name string
+			if json.Unmarshal(raw, &name) != nil {
+				return nil, fmt.Errorf("invalid session info")
+			}
+			payload.Name = &name
+		}
+		return payload, nil
+	default:
+		return nil, nil
+	}
+}
+
+func decodeToolResultMetadata(object map[string]json.RawMessage) (llm.ToolResultMetadata, error) {
+	metadata := llm.ToolResultMetadata{Details: toolResultDetails(object)}
+	if raw, exists := object["addedToolNames"]; exists {
+		if err := json.Unmarshal(raw, &metadata.AddedToolNames); err != nil {
+			return llm.ToolResultMetadata{}, fmt.Errorf("tool result has invalid addedToolNames")
+		}
+	}
+	if raw, exists := object["usage"]; exists {
+		usage, err := decodePortableUsage(raw)
+		if err != nil {
+			return llm.ToolResultMetadata{}, err
+		}
+		metadata.Usage = &usage
+	}
+	return metadata, nil
+}
+
+func decodePortableUsage(raw []byte) (llm.Usage, error) {
+	object, err := decodeObject(raw)
+	if err != nil {
+		return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+	}
+	input, err := requiredUint64(object, "input")
+	if err != nil {
+		return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+	}
+	output, err := requiredUint64(object, "output")
+	if err != nil {
+		return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+	}
+	cacheRead, err := requiredUint64(object, "cacheRead")
+	if err != nil {
+		return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+	}
+	cacheWrite, err := requiredUint64(object, "cacheWrite")
+	if err != nil {
+		return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+	}
+	spec := llm.UsageSpec{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	if value, exists := object["reasoning"]; exists {
+		n, e := decodeUint64(value)
+		if e != nil {
+			return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+		}
+		spec.Reasoning = &n
+	}
+	if value, exists := object["cacheWrite1h"]; exists {
+		n, e := decodeUint64(value)
+		if e != nil {
+			return llm.Usage{}, fmt.Errorf("tool result has invalid usage")
+		}
+		spec.CacheWrite1h = &n
+	}
+	if value, exists := object["cost"]; exists {
+		var cost llm.Cost
+		if err := json.Unmarshal(value, &cost); err != nil {
+			return llm.Usage{}, fmt.Errorf("tool result has invalid usage cost")
+		}
+		spec.Cost = &cost
+	}
+	usage, err := llm.NewUsage(spec)
+	if err != nil {
+		return llm.Usage{}, err
+	}
+	if value, exists := object["totalTokens"]; exists {
+		total, e := decodeUint64(value)
+		if e != nil || total != usage.TotalTokens() {
+			return llm.Usage{}, fmt.Errorf("tool result has invalid totalTokens")
+		}
+	}
+	return usage, nil
 }
 
 func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowSignatures bool) ([]llm.AssistantBlock, []Diagnostic, error) {

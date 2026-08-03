@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
@@ -208,6 +209,110 @@ type Entry struct {
 	hasAssistant bool
 	compaction   *CompactionRecord
 	diagnostics  []Diagnostic
+	payload      EntryPayload
+}
+
+// EntryPayload is the typed v3 session-entry union.  Entry.RawJSON remains
+// available for forward compatibility, while this projection gives later
+// SessionManager work a complete, non-stringly-typed foundation.
+type EntryPayload interface {
+	entryPayload()
+	CloneEntryPayload() EntryPayload
+}
+type MessagePayload struct{ Message agentmsg.Message }
+
+func (MessagePayload) entryPayload() {}
+func (p MessagePayload) CloneEntryPayload() EntryPayload {
+	if p.Message != nil {
+		p.Message = agentmsg.CloneOne(p.Message)
+	}
+	return p
+}
+
+type ThinkingLevelChangePayload struct{ ThinkingLevel string }
+
+func (ThinkingLevelChangePayload) entryPayload()                     {}
+func (p ThinkingLevelChangePayload) CloneEntryPayload() EntryPayload { return p }
+
+type ModelChangePayload struct {
+	Provider, ModelID string
+	HasModelID        bool
+}
+
+func (ModelChangePayload) entryPayload()                     {}
+func (p ModelChangePayload) CloneEntryPayload() EntryPayload { return p }
+
+type BranchSummaryPayload struct {
+	FromID, Summary string
+	Details         json.RawMessage
+	Usage           *CompactionUsage
+	FromHook        bool
+	HasFromHook     bool
+}
+
+func (BranchSummaryPayload) entryPayload() {}
+func (p BranchSummaryPayload) CloneEntryPayload() EntryPayload {
+	p.Details = bytes.Clone(p.Details)
+	if p.Usage != nil {
+		u := *p.Usage
+		p.Usage = &u
+	}
+	return p
+}
+
+type CustomPayload struct {
+	CustomType string
+	Data       json.RawMessage
+}
+
+func (CustomPayload) entryPayload()                     {}
+func (p CustomPayload) CloneEntryPayload() EntryPayload { p.Data = bytes.Clone(p.Data); return p }
+
+type CustomMessagePayload struct{ Message agentmsg.Custom }
+
+func (CustomMessagePayload) entryPayload() {}
+func (p CustomMessagePayload) CloneEntryPayload() EntryPayload {
+	clone, _ := agentmsg.NewCustom(p.Message)
+	p.Message = clone
+	return p
+}
+
+type LabelPayload struct {
+	TargetID string
+	Label    *string
+}
+
+func (LabelPayload) entryPayload() {}
+func (p LabelPayload) CloneEntryPayload() EntryPayload {
+	if p.Label != nil {
+		x := *p.Label
+		p.Label = &x
+	}
+	return p
+}
+
+type SessionInfoPayload struct{ Name *string }
+
+func (SessionInfoPayload) entryPayload() {}
+func (p SessionInfoPayload) CloneEntryPayload() EntryPayload {
+	if p.Name != nil {
+		x := *p.Name
+		p.Name = &x
+	}
+	return p
+}
+
+type CompactionPayload struct {
+	Record      CompactionRecord
+	Details     json.RawMessage
+	FromHook    bool
+	HasFromHook bool
+}
+
+func (CompactionPayload) entryPayload() {}
+func (p CompactionPayload) CloneEntryPayload() EntryPayload {
+	p.Details = bytes.Clone(p.Details)
+	return p.Record.clonePayload(p)
 }
 
 // CompactionRecord is the recognized v3 compaction entry payload. Details and
@@ -218,6 +323,15 @@ type CompactionRecord struct {
 	FirstKeptEntryID string
 	TokensBefore     uint64
 	Usage            *CompactionUsage
+}
+
+func (r CompactionRecord) clonePayload(p CompactionPayload) EntryPayload {
+	if r.Usage != nil {
+		u := *r.Usage
+		r.Usage = &u
+	}
+	p.Record = r
+	return p
 }
 
 // TreeNode is an immutable snapshot of the durable forest. Children preserve
@@ -256,6 +370,21 @@ func (e Entry) RawJSON() []byte { return bytes.Clone(e.raw) }
 func (e Entry) Message() (llm.ConversationMessage, bool) {
 	return e.message, e.message != nil
 }
+func (e Entry) Payload() EntryPayload {
+	if e.payload == nil {
+		return nil
+	}
+	return e.payload.CloneEntryPayload()
+}
+func (e Entry) AgentMessage() (agentmsg.Message, bool) {
+	if payload, ok := e.payload.(MessagePayload); ok && payload.Message != nil {
+		return agentmsg.CloneOne(payload.Message), true
+	}
+	if payload, ok := e.payload.(CustomMessagePayload); ok {
+		return agentmsg.CloneOne(payload.Message), true
+	}
+	return nil, false
+}
 func (e Entry) AssistantProvenance() (AssistantProvenance, bool) {
 	return e.assistant, e.hasAssistant
 }
@@ -284,25 +413,37 @@ func (e Entry) clone() Entry {
 		}
 		e.compaction = &compaction
 	}
+	if e.payload != nil {
+		e.payload = e.payload.CloneEntryPayload()
+	}
 	return e
 }
 
 type Context struct {
-	messages     []llm.ConversationMessage
-	diagnostics  []Diagnostic
-	assistant    AssistantProvenance
-	hasAssistant bool
+	messages      []llm.ConversationMessage
+	agentMessages []agentmsg.Message
+	diagnostics   []Diagnostic
+	assistant     AssistantProvenance
+	hasAssistant  bool
 }
 
 // NewContext constructs an in-memory runtime projection. It is intentionally
 // separate from Session's durable selected-branch projection.
 func NewContext(messages []llm.ConversationMessage) Context {
-	return Context{messages: append([]llm.ConversationMessage(nil), messages...)}
+	agentMessages := make([]agentmsg.Message, 0, len(messages))
+	for _, message := range messages {
+		wrapped, err := agentmsg.NewLLM(message)
+		if err == nil {
+			agentMessages = append(agentMessages, wrapped)
+		}
+	}
+	return Context{messages: append([]llm.ConversationMessage(nil), messages...), agentMessages: agentmsg.Clone(agentMessages)}
 }
 
 func (c Context) Messages() []llm.ConversationMessage {
 	return append([]llm.ConversationMessage(nil), c.messages...)
 }
+func (c Context) AgentMessages() []agentmsg.Message { return agentmsg.Clone(c.agentMessages) }
 
 func (c Context) Diagnostics() []Diagnostic {
 	return append([]Diagnostic(nil), c.diagnostics...)

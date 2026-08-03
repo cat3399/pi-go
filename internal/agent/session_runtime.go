@@ -262,7 +262,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	s := &AgentSession{
 		transcript: config.Transcript, model: config.Model, thinkingLevel: config.ThinkingLevel,
 		systemPrompt: config.SystemPrompt, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: config.BeforeToolCall, afterToolCall: config.AfterToolCall,
-		stream:        provider.StreamOptions{APIKey: config.Stream.APIKey, Headers: cloneHeaderMap(config.Stream.Headers), MaxTokens: config.Stream.MaxTokens, SessionID: config.Stream.SessionID},
+		stream:        provider.CloneStreamOptions(config.Stream),
 		resolveStream: config.ResolveStreamOptions,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
@@ -464,7 +464,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 	s.mu.RLock()
 	snapshot := TurnSnapshot{
 		Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt,
-		Tool: s.tool, Tools: append([]provider.ToolDefinition(nil), s.tools...), BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall, Stream: provider.StreamOptions{APIKey: s.stream.APIKey, Headers: cloneHeaderMap(s.stream.Headers), MaxTokens: s.stream.MaxTokens, SessionID: s.stream.SessionID},
+		Tool: s.tool, Tools: append([]provider.ToolDefinition(nil), s.tools...), BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall, Stream: provider.CloneStreamOptions(s.stream),
 	}
 	resolver := s.resolveStream
 	s.mu.RUnlock()
@@ -481,7 +481,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 		if resolved.SessionID == "" {
 			resolved.SessionID = snapshot.Stream.SessionID
 		}
-		snapshot.Stream = provider.StreamOptions{APIKey: resolved.APIKey, Headers: cloneHeaderMap(resolved.Headers), MaxTokens: resolved.MaxTokens, SessionID: resolved.SessionID}
+		snapshot.Stream = provider.CloneStreamOptions(resolved)
 	}
 	return snapshot, nil
 }
@@ -1056,6 +1056,17 @@ func cloneSessionEvent(event SessionEvent) SessionEvent {
 	event.Messages = append([]llm.ConversationMessage(nil), event.Messages...)
 	event.Event.ToolArguments = bytes.Clone(event.Event.ToolArguments)
 	event.Event.ToolOutput.Content = append([]llm.ToolResultContentBlock(nil), event.Event.ToolOutput.Content...)
+	event.Event.ToolOutput.AddedToolNames = append([]string(nil), event.Event.ToolOutput.AddedToolNames...)
+	if event.Event.ToolOutput.Usage != nil {
+		usage := *event.Event.ToolOutput.Usage
+		event.Event.ToolOutput.Usage = &usage
+	}
+	event.Event.ToolUpdate.Content = append([]llm.ToolResultContentBlock(nil), event.Event.ToolUpdate.Content...)
+	event.Event.ToolUpdate.AddedToolNames = append([]string(nil), event.Event.ToolUpdate.AddedToolNames...)
+	if event.Event.ToolUpdate.Usage != nil {
+		usage := *event.Event.ToolUpdate.Usage
+		event.Event.ToolUpdate.Usage = &usage
+	}
 	if event.CompactionResult != nil {
 		result := *event.CompactionResult
 		result.Input.Messages = append([]llm.ConversationMessage(nil), result.Input.Messages...)

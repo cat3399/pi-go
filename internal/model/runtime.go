@@ -188,6 +188,11 @@ func (r *Runtime) ValidateRoute(selected Model) error {
 	if len(selected.UnknownFields) != 0 {
 		return fmt.Errorf("%w: selected model contains unknown configuration fields", ErrUnsupported)
 	}
+	// Preserving a future API's compat is required for catalog fidelity, but a
+	// production route must not pretend an unimplemented adapter consumed it.
+	if len(selected.Compat.Additional) != 0 {
+		return fmt.Errorf("%w: selected model contains compatibility for an unimplemented API", ErrUnsupported)
+	}
 	return nil
 }
 
@@ -600,7 +605,7 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 		return p, err
 	}
 	if raw, ok := o["compat"]; ok {
-		if p.Compat, err = decodeCompat(raw, id); err != nil {
+		if p.Compat, err = decodeCompat(raw, id, p.API); err != nil {
 			p.UnsupportedFields = append(p.UnsupportedFields, "compat")
 			err = nil
 		}
@@ -622,7 +627,7 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 		}
 		seen := map[string]bool{}
 		for i, entry := range models {
-			m, e := parseModel(id, i, entry)
+			m, e := parseModel(id, p.API, i, entry)
 			if e != nil {
 				return p, e
 			}
@@ -695,7 +700,7 @@ func parseOverride(providerID, modelID string, raw json.RawMessage) (modelOverri
 	sort.Strings(result.UnknownFields)
 	return result, nil
 }
-func parseModel(providerID string, index int, raw json.RawMessage) (Model, error) {
+func parseModel(providerID, providerAPI string, index int, raw json.RawMessage) (Model, error) {
 	var o map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &o); err != nil || o == nil {
 		return Model{}, Diagnostic{"models.json", fmt.Sprintf("providers.%s.models.%d", providerID, index), "must be an object"}
@@ -741,7 +746,11 @@ func parseModel(providerID string, index int, raw json.RawMessage) (Model, error
 		return m, err
 	}
 	if raw, exists := o["compat"]; exists {
-		if m.Compat, err = decodeCompat(raw, providerID); err != nil {
+		compatAPI := m.API
+		if compatAPI == "" {
+			compatAPI = providerAPI
+		}
+		if m.Compat, err = decodeCompat(raw, providerID, compatAPI); err != nil {
 			m.UnsupportedFields = append(m.UnsupportedFields, "compat")
 			err = nil
 		}
@@ -934,44 +943,107 @@ func decodeCost(raw json.RawMessage, owner string) (provider.CostRates, error) {
 		Output     float64 `json:"output"`
 		CacheRead  float64 `json:"cacheRead"`
 		CacheWrite float64 `json:"cacheWrite"`
+		Tiers      []struct {
+			InputTokensAbove uint64  `json:"inputTokensAbove"`
+			Input            float64 `json:"input"`
+			Output           float64 `json:"output"`
+			CacheRead        float64 `json:"cacheRead"`
+			CacheWrite       float64 `json:"cacheWrite"`
+		} `json:"tiers"`
 	}
 	if err := json.Unmarshal(raw, &value); err != nil || value.Input < 0 || value.Output < 0 || value.CacheRead < 0 || value.CacheWrite < 0 {
 		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain non-negative rates"}
 	}
-	return provider.CostRates{Input: value.Input, Output: value.Output, CacheRead: value.CacheRead, CacheWrite: value.CacheWrite}, nil
+	tiers := make([]provider.CostTier, len(value.Tiers))
+	var previous uint64
+	for index, tier := range value.Tiers {
+		if (index != 0 && tier.InputTokensAbove <= previous) || tier.Input < 0 || tier.Output < 0 || tier.CacheRead < 0 || tier.CacheWrite < 0 {
+			return provider.CostRates{}, Diagnostic{"models.json", owner, "cost tiers must be strictly increasing non-negative rates"}
+		}
+		previous = tier.InputTokensAbove
+		tiers[index] = provider.CostTier{InputTokensAbove: tier.InputTokensAbove, Input: tier.Input, Output: tier.Output, CacheRead: tier.CacheRead, CacheWrite: tier.CacheWrite}
+	}
+	return provider.CostRates{Input: value.Input, Output: value.Output, CacheRead: value.CacheRead, CacheWrite: value.CacheWrite, Tiers: tiers}, nil
 }
 
-func decodeCompat(raw json.RawMessage, owner string) (provider.ModelCompat, error) {
+func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat, error) {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
 		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
 	}
+	if api == "anthropic-messages" {
+		for key := range object {
+			switch key {
+			case "supportsEagerToolInputStreaming", "supportsLongCacheRetention", "sendSessionAffinityHeaders", "supportsCacheControlOnTools", "supportsTemperature", "forceAdaptiveThinking", "allowEmptySignature", "supportsStrictTools", "supportsToolReferences":
+			default:
+				return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat contains an unsupported field"}
+			}
+		}
+		var wire struct {
+			SupportsEagerToolInputStreaming *bool `json:"supportsEagerToolInputStreaming"`
+			SupportsLongCacheRetention      *bool `json:"supportsLongCacheRetention"`
+			SendSessionAffinityHeaders      *bool `json:"sendSessionAffinityHeaders"`
+			SupportsCacheControlOnTools     *bool `json:"supportsCacheControlOnTools"`
+			SupportsTemperature             *bool `json:"supportsTemperature"`
+			ForceAdaptiveThinking           *bool `json:"forceAdaptiveThinking"`
+			AllowEmptySignature             *bool `json:"allowEmptySignature"`
+			SupportsStrictTools             *bool `json:"supportsStrictTools"`
+			SupportsToolReferences          *bool `json:"supportsToolReferences"`
+		}
+		if json.Unmarshal(raw, &wire) != nil {
+			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
+		}
+		return provider.ModelCompat{AnthropicMessages: &provider.AnthropicMessagesCompat{SupportsEagerToolInputStreaming: wire.SupportsEagerToolInputStreaming, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SupportsCacheControlOnTools: wire.SupportsCacheControlOnTools, SupportsTemperature: wire.SupportsTemperature, ForceAdaptiveThinking: wire.ForceAdaptiveThinking, AllowEmptySignature: wire.AllowEmptySignature, SupportsStrictTools: wire.SupportsStrictTools, SupportsToolReferences: wire.SupportsToolReferences}}, nil
+	}
+	if api == "bedrock-converse-stream" {
+		for key := range object {
+			if key != "supportsStrictMode" {
+				return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat contains an unsupported field"}
+			}
+		}
+		var wire struct {
+			SupportsStrictMode *bool `json:"supportsStrictMode"`
+		}
+		if json.Unmarshal(raw, &wire) != nil {
+			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
+		}
+		return provider.ModelCompat{Bedrock: &provider.BedrockCompat{SupportsStrictMode: wire.SupportsStrictMode}}, nil
+	}
+	if api != "openai-completions" && api != "openai-responses" && api != "azure-openai-responses" && api != "openai-codex-responses" {
+		return provider.ModelCompat{Additional: map[string]json.RawMessage{api: bytes.Clone(raw)}}, nil
+	}
 	for key := range object {
 		switch key {
-		case "supportsStore", "supportsDeveloperRole", "supportsReasoningEffort", "supportsUsageInStreaming", "supportsFinishReason", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult", "requiresThinkingAsText", "requiresReasoningContentOnAssistantMessages", "thinkingFormat", "supportsOpenAIGrammarTools", "supportsStrictMode", "sendSessionAffinityHeaders", "sessionAffinityFormat", "supportsLongCacheRetention", "supportsToolSearch", "supportsExplicitPromptCacheMode":
+		case "supportsStore", "supportsDeveloperRole", "supportsReasoningEffort", "supportsUsageInStreaming", "supportsFinishReason", "maxTokensField", "requiresToolResultName", "requiresAssistantAfterToolResult", "requiresThinkingAsText", "requiresReasoningContentOnAssistantMessages", "thinkingFormat", "supportsOpenAIGrammarTools", "supportsStrictMode", "sendSessionAffinityHeaders", "sessionAffinityFormat", "supportsLongCacheRetention", "supportsToolSearch", "supportsExplicitPromptCacheMode", "cacheControlFormat", "deferredToolsMode", "zaiToolStream", "chatTemplateKwargs", "openRouterRouting", "vercelGatewayRouting":
 		default:
 			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat contains an unsupported field"}
 		}
 	}
 	var wire struct {
-		SupportsStore                               *bool   `json:"supportsStore"`
-		SupportsDeveloperRole                       *bool   `json:"supportsDeveloperRole"`
-		SupportsReasoningEffort                     *bool   `json:"supportsReasoningEffort"`
-		SupportsUsageInStreaming                    *bool   `json:"supportsUsageInStreaming"`
-		SupportsFinishReason                        *bool   `json:"supportsFinishReason"`
-		MaxTokensField                              *string `json:"maxTokensField"`
-		RequiresToolResultName                      *bool   `json:"requiresToolResultName"`
-		RequiresAssistantAfterToolResult            *bool   `json:"requiresAssistantAfterToolResult"`
-		RequiresThinkingAsText                      *bool   `json:"requiresThinkingAsText"`
-		RequiresReasoningContentOnAssistantMessages *bool   `json:"requiresReasoningContentOnAssistantMessages"`
-		ThinkingFormat                              *string `json:"thinkingFormat"`
-		SendSessionAffinityHeaders                  *bool   `json:"sendSessionAffinityHeaders"`
-		SessionAffinityFormat                       *string `json:"sessionAffinityFormat"`
-		SupportsLongCacheRetention                  *bool   `json:"supportsLongCacheRetention"`
-		SupportsStrictMode                          *bool   `json:"supportsStrictMode"`
-		SupportsOpenAIGrammarTools                  *bool   `json:"supportsOpenAIGrammarTools"`
-		SupportsToolSearch                          *bool   `json:"supportsToolSearch"`
-		SupportsExplicitPromptCacheMode             *bool   `json:"supportsExplicitPromptCacheMode"`
+		SupportsStore                               *bool          `json:"supportsStore"`
+		SupportsDeveloperRole                       *bool          `json:"supportsDeveloperRole"`
+		SupportsReasoningEffort                     *bool          `json:"supportsReasoningEffort"`
+		SupportsUsageInStreaming                    *bool          `json:"supportsUsageInStreaming"`
+		SupportsFinishReason                        *bool          `json:"supportsFinishReason"`
+		MaxTokensField                              *string        `json:"maxTokensField"`
+		RequiresToolResultName                      *bool          `json:"requiresToolResultName"`
+		RequiresAssistantAfterToolResult            *bool          `json:"requiresAssistantAfterToolResult"`
+		RequiresThinkingAsText                      *bool          `json:"requiresThinkingAsText"`
+		RequiresReasoningContentOnAssistantMessages *bool          `json:"requiresReasoningContentOnAssistantMessages"`
+		ThinkingFormat                              *string        `json:"thinkingFormat"`
+		SendSessionAffinityHeaders                  *bool          `json:"sendSessionAffinityHeaders"`
+		SessionAffinityFormat                       *string        `json:"sessionAffinityFormat"`
+		SupportsLongCacheRetention                  *bool          `json:"supportsLongCacheRetention"`
+		SupportsStrictMode                          *bool          `json:"supportsStrictMode"`
+		SupportsOpenAIGrammarTools                  *bool          `json:"supportsOpenAIGrammarTools"`
+		SupportsToolSearch                          *bool          `json:"supportsToolSearch"`
+		SupportsExplicitPromptCacheMode             *bool          `json:"supportsExplicitPromptCacheMode"`
+		CacheControlFormat                          *string        `json:"cacheControlFormat"`
+		DeferredToolsMode                           *string        `json:"deferredToolsMode"`
+		ZaiToolStream                               *bool          `json:"zaiToolStream"`
+		ChatTemplateKwargs                          map[string]any `json:"chatTemplateKwargs"`
+		OpenRouterRouting                           map[string]any `json:"openRouterRouting"`
+		VercelGatewayRouting                        map[string]any `json:"vercelGatewayRouting"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
@@ -991,7 +1063,7 @@ func decodeCompat(raw json.RawMessage, owner string) (provider.ModelCompat, erro
 	}
 	return provider.ModelCompat{
 		OpenAIResponses:   &provider.OpenAIResponsesCompat{SupportsDeveloperRole: wire.SupportsDeveloperRole, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SupportsStrictMode: wire.SupportsStrictMode, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsToolSearch: wire.SupportsToolSearch, SupportsExplicitPromptCacheMode: wire.SupportsExplicitPromptCacheMode},
-		OpenAICompletions: &provider.OpenAICompletionsCompat{SupportsStore: wire.SupportsStore, SupportsDeveloperRole: wire.SupportsDeveloperRole, SupportsReasoningEffort: wire.SupportsReasoningEffort, SupportsUsageInStreaming: wire.SupportsUsageInStreaming, SupportsFinishReason: wire.SupportsFinishReason, MaxTokensField: wire.MaxTokensField, RequiresToolResultName: wire.RequiresToolResultName, RequiresAssistantAfterToolResult: wire.RequiresAssistantAfterToolResult, RequiresThinkingAsText: wire.RequiresThinkingAsText, RequiresReasoningContentOnAssistantMessages: wire.RequiresReasoningContentOnAssistantMessages, ThinkingFormat: wire.ThinkingFormat, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsStrictMode: wire.SupportsStrictMode, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention},
+		OpenAICompletions: &provider.OpenAICompletionsCompat{SupportsStore: wire.SupportsStore, SupportsDeveloperRole: wire.SupportsDeveloperRole, SupportsReasoningEffort: wire.SupportsReasoningEffort, SupportsUsageInStreaming: wire.SupportsUsageInStreaming, SupportsFinishReason: wire.SupportsFinishReason, MaxTokensField: wire.MaxTokensField, RequiresToolResultName: wire.RequiresToolResultName, RequiresAssistantAfterToolResult: wire.RequiresAssistantAfterToolResult, RequiresThinkingAsText: wire.RequiresThinkingAsText, RequiresReasoningContentOnAssistantMessages: wire.RequiresReasoningContentOnAssistantMessages, ThinkingFormat: wire.ThinkingFormat, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsStrictMode: wire.SupportsStrictMode, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, CacheControlFormat: wire.CacheControlFormat, DeferredToolsMode: wire.DeferredToolsMode, ZaiToolStream: wire.ZaiToolStream, ChatTemplateKwargs: wire.ChatTemplateKwargs, OpenRouterRouting: wire.OpenRouterRouting, VercelGatewayRouting: wire.VercelGatewayRouting},
 	}, nil
 }
 
@@ -1387,54 +1459,10 @@ func cloneThinkingMap(v map[provider.ThinkingLevel]*string) map[provider.Thinkin
 	return out
 }
 func cloneCompat(v provider.ModelCompat) provider.ModelCompat {
-	clone := func(value *bool) *bool {
-		if value == nil {
-			return nil
-		}
-		copy := *value
-		return &copy
-	}
-	result := provider.ModelCompat{}
-	if v.OpenAIResponses != nil {
-		result.OpenAIResponses = &provider.OpenAIResponsesCompat{
-			SupportsDeveloperRole: clone(v.OpenAIResponses.SupportsDeveloperRole), SupportsStrictMode: clone(v.OpenAIResponses.SupportsStrictMode),
-			SupportsLongCacheRetention: clone(v.OpenAIResponses.SupportsLongCacheRetention), SupportsOpenAIGrammarTools: clone(v.OpenAIResponses.SupportsOpenAIGrammarTools),
-			SessionAffinityFormat: func() *string {
-				if v.OpenAIResponses.SessionAffinityFormat == nil {
-					return nil
-				}
-				copy := *v.OpenAIResponses.SessionAffinityFormat
-				return &copy
-			}(),
-			SupportsToolSearch: clone(v.OpenAIResponses.SupportsToolSearch), SupportsExplicitPromptCacheMode: clone(v.OpenAIResponses.SupportsExplicitPromptCacheMode),
-		}
-	}
-	if v.OpenAICompletions != nil {
-		result.OpenAICompletions = &provider.OpenAICompletionsCompat{
-			SupportsStore: clone(v.OpenAICompletions.SupportsStore), SupportsDeveloperRole: clone(v.OpenAICompletions.SupportsDeveloperRole), SupportsReasoningEffort: clone(v.OpenAICompletions.SupportsReasoningEffort), SupportsUsageInStreaming: clone(v.OpenAICompletions.SupportsUsageInStreaming), SupportsFinishReason: clone(v.OpenAICompletions.SupportsFinishReason),
-			MaxTokensField: func() *string {
-				if v.OpenAICompletions.MaxTokensField == nil {
-					return nil
-				}
-				x := *v.OpenAICompletions.MaxTokensField
-				return &x
-			}(), RequiresToolResultName: clone(v.OpenAICompletions.RequiresToolResultName), RequiresAssistantAfterToolResult: clone(v.OpenAICompletions.RequiresAssistantAfterToolResult), RequiresThinkingAsText: clone(v.OpenAICompletions.RequiresThinkingAsText), RequiresReasoningContentOnAssistantMessages: clone(v.OpenAICompletions.RequiresReasoningContentOnAssistantMessages),
-			ThinkingFormat: func() *string {
-				if v.OpenAICompletions.ThinkingFormat == nil {
-					return nil
-				}
-				x := *v.OpenAICompletions.ThinkingFormat
-				return &x
-			}(), SupportsOpenAIGrammarTools: clone(v.OpenAICompletions.SupportsOpenAIGrammarTools), SupportsStrictMode: clone(v.OpenAICompletions.SupportsStrictMode), SendSessionAffinityHeaders: clone(v.OpenAICompletions.SendSessionAffinityHeaders), SessionAffinityFormat: func() *string {
-				if v.OpenAICompletions.SessionAffinityFormat == nil {
-					return nil
-				}
-				x := *v.OpenAICompletions.SessionAffinityFormat
-				return &x
-			}(), SupportsLongCacheRetention: clone(v.OpenAICompletions.SupportsLongCacheRetention),
-		}
-	}
-	return result
+	// Provider owns the full API-specific compatibility union. Keeping the
+	// cloning rule there prevents a model-runtime snapshot from silently
+	// dropping compat for an adapter not implemented in this binary yet.
+	return provider.CloneModelCompat(v)
 }
 
 func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
@@ -1485,14 +1513,66 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 		copyBool(&target.SendSessionAffinityHeaders, value.SendSessionAffinityHeaders)
 		copyString(&target.SessionAffinityFormat, value.SessionAffinityFormat)
 		copyBool(&target.SupportsLongCacheRetention, value.SupportsLongCacheRetention)
+		copyString(&target.CacheControlFormat, value.CacheControlFormat)
+		copyString(&target.DeferredToolsMode, value.DeferredToolsMode)
+		copyBool(&target.ZaiToolStream, value.ZaiToolStream)
+		if value.ChatTemplateKwargs != nil {
+			target.ChatTemplateKwargs = cloneAnyMap(value.ChatTemplateKwargs)
+		}
+		if value.OpenRouterRouting != nil {
+			target.OpenRouterRouting = cloneAnyMap(value.OpenRouterRouting)
+		}
+		if value.VercelGatewayRouting != nil {
+			target.VercelGatewayRouting = cloneAnyMap(value.VercelGatewayRouting)
+		}
+	}
+	if value := override.AnthropicMessages; value != nil {
+		if result.AnthropicMessages == nil {
+			result.AnthropicMessages = &provider.AnthropicMessagesCompat{}
+		}
+		target := result.AnthropicMessages
+		copyBool(&target.SupportsEagerToolInputStreaming, value.SupportsEagerToolInputStreaming)
+		copyBool(&target.SupportsLongCacheRetention, value.SupportsLongCacheRetention)
+		copyBool(&target.SendSessionAffinityHeaders, value.SendSessionAffinityHeaders)
+		copyBool(&target.SupportsCacheControlOnTools, value.SupportsCacheControlOnTools)
+		copyBool(&target.SupportsTemperature, value.SupportsTemperature)
+		copyBool(&target.ForceAdaptiveThinking, value.ForceAdaptiveThinking)
+		copyBool(&target.AllowEmptySignature, value.AllowEmptySignature)
+		copyBool(&target.SupportsStrictTools, value.SupportsStrictTools)
+		copyBool(&target.SupportsToolReferences, value.SupportsToolReferences)
+	}
+	if value := override.Bedrock; value != nil {
+		if result.Bedrock == nil {
+			result.Bedrock = &provider.BedrockCompat{}
+		}
+		copyBool(&result.Bedrock.SupportsStrictMode, value.SupportsStrictMode)
+	}
+	if override.Additional != nil {
+		if result.Additional == nil {
+			result.Additional = map[string]json.RawMessage{}
+		}
+		for key, value := range override.Additional {
+			result.Additional[key] = bytes.Clone(value)
+		}
 	}
 	return result
+}
+func cloneAnyMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	copy := make(map[string]any, len(value))
+	for key, item := range value {
+		copy[key] = item
+	}
+	return copy
 }
 func cloneModel(m Model) Model {
 	m.Headers = cloneHeaders(m.Headers)
 	m.Input = append([]provider.InputKind(nil), m.Input...)
 	m.ThinkingLevelMap = cloneThinkingMap(m.ThinkingLevelMap)
 	m.Compat = cloneCompat(m.Compat)
+	m.Cost.Tiers = append([]provider.CostTier(nil), m.Cost.Tiers...)
 	m.UnsupportedFields = append([]string(nil), m.UnsupportedFields...)
 	m.UnknownFields = append([]string(nil), m.UnknownFields...)
 	return m

@@ -38,15 +38,20 @@ assembly 已经启用全部能力。
 
 ## 与目标架构的主要差距
 
-### P0：兼容数据模型尚未完成
+### P0：兼容数据模型已完成
 
-- `Model` 已比早期 route key 丰富，但仍未完整对齐原版 cost tiers、compat/request options
-  和全部 capability 语义；
-- 通用消息还没有完整形成原版 `AgentMessage + convertToLlm` 边界，custom/bash/compaction/
-  branch 等消息的转换职责不完整；
-- ToolResult 尚未完整贯通 usage、added tool names 等原版字段；
-- usage/cost 与 replay provenance 仍有缺口，部分路径可能给出零值而非准确或明确未知；
-- session entry、event 和 hook payload 尚无系统性的原版 fixture 对照。
+- `Model` 现包含 request-wide cost tiers、完整的 portable stream options、OpenAI、Anthropic
+  与 Bedrock 的 typed compat，以及保留未实现 API compat 的 immutable raw projection。未实现
+  adapter 的 compat 可以读取/复制，但 production route 会明确拒绝，绝不假装已经消费它；
+- `internal/agentmsg` 提供可扩展的 AgentMessage union 和唯一的 `ConvertToLLM` 边界。标准
+  LLM、bash、custom、branch summary、compaction summary 和 opaque extension message 不会提前
+  降成字符串；
+- ToolResult 的 rich content、details、usage/cost、added tool names、terminate、identity、
+  `isError`、timestamp 已贯通 tool execution、event copy、session JSONL codec 和 replay；
+- v3 session 的 message、thinking/model change、compaction、branch summary、custom/custom
+  message、label、session info 都有 typed payload，并能 append、reopen、branch/context projection；
+- P0 对照测试覆盖 coding-agent message conversion、原版 v3 entry JSON shapes、metadata
+  round-trip 和不含 OpenAI metadata 的 generic provider contract。
 
 ### P1–P2：AgentLoop 与 Agent 的边界尚未对齐
 
@@ -90,26 +95,23 @@ P0–P4，必须现在正确建模。
 
 严格按照 [实现路线](ROADMAP.md) 推进：
 
-1. 先完成 Model、AgentMessage、ToolResult、session/event/hook 数据契约；
-2. 再拆清 AgentLoop 和 stateful Agent；
-3. 完成 SessionManager；
-4. 完成产品级 AgentSession；
-5. 建立进程内 Runtime 并做整体行为验收；
-6. 之后才开始 RPC、Provider 扩展、pi-web 和其他 surface。
+1. 拆清 AgentLoop 和 stateful Agent；
+2. 完成 SessionManager；
+3. 完成产品级 AgentSession；
+4. 建立进程内 Runtime 并做整体行为验收；
+5. 之后才开始 RPC、Provider 扩展、pi-web 和其他 surface。
 
 不为保留旧 package 或减少 diff 调整顺序，也不以 CLI demo 或单一 Provider 成功作为阶段
 完成证据。
 
 ## 当前验证基线
 
-审查时：
+P0 完成后的验证基线：
 
 - `go build ./...` 通过；
 - `go vet ./...` 通过；
-- `go test ./...` 仅失败于
-  `TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession`；
-- `go test -race ./internal/agent ./internal/session ./internal/provider` 同样只触发上述断言。
+- `go test ./...` 通过；
+- `go test -race ./internal/agent ./internal/session ./internal/provider ./internal/model ./internal/agentmsg` 通过。
 
-该断言仍按旧 signature 预期 replay，不包含 reasoning summary；当前实现保留完整 reasoning
-item（包括 summary），与审查基线中的原版行为一致。因此它是待更新的旧测试预期，不是
-当前已知的实现回归。修正测试后仍需重新运行完整检查，不能把本说明当作永久豁免。
+旧 reasoning replay 断言已按原版完整 reasoning item（包括 summary）修正，因此不再是
+常驻失败基线。P1 开始前，当前默认测试集没有已知豁免。
