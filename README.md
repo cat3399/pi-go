@@ -1,45 +1,37 @@
 # pi-go
 
-pi-go 的目标是用 Go 完整重写 [pi](https://github.com/cat3399/pi)，保留其核心产品
-行为，并在核心稳定后让 pi-web 通过少量启动与传输层修改接入 Go runtime。
+pi-go 的目标是用 Go 完整重写 [pi](https://github.com/cat3399/pi) 的 Agent Runtime。
+完成后的 Go package 应提供与原版 Pi package 等价的能力、分层、行为和数据结构；
+pi-web 只需对进程启动与传输适配做少量调整，不需要迁就一个能力缩水的后端。
 
-产品运行时只使用 Go，不嵌入、代理或 fallback 到 TypeScript 版 pi。原版 pi 的实际
-实现和测试是行为参考；文档只记录当前共识，不能代替源码成为设计依据。
+产品运行时只使用 Go，不嵌入、代理或 fallback 到 TypeScript 版 Pi。原版源码与测试是
+兼容性基准；Go 可以采用更合适的类型、并发和资源管理方式，但不能因此删除能力、压扁
+架构层次或改变可观察语义。
 
-## 当前阶段
+## 首期目标
 
-仓库已经具备一批经过测试的底层能力，包括 OpenAI Responses streaming、tool loop、
-内置工具、JSONL session、auth/model/resource 加载，以及 agent 的队列、重试和压缩
-相关实现。
+当前首期只完成内部 Agent Runtime：
 
-但当前还不是完整的 Pi，也不适合直接作为 pi-web backend：
+- 对齐原版 `AgentLoop`、`Agent`、`SessionManager`、`AgentSession` 与应用 Runtime 的职责；
+- 对齐 Model、AgentMessage、ToolResult、session entry、event 与 hook 等核心契约；
+- 把 retry、compaction、queue、动态配置、工具执行和持久化接入同一条产品调用链；
+- 提供可由 Go 代码直接驱动的长期 runtime，并用端到端场景证明行为完整。
 
-- 已有产品级 `AgentSession` 和每轮不可变 snapshot；模型、thinking、system prompt 和
-  tools 可以在运行期间改变，并作用于 tool chain 的下一次 provider 请求；
-- 通用 model/provider/message 边界仍受 OpenAI Responses 数据形状影响；
-- 图片和富工具结果只在部分底层类型中存在，没有贯通产品运行路径；
-- 重试、自动压缩、队列和 TUI 等已实现能力尚未全部形成完整长期 runtime；
-- CLI 目前只是单次 `-p` headless 运行，没有长期运行的 RPC/session runtime。
+JSONL RPC、pi-web 接入和 TUI 都不属于当前里程碑。RPC 的实现可以后置，但它未来需要
+暴露的状态、命令结果和事件语义必须在内部核心阶段形成，避免传输层反向塑造 Agent。
+Provider 的数量也可以后置；完整 `Model` 结构和厂商无关的 Provider contract 不能后置。
 
-详细事实见 [当前状态](docs/STATUS.md)，目标边界见
-[核心架构](docs/ARCHITECTURE.md)。
+这是快速重构期。仓库现有的内部 package、文件布局和旧文档不构成兼容性约束；如果它们
+偏离原版架构，应直接重组或替换，而不是围绕旧实现做最小补丁。
 
-## 当前可运行入口
+## 当前状态
 
-现有 executable 只支持显式的 print prompt：
+仓库已有可复用的流式 tool loop、富消息、OpenAI Responses 与 Chat Completions adapter、
+session 存储、内置工具，以及 retry、compaction、queue 和动态 snapshot 等实现。不过，
+这些能力尚未按照原版的完整层次组装起来，内部 Runtime 也还没有达到首期验收条件。
 
-```sh
-OPENAI_API_KEY=... go run ./cmd/pi-go -p "检查当前目录"
-```
-
-也可以显式选择 model 或 session 文件：
-
-```sh
-go run ./cmd/pi-go --model gpt-5.5 --session /absolute/path/session.jsonl -p "继续处理"
-```
-
-当前 production assembly 只支持 OpenAI Responses。配置、credential 或模型不可用时会
-明确失败，不会切换到其他 runtime。
+现有 `cmd/pi-go -p` 是诊断入口，不代表产品 Runtime 已完成。更精确的实现盘点和已知测试
+基线见 [当前状态](docs/STATUS.md)。
 
 ## 开发检查
 
@@ -50,14 +42,14 @@ go vet ./...
 go build ./...
 ```
 
-涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。测试应
-默认使用 deterministic fake，不依赖真实 credential 或网络。
+涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。测试默认
+使用 deterministic fake，不依赖真实 credential、网络或 TypeScript runtime。
 
 ## 文档
 
-- [核心架构](docs/ARCHITECTURE.md)：下一阶段必须形成的长期边界。
-- [当前状态](docs/STATUS.md)：已经实现、已经接入和仍然缺失的能力。
-- [近期路线](docs/ROADMAP.md)：核心重构与集成顺序。
+- [核心架构](docs/ARCHITECTURE.md)：目标分层、职责和兼容性边界。
+- [实现路线](docs/ROADMAP.md)：内部核心优先的阶段与验收门槛。
+- [当前状态](docs/STATUS.md)：当前实现事实、主要差距和验证基线。
 
-不再为每个小模块维护 charter、behavior ledger、test ledger 或 review 流水账。重要
-行为由代码和测试证明；影响整体方向的差异才写入上述文档。
+这些文档只保留当前有效的开发契约，不维护历史迁移台账。完成度由代码、测试和完整行为
+场景证明，不由文件数量或文档中的勾选项证明。

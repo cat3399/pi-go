@@ -1,106 +1,115 @@
 # 当前状态
 
-本文记录 2026-08-02 对 commit `8ab9029` 的实现审查及其后的第一阶段核心改造。结论来自
-当前 Go 代码、测试和实际 production assembly，不沿用旧迁移台账中的“已完成”判断。
+本文是 2026-08-03 的实现快照，基于代码、测试和 production assembly 重新审查，不沿用
+旧迁移计划的完成度判断。
 
-参考版本：
+实现审查基线：
 
-- pi-go：`8ab9029145905a5785ed9851a7c6086db9df9e4f`
+- pi-go：`3b39253e2b5547e05d206941fcc2feccc90f62ae`
 - 原版 pi：`a116523434806910336b9de3e38a41aa5860030b`
 - pi-web：`dfab5853b8d2f717df259e7ebc94f49a3c2e43e7`
 
-## 总体判断
+## 总体结论
 
-pi-go 目前具备一个质量较好的“OpenAI Responses + 内置工具 + durable transcript”的
-Agent 内核，以及可运行的 `AgentSession` 第一层；但还不是完整 Pi 的 Go 重写，也还不能
-让 pi-web 只做少量修改后获得完整功能。
+pi-go 已有质量较好的底层 Agent 执行能力和一部分产品控制能力，不是从零开始；但当前
+仍是“若干高级能力聚集在现有 Agent/AgentSession 中”，尚未形成与原版对应的完整
+`Runtime → AgentSession → Agent → AgentLoop` 调用分层。
 
-问题不在于所有已有代码都要重做，而在于长期 runtime、完整 Provider 语义和富内容仍未
-形成产品闭环。
+因此目前不能宣称 Agent 首期重写完成，也不应该开始以 pi-web 接入速度为目标实现 RPC。
+最重要的工作是校正共享数据模型、补齐中间层所有权，并把已有能力装配成可长期驱动的
+内部 Runtime。
 
-## 能力概览
+## 已有可复用能力
 
-| 区域 | 当前已经存在 | 主要缺口 |
-| --- | --- | --- |
-| Application | `-p` headless 入口、signal、stdout/stderr、session 打开与创建；入口使用 `AgentSession` | 只有一次同步运行；没有 interactive 或长期 RPC runtime |
-| Agent | 长期 `AgentSession`、每轮 snapshot、streaming、连续 tool loop、多 tool 并行/顺序、abort、continue、steer/follow-up queue、retry/compaction 机制 | 现有 `Agent` 仍是状态ful coordinator；完整低层 loop 抽取、queue/retry/compaction 的产品控制面和 resource reload 仍未完成 |
-| Provider | deterministic scripted provider、OpenAI Responses text/thinking/tool stream 与 replay；通用 request 含 thinking 和 portable metadata | production 只允许 OpenAI Responses；更多 adapter 尚未移植 |
-| Model | settings/models catalog、provider/model 选择；ModelRef 已携带通用 model metadata | catalog 尚未完整承载原版所有 model capabilities/cost/compat 字段 |
-| Message | text、thinking、tool call/result 和 image 的部分 value type | Agent 入口与队列只收 string；tool adapter 只返回 text；富内容未贯通 |
-| Session | JSONL v3、原子追加、锁、恢复、tree/branch/fork、compaction、legacy import、unknown raw 保留 | 只语义化 message/compaction；不能完整恢复 model/thinking/branch summary 状态 |
-| Tool | production 已装配 bash、read、write、edit、grep、find、ls；registry details 保留在 runtime event | 缺少 session/runtime 级动态管理；rich provider-visible output 尚未由内置工具产生 |
-| Auth/Resource | API key、OpenAI OAuth、settings/model/resource/prompt 加载与 trust boundary | 主要在进程启动时读取，不能由长期 AgentSession 动态刷新 |
-| TUI | terminal/input/text 的基础实现和测试 | 未进入 executable，距离原版 interactive 产品仍很远 |
+| 区域 | 当前实现事实 |
+| --- | --- |
+| 流式执行 | text/thinking/tool stream、连续 tool loop、多工具并行或顺序调度、取消与 settlement |
+| 富内容 | rich user input、image content、rich tool result/details 和队列输入已经进入核心类型与测试路径 |
+| 动态运行 | 每个 provider turn 获取 snapshot；model、thinking、system prompt 和 tools 可在 tool chain 间变化 |
+| 控制策略 | continue、steering/follow-up queue、retry 与 compaction 的主要机制已经存在 |
+| Provider | deterministic fake、OpenAI Responses、OpenAI Chat Completions，以及 reasoning/tool replay 支持 |
+| Session 存储 | JSONL v3、锁与原子追加、恢复、tree/branch/fork、compaction、legacy/unknown raw 保护 |
+| 产品基础 | `AgentSession` 已组合一部分持久化、队列、重试、压缩和动态配置行为 |
+| 工具与服务 | bash/read/write/edit/grep/find/ls，API key/OAuth，settings/model/resource/prompt 加载 |
+| 诊断入口 | `cmd/pi-go -p` 可组装当前 production path 并执行一次 headless prompt |
 
-“代码已经存在”不等于“产品入口已经具备该能力”。当前最明显的例子是：
+这些事实说明许多机制可以迁移或重组，不说明它们已经处于正确层次，也不说明 production
+assembly 已经启用全部能力。
 
-- production 创建 Agent 时没有提供 context window、summarizer 和 compaction 参数，自动
-  压缩不会启用；
-- retry controller 存在，但 production 没有提供完整策略或用户控制面；
-- steer/follow-up、continue 和 manual compact 没有长期 runtime 可以调用；
-- rich message 类型存在，但 `Run`、`Steer`、`FollowUp` 与工具输出仍是文本接口；
-- TUI package 存在，但 main executable 只接受 `-p`。
+## 与目标架构的主要差距
 
-## 主要架构偏差
+### P0：兼容数据模型尚未完成
 
-### 1. AgentSession 已建立，但长期运行闭环尚未完成
+- `Model` 已比早期 route key 丰富，但仍未完整对齐原版 cost tiers、compat/request options
+  和全部 capability 语义；
+- 通用消息还没有完整形成原版 `AgentMessage + convertToLlm` 边界，custom/bash/compaction/
+  branch 等消息的转换职责不完整；
+- ToolResult 尚未完整贯通 usage、added tool names 等原版字段；
+- usage/cost 与 replay provenance 仍有缺口，部分路径可能给出零值而非准确或明确未知；
+- session entry、event 和 hook payload 尚无系统性的原版 fixture 对照。
 
-当前状态ful `Agent` 尚未被假称为低层 loop；`AgentSession` 作为长期配置 owner，且
-headless executable 已由它创建。每个 provider 请求前都会取得新的不可变
-snapshot；tool chain 中的 model、thinking、system prompt 和 tools 更新会用于下一轮。
+### P1–P2：AgentLoop 与 Agent 的边界尚未对齐
 
-仍缺少长期 RPC、完整 settings/resource reload、以及 model/thinking change 的 durable
-session entry 语义；这些不能再通过向 loop 固化配置来补。
+现有 `internal/agent` 已实现复杂的执行和状态协调，但“一次 run 的纯 Loop”与“长期
+stateful Agent”的职责仍未按原版清楚分离。完整 `prepareNextTurn` context、
+`shouldStopAfterTurn`、原版 queue delivery semantics、事件 payload 与 state 归并需要逐项
+核对，而不是把现有类型直接改名后视为完成。
 
-### 2. 通用层受 OpenAI Responses 约束
+### P3：SessionManager 只有部分语义
 
-`provider.ModelRef` 主要是 route identity，`RequestOptions` 只表达 tools 与并行开关；
-同时 `llm` 通用层保存 OpenAI Responses replay 类型。继续沿这个边界增加 Provider，
-会迫使每个新 adapter 改动核心消息或 Agent 逻辑。
+底层 durability、tree 和 fork 能力值得保留，但 typed entry 主要集中在 message 与
+compaction。model/thinking change、branch summary、custom entry/message、name/label/stats
+以及与原版一致的 context 构建和 session navigation 尚未形成完整 SessionManager。
 
-第一阶段已将 portable model metadata、thinking level 和 request metadata 放入通用层，并由
-OpenAI Responses adapter 消费 reasoning setting；但更多 Provider 的 adapter 与全部 catalog
-语义仍未移植。
+当前不能把“能够读写 JSONL”视为“与原版 session package 对齐”。旧 session 兼容也不是
+后置 Provider 或 RPC 的附属工作，而是当前 Agent 核心数据模型的一部分。
 
-### 3. 富内容没有端到端闭环
+### P4：AgentSession 尚未达到产品行为闭环
 
-图片底层类型已经存在，所以不是从零开始；真正缺少的是输入、队列、工具结果、上下文、
-持久化、provider 和 runtime event 的统一通路。这属于核心消息模型，不能留到 UI 阶段
-再补。
+已有 AgentSession 包含 retry、compaction、queue 和动态 snapshot 等重要实现，但仍需按
+原版重新校正职责并补齐：
 
-### 4. Session 是存储兼容，不是完整行为兼容
+- model/thinking change 的 durable entry 与完整恢复；
+- resource/settings/auth reload 及其运行中传播；
+- bash、当前 session tree navigation、name 和 stats；
+- 精确 retry/compaction 控制面、context overflow 与失败恢复；
+- 产品 event 和 extension-neutral hook/custom data；
+- production factory 对上述 service、策略和动态依赖的完整装配。
 
-现有存储的 durability 和 unknown-data 处理值得保留。完整原版 session 语义可以暂缓，
-但当前还不能据此宣称旧会话可无差别恢复运行状态。
+### P5–P6：缺少内部 Runtime 与整体兼容验收
 
-### 5. 已实现能力没有全部装配
+当前 executable 是一次性同步诊断路径，没有独立、长期、transport-neutral 的 application
+Runtime，也没有 new/switch/fork/import 的 session replacement 生命周期。当前还缺少覆盖
+原版完整 workflow 的跨层 golden scenario，因此局部 package 测试通过不能证明首期完成。
 
-这一部分不需要重新研发，但要放到正确的 AgentSession 生命周期内接入，并验证 retry、
-tool side effect、partial stream、compaction commit、queue 和 cancellation 的组合顺序。
+RPC 缺失是预期的后置项，不是当前要绕过核心架构抢先解决的 blocker。Provider breadth、
+extension loader、pi-web 和 TUI 同样不在当前里程碑；但它们依赖的数据与 hook 契约属于
+P0–P4，必须现在正确建模。
 
 ## 当前优先级
 
-现在暂停扩展 Provider 数量、完整 TUI、plugin/extension 和精确旧 session 兼容。近期只
-围绕以下结果推进：
+严格按照 [实现路线](ROADMAP.md) 推进：
 
-1. 建立真正的 AgentSession，并收窄 AgentLoop；
-2. 移植原版 model/provider/message 核心语义；
-3. 贯通图片和富工具结果；
-4. 把 retry、compaction、queue、resource reload 等现有能力接入；
-5. 提供长期 RPC runtime，再验证 pi-web 的最小改动接入。
+1. 先完成 Model、AgentMessage、ToolResult、session/event/hook 数据契约；
+2. 再拆清 AgentLoop 和 stateful Agent；
+3. 完成 SessionManager；
+4. 完成产品级 AgentSession；
+5. 建立进程内 Runtime 并做整体行为验收；
+6. 之后才开始 RPC、Provider 扩展、pi-web 和其他 surface。
 
-不使用源码行数、文件数量、模块版本号或 ledger 状态衡量完成度。完成度只由完整行为
-场景证明。
+不为保留旧 package 或减少 diff 调整顺序，也不以 CLI demo 或单一 Provider 成功作为阶段
+完成证据。
 
 ## 当前验证基线
 
-当前基线下以下检查通过：
+审查时：
 
-```sh
-go test ./...
-go vet ./...
-go build ./...
-go test -race ./internal/agent ./internal/session ./internal/provider
-```
+- `go build ./...` 通过；
+- `go vet ./...` 通过；
+- `go test ./...` 仅失败于
+  `TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession`；
+- `go test -race ./internal/agent ./internal/session ./internal/provider` 同样只触发上述断言。
 
-这些结果证明现有模块的局部质量，不代表已经达到原版 Pi 的端到端行为兼容。
+该断言仍按旧 signature 预期 replay，不包含 reasoning summary；当前实现保留完整 reasoning
+item（包括 summary），与审查基线中的原版行为一致。因此它是待更新的旧测试预期，不是
+当前已知的实现回归。修正测试后仍需重新运行完整检查，不能把本说明当作永久豁免。

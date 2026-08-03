@@ -1,74 +1,116 @@
-# 近期路线
+# 实现路线
 
-路线只描述影响整体方向的阶段，不再为每个小模块维护迁移 charter 和状态台账。每个
-阶段通过端到端行为测试验收，而不是通过文件数量或局部测试数量验收。
+路线按依赖关系推进内部核心，不以尽快接上 pi-web 为优化目标。阶段编号表示验收顺序；
+实现可以并行准备，但下一层不能用临时抽象绕过上一层尚未解决的语义。
 
-## 1. 修正 Agent 核心边界
+当前是快速重构期：允许调整 package、类型和文件布局，也允许替换已有实现。目标不是最小
+diff，而是尽早消除会扩散到后续 Runtime、RPC 和 pi-web 的错误边界。
 
-AgentSession 是本阶段的组织中心。Model/Provider/Message 与它高度相关，应在同一轮
-核心重构中完成：
+## P0：对齐兼容数据模型
 
-1. 从原版实际实现和测试中移植通用 Model、Message、Provider contract；
-2. 将当前 Agent 中的一次运行控制流拆成 AgentLoop；
-3. 建立长期存在的 AgentSession，拥有动态配置、conversation、queue 和 active run；
-4. 在每次 provider turn 前准备最新 model、thinking、system prompt 和 tools snapshot；
-5. 保持现有 event order、tool scheduler、取消和 durable commit 能力。
+先把后续所有层共享的语义从原版完整移植：
 
-验收场景至少包括：
+- 完整 `Model`、provider/API 标识、能力、cost、compat 与 stream options；
+- `AgentMessage` union、`convertToLlm` 和 custom/bash/compaction/branch 消息；
+- tool execution result 的 content、details、usage、added tool names、terminate，以及最终
+  ToolResultMessage 的 identity、`isError` 和 timestamp；
+- Agent/Provider/tool lifecycle event、usage、cost、stop/error reason；
+- v3 session entry union、context、tree/branch 与 custom data；
+- 与核心相交的 hook 输入、输出和取消语义。
 
-- 同一个 session 连续处理多个 prompt；
-- tool chain 中下一轮能够看到新配置；
-- 运行期间切换 model/thinking 后，下一次推理使用新值；
-- abort、provider failure 和 tool failure 后 session 状态仍然一致；
-- 进程重启后可以从 durable conversation 继续。
+这一阶段冻结的是语义与序列化行为，不是 Go public API。Provider breadth 暂不扩展；使用
+现有两个 OpenAI dialect 和一个完全不依赖 OpenAI metadata 的 fake 验证抽象。
 
-## 2. 贯通富内容
+**验收门槛**：原版 fixture 能无信息丢失地解码/编码或转换；Model、Message、ToolResult、
+session entry 和 event 有对照测试；通用测试不导入 vendor wire type。
 
-将 text/image/tool result 从 AgentSession 一直贯通到 Provider adapter 和持久化：
+## P1：AgentLoop 行为对齐
 
-- AgentSession 的 prompt、steer 和 follow-up 接受 rich user message；
-- tool result 保留 provider-visible content 和 runtime-visible details；
-- context transform、compaction 与 session codec 不丢失图片；
-- OpenAI Responses adapter 先证明链路，通用接口不暴露 OpenAI wire type。
+将单次 active run 收敛为独立 AgentLoop：
 
-验收以真实的“图片输入”和“工具返回图片后继续推理”场景为准。
+- 完整 streaming、tool scheduling、rich result 与 multi-turn loop；
+- `prepareNextTurn` 的完整 context、steering 注入和 `shouldStopAfterTurn`；
+- 精确 message/tool/event 顺序以及 usage/cost 聚合；
+- partial stream、provider/tool failure、abort 和 settlement；
+- 每个 provider turn 消费调用方提供的最新不可变 snapshot。
 
-## 3. 接入已有能力
+**验收门槛**：用 deterministic fake 覆盖 text、thinking、image、并行/顺序工具、动态工具、
+stop hook、失败和 abort；Loop 不依赖 session、settings 或具体 Provider。
 
-在 AgentSession 生命周期中接入已经存在的实现：
+## P2：stateful Agent 行为对齐
 
-- retry 与 Retry-After；
-- threshold/context-overflow/manual compaction；
-- steering/follow-up queue 与 continue；
-- model/settings/resource reload；
-- usage、cost 和运行事件。
+按原版建立独立 `Agent` 层：
 
-重点测试组合语义：partial stream 后失败、tool 已产生副作用、压缩写入失败、取消与重试
-竞争，以及进程结束前的 durable settlement。
+- 完整 AgentState 与状态变化事件；
+- prompt/continue、唯一 active run、subscribe、abort 和 wait；
+- steering/follow-up queue 及 delivery mode；
+- turn snapshot、消息归并和可重入边界；
+- model、thinking、system prompt 与 tools 的运行中变更。
 
-## 4. 建立长期 Runtime 与 pi-web 接入
+**验收门槛**：同一 Agent 可连续运行；tool chain 的下一 turn 能看到动态变更；queue mode、
+重复调用、abort/settlement 和 observer 重入均有行为测试。
 
-实现长期运行的 application runtime，并优先兼容原版已有的 JSONL RPC 命令与事件：
+## P3：SessionManager 行为对齐
 
-- prompt、steer、follow_up、abort；
-- set_model、set_thinking_level、compact；
-- new/switch/fork session；
-- 规范化 message、tool、usage、error 和 lifecycle event。
+在可靠存储之上完成原版 session 语义：
 
-随后修改 pi-web 的启动和 transport adapter，使其使用 pi-go。只有通用 AgentSession
-能力确实缺失时才修改 core，不加入页面专用状态。
+- append-only v3 entry 与当前 leaf；
+- context 构建、tree/branch/fork 与分支选择；
+- compaction、branch summary、model/thinking change；
+- name、label、custom entry/custom message 和 session listing metadata；
+- legacy/unknown data 的明确兼容策略与 round-trip 保护。
 
-验收是 pi-web 的核心 workflow 不再实例化 TypeScript AgentSession，并能仅依赖 pi-go
-完成对话、工具、切模、压缩和 session 操作。
+**验收门槛**：原版 session fixture 在 Go 中得到相同的 tree、当前分支和 LLM context；重启、
+fork、压缩与损坏恢复不会静默改写或丢失数据。
 
-## 5. 后续补全
+## P4：产品级 AgentSession 行为对齐
 
-核心与 RPC 闭环稳定后再处理：
+用 Agent、SessionManager 和应用服务组装 coding-agent 核心：
 
-- 原版旧 session 文件的完整语义兼容与迁移；
-- 更多 Provider 和 model catalog；
-- 完整 interactive TUI；
-- plugin、extension 和其他外部集成；
-- release、跨平台和长期运行完善。
+- prompt/continue/steer/follow-up/abort 与有序持久化；
+- retry、Retry-After、context overflow 和 automatic/manual compaction；
+- model/thinking 的控制与 durable change entry，tool/system prompt 的动态更新；
+- bash、resource/settings/auth reload 和动态工具；
+- session navigation、name、stats 与产品 event；
+- extension-neutral hook 和 custom data 通路。
 
-这些工作不得反向改变已经验证的 AgentLoop、AgentSession 和通用 Provider 边界。
+**验收门槛**：partial stream 后失败、工具已产生副作用、重试与取消竞争、压缩写入失败、
+运行中 reload、重启续聊等组合场景都保持 memory、durable state 与 event 一致。
+
+## P5：进程内 Application Runtime
+
+建立与 transport 无关的长期装配层：
+
+- 统一创建 Model/Settings/Auth/Resource 服务和 AgentSession；
+- new/switch/fork/import session 的替换与清理；
+- 通过 in-process Go API 暴露完整命令结果、state snapshot 和 event；
+- 明确进程退出、active run、flush 与资源释放顺序。
+
+**验收门槛**：测试进程可仅调用 Go API 完成原版核心 workflow；production assembly 不再
+遗漏 retry、compaction、dynamic reload 或 session service，也不依赖 RPC framing。
+
+## P6：内部核心验收
+
+在开始 RPC 前做一次整体兼容审查，而不是把缺口留给前端发现：
+
+- 与原版运行同一组 golden scenario/fixture；
+- 覆盖连续对话、rich input、工具返回图片、切模、thinking、queue、压缩、fork 和恢复；
+- 核对完整 event 序列、usage/cost、session JSONL 与错误分类；
+- 运行 unit、integration、race、build 和 vet，并记录所有有意差异及其 Go 理由。
+
+只有 P0–P6 全部通过，才称为“Agent 首期完整重写”。CLI 能运行一次 prompt、某个 Provider
+可用或 pi-web 能显示文本，都不能替代这个门槛。
+
+## 首期之后
+
+后续按以下顺序推进，任何一项都不得反向引入第二套核心状态或前端专用语义：
+
+1. 原版兼容的 JSONL RPC 编解码与长期进程控制；
+2. Go/TypeScript 跨实现 contract fixture 和协议测试；
+3. 补充 Provider adapter 与 model catalog breadth；
+4. extension/plugin loader、外部桥接与完整 hook 集成；
+5. pi-web 启动和 transport 的小范围切换；
+6. TUI 与其他 surface。
+
+Provider adapter、extension loader 和 transport 可以后置，它们所依赖的 Model、Message、
+session、event 与 hook 契约不能后置。
