@@ -3,6 +3,7 @@ package provider
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -84,6 +85,8 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			Content: request.SystemPrompt(),
 		})
 	}
+	_, deferredTools := splitDeferredTools(request, responsesSupportsToolSearch(request.Model()))
+	loadedDeferred := map[string]struct{}{}
 	wireMessageIndex := 0
 	for sourceIndex, message := range request.Messages() {
 		switch message := message.(type) {
@@ -145,6 +148,10 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			}
 			callID, _ := splitResponsesToolID(message.ToolCallID())
 			input = append(input, responsesFunctionCallOutput{Type: "function_call_output", CallID: callID, Output: output})
+			input, err = appendResponsesDeferredTools(input, message.ToolCallID(), message.AddedToolNames(), deferredTools, loadedDeferred)
+			if err != nil {
+				return nil, err
+			}
 			wireMessageIndex++
 		case llm.ToolResultContentMessage:
 			output, err := responsesToolResultContentOutput(message.Content())
@@ -153,6 +160,10 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			}
 			callID, _ := splitResponsesToolID(message.ToolCallID())
 			input = append(input, responsesFunctionCallOutput{Type: "function_call_output", CallID: callID, Output: output})
+			input, err = appendResponsesDeferredTools(input, message.ToolCallID(), message.AddedToolNames(), deferredTools, loadedDeferred)
+			if err != nil {
+				return nil, err
+			}
 			wireMessageIndex++
 
 		default:
@@ -164,7 +175,8 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 			)
 		}
 	}
-	tools, err := encodeResponsesTools(request.Tools())
+	immediateTools, _ := splitDeferredTools(request, responsesSupportsToolSearch(request.Model()))
+	tools, err := encodeResponsesTools(immediateTools)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +212,45 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 	return payload, nil
 }
 
+func responsesSupportsToolSearch(model ModelRef) bool {
+	compat := model.Compat().OpenAIResponses
+	return compat != nil && compat.SupportsToolSearch != nil && *compat.SupportsToolSearch
+}
+
+func appendResponsesDeferredTools(input []any, sourceID string, names []string, deferred map[string]ToolDefinition, loaded map[string]struct{}) ([]any, error) {
+	if len(deferred) == 0 || len(names) == 0 {
+		return input, nil
+	}
+	tools := make([]ToolDefinition, 0, len(names))
+	for _, name := range names {
+		tool, ok := deferred[name]
+		if !ok {
+			continue
+		}
+		if _, done := loaded[name]; done {
+			continue
+		}
+		loaded[name] = struct{}{}
+		tools = append(tools, tool)
+	}
+	if len(tools) == 0 {
+		return input, nil
+	}
+	converted, err := encodeResponsesTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	loadedNames := make([]string, len(tools))
+	for index, tool := range tools {
+		loadedNames[index] = tool.Name()
+	}
+	sum := sha256.Sum256([]byte(sourceID + ":" + strings.Join(loadedNames, ",")))
+	callID := "pi_tool_load_" + hex.EncodeToString(sum[:6])
+	call := responsesToolSearchCall{Type: "tool_search_call", CallID: callID, Execution: "client", Status: "completed"}
+	call.Arguments.Query, call.Arguments.Limit = strings.Join(loadedNames, " "), len(loadedNames)
+	return append(input, call, responsesToolSearchOutput{Type: "tool_search_output", CallID: callID, Execution: "client", Status: "completed", Tools: converted}), nil
+}
+
 type responsesFunctionCall struct {
 	Type      string `json:"type"`
 	ID        string `json:"id,omitempty"`
@@ -212,6 +263,23 @@ type responsesFunctionCallOutput struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
 	Output any    `json:"output"`
+}
+type responsesToolSearchCall struct {
+	Type      string `json:"type"`
+	CallID    string `json:"call_id"`
+	Execution string `json:"execution"`
+	Status    string `json:"status"`
+	Arguments struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+	} `json:"arguments"`
+}
+type responsesToolSearchOutput struct {
+	Type      string                  `json:"type"`
+	CallID    string                  `json:"call_id"`
+	Execution string                  `json:"execution"`
+	Status    string                  `json:"status"`
+	Tools     []responsesFunctionTool `json:"tools"`
 }
 
 type responsesReplayPolicy struct{ sourced, sameDialect, sameModel bool }

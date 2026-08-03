@@ -311,6 +311,33 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	lastToolResult := false
 	pendingToolImages := make([]any, 0)
 	toolCallIDs := make(map[string]string)
+	deferredEnabled := false
+	if compat := completionsCompat(request.Model()); compat != nil && compat.DeferredToolsMode != nil && *compat.DeferredToolsMode == "kimi" {
+		deferredEnabled = true
+	}
+	immediateDefinitions, deferredDefinitions := splitDeferredTools(request, deferredEnabled)
+	pendingDeferred := map[string]struct{}{}
+	flushDeferred := func() error {
+		if len(pendingDeferred) == 0 {
+			return nil
+		}
+		definitions := make([]ToolDefinition, 0, len(pendingDeferred))
+		for _, tool := range request.Tools() {
+			if _, ok := pendingDeferred[tool.Name()]; ok {
+				definitions = append(definitions, tool)
+			}
+		}
+		pendingDeferred = map[string]struct{}{}
+		if len(definitions) == 0 {
+			return nil
+		}
+		tools, err := encodeCompletionsTools(definitions, request.Model())
+		if err != nil {
+			return err
+		}
+		messages = append(messages, map[string]any{"role": "system", "tools": tools})
+		return nil
+	}
 	flushToolImages := func() {
 		if len(pendingToolImages) == 0 {
 			return
@@ -325,6 +352,11 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	for i, message := range request.Messages() {
 		_, toolText := message.(llm.ToolResultMessage)
 		_, toolContent := message.(llm.ToolResultContentMessage)
+		if !toolText && !toolContent {
+			if err := flushDeferred(); err != nil {
+				return nil, err
+			}
+		}
 		if !toolText && !toolContent && len(pendingToolImages) != 0 {
 			flushToolImages()
 		}
@@ -356,16 +388,30 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 				pendingToolImages = append(pendingToolImages, parts...)
 			}
 		}
+		if deferredEnabled {
+			if result, ok := message.(llm.ToolResultMessage); ok {
+				for _, name := range result.AddedToolNames() {
+					if _, exists := deferredDefinitions[name]; exists {
+						pendingDeferred[name] = struct{}{}
+					}
+				}
+			}
+			if result, ok := message.(llm.ToolResultContentMessage); ok {
+				for _, name := range result.AddedToolNames() {
+					if _, exists := deferredDefinitions[name]; exists {
+						pendingDeferred[name] = struct{}{}
+					}
+				}
+			}
+		}
 	}
 	flushToolImages()
-	tools := make([]completionsFunctionTool, 0, len(request.Tools()))
-	for _, tool := range request.Tools() {
-		function := completionsFunction{Name: tool.Name(), Description: tool.Description(), Parameters: json.RawMessage(tool.ParametersJSON())}
-		if completionsSupportsStrict(request.Model()) {
-			strict := tool.Strict()
-			function.Strict = &strict
-		}
-		tools = append(tools, completionsFunctionTool{Type: "function", Function: function})
+	if err := flushDeferred(); err != nil {
+		return nil, err
+	}
+	tools, err := encodeCompletionsTools(immediateDefinitions, request.Model())
+	if err != nil {
+		return nil, err
 	}
 	p := completionsRequestPayload{Model: request.Model().ID(), Messages: messages, Tools: tools, Stream: true}
 	if completionsSupportsUsage(request.Model()) {
@@ -403,6 +449,22 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		return nil, fmt.Errorf("%w: encode JSON: %w", ErrOpenAICompletionsRequest, err)
 	}
 	return encoded, nil
+}
+
+func encodeCompletionsTools(definitions []ToolDefinition, model ModelRef) ([]completionsFunctionTool, error) {
+	tools := make([]completionsFunctionTool, 0, len(definitions))
+	for _, tool := range definitions {
+		if err := tool.validate(); err != nil {
+			return nil, err
+		}
+		function := completionsFunction{Name: tool.Name(), Description: tool.Description(), Parameters: json.RawMessage(tool.ParametersJSON())}
+		if completionsSupportsStrict(model) {
+			strict := tool.Strict()
+			function.Strict = &strict
+		}
+		tools = append(tools, completionsFunctionTool{Type: "function", Function: function})
+	}
+	return tools, nil
 }
 
 func encodeCompletionsMessage(message llm.ConversationMessage, target llm.AssistantProvenance, model ModelRef, toolCallIDs map[string]string) (any, bool, error) {

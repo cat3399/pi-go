@@ -38,11 +38,21 @@ assembly 已经启用全部能力。
 
 ## 与目标架构的主要差距
 
-### P0：兼容数据模型复审修正中
+### P0：兼容数据模型已完成（复审闭环）
 
-复审发现：完整 AgentMessage JSONL 往返、分支上的 model/thinking 设置、完整模型目录持久化、
-portable stream options、usage 成本边界以及 provider-neutral deferred tools 仍有缺口。P0 不应
-标记完成；以下 P1–P2 的分析只作为后续方向，不能替代 P0 验收。
+- AgentMessage 的 LLM、bash、custom（含 string-vs-blocks）、opaque extension 消息均可原样
+  写入 v3 JSONL、重开和沿分支投影；`ConvertToLLM` 是唯一的 LLM 投影边界；
+- selected branch 会派生 effective model/thinking（含 compaction、reopen 和 leaf switch）；
+  `model_change` 缺失 `modelId` 会被严格拒绝；
+- ModelsStore 保存完整 Model 合约（input、thinking map、cost tiers、context/max tokens、compat），
+  并隔离/复制 JSON-like metadata；
+- request-scoped stream options 已具备 typed fetch、payload/response hooks、header 三态删除和
+  thinking budgets；终态 usage 由 Model 计算 cost；
+- extension-neutral typed hook contract 覆盖 context、before agent start、provider request/headers/
+  response、agent/message/tool，以及 session start/shutdown/compact/tree/switch；其中没有 JS loader、
+  TUI 或 UI-only execution surface；
+- deferred tools 不再只在 Request 收集：Responses 写入 client tool-search input，Kimi-compatible
+  Completions 写入对应 system tool schema，普通 compat 路径不受污染。
 
 ### P1–P2：AgentLoop 与 Agent 的边界尚未对齐
 

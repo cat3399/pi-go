@@ -1072,6 +1072,56 @@ func collectDeferredToolNames(messages []llm.ConversationMessage) ([]string, boo
 	return out, has
 }
 
+// splitDeferredTools mirrors pi's transcript-driven placement rule. A tool is
+// deferred only when a prior tool result advertises it and it has not already
+// been called in this context; adapters decide how to load the resulting
+// definitions on their own wire protocol.
+func splitDeferredTools(request Request, enabled bool) ([]ToolDefinition, map[string]ToolDefinition) {
+	if !enabled {
+		return request.Tools(), nil
+	}
+	used := map[string]struct{}{}
+	deferredNames := map[string]struct{}{}
+	for _, message := range request.Messages() {
+		switch value := message.(type) {
+		case llm.AssistantToolUseMessage:
+			collectAssistantToolNames(value.Blocks(), used)
+		case llm.AssistantRichMessage:
+			collectAssistantToolNames(value.Blocks(), used)
+		case llm.ToolResultMessage:
+			for _, name := range value.AddedToolNames() {
+				if _, called := used[name]; !called {
+					deferredNames[name] = struct{}{}
+				}
+			}
+		case llm.ToolResultContentMessage:
+			for _, name := range value.AddedToolNames() {
+				if _, called := used[name]; !called {
+					deferredNames[name] = struct{}{}
+				}
+			}
+		}
+	}
+	immediate := make([]ToolDefinition, 0, len(request.Tools()))
+	deferred := map[string]ToolDefinition{}
+	for _, tool := range request.Tools() {
+		if _, ok := deferredNames[tool.Name()]; ok {
+			deferred[tool.Name()] = tool
+		} else {
+			immediate = append(immediate, tool)
+		}
+	}
+	return immediate, deferred
+}
+
+func collectAssistantToolNames(blocks []llm.AssistantBlock, used map[string]struct{}) {
+	for _, block := range blocks {
+		if call, ok := block.(llm.ToolCallBlock); ok {
+			used[call.Name()] = struct{}{}
+		}
+	}
+}
+
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.
 type EventStream interface {
