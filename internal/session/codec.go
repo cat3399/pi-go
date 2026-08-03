@@ -191,6 +191,14 @@ func decodeEntry(raw []byte) (Entry, error) {
 				return Entry{}, wrapErr
 			}
 			entry.payload = MessagePayload{Message: wrapped}
+		} else {
+			message, messageErr := decodeCodingAgentMessage(messageRaw)
+			if messageErr != nil {
+				return Entry{}, messageErr
+			}
+			if message != nil {
+				entry.payload = MessagePayload{Message: message}
+			}
 		}
 	} else if typeName == "compaction" {
 		compaction, err := decodeCompactionRecord(object)
@@ -212,6 +220,74 @@ func decodeEntry(raw []byte) (Entry, error) {
 		}
 	}
 	return entry, nil
+}
+
+func decodeCodingAgentMessage(raw []byte) (agentmsg.Message, error) {
+	object, err := decodeObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	role, err := requiredString(object, "role")
+	if err != nil {
+		return nil, err
+	}
+	timestamp, err := decodeMessageTimestamp(object)
+	if err != nil {
+		return nil, err
+	}
+	switch role {
+	case "bashExecution":
+		command, e1 := requiredString(object, "command")
+		output, e2 := requiredString(object, "output")
+		if e1 != nil || e2 != nil {
+			return nil, fmt.Errorf("invalid bash execution")
+		}
+		value := agentmsg.BashExecution{Command: command, Output: output, Cancelled: decodeOptionalBool(object, "cancelled"), Truncated: decodeOptionalBool(object, "truncated"), At: timestamp}
+		if raw, ok := object["exitCode"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			var code int
+			if json.Unmarshal(raw, &code) != nil {
+				return nil, fmt.Errorf("invalid bash exit code")
+			}
+			value.ExitCode = &code
+		}
+		if raw, ok := object["fullOutputPath"]; ok {
+			if json.Unmarshal(raw, &value.FullOutputPath) != nil {
+				return nil, fmt.Errorf("invalid bash full output path")
+			}
+		}
+		value.ExcludeFromContext = decodeOptionalBool(object, "excludeFromContext")
+		result, e := agentmsg.NewBashExecution(value)
+		return result, e
+	case "custom":
+		customType, e := requiredString(object, "customType")
+		if e != nil {
+			return nil, fmt.Errorf("invalid custom agent message")
+		}
+		contentRaw, ok := object["content"]
+		if !ok {
+			return nil, fmt.Errorf("invalid custom agent content")
+		}
+		content, _, contentErr := decodeUserContentBlocks("", contentRaw)
+		var stringContent *string
+		if contentErr != nil {
+			var text string
+			if json.Unmarshal(contentRaw, &text) != nil {
+				return nil, contentErr
+			}
+			block, e := llm.NewTextBlock(text)
+			if e != nil {
+				return nil, e
+			}
+			content = []llm.UserContentBlock{block}
+			stringContent = &text
+		}
+		value := agentmsg.Custom{CustomType: customType, Content: content, StringContent: stringContent, Display: decodeOptionalBool(object, "display"), Details: bytes.Clone(object["details"]), At: timestamp}
+		result, e := agentmsg.NewCustom(value)
+		return result, e
+	default:
+		result, e := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: role, Data: bytes.Clone(raw), At: timestamp})
+		return result, e
+	}
 }
 
 func decodeCompactionRecord(object map[string]json.RawMessage) (CompactionRecord, error) {
@@ -636,15 +712,11 @@ func decodeKnownEntryPayload(typeName string, object map[string]json.RawMessage,
 		return ThinkingLevelChangePayload{ThinkingLevel: value}, nil
 	case "model_change":
 		providerID, e1 := requiredString(object, "provider")
-		modelID := ""
-		_, hasModelID := object["modelId"]
-		if raw, ok := object["modelId"]; ok && json.Unmarshal(raw, &modelID) != nil {
+		modelID, e2 := requiredString(object, "modelId")
+		if e1 != nil || e2 != nil {
 			return nil, fmt.Errorf("invalid model change")
 		}
-		if e1 != nil {
-			return nil, fmt.Errorf("invalid model change")
-		}
-		return ModelChangePayload{Provider: providerID, ModelID: modelID, HasModelID: hasModelID}, nil
+		return ModelChangePayload{Provider: providerID, ModelID: modelID}, nil
 	case "branch_summary":
 		fromID, e1 := requiredString(object, "fromId")
 		summary, e2 := requiredString(object, "summary")
@@ -678,6 +750,7 @@ func decodeKnownEntryPayload(typeName string, object map[string]json.RawMessage,
 			return nil, fmt.Errorf("invalid custom message content")
 		}
 		content, _, e := decodeUserContentBlocks("", contentRaw)
+		var stringContent *string
 		if e != nil {
 			var text string
 			if json.Unmarshal(contentRaw, &text) != nil {
@@ -688,8 +761,9 @@ func decodeKnownEntryPayload(typeName string, object map[string]json.RawMessage,
 				return nil, blockErr
 			}
 			content = []llm.UserContentBlock{block}
+			stringContent = &text
 		}
-		message, e := agentmsg.NewCustom(agentmsg.Custom{CustomType: customType, Content: content, Display: display, Details: bytes.Clone(object["details"]), At: timestamp})
+		message, e := agentmsg.NewCustom(agentmsg.Custom{CustomType: customType, Content: content, StringContent: stringContent, Display: display, Details: bytes.Clone(object["details"]), At: timestamp})
 		if e != nil {
 			return nil, e
 		}
@@ -729,6 +803,7 @@ func decodeToolResultMetadata(object map[string]json.RawMessage) (llm.ToolResult
 		if err := json.Unmarshal(raw, &metadata.AddedToolNames); err != nil {
 			return llm.ToolResultMetadata{}, fmt.Errorf("tool result has invalid addedToolNames")
 		}
+		metadata.HasAddedToolNames = true
 	}
 	if raw, exists := object["usage"]; exists {
 		usage, err := decodePortableUsage(raw)

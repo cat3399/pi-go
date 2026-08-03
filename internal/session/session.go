@@ -297,7 +297,13 @@ func (s *Session) buildContextLocked() Context {
 		}
 	}
 
-	context := Context{}
+	// Settings are not conversation messages, but they are branch state. Scan
+	// the whole selected path first so compaction cannot accidentally erase the
+	// current selection.
+	context := Context{thinkingLevel: "off", hasThinkingLevel: true}
+	for index := len(path) - 1; index >= 0; index-- {
+		applyContextSettings(&context, s.entries[path[index]])
+	}
 	if compactionIndex >= 0 {
 		compaction := s.entries[path[compactionIndex]]
 		summary, err := llm.NewUserTextMessage(CompactionSummaryPrefix+compaction.compaction.Summary+CompactionSummarySuffix, compaction.timestamp)
@@ -346,20 +352,15 @@ func (s *Session) buildContextLocked() Context {
 }
 
 func appendEntryToContext(context *Context, entry Entry) {
-	if entry.message != nil {
-		context.messages = append(context.messages, entry.message)
-		if message, ok := entry.AgentMessage(); ok {
-			context.agentMessages = append(context.agentMessages, message)
+	if message, ok := entry.AgentMessage(); ok {
+		context.agentMessages = append(context.agentMessages, message)
+		converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{message})
+		if err == nil {
+			context.messages = append(context.messages, converted...)
 		}
 		return
 	}
 	switch payload := entry.Payload().(type) {
-	case CustomMessagePayload:
-		context.agentMessages = append(context.agentMessages, payload.Message)
-		converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{payload.Message})
-		if err == nil {
-			context.messages = append(context.messages, converted...)
-		}
 	case BranchSummaryPayload:
 		message, err := agentmsg.NewBranchSummary(agentmsg.BranchSummary{FromID: payload.FromID, Summary: payload.Summary, At: entry.timestamp})
 		if err != nil {
@@ -370,6 +371,21 @@ func appendEntryToContext(context *Context, entry Entry) {
 		if err == nil {
 			context.messages = append(context.messages, converted...)
 		}
+	}
+}
+
+func applyContextSettings(context *Context, entry Entry) {
+	switch payload := entry.Payload().(type) {
+	case ThinkingLevelChangePayload:
+		context.thinkingLevel = payload.ThinkingLevel
+		context.hasThinkingLevel = true
+	case ModelChangePayload:
+		context.model = ModelSelection{Provider: payload.Provider, ModelID: payload.ModelID}
+		context.hasModel = true
+	}
+	if entry.hasAssistant {
+		context.model = ModelSelection{Provider: entry.assistant.Provider, ModelID: entry.assistant.Model}
+		context.hasModel = true
 	}
 }
 
@@ -474,8 +490,8 @@ func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entr
 	if payload == nil {
 		return Entry{}, fmt.Errorf("%w: nil entry payload", ErrInvalidEntry)
 	}
-	if _, ok := payload.(MessagePayload); ok {
-		return Entry{}, fmt.Errorf("%w: message payload requires Append", ErrInvalidEntry)
+	if message, ok := payload.(MessagePayload); ok {
+		return s.AppendAgentMessage(ctx, message.Message, AppendOptions{})
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -537,6 +553,87 @@ func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entr
 			return Entry{}, fmt.Errorf("%w: %w", ErrAppendCanceled, err)
 		}
 		return Entry{}, fmt.Errorf("%w: append %s: %w", ErrStorage, s.path, err)
+	}
+	s.entries = append(s.entries, entry)
+	s.leaf = len(s.entries) - 1
+	s.byID[entry.id] = s.leaf
+	s.needsSeparator = false
+	s.generation++
+	return entry.clone(), nil
+}
+
+// AppendAgentMessage is the v3 `type:"message"` boundary. It persists the
+// full AgentMessage union; only its later Context projection invokes
+// agentmsg.ConvertToLLM.
+func (s *Session) AppendAgentMessage(ctx context.Context, message agentmsg.Message, options AppendOptions) (Entry, error) {
+	if message == nil {
+		return Entry{}, fmt.Errorf("%w: nil agent message", ErrInvalidEntry)
+	}
+	if standard, ok := message.(agentmsg.LLM); ok {
+		return s.Append(ctx, standard.Conversation(), options)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.acquireAppend(ctx); err != nil {
+		return Entry{}, err
+	}
+	defer s.releaseAppend()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return Entry{}, ErrClosed
+	}
+	if s.poisoned {
+		s.mu.Unlock()
+		return Entry{}, ErrPoisoned
+	}
+	messageJSON, err := encodeAgentMessage(message)
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
+	}
+	entryID, err := s.nextEntryID()
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
+	}
+	timestamp := canonicalTime(s.runtime.now())
+	if timestamp.IsZero() || validateISOTime(timestamp) != nil {
+		s.mu.Unlock()
+		return Entry{}, fmt.Errorf("%w: invalid entry timestamp", ErrInvalidEntry)
+	}
+	parentID := ""
+	hasParent := s.leaf >= 0
+	if hasParent {
+		parentID = s.entries[s.leaf].id
+	}
+	raw, err := encodeMessageEntry(entryID, parentID, hasParent, timestamp, messageJSON)
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
+	}
+	entry, err := decodeEntry(raw)
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
+	}
+	appendBytes := make([]byte, 0, len(raw)+2)
+	if s.needsSeparator {
+		appendBytes = append(appendBytes, '\n')
+	}
+	appendBytes = append(appendBytes, raw...)
+	appendBytes = append(appendBytes, '\n')
+	s.mu.Unlock()
+	started, err := s.storage.append(ctx, s.path, appendBytes)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		if started {
+			s.poisoned = true
+			return Entry{}, fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+		}
+		return Entry{}, fmt.Errorf("%w: append: %w", ErrStorage, err)
 	}
 	s.entries = append(s.entries, entry)
 	s.leaf = len(s.entries) - 1

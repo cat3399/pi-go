@@ -76,6 +76,7 @@ type openAIResponsesStream struct {
 	headers           map[string]string
 	maxEventBytes     int
 	maxErrorBodyBytes int
+	onResponse        ResponseHook
 	preflight         *responsesFailureSpec
 
 	lifecycleMu sync.Mutex
@@ -313,6 +314,11 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 	if response == nil || response.Body == nil || isTypedNil(response.Body) {
 		cause := fmt.Errorf("%w: HTTP client returned a nil response or body", ErrOpenAIResponsesStream)
 		return &responsesFailureSpec{kind: FailureInvalidResponse, cause: cause, message: cause.Error()}
+	}
+	if s.onResponse != nil {
+		if err := s.onResponse(responseInfo(response)); err != nil {
+			return &responsesFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("response hook: %w", err), message: "OpenAI Responses response hook rejected the response"}
+		}
 	}
 	if response.StatusCode < 100 || response.StatusCode > 599 {
 		cause := fmt.Errorf(

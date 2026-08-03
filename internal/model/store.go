@@ -13,18 +13,30 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/cat3399/pi-go/internal/provider"
 )
 
 // CachedModel is the complete public model contract of models-store.json.
 // Runtime parse diagnostics deliberately live on Model instead of this type.
 type CachedModel struct {
-	Provider  string            `json:"provider"`
-	ID        string            `json:"id"`
-	Name      string            `json:"name,omitempty"`
-	API       string            `json:"api"`
-	BaseURL   string            `json:"baseUrl,omitempty"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Reasoning bool              `json:"reasoning"`
+	Provider         string                             `json:"provider"`
+	ID               string                             `json:"id"`
+	Name             string                             `json:"name,omitempty"`
+	API              string                             `json:"api"`
+	BaseURL          string                             `json:"baseUrl,omitempty"`
+	Headers          map[string]string                  `json:"headers,omitempty"`
+	Reasoning        bool                               `json:"reasoning"`
+	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
+	Input            []provider.InputKind               `json:"input,omitempty"`
+	Cost             provider.CostRates                 `json:"cost"`
+	ContextWindow    uint64                             `json:"contextWindow"`
+	MaxTokens        uint64                             `json:"maxTokens"`
+	// Compat is the original JSON object, kept separately because the runtime
+	// exposes it as a typed provider.ModelCompat selected by API dialect.
+	// Keeping its wire spelling makes cache read/write lossless for adapters
+	// that this binary does not implement yet.
+	Compat json.RawMessage `json:"compat,omitempty"`
 }
 
 // CachedCatalog is the durable, provider-scoped result of a future remote
@@ -302,7 +314,7 @@ func parseCatalogModel(providerID string, index int, raw json.RawMessage) (Cache
 	model.Provider = providerID
 	model.Reasoning = reasoning
 	model.Headers = cloneHeaders(headers)
-	cached := CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning}
+	cached := cachedFromRuntimeModel(model, object["compat"])
 	return cached, model, nil
 }
 
@@ -339,30 +351,8 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 		if previousModel, ok := oldModels[canonicalKey(model.ID)]; ok {
 			_ = json.Unmarshal(previousModel, &modelObject)
 		}
-		for key, value := range map[string]string{"provider": model.Provider, "id": model.ID, "name": model.Name, "api": model.API, "baseUrl": model.BaseURL} {
-			if value == "" {
-				delete(modelObject, key)
-				continue
-			}
-			encoded, err := json.Marshal(value)
-			if err != nil {
-				return nil, err
-			}
-			modelObject[key] = encoded
-		}
-		reasoning, err := json.Marshal(model.Reasoning)
-		if err != nil {
+		if err := writeCachedModelFields(modelObject, model); err != nil {
 			return nil, err
-		}
-		modelObject["reasoning"] = reasoning
-		if model.Headers == nil {
-			delete(modelObject, "headers")
-		} else {
-			headers, err := json.Marshal(cloneHeaders(model.Headers))
-			if err != nil {
-				return nil, err
-			}
-			modelObject["headers"] = headers
 		}
 		encoded, err := json.Marshal(modelObject)
 		if err != nil {
@@ -435,6 +425,10 @@ func canonicalizeCatalog(entry CachedCatalog, providerID string) (CachedCatalog,
 
 func cloneCachedModel(model CachedModel) CachedModel {
 	model.Headers = cloneHeaders(model.Headers)
+	model.Input = append([]provider.InputKind(nil), model.Input...)
+	model.ThinkingLevelMap = cloneThinkingMap(model.ThinkingLevelMap)
+	model.Cost.Tiers = append([]provider.CostTier(nil), model.Cost.Tiers...)
+	model.Compat = append(json.RawMessage(nil), model.Compat...)
 	return model
 }
 
@@ -443,7 +437,55 @@ func cachedRuntimeModel(entry CachedCatalog, index int) Model {
 		return cloneModel(entry.runtimeModels[index])
 	}
 	model := entry.Models[index]
-	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning}
+	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: append([]provider.InputKind(nil), model.Input...), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens}
+}
+
+func cachedFromRuntimeModel(model Model, compat json.RawMessage) CachedModel {
+	return CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: append([]provider.InputKind(nil), model.Input...), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Compat: append(json.RawMessage(nil), compat...)}
+}
+
+// writeCachedModelFields replaces every member of the public Model contract;
+// only future/unknown keys from the previous wire object are preserved.
+func writeCachedModelFields(object map[string]json.RawMessage, model CachedModel) error {
+	values := map[string]any{"provider": model.Provider, "id": model.ID, "api": model.API, "reasoning": model.Reasoning, "cost": model.Cost}
+	if model.Name != "" {
+		values["name"] = model.Name
+	}
+	if model.BaseURL != "" {
+		values["baseUrl"] = model.BaseURL
+	}
+	if model.Headers != nil {
+		values["headers"] = cloneHeaders(model.Headers)
+	}
+	if model.ThinkingLevelMap != nil {
+		values["thinkingLevelMap"] = cloneThinkingMap(model.ThinkingLevelMap)
+	}
+	if model.Input != nil {
+		values["input"] = append([]provider.InputKind(nil), model.Input...)
+	}
+	if model.ContextWindow != 0 {
+		values["contextWindow"] = model.ContextWindow
+	}
+	if model.MaxTokens != 0 {
+		values["maxTokens"] = model.MaxTokens
+	}
+	for _, key := range []string{"name", "baseUrl", "headers", "thinkingLevelMap", "input", "contextWindow", "maxTokens", "compat"} {
+		delete(object, key)
+	}
+	for key, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		object[key] = encoded
+	}
+	if len(model.Compat) != 0 {
+		if !json.Valid(model.Compat) {
+			return fmt.Errorf("invalid model compat")
+		}
+		object["compat"] = append(json.RawMessage(nil), model.Compat...)
+	}
+	return nil
 }
 
 func indexStoreRoot(root map[string]json.RawMessage) (map[string]string, error) {

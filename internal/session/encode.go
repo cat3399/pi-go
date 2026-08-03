@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
@@ -87,7 +88,7 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 			encoded = append(encoded, `,"details":`...)
 			encoded = append(encoded, details...)
 		}
-		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames)
+		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames, message.HasAddedToolNames())
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +118,7 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 			encoded = append(encoded, `,"details":`...)
 			encoded = append(encoded, details...)
 		}
-		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames)
+		encoded, err = appendToolResultMetadata(encoded, message.Usage, message.AddedToolNames, message.HasAddedToolNames())
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +128,46 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 	}
 }
 
-func appendToolResultMetadata(encoded []byte, usageFn func() (llm.Usage, bool), namesFn func() []string) ([]byte, error) {
+func encodeAgentMessage(message agentmsg.Message) (json.RawMessage, error) {
+	switch value := message.(type) {
+	case agentmsg.BashExecution:
+		object := map[string]any{"role": "bashExecution", "command": value.Command, "output": value.Output, "cancelled": value.Cancelled, "truncated": value.Truncated, "timestamp": value.Timestamp().UnixMilli()}
+		if value.ExitCode != nil {
+			object["exitCode"] = *value.ExitCode
+		}
+		if value.FullOutputPath != "" {
+			object["fullOutputPath"] = value.FullOutputPath
+		}
+		if value.ExcludeFromContext {
+			object["excludeFromContext"] = true
+		}
+		return json.Marshal(object)
+	case agentmsg.Custom:
+		object := map[string]any{"role": "custom", "customType": value.CustomType, "display": value.Display, "timestamp": value.Timestamp().UnixMilli()}
+		if value.StringContent != nil {
+			object["content"] = *value.StringContent
+		} else {
+			content, err := encodeUserContentBlocks(value.Content)
+			if err != nil {
+				return nil, err
+			}
+			object["content"] = content
+		}
+		if len(value.Details) != 0 {
+			object["details"] = json.RawMessage(value.Details)
+		}
+		return json.Marshal(object)
+	case agentmsg.OpaqueMessage:
+		if len(value.Data) != 0 && json.Valid(value.Data) {
+			return append(json.RawMessage(nil), value.Data...), nil
+		}
+		return nil, fmt.Errorf("opaque agent message has no durable JSON")
+	default:
+		return nil, fmt.Errorf("unsupported durable agent message %T", message)
+	}
+}
+
+func appendToolResultMetadata(encoded []byte, usageFn func() (llm.Usage, bool), namesFn func() []string, hasNames bool) ([]byte, error) {
 	if usage, ok := usageFn(); ok {
 		usageJSON, err := encodePortableUsage(usage)
 		if err != nil {
@@ -136,7 +176,7 @@ func appendToolResultMetadata(encoded []byte, usageFn func() (llm.Usage, bool), 
 		encoded = append(encoded, `,"usage":`...)
 		encoded = append(encoded, usageJSON...)
 	}
-	if names := namesFn(); len(names) != 0 {
+	if names := namesFn(); hasNames {
 		namesJSON, err := json.Marshal(names)
 		if err != nil {
 			return nil, err
@@ -553,15 +593,16 @@ func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time
 	case ModelChangePayload:
 		base["type"] = "model_change"
 		base["provider"] = value.Provider
-		if value.HasModelID || value.ModelID != "" {
-			base["modelId"] = value.ModelID
+		if strings.TrimSpace(value.Provider) == "" || strings.TrimSpace(value.ModelID) == "" {
+			return nil, fmt.Errorf("invalid model change")
 		}
+		base["modelId"] = value.ModelID
 	case BranchSummaryPayload:
 		base["type"] = "branch_summary"
 		base["fromId"] = value.FromID
 		base["summary"] = value.Summary
 		if len(value.Details) != 0 {
-			base["details"] = value.Details
+			base["details"] = json.RawMessage(value.Details)
 		}
 		if value.Usage != nil {
 			usage, err := encodeCompactionUsage(*value.Usage)
@@ -577,18 +618,24 @@ func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time
 		base["type"] = "custom"
 		base["customType"] = value.CustomType
 		if len(value.Data) != 0 {
-			base["data"] = value.Data
+			base["data"] = json.RawMessage(value.Data)
 		}
 	case CustomMessagePayload:
 		base["type"] = "custom_message"
 		base["customType"] = value.Message.CustomType
 		base["display"] = value.Message.Display
-		base["details"] = value.Message.Details
-		content, err := encodeUserContentBlocks(value.Message.Content)
-		if err != nil {
-			return nil, err
+		if len(value.Message.Details) != 0 {
+			base["details"] = json.RawMessage(value.Message.Details)
 		}
-		base["content"] = content
+		if value.Message.StringContent != nil {
+			base["content"] = *value.Message.StringContent
+		} else {
+			content, err := encodeUserContentBlocks(value.Message.Content)
+			if err != nil {
+				return nil, err
+			}
+			base["content"] = content
+		}
 	case LabelPayload:
 		base["type"] = "label"
 		base["targetId"] = value.TargetID
@@ -606,7 +653,7 @@ func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time
 		base["firstKeptEntryId"] = value.Record.FirstKeptEntryID
 		base["tokensBefore"] = value.Record.TokensBefore
 		if len(value.Details) != 0 {
-			base["details"] = value.Details
+			base["details"] = json.RawMessage(value.Details)
 		}
 		if value.Record.Usage != nil {
 			usage, err := encodeCompactionUsage(*value.Record.Usage)

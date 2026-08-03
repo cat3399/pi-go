@@ -121,9 +121,12 @@ func (m BashExecution) Text() string {
 type Custom struct {
 	CustomType string
 	Content    []llm.UserContentBlock
-	Display    bool
-	Details    []byte // JSON; intentionally not sent to the LLM
-	At         time.Time
+	// StringContent preserves pi's string-vs-blocks wire distinction. When set,
+	// Content contains the canonical one-text-block projection as well.
+	StringContent *string
+	Display       bool
+	Details       []byte // JSON; intentionally not sent to the LLM
+	At            time.Time
 }
 
 func NewCustom(value Custom) (Custom, error) {
@@ -133,6 +136,20 @@ func NewCustom(value Custom) (Custom, error) {
 	for _, block := range value.Content {
 		if !validUserContent(block) {
 			return Custom{}, fmt.Errorf("invalid custom message content")
+		}
+	}
+	if value.StringContent != nil {
+		if !utf8.ValidString(*value.StringContent) {
+			return Custom{}, fmt.Errorf("invalid custom message string content")
+		}
+		copy := *value.StringContent
+		value.StringContent = &copy
+		if len(value.Content) == 0 {
+			block, err := llm.NewTextBlock(copy)
+			if err != nil {
+				return Custom{}, err
+			}
+			value.Content = []llm.UserContentBlock{block}
 		}
 	}
 	if len(value.Details) != 0 && !jsonValid(value.Details) {
@@ -150,13 +167,17 @@ func NewCustomText(customType, text string, display bool, details []byte, at tim
 	if err != nil {
 		return Custom{}, err
 	}
-	return NewCustom(Custom{CustomType: customType, Content: []llm.UserContentBlock{block}, Display: display, Details: details, At: at})
+	return NewCustom(Custom{CustomType: customType, Content: []llm.UserContentBlock{block}, StringContent: &text, Display: display, Details: details, At: at})
 }
 func (m Custom) Role() Role           { return RoleCustom }
 func (m Custom) Timestamp() time.Time { return m.At }
 func (m Custom) cloneMessage() Message {
 	m.Content = append([]llm.UserContentBlock(nil), m.Content...)
 	m.Details = append([]byte(nil), m.Details...)
+	if m.StringContent != nil {
+		value := *m.StringContent
+		m.StringContent = &value
+	}
 	return m
 }
 

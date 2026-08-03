@@ -177,6 +177,17 @@ func migrateLegacySession(path string, source []byte, version int, newID IDGener
 		if typeName == "message" {
 			migrateV2Message(object)
 		}
+		// v1/v2 accepted provider-only model changes. A v3 typed model_change
+		// does not: preserving a missing ID would make later branch context
+		// silently select an unusable model. Keep the legacy record opaque
+		// instead of claiming it is a valid v3 model selection.
+		if typeName == "model_change" {
+			if _, exists := object["modelId"]; !exists {
+				object["type"] = json.RawMessage(`"custom"`)
+				object["customType"] = json.RawMessage(`"legacy_model_change"`)
+				object["data"] = json.RawMessage(`{"missingModelId":true}`)
+			}
+		}
 	}
 	objects[0]["version"] = json.RawMessage("3")
 
@@ -224,6 +235,9 @@ func migrateV2Message(entry map[string]json.RawMessage) {
 	role, err := requiredString(message, "role")
 	if err == nil && role == "hookMessage" {
 		message["role"] = json.RawMessage(`"custom"`)
+		if _, exists := message["customType"]; !exists {
+			message["customType"] = json.RawMessage(`"hookMessage"`)
+		}
 		if encoded, marshalErr := json.Marshal(message); marshalErr == nil {
 			entry["message"] = encoded
 		}

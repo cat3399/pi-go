@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -222,6 +223,10 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
+	options := request.StreamOptions()
+	if payload, err = applyPayloadHook(options.OnPayload, payload); err != nil {
+		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+	}
 	endpoint := p.endpoint
 	if baseURL := request.Model().BaseURL(); baseURL != "" {
 		endpoint, err = responsesEndpoint(baseURL)
@@ -230,8 +235,8 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		}
 	}
 	streamContext, cancel := context.WithCancelCause(ctx)
-	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, request.StreamOptions().Headers)
-	if sessionID := request.StreamOptions().SessionID; sessionID != "" {
+	headers := mergeRequestHeaders(request.Model().Headers(), p.headers, options)
+	if sessionID := options.SessionID; sessionID != "" {
 		format := "openai"
 		if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SessionAffinityFormat != nil {
 			format = *compat.SessionAffinityFormat
@@ -246,12 +251,16 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 			headers["x-client-request-id"] = sessionID
 		}
 	}
+	client := p.client
+	if options.Fetch != nil {
+		client = options.Fetch
+	}
 	return &openAIResponsesStream{
 		ctx:               streamContext,
 		cancel:            cancel,
 		endpoint:          endpoint,
 		apiKey:            requestAPIKey(request, p.apiKey),
-		client:            p.client,
+		client:            client,
 		clock:             clock,
 		timestamp:         clock(),
 		payload:           payload,
@@ -259,6 +268,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		headers:           headers,
 		maxEventBytes:     p.maxEventBytes,
 		maxErrorBodyBytes: p.maxErrorBodyBytes,
+		onResponse:        options.OnResponse,
 		slots:             make(map[int]*responsesTextSlot),
 		reasoningSlots:    make(map[int]*responsesReasoningSlot),
 		toolSlots:         make(map[int]*responsesToolSlot),
@@ -292,6 +302,43 @@ func mergeResponseHeaders(groups ...map[string]string) map[string]string {
 		}
 	}
 	return merged
+}
+
+func mergeRequestHeaders(modelHeaders, providerHeaders map[string]string, options StreamOptions) map[string]string {
+	merged := mergeResponseHeaders(modelHeaders, providerHeaders, options.Headers)
+	for name, value := range options.HeaderOverrides {
+		for existing := range merged {
+			if strings.EqualFold(existing, name) {
+				delete(merged, existing)
+			}
+		}
+		if value != nil {
+			merged[name] = *value
+		}
+	}
+	return merged
+}
+
+func applyPayloadHook(hook PayloadHook, payload []byte) ([]byte, error) {
+	if hook == nil {
+		return payload, nil
+	}
+	result, err := hook(append([]byte(nil), payload...))
+	if err != nil {
+		return nil, fmt.Errorf("payload hook: %w", err)
+	}
+	if !json.Valid(result) {
+		return nil, fmt.Errorf("payload hook returned invalid JSON")
+	}
+	return append([]byte(nil), result...), nil
+}
+
+func responseInfo(response *http.Response) ResponseInfo {
+	info := ResponseInfo{StatusCode: response.StatusCode, Headers: make(map[string][]string, len(response.Header))}
+	for key, values := range response.Header {
+		info.Headers[key] = append([]string(nil), values...)
+	}
+	return info
 }
 
 func isTypedNil(value any) bool {

@@ -38,20 +38,11 @@ assembly 已经启用全部能力。
 
 ## 与目标架构的主要差距
 
-### P0：兼容数据模型已完成
+### P0：兼容数据模型复审修正中
 
-- `Model` 现包含 request-wide cost tiers、完整的 portable stream options、OpenAI、Anthropic
-  与 Bedrock 的 typed compat，以及保留未实现 API compat 的 immutable raw projection。未实现
-  adapter 的 compat 可以读取/复制，但 production route 会明确拒绝，绝不假装已经消费它；
-- `internal/agentmsg` 提供可扩展的 AgentMessage union 和唯一的 `ConvertToLLM` 边界。标准
-  LLM、bash、custom、branch summary、compaction summary 和 opaque extension message 不会提前
-  降成字符串；
-- ToolResult 的 rich content、details、usage/cost、added tool names、terminate、identity、
-  `isError`、timestamp 已贯通 tool execution、event copy、session JSONL codec 和 replay；
-- v3 session 的 message、thinking/model change、compaction、branch summary、custom/custom
-  message、label、session info 都有 typed payload，并能 append、reopen、branch/context projection；
-- P0 对照测试覆盖 coding-agent message conversion、原版 v3 entry JSON shapes、metadata
-  round-trip 和不含 OpenAI metadata 的 generic provider contract。
+复审发现：完整 AgentMessage JSONL 往返、分支上的 model/thinking 设置、完整模型目录持久化、
+portable stream options、usage 成本边界以及 provider-neutral deferred tools 仍有缺口。P0 不应
+标记完成；以下 P1–P2 的分析只作为后续方向，不能替代 P0 验收。
 
 ### P1–P2：AgentLoop 与 Agent 的边界尚未对齐
 

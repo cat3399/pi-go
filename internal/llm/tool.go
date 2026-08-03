@@ -291,6 +291,7 @@ type ToolResultContentMessage struct {
 	details              json.RawMessage
 	usage                *Usage
 	addedToolNames       []string
+	hasAddedToolNames    bool
 }
 
 // ToolResultMetadata is the information carried by pi's ToolResultMessage
@@ -301,6 +302,9 @@ type ToolResultMetadata struct {
 	Details        json.RawMessage
 	Usage          *Usage
 	AddedToolNames []string
+	// HasAddedToolNames preserves the difference between an omitted field and
+	// an explicitly supplied empty deferred-tool list.
+	HasAddedToolNames bool
 }
 
 func (ToolResultContentMessage) conversationMessage() {}
@@ -314,7 +318,7 @@ func NewToolResultContentMessageWithMetadata(id, name string, content []ToolResu
 	if err := validateToolNames(metadata.AddedToolNames); err != nil {
 		return ToolResultContentMessage{}, err
 	}
-	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(metadata.Details), addedToolNames: cloneToolNames(metadata.AddedToolNames)}
+	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(metadata.Details), addedToolNames: cloneToolNames(metadata.AddedToolNames), hasAddedToolNames: metadata.HasAddedToolNames || metadata.AddedToolNames != nil}
 	if metadata.Usage != nil {
 		usage := *metadata.Usage
 		m.usage = &usage
@@ -371,6 +375,7 @@ func (m ToolResultContentMessage) Usage() (Usage, bool) {
 func (m ToolResultContentMessage) AddedToolNames() []string {
 	return append([]string(nil), m.addedToolNames...)
 }
+func (m ToolResultContentMessage) HasAddedToolNames() bool { return m.hasAddedToolNames }
 
 func (m AssistantToolUseMessage) validate() error {
 	_, err := NewAssistantToolUseMessage(m.content, m.usage, m.timestamp)
@@ -422,14 +427,15 @@ func (m AssistantToolUseMessage) Timestamp() time.Time {
 // ToolResultMessage records one tool execution outcome. The agent runtime owns
 // pairing it with the pending call and committing it to the transcript.
 type ToolResultMessage struct {
-	toolCallID     string
-	toolName       string
-	content        []TextBlock
-	isError        bool
-	timestamp      time.Time
-	details        json.RawMessage
-	usage          *Usage
-	addedToolNames []string
+	toolCallID        string
+	toolName          string
+	content           []TextBlock
+	isError           bool
+	timestamp         time.Time
+	details           json.RawMessage
+	usage             *Usage
+	addedToolNames    []string
+	hasAddedToolNames bool
 }
 
 func (ToolResultMessage) conversationMessage() {}
@@ -458,7 +464,7 @@ func NewToolResultMessageWithMetadata(toolCallID string, toolName string, conten
 		isError:        isError,
 		timestamp:      timestamp,
 		details:        bytes.Clone(metadata.Details),
-		addedToolNames: cloneToolNames(metadata.AddedToolNames),
+		addedToolNames: cloneToolNames(metadata.AddedToolNames), hasAddedToolNames: metadata.HasAddedToolNames || metadata.AddedToolNames != nil,
 	}
 	if metadata.Usage != nil {
 		usage := *metadata.Usage
@@ -524,9 +530,10 @@ func (m ToolResultMessage) Usage() (Usage, bool) {
 func (m ToolResultMessage) AddedToolNames() []string {
 	return append([]string(nil), m.addedToolNames...)
 }
+func (m ToolResultMessage) HasAddedToolNames() bool { return m.hasAddedToolNames }
 
 func cloneToolNames(names []string) []string {
-	if len(names) == 0 {
+	if names == nil {
 		return nil
 	}
 	return append([]string(nil), names...)

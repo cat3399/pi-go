@@ -478,12 +478,33 @@ func cloneAny(values map[string]any) map[string]any {
 	}
 	copy := make(map[string]any, len(values))
 	for key, value := range values {
-		copy[key] = value
+		copy[key] = cloneJSONLike(value)
 	}
 	return copy
 }
+
+func cloneJSONLike(value any) any {
+	switch item := value.(type) {
+	case map[string]any:
+		return cloneAny(item)
+	case []any:
+		copy := make([]any, len(item))
+		for i := range item {
+			copy[i] = cloneJSONLike(item[i])
+		}
+		return copy
+	case []byte:
+		return append([]byte(nil), item...)
+	case json.RawMessage:
+		return append(json.RawMessage(nil), item...)
+	default:
+		return value
+	}
+}
 func CloneStreamOptions(value StreamOptions) StreamOptions {
 	value.Headers = cloneStrings(value.Headers)
+	value.HeaderOverrides = cloneHeaderOverrides(value.HeaderOverrides)
+	value.ThinkingBudgets = cloneThinkingBudgets(value.ThinkingBudgets)
 	value.Metadata = cloneAny(value.Metadata)
 	value.Extra = cloneAny(value.Extra)
 	value.Env = cloneStrings(value.Env)
@@ -492,6 +513,27 @@ func CloneStreamOptions(value StreamOptions) StreamOptions {
 		value.Temperature = &copy
 	}
 	return value
+}
+
+func cloneHeaderOverrides(values map[string]*string) map[string]*string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]*string, len(values))
+	for key, value := range values {
+		out[key] = cloneString(value)
+	}
+	return out
+}
+func cloneThinkingBudgets(values map[ThinkingLevel]uint64) map[ThinkingLevel]uint64 {
+	if values == nil {
+		return nil
+	}
+	out := make(map[ThinkingLevel]uint64, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 func cloneBool(value *bool) *bool {
 	if value == nil {
@@ -576,6 +618,8 @@ type Request struct {
 	metadata          map[string]any
 	stream            StreamOptions
 	replayTarget      llm.AssistantProvenance
+	deferredToolNames []string
+	hasDeferredTools  bool
 }
 
 // ToolChoice is a portable coordinator policy. Providers map it to their own
@@ -618,12 +662,22 @@ type RequestOptions struct {
 // properties of an API dialect: a model/provider selection resolves them for
 // each request.
 type StreamOptions struct {
-	Temperature               *float64
-	APIKey                    string
-	Headers                   map[string]string
-	MaxTokens                 uint64
-	SessionID                 string
-	Transport                 Transport
+	Temperature *float64
+	APIKey      string
+	Headers     map[string]string
+	// HeaderOverrides has three states per name: absent leaves inherited
+	// headers untouched, non-nil replaces/adds it, and nil explicitly removes
+	// it. Headers remains the ordinary convenient add/replace map.
+	HeaderOverrides map[string]*string
+	MaxTokens       uint64
+	SessionID       string
+	Transport       Transport
+	// Fetch overrides the provider's configured HTTP transport for this one
+	// request. It is intentionally an interface, not an untyped Extra value.
+	Fetch                     HTTPDoer
+	OnPayload                 PayloadHook
+	OnResponse                ResponseHook
+	ThinkingBudgets           map[ThinkingLevel]uint64
 	CacheRetention            CacheRetention
 	TimeoutMS                 uint64
 	WebsocketConnectTimeoutMS uint64
@@ -631,10 +685,23 @@ type StreamOptions struct {
 	MaxRetryDelayMS           uint64
 	Metadata                  map[string]any
 	Env                       map[string]string
-	// Extra preserves future/provider-specific options without putting vendor
-	// request structs into AgentLoop. Adapters opt in to recognized keys.
+	// Extra is retained for source compatibility only. New portable options
+	// must have a typed field above; adapters must not treat Extra as a wire
+	// request escape hatch.
 	Extra map[string]any
 }
+
+// PayloadHook may make a final JSON-level request adjustment after an adapter
+// has produced its dialect payload. It is useful for transports/gateways while
+// keeping provider wire structs out of Agent.
+type PayloadHook func(payload []byte) ([]byte, error)
+
+// ResponseInfo is a portable transport observation supplied to OnResponse.
+type ResponseInfo struct {
+	StatusCode int
+	Headers    map[string][]string
+}
+type ResponseHook func(ResponseInfo) error
 
 type Transport string
 
@@ -692,6 +759,7 @@ func NewRequestWithOptions(
 		stream:            CloneStreamOptions(options.Stream),
 		replayTarget:      llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	}
+	request.deferredToolNames, request.hasDeferredTools = collectDeferredToolNames(request.messages)
 	if options.ToolChoice != nil {
 		copy := *options.ToolChoice
 		request.toolChoice = &copy
@@ -728,6 +796,22 @@ func (r Request) validate() error {
 		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("%w: invalid stream header", ErrInvalidRequest)
 		}
+	}
+	for name, value := range r.stream.HeaderOverrides {
+		if !utf8.ValidString(name) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") {
+			return fmt.Errorf("%w: invalid stream header override", ErrInvalidRequest)
+		}
+		if value != nil && (!utf8.ValidString(*value) || strings.ContainsAny(*value, "\r\n")) {
+			return fmt.Errorf("%w: invalid stream header override", ErrInvalidRequest)
+		}
+	}
+	for level := range r.stream.ThinkingBudgets {
+		if !level.Valid() {
+			return fmt.Errorf("%w: invalid thinking budget level", ErrInvalidRequest)
+		}
+	}
+	if r.stream.Fetch != nil && isTypedNil(r.stream.Fetch) {
+		return fmt.Errorf("%w: stream fetch is typed nil", ErrInvalidRequest)
 	}
 	for index, message := range r.messages {
 		if err := llm.ValidateConversationMessage(message); err != nil {
@@ -912,7 +996,8 @@ func (r Request) clone() Request {
 	r.messages = append([]llm.ConversationMessage(nil), r.messages...)
 	r.tools = append([]ToolDefinition(nil), r.tools...)
 	r.metadata = cloneAny(r.metadata)
-	r.stream.Headers = cloneStrings(r.stream.Headers)
+	r.stream = CloneStreamOptions(r.stream)
+	r.deferredToolNames = append([]string(nil), r.deferredToolNames...)
 	return r
 }
 
@@ -942,6 +1027,50 @@ func (r Request) StreamOptions() StreamOptions {
 }
 
 func (r Request) ReplayTarget() llm.AssistantProvenance { return r.replayTarget }
+
+// ThinkingBudget returns the optional cap selected for a thinking level.
+func (r Request) ThinkingBudget(level ThinkingLevel) (uint64, bool) {
+	value, ok := r.stream.ThinkingBudgets[level]
+	return value, ok
+}
+
+// DeferredToolNames is the provider-neutral collection of tool names made
+// available by earlier tool results. Its presence distinguishes no deferred
+// tool protocol from an explicitly empty update.
+func (r Request) DeferredToolNames() ([]string, bool) {
+	if r.deferredToolNames == nil {
+		return nil, r.hasDeferredTools
+	}
+	return append([]string{}, r.deferredToolNames...), r.hasDeferredTools
+}
+
+type deferredToolNamesCarrier interface {
+	AddedToolNames() []string
+	HasAddedToolNames() bool
+}
+
+func collectDeferredToolNames(messages []llm.ConversationMessage) ([]string, bool) {
+	seen := map[string]struct{}{}
+	var out []string
+	has := false
+	for _, message := range messages {
+		carrier, ok := message.(deferredToolNamesCarrier)
+		if !ok || !carrier.HasAddedToolNames() {
+			continue
+		}
+		has = true
+		for _, name := range carrier.AddedToolNames() {
+			if _, exists := seen[name]; !exists {
+				seen[name] = struct{}{}
+				out = append(out, name)
+			}
+		}
+	}
+	if has && out == nil {
+		out = []string{}
+	}
+	return out, has
+}
 
 // EventStream is a single-consumer pull stream. All expected provider failures
 // are represented by llm.ErrorEvent; io.EOF follows the unique terminal event.

@@ -139,3 +139,19 @@ func (u Usage) CacheWrite1h() (uint64, bool) {
 }
 
 func (u Usage) Cost() (Cost, bool) { return u.cost, u.hasCost }
+
+// WithCost returns the same normalized token accounting with a calculated
+// model-bound cost. It is the terminal provider/session boundary: adapters
+// must not invent pricing while parsing wire events.
+func (u Usage) WithCost(cost Cost) (Usage, error) {
+	spec := UsageSpec{Input: u.input, Output: u.output, CacheRead: u.cacheRead, CacheWrite: u.cacheWrite, Cost: &cost}
+	if u.hasReasoning {
+		value := u.reasoning
+		spec.Reasoning = &value
+	}
+	if u.hasCacheWrite1h {
+		value := u.cacheWrite1h
+		spec.CacheWrite1h = &value
+	}
+	return NewUsage(spec)
+}

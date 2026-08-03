@@ -152,6 +152,105 @@ func TestP0SessionPayloadAppendAndReopen(t *testing.T) {
 		t.Fatalf("payload=%#v", entries[2].Payload())
 	}
 }
+
+func TestP0AgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-message.jsonl")
+	ids := []string{"root", "model", "bash", "custom", "opaque", "branch"}
+	next := 0
+	s, err := Create(path, CreateOptions{ID: "agent-message", WorkingDir: dir, Now: func() time.Time { return time.UnixMilli(100) }, NewEntryID: func() (string, error) { id := ids[next]; next++; return id, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendPayload(context.Background(), ThinkingLevelChangePayload{ThinkingLevel: "high"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendPayload(context.Background(), ModelChangePayload{Provider: "generic", ModelID: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	code := 1
+	bash, err := agentmsg.NewBashExecution(agentmsg.BashExecution{Command: "false", Output: "failed", ExitCode: &code, FullOutputPath: "/tmp/full", Truncated: true, At: time.UnixMilli(2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendAgentMessage(context.Background(), bash, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	custom, err := agentmsg.NewCustomText("extension", "string form", true, json.RawMessage(`{"present":true}`), time.UnixMilli(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendAgentMessage(context.Background(), custom, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "extensionEvent", Data: json.RawMessage(`{"role":"extensionEvent","value":{"keep":true},"timestamp":4}`), At: time.UnixMilli(4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendAgentMessage(context.Background(), opaque, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SelectLeaf("model"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendPayload(context.Background(), ThinkingLevelChangePayload{ThinkingLevel: "low"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	// Reopen selects the physical tail (the alternate branch).
+	context := reopened.BuildContext()
+	if level, ok := context.ThinkingLevel(); !ok || level != "low" {
+		t.Fatalf("thinking = %q, %t", level, ok)
+	}
+	if selected, ok := context.Model(); !ok || selected.Provider != "generic" || selected.ModelID != "one" {
+		t.Fatalf("model = %#v, %t", selected, ok)
+	}
+	if err := reopened.SelectLeaf("opaque"); err != nil {
+		t.Fatal(err)
+	}
+	context = reopened.BuildContext()
+	if level, _ := context.ThinkingLevel(); level != "high" {
+		t.Fatalf("switched thinking = %q", level)
+	}
+	messages := context.AgentMessages()
+	if len(messages) != 3 {
+		t.Fatalf("agent messages = %#v", messages)
+	}
+	if got, ok := messages[0].(agentmsg.BashExecution); !ok || got.ExitCode == nil || *got.ExitCode != 1 || !got.Truncated || got.FullOutputPath != "/tmp/full" {
+		t.Fatalf("bash = %#v", messages[0])
+	}
+	if got, ok := messages[1].(agentmsg.Custom); !ok || got.StringContent == nil || *got.StringContent != "string form" || string(got.Details) != `{"present":true}` {
+		t.Fatalf("custom = %#v", messages[1])
+	}
+	if got, ok := messages[2].(agentmsg.OpaqueMessage); !ok || string(got.Data) != `{"role":"extensionEvent","value":{"keep":true},"timestamp":4}` {
+		t.Fatalf("opaque = %#v", messages[2])
+	}
+	if projected := context.Messages(); len(projected) != 2 {
+		t.Fatalf("LLM projection = %#v", projected)
+	}
+}
+
+func TestP0ModelChangeRequiresModelID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing-model.jsonl")
+	data := `{"type":"session","version":3,"id":"s","timestamp":"2026-01-01T00:00:00.000Z","cwd":"` + dir + `"}
+{"type":"model_change","id":"a","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","provider":"generic"}
+`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, OpenOptions{}); err == nil {
+		t.Fatal("Open accepted model_change without modelId")
+	}
+}
 func mustSessionText(t *testing.T, text string) llm.TextBlock {
 	t.Helper()
 	value, err := llm.NewTextBlock(text)

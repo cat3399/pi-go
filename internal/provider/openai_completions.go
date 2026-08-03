@@ -148,6 +148,10 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if err != nil {
 		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
+	options := request.StreamOptions()
+	if payload, err = applyPayloadHook(options.OnPayload, payload); err != nil {
+		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+	}
 	endpoint := p.endpoint
 	if base := request.Model().BaseURL(); base != "" {
 		endpoint, err = completionsEndpoint(base)
@@ -156,8 +160,8 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 		}
 	}
 	streamCtx, cancel := context.WithCancelCause(ctx)
-	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, request.StreamOptions().Headers)
-	if sessionID := request.StreamOptions().SessionID; sessionID != "" && completionsSendSessionAffinity(request.Model()) {
+	headers := mergeRequestHeaders(request.Model().Headers(), p.headers, options)
+	if sessionID := options.SessionID; sessionID != "" && completionsSendSessionAffinity(request.Model()) {
 		switch completionsSessionAffinityFormat(request.Model()) {
 		case "openrouter":
 			headers["x-session-id"] = sessionID
@@ -170,7 +174,11 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 			headers["x-session-affinity"] = sessionID
 		}
 	}
-	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: p.client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
+	client := p.client
+	if options.Fetch != nil {
+		client = options.Fetch
+	}
+	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
 }
 
 func completionsHasAuthorization(groups ...map[string]string) bool {
@@ -707,6 +715,7 @@ type openAICompletionsStream struct {
 	model                                  ModelRef
 	headers                                map[string]string
 	maxEventBytes, maxErrorBodyBytes       int
+	onResponse                             ResponseHook
 	mu                                     sync.Mutex
 	body                                   io.ReadCloser
 	closed, finished, started, initialized bool
@@ -838,6 +847,12 @@ func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 	if resp == nil || resp.Body == nil || isTypedNil(resp.Body) {
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: HTTP client returned nil response/body", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned an invalid response"}
 	}
+	if s.onResponse != nil {
+		if err := s.onResponse(responseInfo(resp)); err != nil {
+			_ = resp.Body.Close()
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("response hook: %w", err), message: "OpenAI Chat Completions response hook rejected the response"}
+		}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return s.httpFailure(resp)
 	}
@@ -946,6 +961,10 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 	}
 	if c.Usage != nil {
 		u, err := completionsUsage(c.Usage)
+		if err != nil {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
+		}
+		u, err = u.WithCost(s.model.CalculateCost(u))
 		if err != nil {
 			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
 		}

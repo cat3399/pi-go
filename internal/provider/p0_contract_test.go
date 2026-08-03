@@ -45,6 +45,60 @@ func TestP0GenericProviderContractHasNoOpenAIShape(t *testing.T) {
 	}
 }
 
+func TestP0RequestPreservesPortableOptionsAndDeferredToolPresence(t *testing.T) {
+	model, err := provider.NewModel(provider.ModelSpec{Provider: "generic", API: "generic-api", ID: "model", Cost: provider.CostRates{Input: 1, Output: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := llm.NewTextBlock("done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultMessageWithMetadata("call", "tool", []llm.TextBlock{text}, false, time.UnixMilli(1), llm.ToolResultMetadata{AddedToolNames: []string{}, HasAddedToolNames: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("call", "tool", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, llm.Usage{}, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteHeader := (*string)(nil)
+	request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{assistant, result}, provider.RequestOptions{Stream: provider.StreamOptions{Transport: provider.TransportWebsocket, ThinkingBudgets: map[provider.ThinkingLevel]uint64{provider.ThinkingHigh: 7}, HeaderOverrides: map[string]*string{"Authorization": deleteHeader}, Metadata: map[string]any{"nested": map[string]any{"value": "keep"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names, present := request.DeferredToolNames(); !present || names == nil || len(names) != 0 {
+		t.Fatalf("deferred = %#v, %t", names, present)
+	}
+	if budget, ok := request.ThinkingBudget(provider.ThinkingHigh); !ok || budget != 7 {
+		t.Fatalf("budget = %d, %t", budget, ok)
+	}
+	options := request.StreamOptions()
+	if value, ok := options.HeaderOverrides["Authorization"]; !ok || value != nil {
+		t.Fatalf("header deletion lost: %#v", options.HeaderOverrides)
+	}
+	metadata := request.StreamOptions().Metadata
+	metadata["nested"].(map[string]any)["value"] = "mutated"
+	if request.StreamOptions().Metadata["nested"].(map[string]any)["value"] != "keep" {
+		t.Fatal("metadata was not deeply cloned")
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{Input: 3, Output: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	costUsage, err := usage.WithCost(model.CalculateCost(usage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost, ok := costUsage.Cost(); !ok || cost.Total != 11e-6 {
+		t.Fatalf("cost = %#v, %t", cost, ok)
+	}
+}
+
 type genericProvider struct{}
 
 func (*genericProvider) Stream(_ context.Context, request provider.Request) provider.EventStream {

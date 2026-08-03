@@ -236,7 +236,6 @@ func (p ThinkingLevelChangePayload) CloneEntryPayload() EntryPayload { return p 
 
 type ModelChangePayload struct {
 	Provider, ModelID string
-	HasModelID        bool
 }
 
 func (ModelChangePayload) entryPayload()                     {}
@@ -420,11 +419,23 @@ func (e Entry) clone() Entry {
 }
 
 type Context struct {
-	messages      []llm.ConversationMessage
-	agentMessages []agentmsg.Message
-	diagnostics   []Diagnostic
-	assistant     AssistantProvenance
-	hasAssistant  bool
+	messages         []llm.ConversationMessage
+	agentMessages    []agentmsg.Message
+	diagnostics      []Diagnostic
+	assistant        AssistantProvenance
+	hasAssistant     bool
+	thinkingLevel    string
+	hasThinkingLevel bool
+	model            ModelSelection
+	hasModel         bool
+}
+
+// ModelSelection is the exact provider/model selection recorded on the active
+// branch. Its presence is intentionally separate from an empty value: no
+// model selected and an invalid/missing model ID must never be conflated.
+type ModelSelection struct {
+	Provider string
+	ModelID  string
 }
 
 // NewContext constructs an in-memory runtime projection. It is intentionally
@@ -453,3 +464,10 @@ func (c Context) Diagnostics() []Diagnostic {
 func (c Context) AssistantProvenance() (AssistantProvenance, bool) {
 	return c.assistant, c.hasAssistant
 }
+
+// ThinkingLevel returns the effective thinking level recorded along the
+// selected branch. The default is recorded as "off" for a durable session.
+func (c Context) ThinkingLevel() (string, bool) { return c.thinkingLevel, c.hasThinkingLevel }
+
+// Model returns the effective selected model along the selected branch.
+func (c Context) Model() (ModelSelection, bool) { return c.model, c.hasModel }
