@@ -15,10 +15,75 @@ import (
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
+func TestMergeStreamOptionsPreservesAndClonesCompleteTurnContract(t *testing.T) {
+	model, _ := provider.NewModelRef("fixture", "fixture", "model")
+	temperature := 0.25
+	baseNested := map[string][]map[string]string{"items": {{"value": "base"}}}
+	overlayNested := []map[string]any{{"value": "overlay"}}
+	order := make([]string, 0, 6)
+	base := provider.StreamOptions{
+		Temperature: &temperature, APIKey: "base-key", Headers: map[string]string{"X-Base": "yes", "X-Shared": "base"},
+		MaxTokens: 17, SessionID: "session", Transport: provider.TransportSSE,
+		ThinkingBudgets: map[provider.ThinkingLevel]uint64{provider.ThinkingHigh: 4096},
+		Metadata:        map[string]any{"base": baseNested}, Extra: map[string]any{"keep": []string{"one"}}, Env: map[string]string{"BASE": "yes"},
+		OnPayload: func(_ provider.ModelRef, payload []byte) ([]byte, error) {
+			order = append(order, "base-payload")
+			return append(payload, '1'), nil
+		},
+		OnHeaders: func(_ provider.ModelRef, _ map[string]*string) error {
+			order = append(order, "base-headers")
+			return nil
+		},
+		OnResponse: func(_ provider.ModelRef, _ provider.ResponseInfo) error {
+			order = append(order, "base-response")
+			return nil
+		},
+	}
+	overlay := provider.StreamOptions{
+		APIKey: "resolved-key", Headers: map[string]string{"X-Resolved": "yes", "x-shared": "resolved"},
+		Metadata: map[string]any{"resolved": overlayNested}, Env: map[string]string{"RESOLVED": "yes"},
+		OnPayload: func(_ provider.ModelRef, payload []byte) ([]byte, error) {
+			order = append(order, "overlay-payload")
+			return append(payload, '2'), nil
+		},
+		OnHeaders: func(_ provider.ModelRef, _ map[string]*string) error {
+			order = append(order, "overlay-headers")
+			return nil
+		},
+		OnResponse: func(_ provider.ModelRef, _ provider.ResponseInfo) error {
+			order = append(order, "overlay-response")
+			return nil
+		},
+	}
+	merged := provider.MergeStreamOptions(base, overlay)
+	base.Headers["X-Base"] = "mutated"
+	baseNested["items"][0]["value"] = "mutated"
+	overlayNested[0]["value"] = "mutated"
+	if merged.APIKey != "resolved-key" || merged.Headers["X-Base"] != "yes" || merged.Headers["x-shared"] != "resolved" || len(merged.Headers) != 3 || merged.MaxTokens != 17 || merged.SessionID != "session" {
+		t.Fatalf("merged scalar/header contract = %#v", merged)
+	}
+	if merged.ThinkingBudgets[provider.ThinkingHigh] != 4096 || merged.Metadata["base"].(map[string][]map[string]string)["items"][0]["value"] != "base" || merged.Metadata["resolved"].([]map[string]any)[0]["value"] != "overlay" {
+		t.Fatalf("merged nested contract = %#v", merged.Metadata)
+	}
+	payload, err := merged.OnPayload(model, []byte("p"))
+	if err != nil || string(payload) != "p12" {
+		t.Fatalf("payload hooks = %q, %v", payload, err)
+	}
+	if err := merged.OnHeaders(model, map[string]*string{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := merged.OnResponse(model, provider.ResponseInfo{StatusCode: 200}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "base-payload,overlay-payload,base-headers,overlay-headers,base-response,overlay-response" {
+		t.Fatalf("hook order = %s", got)
+	}
+}
+
 // This contract test intentionally uses no OpenAI API name, response ID, or
 // wire metadata. It guards the boundary that lets another provider be added
 // without changing AgentLoop's request/message contracts.
-func TestP0GenericProviderContractHasNoOpenAIShape(t *testing.T) {
+func TestGenericProviderContractHasNoOpenAIShape(t *testing.T) {
 	model, err := provider.NewModel(provider.ModelSpec{Provider: "local-generic", API: "pi-messages", ID: "model", Name: "Generic", Input: []provider.InputKind{provider.InputText, provider.InputImage}, Reasoning: true, Cost: provider.CostRates{Input: 1, Output: 2, CacheRead: .5, CacheWrite: 3, Tiers: []provider.CostTier{{InputTokensAbove: 100, Input: 4, Output: 5, CacheRead: 6, CacheWrite: 7}}}, Compat: provider.ModelCompat{Additional: map[string]json.RawMessage{"pi-messages": json.RawMessage(`{"native":true}`)}}})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +115,7 @@ func TestP0GenericProviderContractHasNoOpenAIShape(t *testing.T) {
 	}
 }
 
-func TestP0RequestPreservesPortableOptionsAndDeferredToolPresence(t *testing.T) {
+func TestRequestPreservesPortableOptionsAndDeferredToolPresence(t *testing.T) {
 	model, err := provider.NewModel(provider.ModelSpec{Provider: "generic", API: "generic-api", ID: "model", Cost: provider.CostRates{Input: 1, Output: 2}})
 	if err != nil {
 		t.Fatal(err)
@@ -104,11 +169,11 @@ func TestP0RequestPreservesPortableOptionsAndDeferredToolPresence(t *testing.T) 
 	}
 }
 
-type p0TypedMap map[string]string
-type p0TypedSlice []p0TypedMap
+type typedStringMap map[string]string
+type typedStringMapSlice []typedStringMap
 
-func TestP0JSONLikeValuesDeepCloneTypedContainersAndRejectInvalidValues(t *testing.T) {
-	typed := p0TypedSlice{{"value": "original"}}
+func TestJSONLikeValuesDeepCloneTypedContainersAndRejectInvalidValues(t *testing.T) {
+	typed := typedStringMapSlice{{"value": "original"}}
 	model, err := provider.NewModel(provider.ModelSpec{
 		Provider: "generic", API: provider.OpenAICompletionsAPI, ID: "model",
 		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{ChatTemplateKwargs: map[string]any{"typed": typed}}},
@@ -127,22 +192,22 @@ func TestP0JSONLikeValuesDeepCloneTypedContainersAndRejectInvalidValues(t *testi
 	for label, values := range map[string]map[string]any{
 		"request": request.Metadata(), "stream": request.StreamOptions().Metadata, "extra": request.StreamOptions().Extra,
 	} {
-		cloned, ok := values["typed"].(p0TypedSlice)
+		cloned, ok := values["typed"].(typedStringMapSlice)
 		if !ok || cloned[0]["value"] != "original" {
 			t.Fatalf("%s typed clone = %#v", label, values["typed"])
 		}
 		cloned[0]["value"] = "copy-mutated"
 	}
-	if got := request.Metadata()["typed"].(p0TypedSlice)[0]["value"]; got != "original" {
+	if got := request.Metadata()["typed"].(typedStringMapSlice)[0]["value"]; got != "original" {
 		t.Fatalf("request getter shared typed nested storage: %q", got)
 	}
 	compat := model.Compat()
-	compatTyped := compat.OpenAICompletions.ChatTemplateKwargs["typed"].(p0TypedSlice)
+	compatTyped := compat.OpenAICompletions.ChatTemplateKwargs["typed"].(typedStringMapSlice)
 	if compatTyped[0]["value"] != "original" {
 		t.Fatalf("compat clone = %#v", compatTyped)
 	}
 	compatTyped[0]["value"] = "compat-mutated"
-	if got := model.Compat().OpenAICompletions.ChatTemplateKwargs["typed"].(p0TypedSlice)[0]["value"]; got != "original" {
+	if got := model.Compat().OpenAICompletions.ChatTemplateKwargs["typed"].(typedStringMapSlice)[0]["value"]; got != "original" {
 		t.Fatalf("compat getter shared typed nested storage: %q", got)
 	}
 
@@ -160,7 +225,7 @@ func TestP0JSONLikeValuesDeepCloneTypedContainersAndRejectInvalidValues(t *testi
 	}
 }
 
-func TestP0DeferredToolsMapToResponsesAndKimiWireOnlyWhenEnabled(t *testing.T) {
+func TestDeferredToolsMapToResponsesAndKimiWireOnlyWhenEnabled(t *testing.T) {
 	called, err := provider.NewToolDefinition("called", "called", false, []byte(`{"type":"object"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +310,7 @@ func TestP0DeferredToolsMapToResponsesAndKimiWireOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
-func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing.T) {
+func TestProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing.T) {
 	tests := []struct {
 		name string
 		api  string
@@ -276,13 +341,10 @@ func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing
 			var calls int
 			implementation, err := test.new(responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
 				calls++
-				for name, want := range map[string]string{"Authorization": "Bearer secret", "X-Model": "model", "X-Hook": "hook", "X-Final": "final"} {
+				for name, want := range map[string]string{"Authorization": "Bearer secret", "X-Model": "model", "X-Adapter": "restored", "X-Hook": "hook", "X-Final": "final"} {
 					if got := request.Header.Get(name); got != want {
 						t.Errorf("%s = %q, want %q", name, got, want)
 					}
-				}
-				if got := request.Header.Get("X-Adapter"); got != "" {
-					t.Errorf("X-Adapter survived nil final override: %q", got)
 				}
 				if got := request.Header.Get("X-Request"); got != "" {
 					t.Errorf("X-Request survived nil header hook value: %q", got)
@@ -298,6 +360,7 @@ func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing
 			}
 			final := "final"
 			hook := "hook"
+			restored := "restored"
 			responseCalled := false
 			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustProviderUser(t, "hi")}, provider.RequestOptions{Stream: provider.StreamOptions{
 				Headers: map[string]string{"X-Request": "request"}, HeaderOverrides: map[string]*string{"X-Adapter": nil, "X-Final": &final},
@@ -313,10 +376,11 @@ func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing
 					return json.Marshal(object)
 				},
 				OnHeaders: func(gotModel provider.ModelRef, headers map[string]*string) error {
-					if !gotModel.Equal(model) || headerHookValue(headers, "Authorization") != "Bearer secret" || headerHookValue(headers, "Accept") != "text/event-stream" || headerHookValue(headers, "X-Model") != "model" || headerHookValue(headers, "X-Adapter") != "adapter" || headerHookValue(headers, "X-Request") != "request" {
+					if !gotModel.Equal(model) || headerHookValue(headers, "Authorization") != "Bearer secret" || headerHookValue(headers, "Accept") != "text/event-stream" || headerHookValue(headers, "X-Model") != "model" || headerHookValue(headers, "X-Adapter") != "" || headerHookValue(headers, "X-Final") != "final" || headerHookValue(headers, "X-Request") != "request" {
 						t.Errorf("header hook model/values = %#v / %#v", gotModel, headers)
 					}
 					headers["X-Request"] = nil
+					headers["X-Adapter"] = &restored
 					headers["X-Hook"] = &hook
 					return nil
 				},
@@ -339,7 +403,7 @@ func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing
 	}
 }
 
-func TestP0FinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T) {
+func TestFinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T) {
 	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
 		t.Run(api, func(t *testing.T) {
 			calls := 0
@@ -358,10 +422,10 @@ func TestP0FinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T
 				t.Fatal(err)
 			}
 			model, _ := provider.NewModelRef("fixture", api, "model")
-			sawAuthorization := false
+			sawDeletion := false
 			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustProviderUser(t, "hi")}, provider.RequestOptions{Stream: provider.StreamOptions{
 				OnHeaders: func(_ provider.ModelRef, headers map[string]*string) error {
-					sawAuthorization = headerHookValue(headers, "Authorization") == "Bearer secret"
+					sawDeletion = headerHookValue(headers, "Authorization") == ""
 					return nil
 				},
 				HeaderOverrides: map[string]*string{"Authorization": nil},
@@ -370,8 +434,8 @@ func TestP0FinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T
 				t.Fatal(err)
 			}
 			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
-			if calls != 0 || !sawAuthorization {
-				t.Fatalf("HTTP calls/header preflight = %d/%t", calls, sawAuthorization)
+			if calls != 0 || !sawDeletion {
+				t.Fatalf("HTTP calls/header preflight = %d/%t", calls, sawDeletion)
 			}
 			if failure, ok := terminal.(llm.AssistantFailureMessage); !ok || failure.FinishReason() != llm.FinishError {
 				t.Fatalf("terminal = %T %#v", terminal, terminal)

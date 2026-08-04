@@ -259,6 +259,54 @@ func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr e
 	return a.runV2(active, []llm.ConversationMessage{user})
 }
 
+// RunAgentMessages starts one turn from the complete provider-neutral message
+// batch. It is the core equivalent of pi's AgentMessage | AgentMessage[] prompt
+// input and preserves custom/rich message order through commit and hooks.
+func (a *Agent) RunAgentMessages(ctx context.Context, messages []agentmsg.Message) (Result, error) {
+	initial := agentmsg.Clone(messages)
+	active, err := a.beginAgentMessageRun(ctx, initial)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runV2WithAgentMessages(active, nil, initial)
+}
+
+func (a *Agent) beginAgentMessageRun(ctx context.Context, messages []agentmsg.Message) (*activeRun, error) {
+	if a == nil {
+		return nil, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: context is nil", ErrInvalidRun)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
+	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("%w: empty agent message prompt", ErrInvalidRun)
+	}
+	for _, message := range messages {
+		if message == nil {
+			return nil, fmt.Errorf("%w: nil agent message prompt", ErrInvalidRun)
+		}
+		if _, partial := message.(agentmsg.AssistantPartial); partial {
+			return nil, fmt.Errorf("%w: partial assistant prompt", ErrInvalidRun)
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != nil || a.starting {
+		return nil, ErrBusy
+	}
+	if a.nextID == math.MaxUint64 {
+		return nil, ErrRunIDExhausted
+	}
+	a.nextID++
+	runContext, cancel := context.WithCancelCause(ctx)
+	active := &activeRun{id: a.nextID, ctx: runContext, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
+	a.active = active
+	return active, nil
+}
+
 func (a *Agent) runWithAgentMessages(ctx context.Context, prompt string, extra []agentmsg.Message) (Result, error) {
 	active, user, err := a.beginRun(ctx, prompt)
 	if err != nil {
@@ -651,6 +699,15 @@ func (a *Agent) collectProvider(
 	}()
 
 	collector := &llm.StreamCollector{}
+	// Reuse the timestamp of the context message that caused this provider
+	// turn. This keeps partial events deterministic and avoids an extra call to
+	// the Agent clock (busy/admission semantics guarantee one clock read per
+	// newly created durable message).
+	var partialTimestamp time.Time
+	if messages := a.config.transcript.Context().Messages(); len(messages) != 0 {
+		partialTimestamp = messages[len(messages)-1].Timestamp()
+	}
+	partialModel := request.Model()
 	for {
 		event, nextErr := stream.Next()
 		if errors.Is(nextErr, io.EOF) {
@@ -672,12 +729,24 @@ func (a *Agent) collectProvider(
 		if snapshotErr != nil {
 			return nil, fmt.Errorf("%w: snapshot: %w", ErrProviderStream, snapshotErr)
 		}
+		partial, partialErr := agentmsg.NewAssistantPartial(agentmsg.AssistantPartialSpec{
+			Snapshot: snapshot,
+			Event:    event,
+			API:      partialModel.API(),
+			Provider: partialModel.Provider(),
+			Model:    partialModel.ID(),
+			At:       partialTimestamp,
+		})
+		if partialErr != nil {
+			return nil, fmt.Errorf("%w: partial message: %w", ErrProviderStream, partialErr)
+		}
 		a.notify(active.ctx, Event{
 			Kind:             EventProviderProgress,
 			RunID:            active.id,
 			Turn:             turn,
 			ProviderSnapshot: snapshot,
 			ProviderEvent:    event,
+			AgentMessage:     partial,
 		})
 	}
 

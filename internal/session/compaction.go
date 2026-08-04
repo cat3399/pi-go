@@ -1,7 +1,9 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -284,11 +286,27 @@ func (s *Session) Compact(ctx context.Context, request CompactRequest) (CompactR
 			return CompactResult{}, fmt.Errorf("%w: invalid summary usage: %v", ErrSummaryFailed, err)
 		}
 	}
+	if output.FromExtension {
+		if err := validateOpaqueID(output.FirstKeptEntryID, "extension compaction first kept entry id"); err != nil {
+			return CompactResult{}, fmt.Errorf("%w: %v", ErrSummaryFailed, err)
+		}
+		if len(output.Details) != 0 && !json.Valid(output.Details) {
+			return CompactResult{}, fmt.Errorf("%w: invalid extension compaction details", ErrSummaryFailed)
+		}
+	}
 	entry, err := s.commitCompaction(ctx, input, output)
 	if err != nil {
 		return CompactResult{}, err
 	}
-	return CompactResult{Entry: entry, Input: input, Committed: true}, nil
+	// Estimation is diagnostic data computed after the durable append. It must
+	// never turn a committed compaction into an apparent failed write. The
+	// estimator can only fail on arithmetic overflow; retain zero in that
+	// unreachable-in-practice case and preserve the known committed outcome.
+	var estimatedTokensAfter uint64
+	if contextEstimate, estimateErr := EstimateContextTokens(s.BuildContext().Messages()); estimateErr == nil {
+		estimatedTokensAfter = contextEstimate.Tokens
+	}
+	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil
 }
 
 func (s *Session) compactionSnapshot(ctx context.Context, request CompactRequest) (SummaryInput, error) {
@@ -373,8 +391,15 @@ func (s *Session) commitCompaction(ctx context.Context, input SummaryInput, outp
 		s.mu.Unlock()
 		return Entry{}, fmt.Errorf("%w: compaction timestamp", ErrInvalidEntry)
 	}
-	record := CompactionRecord{Summary: output.Text, FirstKeptEntryID: input.FirstKeptEntryID, TokensBefore: input.TokensBefore, Usage: output.Usage}
-	raw, err := encodeCompactionEntry(entryID, input.SelectedLeafID, timestamp, record)
+	firstKeptEntryID, tokensBefore := input.FirstKeptEntryID, input.TokensBefore
+	if output.FromExtension {
+		firstKeptEntryID, tokensBefore = output.FirstKeptEntryID, output.TokensBefore
+	}
+	payload := CompactionPayload{
+		Record:  CompactionRecord{Summary: output.Text, FirstKeptEntryID: firstKeptEntryID, TokensBefore: tokensBefore, Usage: output.Usage},
+		Details: bytes.Clone(output.Details), FromHook: output.FromExtension, HasFromHook: output.FromExtension,
+	}
+	raw, err := encodeCompactionEntry(entryID, input.SelectedLeafID, timestamp, payload)
 	if err != nil {
 		s.mu.Unlock()
 		return Entry{}, fmt.Errorf("%w: encode compaction: %w", ErrInvalidEntry, err)
@@ -412,6 +437,19 @@ func (s *Session) commitCompaction(ctx context.Context, input SummaryInput, outp
 	s.needsSeparator = false
 	s.generation++
 	return entry.clone(), nil
+}
+
+func cloneSummaryOutput(value SummaryOutput) SummaryOutput {
+	value.Details = bytes.Clone(value.Details)
+	if value.Usage != nil {
+		usage := *value.Usage
+		value.Usage = &usage
+	}
+	if value.EstimatedTokensAfter != nil {
+		estimated := *value.EstimatedTokensAfter
+		value.EstimatedTokensAfter = &estimated
+	}
+	return value
 }
 
 type compactionPreparation struct {

@@ -138,6 +138,7 @@ func runApplication(
 		Tool:              executor,
 		Tools:             toolDefinitions,
 		Stream:            runtime.stream,
+		Hooks:             runtime.hooks,
 		Now:               runtime.agentNow,
 		SettlementTimeout: runtime.settlementTimeout,
 	})

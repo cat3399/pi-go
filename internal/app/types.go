@@ -40,6 +40,7 @@ type Dependencies struct {
 	Provider           provider.Provider
 	Model              provider.ModelRef
 	Stream             provider.StreamOptions
+	Hooks              agent.Hooks
 	SystemPrompt       string
 	WorkingDir         string
 	DefaultSessionPath SessionPathFactory
@@ -66,6 +67,7 @@ type runtimeDependencies struct {
 	provider           provider.Provider
 	model              provider.ModelRef
 	stream             provider.StreamOptions
+	hooks              agent.Hooks
 	systemPrompt       string
 	workingDir         string
 	defaultSessionPath SessionPathFactory
@@ -139,6 +141,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		provider:           deps.Provider,
 		model:              deps.Model,
 		stream:             provider.CloneStreamOptions(deps.Stream),
+		hooks:              deps.Hooks,
 		systemPrompt:       deps.SystemPrompt,
 		workingDir:         filepath.Clean(workingDir),
 		defaultSessionPath: deps.DefaultSessionPath,

@@ -70,6 +70,64 @@ func (m LLM) Timestamp() time.Time                  { return m.value.Timestamp()
 func (m LLM) Conversation() llm.ConversationMessage { return m.value }
 func (m LLM) cloneMessage() Message                 { return m }
 
+// AssistantPartial is the provider-streaming form of an assistant message.
+// It is deliberately not a durable/provider-context message: Agent emits it
+// only at message_start/message_update boundaries and replaces it with a
+// terminal LLM message before persistence.
+type AssistantPartial struct {
+	snapshot llm.StreamSnapshot
+	event    llm.StreamEvent
+	api      string
+	provider string
+	model    string
+	usage    llm.Usage
+	at       time.Time
+}
+
+type AssistantPartialSpec struct {
+	Snapshot llm.StreamSnapshot
+	Event    llm.StreamEvent
+	API      string
+	Provider string
+	Model    string
+	At       time.Time
+}
+
+func NewAssistantPartial(spec AssistantPartialSpec) (AssistantPartial, error) {
+	if spec.Event == nil || spec.Snapshot.Terminal() || spec.Snapshot.FinishReason() != llm.FinishPending {
+		return AssistantPartial{}, fmt.Errorf("invalid partial assistant message")
+	}
+	if !utf8.ValidString(spec.API) || !utf8.ValidString(spec.Provider) || !utf8.ValidString(spec.Model) ||
+		strings.TrimSpace(spec.API) == "" || strings.TrimSpace(spec.Provider) == "" || strings.TrimSpace(spec.Model) == "" {
+		return AssistantPartial{}, fmt.Errorf("invalid partial assistant provenance")
+	}
+	zeroCost := llm.Cost{}
+	usage, err := llm.NewUsage(llm.UsageSpec{Cost: &zeroCost})
+	if err != nil {
+		return AssistantPartial{}, fmt.Errorf("invalid partial assistant usage: %w", err)
+	}
+	return AssistantPartial{
+		snapshot: spec.Snapshot,
+		event:    spec.Event,
+		api:      spec.API,
+		provider: spec.Provider,
+		model:    spec.Model,
+		usage:    usage,
+		at:       spec.At,
+	}, nil
+}
+func (m AssistantPartial) Role() Role                     { return RoleAssistant }
+func (m AssistantPartial) Timestamp() time.Time           { return m.at }
+func (m AssistantPartial) Snapshot() llm.StreamSnapshot   { return m.snapshot }
+func (m AssistantPartial) ProviderEvent() llm.StreamEvent { return m.event }
+func (m AssistantPartial) API() string                    { return m.api }
+func (m AssistantPartial) Provider() string               { return m.provider }
+func (m AssistantPartial) Model() string                  { return m.model }
+func (m AssistantPartial) Usage() llm.Usage               { return m.usage }
+func (m AssistantPartial) FinishReason() llm.FinishReason { return llm.FinishPending }
+func (m AssistantPartial) Blocks() []llm.AssistantBlock   { return m.snapshot.Blocks() }
+func (m AssistantPartial) cloneMessage() Message          { return m }
+
 type BashExecution struct {
 	Command            string
 	Output             string
@@ -118,18 +176,36 @@ func (m BashExecution) Text() string {
 	return text
 }
 
-type Custom struct {
-	CustomType string
-	Content    []llm.UserContentBlock
-	// StringContent preserves pi's string-vs-blocks wire distinction. When set,
-	// Content contains the canonical one-text-block projection as well.
+// CustomSpec is the mutable constructor boundary. Custom itself keeps one
+// tagged payload so its string wire form and rich provider projection cannot
+// be changed independently after construction.
+type CustomSpec struct {
+	CustomType    string
+	Content       []llm.UserContentBlock
 	StringContent *string
 	Display       bool
-	Details       []byte // JSON; intentionally not sent to the LLM
+	Details       []byte
 	At            time.Time
 }
 
-func NewCustom(value Custom) (Custom, error) {
+type customContentKind uint8
+
+const (
+	customContentRich customContentKind = iota + 1
+	customContentString
+)
+
+type Custom struct {
+	customType  string
+	contentKind customContentKind
+	content     []llm.UserContentBlock
+	text        string
+	display     bool
+	details     []byte
+	at          time.Time
+}
+
+func NewCustom(value CustomSpec) (Custom, error) {
 	if !utf8.ValidString(value.CustomType) || strings.TrimSpace(value.CustomType) == "" {
 		return Custom{}, fmt.Errorf("invalid custom message type")
 	}
@@ -138,51 +214,54 @@ func NewCustom(value Custom) (Custom, error) {
 			return Custom{}, fmt.Errorf("invalid custom message content")
 		}
 	}
+	if value.StringContent != nil && len(value.Content) != 0 {
+		return Custom{}, fmt.Errorf("custom message must choose string or rich content")
+	}
+	result := Custom{customType: value.CustomType, display: value.Display, at: value.At}
 	if value.StringContent != nil {
 		if !utf8.ValidString(*value.StringContent) {
 			return Custom{}, fmt.Errorf("invalid custom message string content")
 		}
-		copy := *value.StringContent
-		value.StringContent = &copy
-		if len(value.Content) == 0 {
-			block, err := llm.NewTextBlock(copy)
-			if err != nil {
-				return Custom{}, err
-			}
-			value.Content = []llm.UserContentBlock{block}
-		} else {
-			text, ok := value.Content[0].(llm.TextBlock)
-			if len(value.Content) != 1 || !ok || text.Text() != copy {
-				return Custom{}, fmt.Errorf("custom string content conflicts with rich content")
-			}
-		}
+		result.contentKind = customContentString
+		result.text = *value.StringContent
+	} else {
+		result.contentKind = customContentRich
+		result.content = append([]llm.UserContentBlock(nil), value.Content...)
 	}
 	if len(value.Details) != 0 && !jsonValid(value.Details) {
 		return Custom{}, fmt.Errorf("invalid custom message details")
 	}
-	value.Content = append([]llm.UserContentBlock(nil), value.Content...)
-	value.Details = append([]byte(nil), value.Details...)
-	return value, nil
+	result.details = append([]byte(nil), value.Details...)
+	return result, nil
 }
 
-// NewCustomText preserves pi's string shorthand while normalizing it to the
-// canonical rich-content form used by the Go provider boundary.
+// NewCustomText preserves pi's string shorthand. Content derives a temporary
+// rich projection only at the provider boundary; the durable wire form remains
+// the original string.
 func NewCustomText(customType, text string, display bool, details []byte, at time.Time) (Custom, error) {
-	block, err := llm.NewTextBlock(text)
-	if err != nil {
-		return Custom{}, err
-	}
-	return NewCustom(Custom{CustomType: customType, Content: []llm.UserContentBlock{block}, StringContent: &text, Display: display, Details: details, At: at})
+	return NewCustom(CustomSpec{CustomType: customType, StringContent: &text, Display: display, Details: details, At: at})
 }
 func (m Custom) Role() Role           { return RoleCustom }
-func (m Custom) Timestamp() time.Time { return m.At }
-func (m Custom) cloneMessage() Message {
-	m.Content = append([]llm.UserContentBlock(nil), m.Content...)
-	m.Details = append([]byte(nil), m.Details...)
-	if m.StringContent != nil {
-		value := *m.StringContent
-		m.StringContent = &value
+func (m Custom) Timestamp() time.Time { return m.at }
+func (m Custom) CustomType() string   { return m.customType }
+func (m Custom) Display() bool        { return m.display }
+func (m Custom) Details() []byte      { return append([]byte(nil), m.details...) }
+func (m Custom) StringContent() (string, bool) {
+	return m.text, m.contentKind == customContentString
+}
+func (m Custom) Content() []llm.UserContentBlock {
+	if m.contentKind == customContentString {
+		block, err := llm.NewTextBlock(m.text)
+		if err != nil {
+			return nil
+		}
+		return []llm.UserContentBlock{block}
 	}
+	return append([]llm.UserContentBlock(nil), m.content...)
+}
+func (m Custom) cloneMessage() Message {
+	m.content = append([]llm.UserContentBlock(nil), m.content...)
+	m.details = append([]byte(nil), m.details...)
 	return m
 }
 
@@ -221,13 +300,19 @@ func (m CompactionSummary) cloneMessage() Message { return m }
 // AgentMessage union member. Data is the sole source of truth: Session writes
 // it byte-for-byte and reopens the same role. Unknown roles do not enter LLM
 // context until a context hook deliberately replaces them with a known value.
-type OpaqueMessage struct {
+type OpaqueSpec struct {
 	Type string
 	Data []byte
 	At   time.Time
 }
 
-func NewOpaque(value OpaqueMessage) (OpaqueMessage, error) {
+type OpaqueMessage struct {
+	typ  string
+	data []byte
+	at   time.Time
+}
+
+func NewOpaque(value OpaqueSpec) (OpaqueMessage, error) {
 	if !validID(value.Type) || len(value.Data) == 0 || !jsonValid(value.Data) {
 		return OpaqueMessage{}, fmt.Errorf("invalid opaque agent message")
 	}
@@ -242,14 +327,14 @@ func NewOpaque(value OpaqueMessage) (OpaqueMessage, error) {
 	if !value.At.IsZero() && !value.At.Equal(fromData) {
 		return OpaqueMessage{}, fmt.Errorf("opaque timestamp does not match durable data")
 	}
-	value.At = fromData
-	value.Data = append([]byte(nil), value.Data...)
-	return value, nil
+	return OpaqueMessage{typ: value.Type, data: append([]byte(nil), value.Data...), at: fromData}, nil
 }
-func (m OpaqueMessage) Role() Role           { return Role(m.Type) }
-func (m OpaqueMessage) Timestamp() time.Time { return m.At }
+func (m OpaqueMessage) Role() Role           { return Role(m.typ) }
+func (m OpaqueMessage) Timestamp() time.Time { return m.at }
+func (m OpaqueMessage) Type() string         { return m.typ }
+func (m OpaqueMessage) Data() []byte         { return append([]byte(nil), m.data...) }
 func (m OpaqueMessage) cloneMessage() Message {
-	m.Data = append([]byte(nil), m.Data...)
+	m.data = append([]byte(nil), m.data...)
 	return m
 }
 
@@ -286,7 +371,7 @@ func ConvertToLLM(messages []Message) ([]llm.ConversationMessage, error) {
 				out = append(out, converted)
 			}
 		case Custom:
-			converted, err := llm.NewUserContentMessage(value.Content, value.At)
+			converted, err := llm.NewUserContentMessage(value.Content(), value.Timestamp())
 			if err != nil {
 				return nil, err
 			}
@@ -306,6 +391,8 @@ func ConvertToLLM(messages []Message) ([]llm.ConversationMessage, error) {
 		case OpaqueMessage:
 			// Unknown union members are durable but provider-invisible by default.
 			// A ContextHook can replace one with a known custom/LLM message.
+		case AssistantPartial:
+			return nil, fmt.Errorf("partial assistant message cannot enter provider context")
 		default:
 			return nil, fmt.Errorf("unsupported agent message %T", message)
 		}

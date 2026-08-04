@@ -9,7 +9,7 @@
 - 原版 pi：`a116523434806910336b9de3e38a41aa5860030b`
 - pi-web：`dfab5853b8d2f717df259e7ebc94f49a3c2e43e7`
 
-当前 P0 复审以本文件所在提交及其测试结果为准，不再用上述 pi-go 起点哈希代表进度。
+当前实现状态以本文件所在提交及其测试结果为准，不再用上述 pi-go 起点哈希代表进度。
 
 ## 总体结论
 
@@ -40,10 +40,11 @@ assembly 已经启用全部能力。
 
 ## 与目标架构的主要差距
 
-### P0：兼容数据模型复审修正中（尚未验收）
+### P0：兼容数据模型已完成
 
-下面列出的是当前修正候选已经覆盖的实现事实，不代表 P0 已经关闭。必须在独立的高强度
-复审确认契约、真实调用边界和回归测试均符合原版后，才能把 P0 标记为完成。
+P0 已按原版类型、序列化行为和真实调用边界完成复审与修正。这里的“完成”仅表示共享
+数据契约已经可以支撑后续 AgentLoop、Agent、SessionManager 和 AgentSession 工作，不表示
+这些更高层阶段已经完成。
 
 - AgentMessage 的 LLM、bash、custom（含 string-vs-blocks）、opaque extension 消息均可原样
   写入 v3 JSONL、重开和沿分支投影；`ConvertToLLM` 是唯一的 LLM 投影边界；
@@ -51,11 +52,17 @@ assembly 已经启用全部能力。
   `model_change` 缺失 `modelId` 会被严格拒绝；
 - ModelsStore 保存完整 Model 合约（input、thinking map、cost tiers、context/max tokens、compat），
   并隔离/复制 JSON-like metadata；
-- request-scoped stream options 已具备 typed fetch、payload/response hooks、header 三态删除和
-  thinking budgets；终态 usage 由 Model 计算 cost；
+- request-scoped stream options 已具备 typed fetch、payload/header/response hooks、header 三态
+  删除和 thinking budgets；resolver 以 overlay 方式合并完整调用契约，provider header hook
+  位于最终 HTTP 边界；终态 usage 由 Model 计算 cost；
 - extension-neutral typed hook contract 覆盖 context、before agent start、provider request/headers/
-  response、agent/message/tool，以及 session start/shutdown/compact/tree selection；其中没有 JS loader、
-  TUI 或 UI-only execution surface；
+  response、agent/turn/message/tool execution、model/thinking selection，以及 session start/shutdown/
+  compact/tree/switch/fork；before-agent-start 可见完整 rich prompt、结构化 system prompt options
+  和压缩后的 context；其中没有 JS loader、TUI 或 UI-only execution surface；
+- streaming message hook 和 observer 获得带 provider/model/usage/stop reason、rich partial content
+  及原始 stream event 的临时 AssistantMessage；partial 不会进入 provider context 或 durable history；
+- compaction override 的 summary、first-kept entry、tokens、usage、details 与 from-extension 标记
+  会进入同一个 durable commit，并保持 public start、before hook、commit、after hook、public end 顺序；
 - deferred tools 不再只在 Request 收集：Responses 写入 client tool-search input，Kimi-compatible
   Completions 写入对应 system tool schema，普通 compat 路径不受污染。
 
@@ -101,24 +108,24 @@ P0–P4，必须现在正确建模。
 
 严格按照 [实现路线](ROADMAP.md) 推进：
 
-1. 拆清 AgentLoop 和 stateful Agent；
-2. 完成 SessionManager；
-3. 完成产品级 AgentSession；
-4. 建立进程内 Runtime 并做整体行为验收；
-5. 之后才开始 RPC、Provider 扩展、pi-web 和其他 surface。
+1. P1：拆清并完整对齐 AgentLoop；
+2. P2：完成 stateful Agent；
+3. P3：完成 SessionManager；
+4. P4：完成产品级 AgentSession；
+5. P5–P6：建立进程内 Runtime 并做整体行为验收；
+6. 之后才开始 RPC、Provider 扩展、pi-web 和其他 surface。
 
 不为保留旧 package 或减少 diff 调整顺序，也不以 CLI demo 或单一 Provider 成功作为阶段
-完成证据。
+完成证据。本轮按约定在 P0 验收后停止，P1 尚未开始。
 
 ## 当前验证状态
 
-P0 复审修正候选的本地验证目标如下；它们全部通过也只是进入独立复审的必要条件，不是
-阶段完成声明：
+P0 最终实现已通过以下本地验证：
 
 - `go build ./...` 通过；
 - `go vet ./...` 通过；
 - `go test ./...` 通过；
-- `go test -race ./internal/agent ./internal/session ./internal/provider ./internal/model ./internal/agentmsg` 通过。
+- `go test -race ./...` 通过。
 
 旧 reasoning replay 断言已按原版完整 reasoning item（包括 summary）修正，因此不再是
-常驻失败基线。P1 只能在 P0 独立复审通过、文档验收状态同步更新后开始。
+常驻失败基线。P1 尚未实施。

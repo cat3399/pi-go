@@ -140,8 +140,13 @@ type SummaryInput struct {
 // SummaryOutput is the only data a summarizer may contribute to durable
 // session state. Empty or invalid text is rejected before any file write.
 type SummaryOutput struct {
-	Text  string
-	Usage *CompactionUsage
+	Text                 string
+	Usage                *CompactionUsage
+	FirstKeptEntryID     string
+	TokensBefore         uint64
+	EstimatedTokensAfter *uint64
+	Details              json.RawMessage
+	FromExtension        bool
 }
 
 // Summarizer is deliberately narrow: provider routing, retries and UI events
@@ -163,9 +168,27 @@ type CompactRequest struct {
 // that produced it. It never implies that an external provider ran under the
 // session lock.
 type CompactResult struct {
-	Entry     Entry
-	Input     SummaryInput
-	Committed bool
+	Entry                Entry
+	Input                SummaryInput
+	Output               SummaryOutput
+	EstimatedTokensAfter uint64
+	Committed            bool
+}
+
+func CloneCompactResult(value CompactResult) CompactResult {
+	value.Entry = value.Entry.clone()
+	value.Input.Messages = append([]llm.ConversationMessage(nil), value.Input.Messages...)
+	value.Input.RetainedTail = append([]llm.ConversationMessage(nil), value.Input.RetainedTail...)
+	value.Output.Details = bytes.Clone(value.Output.Details)
+	if value.Output.Usage != nil {
+		usage := *value.Output.Usage
+		value.Output.Usage = &usage
+	}
+	if value.Output.EstimatedTokensAfter != nil {
+		estimated := *value.Output.EstimatedTokensAfter
+		value.Output.EstimatedTokensAfter = &estimated
+	}
+	return value
 }
 
 type Header struct {
@@ -277,8 +300,8 @@ type CustomMessagePayload struct{ Message agentmsg.Custom }
 
 func (CustomMessagePayload) entryPayload() {}
 func (p CustomMessagePayload) CloneEntryPayload() EntryPayload {
-	clone, _ := agentmsg.NewCustom(p.Message)
-	p.Message = clone
+	clone := agentmsg.CloneOne(p.Message)
+	p.Message = clone.(agentmsg.Custom)
 	return p
 }
 

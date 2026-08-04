@@ -21,16 +21,21 @@ import (
 // Provider and Transcript are lifecycle dependencies; all prompt-visible
 // settings below are owned by AgentSession and snapshotted per provider turn.
 type SessionConfig struct {
-	Provider       provider.Provider
-	Transcript     Transcript
-	Model          provider.ModelRef
-	ThinkingLevel  provider.ThinkingLevel
-	SystemPrompt   string
-	Tool           ToolExecutor
-	Tools          []provider.ToolDefinition
-	BeforeToolCall BeforeToolCallHook
-	AfterToolCall  AfterToolCallHook
-	Stream         provider.StreamOptions
+	Provider      provider.Provider
+	Transcript    Transcript
+	Model         provider.ModelRef
+	ThinkingLevel provider.ThinkingLevel
+	SystemPrompt  string
+	// SystemPromptOptions preserves the structured inputs exposed by the
+	// original before_agent_start hook. Product resource assembly may populate
+	// the complete value; AgentSession fills CWD and selected tool names when
+	// callers leave those fields unset.
+	SystemPromptOptions BuildSystemPromptOptions
+	Tool                ToolExecutor
+	Tools               []provider.ToolDefinition
+	BeforeToolCall      BeforeToolCallHook
+	AfterToolCall       AfterToolCallHook
+	Stream              provider.StreamOptions
 	// ResolveStreamOptions resolves credentials and request headers for the
 	// model selected by a concrete turn. It is invoked outside session locks.
 	ResolveStreamOptions func(context.Context, provider.ModelRef) (provider.StreamOptions, error)
@@ -114,6 +119,7 @@ type AgentSession struct {
 	model          provider.ModelRef
 	thinkingLevel  provider.ThinkingLevel
 	systemPrompt   string
+	systemOptions  BuildSystemPromptOptions
 	tool           ToolExecutor
 	tools          []provider.ToolDefinition
 	beforeToolCall BeforeToolCallHook
@@ -298,9 +304,21 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: retry policy: %w", ErrInvalidConfig, err)
 	}
+	systemOptions := cloneBuildSystemPromptOptions(config.SystemPromptOptions)
+	if systemOptions.CWD == "" {
+		if durable, ok := config.Transcript.(*session.Session); ok {
+			systemOptions.CWD = durable.Header().WorkingDir()
+		}
+	}
+	if systemOptions.SelectedTools == nil {
+		systemOptions.SelectedTools = make([]string, len(config.Tools))
+		for index, definition := range config.Tools {
+			systemOptions.SelectedTools[index] = definition.Name()
+		}
+	}
 	s := &AgentSession{
 		transcript: config.Transcript, model: config.Model, thinkingLevel: config.ThinkingLevel,
-		systemPrompt: config.SystemPrompt, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
+		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
 		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks,
 		retry:         retry,
@@ -380,13 +398,16 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		s.resetSessionTurn(event)
 		types = []string{"turn_start"}
 	case EventProviderProgress:
+		agentMessage = agentmsg.CloneOne(event.AgentMessage)
 		if _, ok := event.ProviderEvent.(llm.StartEvent); ok {
 			if s.beginAssistantMessage() {
 				types = append(types, "message_start")
+				s.beginAssistantHookMessage()
 			}
 		} else {
 			if s.beginAssistantMessage() {
 				types = append(types, "message_start")
+				s.beginAssistantHookMessage()
 			}
 			types = append(types, "message_update")
 		}
@@ -468,9 +489,85 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 			messageType = MessageUpdateHookEvent
 		}
 		if messageType != "" {
-			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage)})
+			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage), ProviderEvent: event.ProviderEvent})
 		}
 	}
+	if s.hooks.Turn != nil {
+		turnIndex := uint32(0)
+		if event.Turn > 0 {
+			turnIndex = event.Turn - 1
+		}
+		switch kind {
+		case "turn_start":
+			// coding-agent adds the timestamp while adapting the low-level
+			// turn_start event to its extension surface. Reuse the configured
+			// Agent clock so tests and embedding hosts retain deterministic time
+			// semantics; a clock failure leaves the observational field unset.
+			timestamp, _ := s.loop.now()
+			_ = s.hooks.Turn(ctx, TurnLifecycleEvent{
+				Type: TurnStartHookEvent, TurnIndex: turnIndex, Timestamp: timestamp,
+			})
+		case "turn_end":
+			var final agentmsg.Message
+			if terminal != nil {
+				final, _ = agentmsg.NewLLM(terminal)
+			}
+			results := make([]agentmsg.Message, 0, len(s.sessionTurnResults()))
+			for _, result := range s.sessionTurnResults() {
+				wrapped, err := agentmsg.NewLLM(result)
+				if err == nil {
+					results = append(results, wrapped)
+				}
+			}
+			_ = s.hooks.Turn(ctx, TurnLifecycleEvent{
+				Type: TurnEndHookEvent, TurnIndex: turnIndex,
+				Message: agentmsg.CloneOne(final), ToolResults: agentmsg.Clone(results),
+			})
+		}
+	}
+	if s.hooks.ToolExecution != nil {
+		toolEvent := ToolExecutionLifecycleEvent{
+			ToolCallID: event.ToolCallID,
+			ToolName:   event.ToolName,
+			Arguments:  bytes.Clone(event.ToolArguments),
+			IsError:    event.ToolError != nil,
+		}
+		switch kind {
+		case "tool_execution_start":
+			toolEvent.Type = ToolExecutionStartHookEvent
+		case "tool_execution_update":
+			toolEvent.Type = ToolExecutionUpdateHookEvent
+			update := cloneToolUpdate(event.ToolUpdate)
+			toolEvent.Update = &update
+		case "tool_execution_end":
+			toolEvent.Type = ToolExecutionEndHookEvent
+			result := cloneToolOutput(event.ToolOutput)
+			toolEvent.Result = &result
+		}
+		if toolEvent.Type != "" {
+			_ = s.hooks.ToolExecution(ctx, toolEvent)
+		}
+	}
+}
+
+func cloneToolUpdate(value ToolUpdate) ToolUpdate {
+	value.Content = append([]llm.ToolResultContentBlock(nil), value.Content...)
+	value.AddedToolNames = append([]string(nil), value.AddedToolNames...)
+	if value.Usage != nil {
+		usage := *value.Usage
+		value.Usage = &usage
+	}
+	return value
+}
+
+func cloneToolOutput(value ToolOutput) ToolOutput {
+	value.Content = append([]llm.ToolResultContentBlock(nil), value.Content...)
+	value.AddedToolNames = append([]string(nil), value.AddedToolNames...)
+	if value.Usage != nil {
+		usage := *value.Usage
+		value.Usage = &usage
+	}
+	return value
 }
 
 func retrySucceededMessage(message llm.ConversationMessage) bool {
@@ -594,16 +691,17 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 		if err != nil {
 			return TurnSnapshot{}, fmt.Errorf("%w: resolve stream options: %w", ErrInvalidConfig, err)
 		}
-		// Resolver owns auth/header selection; preserve explicit per-session
-		// operational options only when it leaves them unspecified.
-		if resolved.MaxTokens == 0 {
-			resolved.MaxTokens = snapshot.Stream.MaxTokens
-		}
-		if resolved.SessionID == "" {
-			resolved.SessionID = snapshot.Stream.SessionID
-		}
-		snapshot.Stream = provider.CloneStreamOptions(resolved)
+		// A resolver refreshes auth and other turn-scoped values. It cannot
+		// replace the caller's complete stream contract: callbacks, thinking
+		// budgets, attribution headers, metadata, and transport settings remain
+		// present unless an explicit overlay field replaces that value.
+		snapshot.Stream = provider.MergeStreamOptions(snapshot.Stream, resolved)
 	}
+	snapshot.Stream = provider.MergeStreamOptions(snapshot.Stream, provider.StreamOptions{
+		OnPayload:  s.hooks.BeforeProviderRequest,
+		OnHeaders:  s.hooks.BeforeProviderHeaders,
+		OnResponse: s.hooks.AfterProviderResponse,
+	})
 	return snapshot, nil
 }
 
@@ -718,10 +816,20 @@ func (s *AgentSession) SetModel(model provider.ModelRef) error {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	s.mu.Lock()
+	previous := s.model
+	previousThinking := s.thinkingLevel
 	s.model = model
 	s.thinkingLevel = model.ClampThinkingLevel(s.thinkingLevel)
+	selectedThinking := s.thinkingLevel
 	s.mu.Unlock()
 	s.lifecycleMu.Unlock()
+	if selectedThinking != previousThinking && s.hooks.ThinkingLevelSelect != nil {
+		_ = s.hooks.ThinkingLevelSelect(context.Background(), ThinkingLevelSelectEvent{Level: selectedThinking, PreviousLevel: previousThinking})
+	}
+	if hook := s.hooks.ModelSelect; hook != nil && !previous.Equal(model) {
+		previousCopy := previous
+		_ = hook(context.Background(), ModelSelectEvent{Model: model, PreviousModel: &previousCopy, Source: ModelSelectSet})
+	}
 	s.emitControl(context.Background(), "model_changed")
 	return nil
 }
@@ -739,10 +847,17 @@ func (s *AgentSession) SetThinkingLevel(level provider.ThinkingLevel) error {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	s.mu.Lock()
+	previous := s.thinkingLevel
 	s.thinkingLevel = s.model.ClampThinkingLevel(level)
+	selected := s.thinkingLevel
 	s.mu.Unlock()
 	s.lifecycleMu.Unlock()
-	s.emitControl(context.Background(), "thinking_level_changed")
+	if hook := s.hooks.ThinkingLevelSelect; hook != nil && selected != previous {
+		_ = hook(context.Background(), ThinkingLevelSelectEvent{Level: selected, PreviousLevel: previous})
+	}
+	if selected != previous {
+		s.emitControl(context.Background(), "thinking_level_changed")
+	}
 	return nil
 }
 
@@ -784,6 +899,10 @@ func (s *AgentSession) SetTools(executor ToolExecutor, tools []provider.ToolDefi
 	s.mu.Lock()
 	s.tool = executor
 	s.tools = append([]provider.ToolDefinition(nil), tools...)
+	s.systemOptions.SelectedTools = make([]string, len(tools))
+	for index, definition := range tools {
+		s.systemOptions.SelectedTools[index] = definition.Name()
+	}
 	s.mu.Unlock()
 	s.lifecycleMu.Unlock()
 	return nil
@@ -796,8 +915,22 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, true, prompt, func(run context.Context, extra []agentmsg.Message) (Result, error) {
-		return s.loop.runWithAgentMessages(run, prompt, extra)
+	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
+		timestamp, err := s.loop.now()
+		if err != nil {
+			return sessionPromptInput{}, err
+		}
+		user, err := llm.NewUserTextMessage(prompt, timestamp)
+		if err != nil {
+			return sessionPromptInput{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
+		}
+		wrapper, err := agentmsg.NewLLM(user)
+		if err != nil {
+			return sessionPromptInput{}, err
+		}
+		return sessionPromptInput{Text: prompt, Messages: []agentmsg.Message{wrapper}}, nil
+	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
 	})
 }
 func (s *AgentSession) Prompt(ctx context.Context, prompt string) (Result, error) {
@@ -814,15 +947,118 @@ func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContent
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, true, "", func(run context.Context, extra []agentmsg.Message) (Result, error) {
-		return s.loop.runContentWithAgentMessages(run, content, extra)
+	input := append([]llm.UserContentBlock(nil), content...)
+	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
+		timestamp, err := s.loop.now()
+		if err != nil {
+			return sessionPromptInput{}, err
+		}
+		user, err := llm.NewUserContentMessage(input, timestamp)
+		if err != nil {
+			return sessionPromptInput{}, fmt.Errorf("%w: prompt content: %w", ErrInvalidRun, err)
+		}
+		wrapper, err := agentmsg.NewLLM(user)
+		if err != nil {
+			return sessionPromptInput{}, err
+		}
+		messages := []agentmsg.Message{wrapper}
+		prompt, images := promptTextAndImages(messages)
+		return sessionPromptInput{Text: prompt, Messages: messages, Images: images}, nil
+	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
 	})
 }
 func (s *AgentSession) PromptContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
 	return s.RunContent(ctx, content)
 }
 
-func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, prompt string, begin func(context.Context, []agentmsg.Message) (Result, error)) (result Result, runErr error) {
+// RunMessages is the multi-message prompt surface used by hosts that already
+// operate on pi's AgentMessage union (for example pending next-turn custom
+// messages). The supplied order remains intact and extension messages follow
+// the complete prompt batch.
+func (s *AgentSession) RunMessages(ctx context.Context, messages []agentmsg.Message) (Result, error) {
+	if err := s.rejectIfClosed(); err != nil {
+		return Result{}, err
+	}
+	if s.loop == nil || len(messages) == 0 {
+		return Result{}, fmt.Errorf("%w: empty agent message prompt", ErrInvalidRun)
+	}
+	initial := agentmsg.Clone(messages)
+	for _, message := range initial {
+		if message == nil {
+			return Result{}, fmt.Errorf("%w: nil agent message prompt", ErrInvalidRun)
+		}
+		if _, partial := message.(agentmsg.AssistantPartial); partial {
+			return Result{}, fmt.Errorf("%w: partial assistant prompt", ErrInvalidRun)
+		}
+	}
+	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
+		prompt, images := promptTextAndImages(initial)
+		return sessionPromptInput{Text: prompt, Messages: agentmsg.Clone(initial), Images: images}, nil
+	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
+	})
+}
+
+func (s *AgentSession) PromptMessages(ctx context.Context, messages []agentmsg.Message) (Result, error) {
+	return s.RunMessages(ctx, messages)
+}
+
+func promptTextAndImages(messages []agentmsg.Message) (string, []llm.ImageBlock) {
+	var prompt string
+	var images []llm.ImageBlock
+	appendText := func(text string) {
+		if prompt != "" {
+			prompt += "\n"
+		}
+		prompt += text
+	}
+	for _, message := range messages {
+		wrapped, ok := message.(agentmsg.LLM)
+		if !ok {
+			continue
+		}
+		switch value := wrapped.Conversation().(type) {
+		case llm.UserTextMessage:
+			for _, block := range value.Content() {
+				appendText(block.Text())
+			}
+		case llm.UserContentMessage:
+			for _, block := range value.Content() {
+				switch block := block.(type) {
+				case llm.TextBlock:
+					appendText(block.Text())
+				case llm.ImageBlock:
+					images = append(images, block)
+				}
+			}
+		}
+	}
+	return prompt, images
+}
+
+func (s *AgentSession) systemPromptOptions() BuildSystemPromptOptions {
+	if s == nil {
+		return BuildSystemPromptOptions{}
+	}
+	s.mu.RLock()
+	options := cloneBuildSystemPromptOptions(s.systemOptions)
+	s.mu.RUnlock()
+	return options
+}
+
+type sessionPromptInput struct {
+	Text     string
+	Messages []agentmsg.Message
+	Images   []llm.ImageBlock
+}
+
+func (s *AgentSession) runSession(
+	ctx context.Context,
+	prePromptCheck bool,
+	prepare func() (sessionPromptInput, error),
+	begin func(context.Context, sessionPromptInput, []agentmsg.Message) (Result, error),
+) (result Result, runErr error) {
 	run, err := s.admitSessionRun(ctx)
 	if err != nil {
 		return Result{}, err
@@ -834,10 +1070,23 @@ func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, prom
 		}
 		s.finishSessionRun(run)
 	}()
+	var input sessionPromptInput
+	if prepare != nil {
+		input, err = prepare()
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	if prePromptCheck {
+		s.checkPrePromptCompaction(run)
+	}
 	var extra []agentmsg.Message
 	if hook := s.hooks.BeforeAgentStart; prePromptCheck && hook != nil {
 		state := s.State()
-		out, hookErr := hook(run.ctx, BeforeAgentStartEvent{Prompt: prompt, SystemPrompt: state.SystemPrompt, Messages: s.runtimeTranscript.Context().AgentMessages()})
+		out, hookErr := hook(run.ctx, BeforeAgentStartEvent{
+			Prompt: input.Text, Images: append([]llm.ImageBlock(nil), input.Images...), PromptMessages: agentmsg.Clone(input.Messages),
+			SystemPrompt: state.SystemPrompt, SystemPromptOptions: s.systemPromptOptions(), Messages: s.runtimeTranscript.Context().AgentMessages(),
+		})
 		if hookErr != nil {
 			return Result{}, hookErr
 		}
@@ -860,10 +1109,9 @@ func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, prom
 	}
 
 	if prePromptCheck {
-		s.checkPrePromptCompaction(run)
 		s.setSessionPhase(run, PhaseProvider)
 	}
-	result, runErr = begin(run.ctx, extra)
+	result, runErr = begin(run.ctx, input, extra)
 	for runErr == nil {
 		if cause := context.Cause(run.ctx); cause != nil {
 			s.endRetrySeries(run.ctx, false, cause.Error())
@@ -1091,23 +1339,11 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 	if s == nil || s.runtimeTranscript == nil || s.summarizer == nil {
 		return false
 	}
-	var proceed bool
-	var hookErr error
-	instructions, proceed, hookErr = s.beforeCompaction(run.ctx, reason, willRetry, instructions)
-	if !proceed {
-		if hookErr != nil {
-			s.emitCompaction(run.ctx, "compaction_end", reason, nil, false, false, hookErr.Error())
-		}
-		return false
-	}
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", reason, nil, false, willRetry, "")
-	result, err := s.runtimeTranscript.Compact(run.ctx, session.CompactRequest{
-		KeepRecentTokens: s.keepRecentTokens, Instructions: instructions,
-		Summarizer: sessionObservedSummarizer{session: s, run: run, reason: reason, base: s.summarizer},
-	})
+	result, err := s.compactTranscript(run, reason, willRetry, instructions)
 	if err != nil {
-		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled)
+		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
 		s.emitCompaction(run.ctx, "compaction_end", reason, nil, aborted, false, err.Error())
 		return false
 	}
@@ -1117,40 +1353,108 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 		// context.
 		s.runtimeTranscript.removeLastFailure()
 	}
+	s.afterCompaction(run.ctx, result, reason, willRetry)
 	s.emitCompaction(run.ctx, "compaction_end", reason, &result, false, willRetry, "")
-	s.afterCompaction(run.ctx, reason, willRetry)
 	return true
 }
 
-func (s *AgentSession) beforeCompaction(ctx context.Context, reason CompactionReason, willRetry bool, instructions string) (string, bool, error) {
-	hook := s.hooks.SessionCompact
+var errExtensionCompactionCancelled = errors.New("extension cancelled compaction")
+
+func (s *AgentSession) compactTranscript(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
+	base := sessionObservedSummarizer{session: s, run: run, reason: reason, base: s.summarizer}
+	return s.runtimeTranscript.Compact(run.ctx, session.CompactRequest{
+		KeepRecentTokens: s.keepRecentTokens,
+		Instructions:     instructions,
+		Summarizer: extensionCompactionSummarizer{
+			session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base,
+		},
+	})
+}
+
+func (s *AgentSession) afterCompaction(ctx context.Context, result session.CompactResult, reason CompactionReason, willRetry bool) {
+	if hook := s.hooks.SessionCompact; hook != nil {
+		firstKept, tokensBefore := result.Input.FirstKeptEntryID, result.Input.TokensBefore
+		if result.Output.FromExtension {
+			firstKept, tokensBefore = result.Output.FirstKeptEntryID, result.Output.TokensBefore
+		}
+		estimated := result.EstimatedTokensAfter
+		_ = hook(ctx, SessionCompactEvent{
+			CompactionEntry: result.Entry,
+			Result: ExtensionCompactionResult{
+				Summary: result.Output.Text, FirstKeptEntryID: firstKept, TokensBefore: tokensBefore,
+				EstimatedTokensAfter: &estimated, Usage: result.Output.Usage, Details: bytes.Clone(result.Output.Details),
+			},
+			FromExtension: result.Output.FromExtension, Reason: reason, WillRetry: willRetry,
+		})
+	}
+}
+
+type extensionCompactionSummarizer struct {
+	session      *AgentSession
+	reason       CompactionReason
+	willRetry    bool
+	instructions string
+	base         session.Summarizer
+}
+
+func (s extensionCompactionSummarizer) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
+	hook := s.session.hooks.SessionBeforeCompact
 	if hook == nil {
-		return instructions, true, nil
+		return s.base.Summarize(ctx, input)
 	}
 	branch := []session.Entry(nil)
-	if durable, ok := s.transcript.(*session.Session); ok {
+	if durable, ok := s.session.transcript.(*session.Session); ok {
 		branch = durable.BranchPath()
 	}
-	result, err := hook(ctx, SessionCompactHookEvent{Before: true, Reason: reason, WillRetry: willRetry, Branch: branch, Instructions: instructions})
+	eventInput := input
+	eventInput.Messages = append([]llm.ConversationMessage(nil), input.Messages...)
+	eventInput.RetainedTail = append([]llm.ConversationMessage(nil), input.RetainedTail...)
+	result, err := hook(ctx, SessionBeforeCompactEvent{
+		Preparation: eventInput, BranchEntries: append([]session.Entry(nil), branch...),
+		CustomInstructions: optionalString(s.instructions), Reason: s.reason, WillRetry: s.willRetry,
+	})
 	if err != nil {
-		return instructions, false, err
+		return session.SummaryOutput{}, err
+	}
+	if err := result.Cancel.Validate(); err != nil {
+		return session.SummaryOutput{}, err
 	}
 	if result.Cancel.Cancelled() {
-		return instructions, false, nil
+		return session.SummaryOutput{}, errExtensionCompactionCancelled
 	}
-	if result.Instructions != nil {
-		return *result.Instructions, true, nil
+	if result.Compaction == nil {
+		return s.base.Summarize(ctx, input)
 	}
-	return instructions, true, nil
+	extension := result.Compaction
+	return session.SummaryOutput{
+		Text: extension.Summary, FirstKeptEntryID: extension.FirstKeptEntryID,
+		TokensBefore: extension.TokensBefore, EstimatedTokensAfter: cloneUint64(extension.EstimatedTokensAfter),
+		Usage: cloneCompactionUsage(extension.Usage), Details: bytes.Clone(extension.Details), FromExtension: true,
+	}, nil
 }
-func (s *AgentSession) afterCompaction(ctx context.Context, reason CompactionReason, willRetry bool) {
-	if hook := s.hooks.SessionCompact; hook != nil {
-		branch := []session.Entry(nil)
-		if durable, ok := s.transcript.(*session.Session); ok {
-			branch = durable.BranchPath()
-		}
-		_, _ = hook(ctx, SessionCompactHookEvent{Before: false, Reason: reason, WillRetry: willRetry, Branch: branch})
+
+func cloneUint64(value *uint64) *uint64 {
+	if value == nil {
+		return nil
 	}
+	copy := *value
+	return &copy
+}
+
+func cloneCompactionUsage(value *session.CompactionUsage) *session.CompactionUsage {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 type sessionObservedSummarizer struct {
@@ -1264,9 +1568,7 @@ func cloneSessionEvent(event SessionEvent) SessionEvent {
 		event.Event.ToolUpdate.Usage = &usage
 	}
 	if event.CompactionResult != nil {
-		result := *event.CompactionResult
-		result.Input.Messages = append([]llm.ConversationMessage(nil), result.Input.Messages...)
-		result.Input.RetainedTail = append([]llm.ConversationMessage(nil), result.Input.RetainedTail...)
+		result := session.CloneCompactResult(*event.CompactionResult)
 		event.CompactionResult = &result
 	}
 	return event
@@ -1351,7 +1653,7 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, false, "", func(run context.Context, _ []agentmsg.Message) (Result, error) {
+	return s.runSession(ctx, false, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.Continue(run)
 	})
 }
@@ -1598,28 +1900,19 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 		return session.CompactResult{}, err
 	}
 	defer s.finishSessionRun(run)
-	var proceed bool
-	var hookErr error
-	instructions, proceed, hookErr = s.beforeCompaction(run.ctx, CompactionManual, false, instructions)
-	if hookErr != nil {
-		return session.CompactResult{}, hookErr
-	}
-	if !proceed {
-		return session.CompactResult{}, ErrAgentAborted
-	}
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
-	result, err := s.runtimeTranscript.Compact(run.ctx, session.CompactRequest{
-		KeepRecentTokens: s.keepRecentTokens, Instructions: instructions,
-		Summarizer: sessionObservedSummarizer{session: s, run: run, reason: CompactionManual, base: s.summarizer},
-	})
+	result, err := s.compactTranscript(run, CompactionManual, false, instructions)
 	if err != nil {
-		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled)
+		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
 		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, aborted, false, err.Error())
+		if errors.Is(err, errExtensionCompactionCancelled) {
+			return session.CompactResult{}, ErrAgentAborted
+		}
 		return session.CompactResult{}, err
 	}
+	s.afterCompaction(run.ctx, result, CompactionManual, false)
 	s.emitCompaction(run.ctx, "compaction_end", CompactionManual, &result, false, false, "")
-	s.afterCompaction(run.ctx, CompactionManual, false)
 	return result, nil
 }
 
@@ -1643,18 +1936,45 @@ func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
 	}
 	defer s.finishSessionRun(run)
 	old, _ := durable.LeafID()
-	branch := durable.BranchPath()
-	if hook := s.hooks.SessionTree; hook != nil {
-		result, err := hook(run.ctx, SessionTreeHookEvent{Before: true, OldLeafID: old, NewLeafID: id, Branch: branch})
+	if old == id {
+		return nil
+	}
+	targetPath, err := durable.PathTo(id)
+	if err != nil {
+		return err
+	}
+	oldPath := durable.BranchPath()
+	commonAncestor, entriesToSummarize := treeNavigationDelta(oldPath, targetPath)
+	preparation := TreePreparation{
+		TargetID: id, OldLeafID: optionalString(old), CommonAncestorID: optionalString(commonAncestor),
+		EntriesToSummarize: entriesToSummarize, UserWantsSummary: false,
+	}
+	var label string
+	if hook := s.hooks.SessionBeforeTree; hook != nil {
+		result, err := hook(run.ctx, SessionBeforeTreeEvent{Preparation: preparation})
 		if err != nil {
+			return err
+		}
+		if err := result.Cancel.Validate(); err != nil {
 			return err
 		}
 		if result.Cancel.Cancelled() {
 			return ErrAgentAborted
 		}
+		// SelectLeaf is the non-summarizing navigation surface. Summary and
+		// instruction overrides remain accurately typed for the future full tree
+		// runtime, while label is meaningful for this operation today.
+		if result.Label != nil {
+			label = *result.Label
+		}
 	}
 	if err := durable.SelectLeaf(id); err != nil {
 		return err
+	}
+	if label != "" {
+		if _, err := durable.AppendPayload(run.ctx, session.LabelPayload{TargetID: id, Label: &label}); err != nil {
+			return err
+		}
 	}
 	refreshed := durable.BuildContext()
 	s.runtimeTranscript.mu.Lock()
@@ -1663,7 +1983,25 @@ func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
 	s.runtimeTranscript.assistant, s.runtimeTranscript.hasAssistant = refreshed.AssistantProvenance()
 	s.runtimeTranscript.mu.Unlock()
 	if hook := s.hooks.SessionTree; hook != nil {
-		_, _ = hook(run.ctx, SessionTreeHookEvent{Before: false, OldLeafID: old, NewLeafID: id, Branch: durable.BranchPath()})
+		newLeaf, _ := durable.LeafID()
+		_ = hook(run.ctx, SessionTreeEvent{OldLeafID: optionalString(old), NewLeafID: optionalString(newLeaf)})
 	}
 	return nil
+}
+
+func treeNavigationDelta(oldPath, targetPath []session.Entry) (string, []session.Entry) {
+	oldIndexes := make(map[string]int, len(oldPath))
+	for index, entry := range oldPath {
+		oldIndexes[entry.ID()] = index
+	}
+	commonIndex := -1
+	commonID := ""
+	for index := len(targetPath) - 1; index >= 0; index-- {
+		if oldIndex, ok := oldIndexes[targetPath[index].ID()]; ok {
+			commonIndex, commonID = oldIndex, targetPath[index].ID()
+			break
+		}
+	}
+	entries := append([]session.Entry(nil), oldPath[commonIndex+1:]...)
+	return commonID, entries
 }

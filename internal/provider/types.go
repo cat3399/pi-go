@@ -514,6 +514,11 @@ func cloneAny(values map[string]any) map[string]any {
 	return copy
 }
 
+// CloneJSONMap returns a recursively independent copy of a JSON-like value
+// map while retaining concrete named map/slice types used by compatibility
+// extensions.
+func CloneJSONMap(values map[string]any) map[string]any { return cloneAny(values) }
+
 func cloneJSONLike(value any) any {
 	if value == nil {
 		return nil
@@ -579,6 +584,184 @@ func CloneStreamOptions(value StreamOptions) StreamOptions {
 		value.Temperature = &copy
 	}
 	return value
+}
+
+// MergeStreamOptions applies one turn-scoped overlay without discarding
+// caller-owned options.  A resolver normally contributes refreshed auth and
+// headers; callbacks and JSON-like maps are therefore composed/merged instead
+// of replacing the complete request contract.
+func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
+	result := CloneStreamOptions(base)
+	if overlay.Temperature != nil {
+		value := *overlay.Temperature
+		result.Temperature = &value
+	}
+	if overlay.APIKey != "" {
+		result.APIKey = overlay.APIKey
+	}
+	result.Headers = mergeHeaderMap(result.Headers, overlay.Headers)
+	result.HeaderOverrides = mergeHeaderOverrideMap(result.HeaderOverrides, overlay.HeaderOverrides)
+	if overlay.MaxTokens != 0 {
+		result.MaxTokens = overlay.MaxTokens
+	}
+	if overlay.SessionID != "" {
+		result.SessionID = overlay.SessionID
+	}
+	if overlay.Transport != "" {
+		result.Transport = overlay.Transport
+	}
+	if overlay.Fetch != nil {
+		result.Fetch = overlay.Fetch
+	}
+	result.OnPayload = composePayloadHooks(result.OnPayload, overlay.OnPayload)
+	result.OnHeaders = composeHeaderHooks(result.OnHeaders, overlay.OnHeaders)
+	result.OnResponse = composeResponseHooks(result.OnResponse, overlay.OnResponse)
+	result.ThinkingBudgets = mergeThinkingBudgets(result.ThinkingBudgets, overlay.ThinkingBudgets)
+	if overlay.CacheRetention != "" {
+		result.CacheRetention = overlay.CacheRetention
+	}
+	if overlay.TimeoutMS != 0 {
+		result.TimeoutMS = overlay.TimeoutMS
+	}
+	if overlay.WebsocketConnectTimeoutMS != 0 {
+		result.WebsocketConnectTimeoutMS = overlay.WebsocketConnectTimeoutMS
+	}
+	if overlay.MaxRetries != 0 {
+		result.MaxRetries = overlay.MaxRetries
+	}
+	if overlay.MaxRetryDelayMS != 0 {
+		result.MaxRetryDelayMS = overlay.MaxRetryDelayMS
+	}
+	result.Metadata = mergeAnyMap(result.Metadata, overlay.Metadata)
+	result.Env = mergeStringMap(result.Env, overlay.Env)
+	result.Extra = mergeAnyMap(result.Extra, overlay.Extra)
+	return result
+}
+
+func composePayloadHooks(first, second PayloadHook) PayloadHook {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(model ModelRef, payload []byte) ([]byte, error) {
+		current, err := first(model, append([]byte(nil), payload...))
+		if err != nil {
+			return nil, err
+		}
+		return second(model, append([]byte(nil), current...))
+	}
+}
+
+func composeHeaderHooks(first, second HeaderHook) HeaderHook {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(model ModelRef, headers map[string]*string) error {
+		if err := first(model, headers); err != nil {
+			return err
+		}
+		return second(model, headers)
+	}
+}
+
+func composeResponseHooks(first, second ResponseHook) ResponseHook {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(model ModelRef, response ResponseInfo) error {
+		if err := first(model, response); err != nil {
+			return err
+		}
+		return second(model, response)
+	}
+}
+
+func mergeStringMap(base, overlay map[string]string) map[string]string {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	result := cloneStrings(base)
+	if result == nil {
+		result = make(map[string]string, len(overlay))
+	}
+	for key, value := range overlay {
+		result[key] = value
+	}
+	return result
+}
+
+func mergeHeaderMap(base, overlay map[string]string) map[string]string {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	result := cloneStrings(base)
+	if result == nil {
+		result = make(map[string]string, len(overlay))
+	}
+	for key, value := range overlay {
+		for existing := range result {
+			if strings.EqualFold(existing, key) {
+				delete(result, existing)
+			}
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func mergeHeaderOverrideMap(base, overlay map[string]*string) map[string]*string {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	result := cloneHeaderOverrides(base)
+	if result == nil {
+		result = make(map[string]*string, len(overlay))
+	}
+	for key, value := range overlay {
+		for existing := range result {
+			if strings.EqualFold(existing, key) {
+				delete(result, existing)
+			}
+		}
+		result[key] = cloneString(value)
+	}
+	return result
+}
+
+func mergeThinkingBudgets(base, overlay map[ThinkingLevel]uint64) map[ThinkingLevel]uint64 {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	result := cloneThinkingBudgets(base)
+	if result == nil {
+		result = make(map[ThinkingLevel]uint64, len(overlay))
+	}
+	for key, value := range overlay {
+		result[key] = value
+	}
+	return result
+}
+
+func mergeAnyMap(base, overlay map[string]any) map[string]any {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	result := cloneAny(base)
+	if result == nil {
+		result = make(map[string]any, len(overlay))
+	}
+	for key, value := range overlay {
+		result[key] = cloneJSONLike(value)
+	}
+	return result
 }
 
 func cloneHeaderOverrides(values map[string]*string) map[string]*string {

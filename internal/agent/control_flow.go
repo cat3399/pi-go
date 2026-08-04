@@ -316,7 +316,8 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 	}()
 	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
 	turn := uint32(1)
-	if len(initial) > 0 {
+	turnStarted := len(initial) > 0 || len(extra) > 0
+	if turnStarted {
 		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
 		if err := a.commitQueued(active, turn, initial); err != nil {
 			return result, err
@@ -333,21 +334,19 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 			return result, err
 		}
 		if len(queued) > 0 {
-			if len(initial) == 0 {
+			if !turnStarted {
 				a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
 			}
 			if err := a.commitQueued(active, turn, queued); err != nil {
 				return result, err
 			}
-			// initial is only the current turn-start marker after commits complete.
-			// Keeping it non-empty prevents the loop below from emitting a duplicate
-			// turn_start before the first provider request.
-			initial = append(initial, queued...)
+			turnStarted = true
 		}
 	}
 	for {
-		if len(initial) == 0 {
+		if !turnStarted {
 			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			turnStarted = true
 		}
 		terminal, err := a.providerTurnV2(active, turn)
 		if err != nil {
@@ -369,10 +368,10 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 			}
 			if len(queued) > 0 {
 				turn++
-				initial = queued
 				if err := a.startQueuedTurnV2(active, turn, queued); err != nil {
 					return result, err
 				}
+				turnStarted = true
 				continue
 			}
 			queued, err = a.reserveQueue(active, false)
@@ -381,10 +380,10 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 			}
 			if len(queued) > 0 {
 				turn++
-				initial = queued
 				if err := a.startQueuedTurnV2(active, turn, queued); err != nil {
 					return result, err
 				}
+				turnStarted = true
 				continue
 			}
 			return a.acceptFinalV2(active, result, terminal)
@@ -432,17 +431,17 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 		}
 		if len(queued) > 0 {
 			turn++
-			initial = queued
 			if err := a.startQueuedTurnV2(active, turn, queued); err != nil {
 				return result, err
 			}
+			turnStarted = true
 			continue
 		}
 		if batch.terminate {
 			return a.acceptFinalV2(active, result, toolUse)
 		}
 		turn++
-		initial = nil
+		turnStarted = false
 		if err := a.setRunPhaseV2(active, turn, PhaseProvider); err != nil {
 			return result, err
 		}

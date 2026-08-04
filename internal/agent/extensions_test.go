@@ -48,9 +48,7 @@ func TestExtensionHookSurfaceIsTyped(t *testing.T) {
 		cancel := true
 		return BeforeAgentStartResult{Cancel: HookCancel{Cancel: &cancel}}, nil
 	}
-	hooks.SessionTree = func(context.Context, SessionTreeHookEvent) (SessionTreeHookResult, error) {
-		return SessionTreeHookResult{}, nil
-	}
+	hooks.SessionTree = func(context.Context, SessionTreeEvent) error { return nil }
 	hooks.SessionShutdown = func(context.Context, SessionShutdownHookEvent) error { return nil }
 	if hooks.BeforeAgentStart == nil || hooks.SessionTree == nil || hooks.SessionShutdown == nil {
 		t.Fatal("typed hooks were not assignable")

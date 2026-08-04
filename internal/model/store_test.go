@@ -57,7 +57,7 @@ func TestStoreProviderScopedMergeAndUnknownPreservation(t *testing.T) {
 	}
 }
 
-func TestP0ModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.T) {
+func TestModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows v0.1 fails closed for private durable configuration")
 	}

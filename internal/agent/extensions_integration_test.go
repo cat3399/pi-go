@@ -15,7 +15,7 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-func TestP0BeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
+func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 	model, err := provider.NewModelRef("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +27,7 @@ func TestP0BeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 	sequence := make([]string, 0, 6)
 	hooks := agent.Hooks{
 		BeforeAgentStart: func(_ context.Context, event agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
-			if event.Prompt != "hello" || event.SystemPrompt != "base" || len(event.Messages) != 0 {
+			if event.Prompt != "hello" || event.SystemPrompt != "base" || len(event.Messages) != 0 || len(event.PromptMessages) != 1 || len(event.Images) != 0 {
 				t.Fatalf("before_agent_start = %#v", event)
 			}
 			override := "hook system"
@@ -75,7 +75,10 @@ func TestP0BeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 	wantSequence := []string{
 		"message_start:user", "message_end:user",
 		"message_start:custom", "message_end:custom",
-		"message_start:assistant", "message_end:assistant",
+		"message_start:assistant",
+		"message_update:assistant", "message_update:assistant", "message_update:assistant",
+		"message_update:assistant", "message_update:assistant", "message_update:assistant",
+		"message_end:assistant",
 	}
 	if !reflect.DeepEqual(sequence, wantSequence) {
 		t.Fatalf("hook sequence = %v, want %v", sequence, wantSequence)
@@ -85,7 +88,7 @@ func TestP0BeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 		t.Fatalf("durable roles = %#v", durable)
 	}
 	custom := durable[1].(agentmsg.Custom)
-	if custom.StringContent == nil || *custom.StringContent != "replaced" || string(custom.Details) != `{"source":"message_end"}` {
+	if text, ok := custom.StringContent(); !ok || text != "replaced" || string(custom.Details()) != `{"source":"message_end"}` {
 		t.Fatalf("durable custom = %#v", custom)
 	}
 	if got := durable[2].(agentmsg.LLM).Conversation().(llm.AssistantTextMessage).Content()[0].Text(); got != "rewritten" {
@@ -101,7 +104,7 @@ func TestP0BeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 	}
 }
 
-func TestP0MessageEndReplacementControlsToolExecution(t *testing.T) {
+func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	definition, err := provider.NewToolDefinition("blocked-by-message-end", "fixture", false, []byte(`{"type":"object"}`))
 	if err != nil {
@@ -155,7 +158,7 @@ func TestP0MessageEndReplacementControlsToolExecution(t *testing.T) {
 	}
 }
 
-func TestP0MessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
+func TestMessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("identity", "fixture", false, []byte(`{"type":"object"}`))
 	transcript := newSession(t)
@@ -192,7 +195,7 @@ func TestP0MessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
 	}
 }
 
-func TestP0BeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T) {
+func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "must not run"))
 	cancel := true
@@ -214,10 +217,10 @@ func TestP0BeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing
 	}
 }
 
-func TestP0ContextHookPresencePreservesFullAgentMessages(t *testing.T) {
+func TestContextHookPresencePreservesFullAgentMessages(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	transcript := newSession(t)
-	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole","timestamp":1,"opaque":true}`)})
+	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole","timestamp":1,"opaque":true}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +272,7 @@ func TestP0ContextHookPresencePreservesFullAgentMessages(t *testing.T) {
 	}
 }
 
-func TestP0ToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
+func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	definition, err := provider.NewToolDefinition("mutate", "fixture", false, []byte(`{"type":"object"}`))
 	if err != nil {
@@ -349,7 +352,7 @@ func TestP0ToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 	}
 }
 
-func TestP0ToolCallHookCanBlockBeforeExecution(t *testing.T) {
+func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("blocked", "fixture", false, []byte(`{"type":"object"}`))
 	providerImpl := newScriptedProvider(t, mustToolUseTerminal(t, "call", "blocked", []byte(`{}`)), mustTextTerminal(t, "done"))
@@ -376,7 +379,7 @@ func TestP0ToolCallHookCanBlockBeforeExecution(t *testing.T) {
 	}
 }
 
-func TestP0SessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
+func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	transcript := newSession(t)
 	firstMessage, _ := llm.NewUserTextMessage("first", time.UnixMilli(1))
@@ -393,11 +396,13 @@ func TestP0SessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	alternateMessage, _ := llm.NewUserTextMessage("alternate", time.UnixMilli(3))
-	if _, err := transcript.Append(context.Background(), alternateMessage, session.AppendOptions{}); err != nil {
+	alternate, err := transcript.Append(context.Background(), alternateMessage, session.AppendOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	var lifecycle []string
-	var tree []agent.SessionTreeHookEvent
+	var treeBefore []agent.SessionBeforeTreeEvent
+	var treeAfter []agent.SessionTreeEvent
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t), Transcript: transcript, Model: model,
 		Hooks: agent.Hooks{
@@ -409,9 +414,14 @@ func TestP0SessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 				lifecycle = append(lifecycle, "shutdown:"+string(event.Reason))
 				return nil
 			},
-			SessionTree: func(_ context.Context, event agent.SessionTreeHookEvent) (agent.SessionTreeHookResult, error) {
-				tree = append(tree, event)
-				return agent.SessionTreeHookResult{}, nil
+			SessionBeforeTree: func(_ context.Context, event agent.SessionBeforeTreeEvent) (agent.SessionBeforeTreeResult, error) {
+				treeBefore = append(treeBefore, event)
+				label := "selected"
+				return agent.SessionBeforeTreeResult{Label: &label}, nil
+			},
+			SessionTree: func(_ context.Context, event agent.SessionTreeEvent) error {
+				treeAfter = append(treeAfter, event)
+				return nil
 			},
 		},
 	})
@@ -421,8 +431,17 @@ func TestP0SessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	if err := runtime.SelectLeaf(context.Background(), second.ID()); err != nil {
 		t.Fatal(err)
 	}
-	if len(tree) != 2 || !tree[0].Before || tree[1].Before || tree[0].OldLeafID == tree[0].NewLeafID || tree[1].NewLeafID != second.ID() {
-		t.Fatalf("tree hooks = %#v", tree)
+	if len(treeBefore) != 1 || len(treeAfter) != 1 {
+		t.Fatalf("tree hooks = %#v / %#v", treeBefore, treeAfter)
+	}
+	preparation := treeBefore[0].Preparation
+	if preparation.TargetID != second.ID() || preparation.OldLeafID == nil || *preparation.OldLeafID != alternate.ID() || preparation.CommonAncestorID == nil || *preparation.CommonAncestorID != first.ID() || len(preparation.EntriesToSummarize) != 1 || preparation.EntriesToSummarize[0].ID() != alternate.ID() || preparation.UserWantsSummary || treeAfter[0].NewLeafID == nil || *treeAfter[0].NewLeafID == second.ID() || treeAfter[0].FromExtension != nil {
+		t.Fatalf("tree hooks = %#v / %#v", treeBefore, treeAfter)
+	}
+	leaf, ok := transcript.LeafEntry()
+	labelPayload, labelOK := leaf.Payload().(session.LabelPayload)
+	if !ok || !labelOK || labelPayload.TargetID != second.ID() || labelPayload.Label == nil || *labelPayload.Label != "selected" || treeAfter[0].NewLeafID == nil || *treeAfter[0].NewLeafID != leaf.ID() {
+		t.Fatalf("tree label leaf = %#v / %#v", leaf, treeAfter[0])
 	}
 	if got := transcript.Context().Messages(); len(got) != 2 || userText(t, got[1]) != "second" {
 		t.Fatalf("selected context = %#v", got)
@@ -435,7 +454,7 @@ func TestP0SessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	}
 }
 
-func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
+func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 	model, _ := provider.NewModelRef("scripted", "scripted", "model")
 	t.Run("manual", func(t *testing.T) {
 		transcript := newSession(t)
@@ -445,7 +464,7 @@ func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) 
 				t.Fatal(err)
 			}
 		}
-		var phases []bool
+		var phases []string
 		var summaryInput session.SummaryInput
 		summarizer := contextRetrySummarizerFunc(func(_ context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
 			summaryInput = input
@@ -453,16 +472,18 @@ func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) 
 		})
 		runtime, err := agent.NewSession(agent.SessionConfig{
 			Provider: newScriptedProvider(t), Transcript: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
-			Hooks: agent.Hooks{SessionCompact: func(_ context.Context, event agent.SessionCompactHookEvent) (agent.SessionCompactHookResult, error) {
+			Hooks: agent.Hooks{SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 				if event.Reason != agent.CompactionManual {
 					t.Fatalf("manual reason = %q", event.Reason)
 				}
-				phases = append(phases, event.Before)
-				if event.Before {
-					replacement := "hook instructions"
-					return agent.SessionCompactHookResult{Instructions: &replacement}, nil
+				phases = append(phases, "before")
+				if event.CustomInstructions == nil || *event.CustomInstructions != "caller instructions" || event.Preparation.FirstKeptEntryID == "" {
+					t.Fatalf("manual preparation = %#v", event)
 				}
-				return agent.SessionCompactHookResult{}, nil
+				return agent.SessionBeforeCompactResult{}, nil
+			}, SessionCompact: func(_ context.Context, event agent.SessionCompactEvent) error {
+				phases = append(phases, "after")
+				return nil
 			}},
 		})
 		if err != nil {
@@ -471,7 +492,7 @@ func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) 
 		if result, err := runtime.Compact(context.Background(), "caller instructions"); err != nil || !result.Committed {
 			t.Fatalf("Compact = (%#v, %v)", result, err)
 		}
-		if !reflect.DeepEqual(phases, []bool{true, false}) || summaryInput.Instructions != "hook instructions" {
+		if !reflect.DeepEqual(phases, []string{"before", "after"}) || summaryInput.Instructions != "caller instructions" {
 			t.Fatalf("manual hook phases/input = %v/%#v", phases, summaryInput)
 		}
 	})
@@ -482,18 +503,23 @@ func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) 
 		if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
 			t.Fatal(err)
 		}
-		var phases []bool
+		var phases []string
 		summarizer := contextRetrySummarizerFunc(func(_ context.Context, _ session.SummaryInput) (session.SummaryOutput, error) {
 			return session.SummaryOutput{Text: "automatic summary"}, nil
 		})
 		runtime, err := agent.NewSession(agent.SessionConfig{
 			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: transcript, Model: model,
 			ContextWindow: 100, ContextReserve: 99, KeepRecentTokens: 1, Summarizer: summarizer,
-			Hooks: agent.Hooks{SessionCompact: func(_ context.Context, event agent.SessionCompactHookEvent) (agent.SessionCompactHookResult, error) {
+			Hooks: agent.Hooks{SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 				if event.Reason == agent.CompactionThreshold {
-					phases = append(phases, event.Before)
+					phases = append(phases, "before")
 				}
-				return agent.SessionCompactHookResult{}, nil
+				return agent.SessionBeforeCompactResult{}, nil
+			}, SessionCompact: func(_ context.Context, event agent.SessionCompactEvent) error {
+				if event.Reason == agent.CompactionThreshold {
+					phases = append(phases, "after")
+				}
+				return nil
 			}},
 		})
 		if err != nil {
@@ -502,12 +528,167 @@ func TestP0ManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) 
 		if _, err := runtime.Run(context.Background(), "new"); err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(phases, []bool{true, false}) {
+		if !reflect.DeepEqual(phases, []string{"before", "after"}) {
 			t.Fatalf("automatic phases = %v", phases)
 		}
 	})
 }
 
+func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
+	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	newTranscript := func(t *testing.T) *session.Session {
+		transcript := newSession(t)
+		for index, text := range []string{"old one", "old two", "recent"} {
+			message, _ := llm.NewUserTextMessage(text, time.UnixMilli(int64(index+1)))
+			if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return transcript
+	}
+	t.Run("full override", func(t *testing.T) {
+		transcript := newTranscript(t)
+		var sequence []string
+		var summarizerCalls int
+		var after agent.SessionCompactEvent
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t), Transcript: transcript, Model: model, KeepRecentTokens: 1,
+			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+				summarizerCalls++
+				return session.SummaryOutput{Text: "default must not run"}, nil
+			}),
+			Hooks: agent.Hooks{
+				SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
+					sequence = append(sequence, "hook-before")
+					return agent.SessionBeforeCompactResult{Compaction: &agent.ExtensionCompactionResult{
+						Summary: "extension summary", FirstKeptEntryID: event.Preparation.FirstKeptEntryID,
+						TokensBefore: event.Preparation.TokensBefore, Details: json.RawMessage(`{"owner":"extension"}`),
+					}}, nil
+				},
+				SessionCompact: func(_ context.Context, event agent.SessionCompactEvent) error {
+					sequence = append(sequence, "hook-after")
+					after = event
+					return nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+			if event.Type == "compaction_start" {
+				sequence = append(sequence, "observer-start")
+			}
+			if event.Type == "compaction_end" {
+				sequence = append(sequence, "observer-end")
+			}
+		})
+		result, err := runtime.Compact(context.Background(), "focus")
+		if err != nil || !result.Committed {
+			t.Fatalf("Compact = (%#v, %v)", result, err)
+		}
+		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "hook-after", "observer-end"}) {
+			t.Fatalf("compaction ordering = %v", sequence)
+		}
+		if summarizerCalls != 0 || !result.Output.FromExtension || after.CompactionEntry.ID() != result.Entry.ID() || !after.FromExtension || after.Result.EstimatedTokensAfter == nil {
+			t.Fatalf("extension result = calls=%d result=%#v after=%#v", summarizerCalls, result, after)
+		}
+		payload, ok := result.Entry.Payload().(session.CompactionPayload)
+		if !ok || !payload.HasFromHook || !payload.FromHook || string(payload.Details) != `{"owner":"extension"}` || payload.Record.Summary != "extension summary" {
+			t.Fatalf("durable compaction payload = %#v", result.Entry.Payload())
+		}
+	})
+
+	for _, test := range []struct {
+		name        string
+		result      agent.SessionBeforeCompactResult
+		hookErr     error
+		wantAborted bool
+	}{
+		{name: "cancel", result: agent.SessionBeforeCompactResult{Cancel: agent.HookCancel{Cancel: boolPtr(true)}}, wantAborted: true},
+		{name: "error", hookErr: errors.New("extension failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transcript := newTranscript(t)
+			beforeEntries := len(transcript.Entries())
+			var sequence []string
+			var settlement agent.SessionEvent
+			runtime, err := agent.NewSession(agent.SessionConfig{
+				Provider: newScriptedProvider(t), Transcript: transcript, Model: model, KeepRecentTokens: 1,
+				Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+					t.Fatal("default summarizer ran after extension settlement")
+					return session.SummaryOutput{}, nil
+				}),
+				Hooks: agent.Hooks{SessionBeforeCompact: func(context.Context, agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
+					sequence = append(sequence, "hook-before")
+					return test.result, test.hookErr
+				}, SessionCompact: func(context.Context, agent.SessionCompactEvent) error {
+					t.Fatal("after hook ran without a committed compaction")
+					return nil
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+				if event.Type == "compaction_start" {
+					sequence = append(sequence, "observer-start")
+				}
+				if event.Type == "compaction_end" {
+					sequence = append(sequence, "observer-end")
+					settlement = event
+				}
+			})
+			_, compactErr := runtime.Compact(context.Background(), "")
+			if test.wantAborted && !errors.Is(compactErr, agent.ErrAgentAborted) {
+				t.Fatalf("cancel error = %v", compactErr)
+			}
+			if !test.wantAborted && (compactErr == nil || !errors.Is(compactErr, test.hookErr)) {
+				t.Fatalf("hook error = %v", compactErr)
+			}
+			if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || settlement.CompactionAborted != test.wantAborted || len(transcript.Entries()) != beforeEntries {
+				t.Fatalf("settlement = sequence=%v event=%#v entries=%d", sequence, settlement, len(transcript.Entries()))
+			}
+		})
+	}
+
+	t.Run("automatic cancel pairs observer settlement", func(t *testing.T) {
+		var sequence []string
+		var settlement agent.SessionEvent
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
+			ContextWindow: 1, KeepRecentTokens: 1,
+			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+				t.Fatal("automatic summarizer ran after cancellation")
+				return session.SummaryOutput{}, nil
+			}),
+			Hooks: agent.Hooks{SessionBeforeCompact: func(context.Context, agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
+				sequence = append(sequence, "hook-before")
+				return agent.SessionBeforeCompactResult{Cancel: agent.HookCancel{Cancel: boolPtr(true)}}, nil
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+			if event.Type == "compaction_start" {
+				sequence = append(sequence, "observer-start")
+			}
+			if event.Type == "compaction_end" {
+				sequence = append(sequence, "observer-end")
+				settlement = event
+			}
+		})
+		if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
+			t.Fatalf("Run = (%#v, %v)", result, err)
+		}
+		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settlement.CompactionAborted {
+			t.Fatalf("automatic cancellation settlement = %v / %#v", sequence, settlement)
+		}
+	})
+}
+
+func boolPtr(value bool) *bool                    { return &value }
 func sessionAppendOptions() session.AppendOptions { return session.AppendOptions{} }
 
 func userText(t *testing.T, message llm.ConversationMessage) string {

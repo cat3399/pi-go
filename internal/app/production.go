@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/auth"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -53,6 +54,10 @@ type ProductionConfig struct {
 	NewSessionEntryID session.IDGenerator
 	AgentNow          func() time.Time
 	SettlementTimeout time.Duration
+	// Hooks is the transport-neutral extension contract wired into the same
+	// AgentSession path used by injected application dependencies. Loading or
+	// discovering extensions remains outside production assembly.
+	Hooks agent.Hooks
 
 	BashRunner            tool.Runner
 	BashShellPath         string
@@ -217,6 +222,7 @@ func assembleProductionDependencies(
 		Provider:              router,
 		Model:                 model,
 		Stream:                provider.StreamOptions{APIKey: resolvedAuth.APIKey, SessionID: sessionID},
+		Hooks:                 config.Hooks,
 		SystemPrompt:          resourceSnapshot.SystemPrompt,
 		WorkingDir:            workingDir,
 		DefaultSessionPath:    defaultPath,

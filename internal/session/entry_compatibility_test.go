@@ -12,12 +12,12 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
-func TestP0ToolResultMetadataRoundTripsWithoutVendorShape(t *testing.T) {
+func TestToolResultMetadataRoundTripsWithoutVendorShape(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 	ids := []string{"one", "two"}
 	next := 0
-	s, err := Create(path, CreateOptions{ID: "p0", WorkingDir: dir, Now: func() time.Time { return time.UnixMilli(100) }, NewEntryID: func() (string, error) { value := ids[next]; next++; return value, nil }})
+	s, err := Create(path, CreateOptions{ID: "tool-result-roundtrip", WorkingDir: dir, Now: func() time.Time { return time.UnixMilli(100) }, NewEntryID: func() (string, error) { value := ids[next]; next++; return value, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestP0ToolResultMetadataRoundTripsWithoutVendorShape(t *testing.T) {
 	}
 }
 
-func TestP0SessionEntryUnionDecodesOriginalV3Shapes(t *testing.T) {
+func TestSessionEntryUnionDecodesOriginalV3Shapes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "union.jsonl")
 	data := `{"type":"session","version":3,"id":"s","timestamp":"2026-01-01T00:00:00.000Z","cwd":"` + dir + `"}
@@ -111,7 +111,7 @@ func TestP0SessionEntryUnionDecodesOriginalV3Shapes(t *testing.T) {
 	}
 }
 
-func TestP0SessionPayloadAppendAndReopen(t *testing.T) {
+func TestSessionPayloadAppendAndReopen(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "append.jsonl")
 	ids := []string{"a", "b", "c", "d"}
@@ -126,7 +126,7 @@ func TestP0SessionPayloadAppendAndReopen(t *testing.T) {
 	if _, err := s.AppendPayload(context.Background(), ModelChangePayload{Provider: "generic", ModelID: "model"}); err != nil {
 		t.Fatal(err)
 	}
-	custom, err := agentmsg.NewCustom(agentmsg.Custom{CustomType: "extension", Content: []llm.UserContentBlock{mustSessionText(t, "context")}, Display: true, Details: json.RawMessage(`{"kept":true}`), At: time.UnixMilli(3)})
+	custom, err := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: "extension", Content: []llm.UserContentBlock{mustSessionText(t, "context")}, Display: true, Details: json.RawMessage(`{"kept":true}`), At: time.UnixMilli(3)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +148,12 @@ func TestP0SessionPayloadAppendAndReopen(t *testing.T) {
 	if len(entries) != 4 {
 		t.Fatalf("entries=%d", len(entries))
 	}
-	if payload, ok := entries[2].Payload().(CustomMessagePayload); !ok || payload.Message.CustomType != "extension" {
+	if payload, ok := entries[2].Payload().(CustomMessagePayload); !ok || payload.Message.CustomType() != "extension" {
 		t.Fatalf("payload=%#v", entries[2].Payload())
 	}
 }
 
-func TestP0AgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
+func TestAgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent-message.jsonl")
 	ids := []string{"root", "model", "bash", "custom", "opaque", "branch"}
@@ -183,7 +183,7 @@ func TestP0AgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
 	if _, err := s.AppendAgentMessage(context.Background(), custom, AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "extensionEvent", Data: json.RawMessage(`{"role":"extensionEvent","value":{"keep":true},"timestamp":4}`), At: time.UnixMilli(4)})
+	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: "extensionEvent", Data: json.RawMessage(`{"role":"extensionEvent","value":{"keep":true},"timestamp":4}`), At: time.UnixMilli(4)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,10 +227,12 @@ func TestP0AgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
 	if got, ok := messages[0].(agentmsg.BashExecution); !ok || got.ExitCode == nil || *got.ExitCode != 1 || !got.Truncated || got.FullOutputPath != "/tmp/full" {
 		t.Fatalf("bash = %#v", messages[0])
 	}
-	if got, ok := messages[1].(agentmsg.Custom); !ok || got.StringContent == nil || *got.StringContent != "string form" || string(got.Details) != `{"present":true}` {
+	if got, ok := messages[1].(agentmsg.Custom); !ok {
+		t.Fatalf("custom = %#v", messages[1])
+	} else if text, stringForm := got.StringContent(); !stringForm || text != "string form" || string(got.Details()) != `{"present":true}` {
 		t.Fatalf("custom = %#v", messages[1])
 	}
-	if got, ok := messages[2].(agentmsg.OpaqueMessage); !ok || string(got.Data) != `{"role":"extensionEvent","value":{"keep":true},"timestamp":4}` {
+	if got, ok := messages[2].(agentmsg.OpaqueMessage); !ok || string(got.Data()) != `{"role":"extensionEvent","value":{"keep":true},"timestamp":4}` {
 		t.Fatalf("opaque = %#v", messages[2])
 	}
 	if projected := context.Messages(); len(projected) != 2 {
@@ -238,7 +240,7 @@ func TestP0AgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
 	}
 }
 
-func TestP0ModelChangeRequiresModelID(t *testing.T) {
+func TestModelChangeRequiresModelID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "missing-model.jsonl")
 	data := `{"type":"session","version":3,"id":"s","timestamp":"2026-01-01T00:00:00.000Z","cwd":"` + dir + `"}

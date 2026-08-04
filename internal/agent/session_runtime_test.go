@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
@@ -68,9 +69,21 @@ func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
 		return agent.ToolOutput{Text: "switched"}, nil
 	}}
 	transcript := newSession(t)
+	var modelEvents []agent.ModelSelectEvent
+	var thinkingEvents []agent.ThinkingLevelSelectEvent
 	runtime, err = agent.NewSession(agent.SessionConfig{
 		Provider: providerImpl, Transcript: transcript, Model: modelA, ThinkingLevel: provider.ThinkingOff,
 		SystemPrompt: "old system prompt", Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Hooks: agent.Hooks{
+			ModelSelect: func(_ context.Context, event agent.ModelSelectEvent) error {
+				modelEvents = append(modelEvents, event)
+				return nil
+			},
+			ThinkingLevelSelect: func(_ context.Context, event agent.ThinkingLevelSelectEvent) error {
+				thinkingEvents = append(thinkingEvents, event)
+				return nil
+			},
+		},
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -89,6 +102,21 @@ func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
 	}
 	if requests[1].Model().ID() != "model-b" || requests[1].ThinkingLevel() != provider.ThinkingHigh || requests[1].SystemPrompt() != "new system prompt" {
 		t.Fatalf("second request did not refresh snapshot: model=%s thinking=%s prompt=%q", requests[1].Model().ID(), requests[1].ThinkingLevel(), requests[1].SystemPrompt())
+	}
+	if len(modelEvents) != 1 || modelEvents[0].Model.ID() != "model-b" || modelEvents[0].PreviousModel == nil || modelEvents[0].PreviousModel.ID() != "model-a" || modelEvents[0].Source != agent.ModelSelectSet {
+		t.Fatalf("model select hooks = %#v", modelEvents)
+	}
+	if len(thinkingEvents) != 1 || thinkingEvents[0].Level != provider.ThinkingHigh || thinkingEvents[0].PreviousLevel != provider.ThinkingOff {
+		t.Fatalf("thinking select hooks = %#v", thinkingEvents)
+	}
+	if err := runtime.SetModel(modelB); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.SetThinkingLevel(provider.ThinkingHigh); err != nil {
+		t.Fatal(err)
+	}
+	if len(modelEvents) != 1 || len(thinkingEvents) != 1 {
+		t.Fatalf("unchanged selections emitted hooks: model=%#v thinking=%#v", modelEvents, thinkingEvents)
 	}
 }
 
@@ -256,7 +284,11 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 		t.Fatal(err)
 	}
 	transcript := newSession(t)
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	var clockCalls atomic.Uint32
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time {
+		clockCalls.Add(1)
+		return agentTestEpoch
+	}, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +318,9 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 	}
 	if _, err := runtime.Continue(context.Background()); !errors.Is(err, agent.ErrBusy) {
 		t.Fatalf("concurrent Continue error = %v, want ErrBusy", err)
+	}
+	if got := clockCalls.Load(); got != 1 {
+		t.Fatalf("clock calls while first run is active = %d, want admitted prompt only", got)
 	}
 	close(release)
 	if err := <-done; err != nil {
@@ -1006,6 +1041,7 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 		t.Fatal(err)
 	}
 	var summaries atomic.Uint32
+	hookSawCompactedContext := false
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		ContextWindow: 1, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
@@ -1013,6 +1049,14 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 			summaries.Add(1)
 			return session.SummaryOutput{Text: "checkpoint"}, nil
 		}),
+		Hooks: agent.Hooks{BeforeAgentStart: func(_ context.Context, event agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+			for _, message := range event.Messages {
+				if message.Role() == agentmsg.RoleCompactionSummary {
+					hookSawCompactedContext = true
+				}
+			}
+			return agent.BeforeAgentStartResult{}, nil
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1028,6 +1072,9 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 	}
 	if summaries.Load() != 2 || !sameStrings(compactTypes, []string{"compaction_start", "compaction_end", "compaction_start", "compaction_end"}) {
 		t.Fatalf("summaries/events = %d/%v", summaries.Load(), compactTypes)
+	}
+	if !hookSawCompactedContext {
+		t.Fatal("before_agent_start ran before pre-prompt compaction committed")
 	}
 }
 

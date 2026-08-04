@@ -10,7 +10,37 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/cat3399/pi-go/internal/provider"
 )
+
+func TestRuntimeCompatMergeRecursivelyClonesNamedMapsAndSlices(t *testing.T) {
+	type namedMap map[string]string
+	type namedSlice []namedMap
+	baseNested := namedSlice{{"value": "base"}}
+	overrideNested := map[string][]namedMap{"items": {{"value": "override"}}}
+	base := provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
+		ChatTemplateKwargs: map[string]any{"nested": baseNested},
+	}}
+	override := provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
+		OpenRouterRouting: map[string]any{"nested": overrideNested},
+	}}
+	merged := mergeCompat(base, override)
+	baseNested[0]["value"] = "mutated-base"
+	overrideNested["items"][0]["value"] = "mutated-override"
+	compat := merged.OpenAICompletions
+	if got := compat.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"]; got != "base" {
+		t.Fatalf("base nested clone = %q", got)
+	}
+	if got := compat.OpenRouterRouting["nested"].(map[string][]namedMap)["items"][0]["value"]; got != "override" {
+		t.Fatalf("override nested clone = %q", got)
+	}
+	snapshot := cloneCompat(merged)
+	compat.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"] = "mutated-result"
+	if got := snapshot.OpenAICompletions.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"]; got != "base" {
+		t.Fatalf("snapshot nested clone = %q", got)
+	}
+}
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

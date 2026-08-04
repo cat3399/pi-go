@@ -274,18 +274,13 @@ func decodeCodingAgentMessage(raw []byte) (agentmsg.Message, error) {
 			if json.Unmarshal(contentRaw, &text) != nil {
 				return nil, contentErr
 			}
-			block, e := llm.NewTextBlock(text)
-			if e != nil {
-				return nil, e
-			}
-			content = []llm.UserContentBlock{block}
 			stringContent = &text
 		}
-		value := agentmsg.Custom{CustomType: customType, Content: content, StringContent: stringContent, Display: decodeOptionalBool(object, "display"), Details: bytes.Clone(object["details"]), At: timestamp}
+		value := agentmsg.CustomSpec{CustomType: customType, Content: content, StringContent: stringContent, Display: decodeOptionalBool(object, "display"), Details: bytes.Clone(object["details"]), At: timestamp}
 		result, e := agentmsg.NewCustom(value)
 		return result, e
 	default:
-		result, e := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: role, Data: bytes.Clone(raw), At: timestamp})
+		result, e := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: role, Data: bytes.Clone(raw), At: timestamp})
 		return result, e
 	}
 }
@@ -756,14 +751,9 @@ func decodeKnownEntryPayload(typeName string, object map[string]json.RawMessage,
 			if json.Unmarshal(contentRaw, &text) != nil {
 				return nil, e
 			}
-			block, blockErr := llm.NewTextBlock(text)
-			if blockErr != nil {
-				return nil, blockErr
-			}
-			content = []llm.UserContentBlock{block}
 			stringContent = &text
 		}
-		message, e := agentmsg.NewCustom(agentmsg.Custom{CustomType: customType, Content: content, StringContent: stringContent, Display: display, Details: bytes.Clone(object["details"]), At: timestamp})
+		message, e := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: customType, Content: content, StringContent: stringContent, Display: display, Details: bytes.Clone(object["details"]), At: timestamp})
 		if e != nil {
 			return nil, e
 		}

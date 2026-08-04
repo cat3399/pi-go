@@ -143,23 +143,23 @@ func encodeAgentMessage(message agentmsg.Message) (json.RawMessage, error) {
 		}
 		return json.Marshal(object)
 	case agentmsg.Custom:
-		object := map[string]any{"role": "custom", "customType": value.CustomType, "display": value.Display, "timestamp": value.Timestamp().UnixMilli()}
-		if value.StringContent != nil {
-			object["content"] = *value.StringContent
+		object := map[string]any{"role": "custom", "customType": value.CustomType(), "display": value.Display(), "timestamp": value.Timestamp().UnixMilli()}
+		if text, ok := value.StringContent(); ok {
+			object["content"] = text
 		} else {
-			content, err := encodeUserContentBlocks(value.Content)
+			content, err := encodeUserContentBlocks(value.Content())
 			if err != nil {
 				return nil, err
 			}
 			object["content"] = content
 		}
-		if len(value.Details) != 0 {
-			object["details"] = json.RawMessage(value.Details)
+		if details := value.Details(); len(details) != 0 {
+			object["details"] = json.RawMessage(details)
 		}
 		return json.Marshal(object)
 	case agentmsg.OpaqueMessage:
-		if len(value.Data) != 0 && json.Valid(value.Data) {
-			return append(json.RawMessage(nil), value.Data...), nil
+		if data := value.Data(); len(data) != 0 && json.Valid(data) {
+			return append(json.RawMessage(nil), data...), nil
 		}
 		return nil, fmt.Errorf("opaque agent message has no durable JSON")
 	default:
@@ -493,8 +493,9 @@ func encodeCompactionEntry(
 	id string,
 	parentID string,
 	timestamp time.Time,
-	record CompactionRecord,
+	payload CompactionPayload,
 ) (json.RawMessage, error) {
+	record := payload.Record
 	if err := validateOpaqueID(id, "entry id"); err != nil {
 		return nil, err
 	}
@@ -542,6 +543,17 @@ func encodeCompactionEntry(
 		}
 		encoded = append(encoded, `,"usage":`...)
 		encoded = append(encoded, usage...)
+	}
+	if len(payload.Details) != 0 {
+		if !json.Valid(payload.Details) {
+			return nil, fmt.Errorf("compaction details must be valid JSON")
+		}
+		encoded = append(encoded, `,"details":`...)
+		encoded = append(encoded, payload.Details...)
+	}
+	if payload.HasFromHook {
+		encoded = append(encoded, `,"fromHook":`...)
+		encoded = strconv.AppendBool(encoded, payload.FromHook)
 	}
 	return append(encoded, '}'), nil
 }
@@ -622,15 +634,15 @@ func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time
 		}
 	case CustomMessagePayload:
 		base["type"] = "custom_message"
-		base["customType"] = value.Message.CustomType
-		base["display"] = value.Message.Display
-		if len(value.Message.Details) != 0 {
-			base["details"] = json.RawMessage(value.Message.Details)
+		base["customType"] = value.Message.CustomType()
+		base["display"] = value.Message.Display()
+		if details := value.Message.Details(); len(details) != 0 {
+			base["details"] = json.RawMessage(details)
 		}
-		if value.Message.StringContent != nil {
-			base["content"] = *value.Message.StringContent
+		if text, ok := value.Message.StringContent(); ok {
+			base["content"] = text
 		} else {
-			content, err := encodeUserContentBlocks(value.Message.Content)
+			content, err := encodeUserContentBlocks(value.Message.Content())
 			if err != nil {
 				return nil, err
 			}

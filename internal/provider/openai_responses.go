@@ -322,6 +322,16 @@ func applyPayloadHook(hook PayloadHook, model ModelRef, payload []byte) ([]byte,
 }
 
 func applyFinalHeaders(headers http.Header, model ModelRef, hook HeaderHook, overrides map[string]*string) error {
+	// HeaderOverrides is the Go representation of the original
+	// Record<string, string | null> request option. Apply it while assembling
+	// the request so before_provider_headers remains the final transform and
+	// can observe, restore, or replace a static deletion.
+	for name, value := range overrides {
+		headers.Del(name)
+		if value != nil {
+			headers.Set(name, *value)
+		}
+	}
 	if hook != nil {
 		values := make(map[string]*string, len(headers))
 		for name := range headers {
@@ -339,12 +349,6 @@ func applyFinalHeaders(headers http.Header, model ModelRef, hook HeaderHook, ove
 			if value != nil {
 				headers.Set(name, *value)
 			}
-		}
-	}
-	for name, value := range overrides {
-		headers.Del(name)
-		if value != nil {
-			headers.Set(name, *value)
 		}
 	}
 	return nil

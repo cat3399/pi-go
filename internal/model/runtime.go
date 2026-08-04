@@ -1517,13 +1517,13 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 		copyString(&target.DeferredToolsMode, value.DeferredToolsMode)
 		copyBool(&target.ZaiToolStream, value.ZaiToolStream)
 		if value.ChatTemplateKwargs != nil {
-			target.ChatTemplateKwargs = cloneAnyMap(value.ChatTemplateKwargs)
+			target.ChatTemplateKwargs = provider.CloneJSONMap(value.ChatTemplateKwargs)
 		}
 		if value.OpenRouterRouting != nil {
-			target.OpenRouterRouting = cloneAnyMap(value.OpenRouterRouting)
+			target.OpenRouterRouting = provider.CloneJSONMap(value.OpenRouterRouting)
 		}
 		if value.VercelGatewayRouting != nil {
-			target.VercelGatewayRouting = cloneAnyMap(value.VercelGatewayRouting)
+			target.VercelGatewayRouting = provider.CloneJSONMap(value.VercelGatewayRouting)
 		}
 	}
 	if value := override.AnthropicMessages; value != nil {
@@ -1556,16 +1556,6 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 		}
 	}
 	return result
-}
-func cloneAnyMap(value map[string]any) map[string]any {
-	if value == nil {
-		return nil
-	}
-	copy := make(map[string]any, len(value))
-	for key, item := range value {
-		copy[key] = item
-	}
-	return copy
 }
 func cloneModel(m Model) Model {
 	m.Headers = cloneHeaders(m.Headers)
