@@ -196,8 +196,8 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 		}
 	}
 	maxTokens := request.Model().MaxTokens()
-	if request.StreamOptions().MaxTokens != 0 {
-		maxTokens = request.StreamOptions().MaxTokens
+	if configured := request.StreamOptions().MaxTokens; configured != nil {
+		maxTokens = *configured
 	}
 	if maxTokens != 0 {
 		if maxTokens < 16 {
@@ -212,7 +212,7 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 	return payload, nil
 }
 
-func responsesSupportsToolSearch(model ModelRef) bool {
+func responsesSupportsToolSearch(model Model) bool {
 	compat := model.Compat().OpenAIResponses
 	return compat != nil && compat.SupportsToolSearch != nil && *compat.SupportsToolSearch
 }
@@ -284,14 +284,11 @@ type responsesToolSearchOutput struct {
 
 type responsesReplayPolicy struct{ sourced, sameDialect, sameModel bool }
 type responsesProvenanceCarrier interface {
-	AssistantProvenance() (llm.AssistantProvenance, bool)
+	AssistantProvenance() llm.AssistantProvenance
 }
 
 func responsesReplayPolicyFor(message responsesProvenanceCarrier, target llm.AssistantProvenance) responsesReplayPolicy {
-	source, ok := message.AssistantProvenance()
-	if !ok {
-		return responsesReplayPolicy{}
-	}
+	source := message.AssistantProvenance()
 	sameDialect := source.Provider == target.Provider && source.API == target.API
 	return responsesReplayPolicy{
 		sourced:     true,

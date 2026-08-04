@@ -24,6 +24,30 @@ var testAssistantProvenance = AssistantProvenance{
 	Cost:     ZeroUsageCost(),
 }
 
+func testLLMAssistantProvenance() llm.AssistantProvenance {
+	return llm.AssistantProvenance{Provider: testAssistantProvenance.Provider, API: testAssistantProvenance.API, Model: testAssistantProvenance.Model}
+}
+
+func newAssistantTextMessage(content []llm.TextBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantTextMessage, error) {
+	return llm.NewAssistantTextMessage(content, finish, usage, timestamp, testLLMAssistantProvenance())
+}
+
+func newAssistantToolUseMessage(content []llm.AssistantBlock, usage llm.Usage, timestamp time.Time) (llm.AssistantToolUseMessage, error) {
+	return llm.NewAssistantToolUseMessage(content, usage, timestamp, testLLMAssistantProvenance())
+}
+
+func newAssistantRichMessage(content []llm.AssistantBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantRichMessage, error) {
+	return llm.NewAssistantRichMessage(content, finish, usage, timestamp, testLLMAssistantProvenance())
+}
+
+func newAssistantFailureMessage(content []llm.TextBlock, finish llm.FinishReason, message string, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessage(content, finish, message, usage, timestamp, testLLMAssistantProvenance())
+}
+
+func newAssistantFailureMessageWithFailure(content []llm.TextBlock, finish llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp, testLLMAssistantProvenance())
+}
+
 var testResponsesAssistantProvenance = AssistantProvenance{
 	API:      "openai-responses",
 	Provider: "openai",
@@ -67,8 +91,9 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 		llm.FinishStop,
 		llm.Usage{},
 		time.UnixMilli(2),
-		&llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model},
+		llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model},
 		&llm.AssistantResponseMetadata{ResponseID: "resp_1", ResponseModel: "resolved-model", RawStopReason: "completed"},
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -78,11 +103,7 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, message := range []llm.ConversationMessage{user, assistant, result} {
-		options := AppendOptions{}
-		if message.Role() == llm.RoleAssistant {
-			options.Assistant = testResponsesAssistantProvenance
-		}
-		if _, err := transcript.Append(context.Background(), message, options); err != nil {
+		if _, err := transcript.Append(context.Background(), message, AppendOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -110,9 +131,9 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 	if !ok || signature != textSignature {
 		t.Fatalf("text=%#v", storedAssistant[1])
 	}
-	provenance, ok := messages[1].(llm.AssistantRichMessage).AssistantProvenance()
-	if !ok || provenance != (llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model}) {
-		t.Fatalf("assistant provenance = (%#v, %t)", provenance, ok)
+	provenance := messages[1].(llm.AssistantRichMessage).AssistantProvenance()
+	if provenance != (llm.AssistantProvenance{Provider: testResponsesAssistantProvenance.Provider, API: testResponsesAssistantProvenance.API, Model: testResponsesAssistantProvenance.Model}) {
+		t.Fatalf("assistant provenance = %#v", provenance)
 	}
 	if response, ok := messages[1].(llm.AssistantRichMessage).ResponseMetadata(); !ok || response != (llm.AssistantResponseMetadata{ResponseID: "resp_1", ResponseModel: "resolved-model", RawStopReason: "completed"}) {
 		t.Fatalf("assistant response metadata = (%#v, %t)", response, ok)
@@ -128,7 +149,7 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 	}
 }
 
-func TestAppendRejectsAssistantMessageProvenanceMismatch(t *testing.T) {
+func TestAppendDerivesAssistantProvenanceFromMessage(t *testing.T) {
 	directory := t.TempDir()
 	transcript, err := Create(filepath.Join(directory, "provenance.jsonl"), CreateOptions{
 		ID:         "provenance",
@@ -143,22 +164,25 @@ func TestAppendRejectsAssistantMessageProvenanceMismatch(t *testing.T) {
 		llm.FinishStop,
 		llm.Usage{},
 		time.UnixMilli(1),
-		&llm.AssistantProvenance{Provider: "openai", API: "openai-responses", Model: "gpt-test"},
+		llm.AssistantProvenance{Provider: "openai", API: "openai-responses", Model: "gpt-test"},
+		nil,
 		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = transcript.Append(context.Background(), message, AppendOptions{Assistant: testAssistantProvenance})
-	if !errors.Is(err, ErrInvalidEntry) {
-		t.Fatalf("Append() error = %v, want ErrInvalidEntry", err)
+	entry, err := transcript.Append(context.Background(), message, AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(transcript.Context().Messages()) != 0 {
-		t.Fatalf("mismatched provenance append mutated transcript: %#v", transcript.Context().Messages())
+	got, ok := entry.AssistantProvenance()
+	want := AssistantProvenance{Provider: "openai", API: "openai-responses", Model: "gpt-test", Cost: ZeroUsageCost()}
+	if !ok || got != want {
+		t.Fatalf("AssistantProvenance() = (%#v, %t), want %#v", got, ok, want)
 	}
 }
 
-func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
+func TestAppendPreservesReplayMetadataOnFailedAssistant(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
@@ -184,25 +208,131 @@ func TestAppendStripsReplayFromFailedAssistant(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			failure, err := llm.NewAssistantFailureMessage([]llm.TextBlock{partial}, tt.finish, "request failed", llm.Usage{}, time.UnixMilli(1))
+			failure, err := newAssistantFailureMessage([]llm.TextBlock{partial}, tt.finish, "request failed", llm.Usage{}, time.UnixMilli(1))
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := transcript.Append(context.Background(), failure, AppendOptions{Assistant: testResponsesAssistantProvenance})
+			entry, err := transcript.Append(context.Background(), failure, AppendOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(entry.RawJSON(), []byte("textSignature")) {
-				t.Fatalf("failed assistant persisted replay metadata: %s", entry.RawJSON())
+			if !bytes.Contains(entry.RawJSON(), []byte("textSignature")) {
+				t.Fatalf("failed assistant lost replay metadata: %s", entry.RawJSON())
 			}
 			stored := transcript.Context().Messages()[0].(llm.AssistantFailureMessage)
-			if signature, ok := stored.Blocks()[0].(llm.TextBlock).TextSignature(); ok {
-				t.Fatalf("failed assistant projected signature: %q", signature)
+			if signature, ok := stored.Blocks()[0].(llm.TextBlock).TextSignature(); !ok || signature != `{"v":1,"id":"msg_partial","phase":"commentary"}` {
+				t.Fatalf("failed assistant projected signature = (%q, %t)", signature, ok)
 			}
 			if diagnostics := transcript.Context().Diagnostics(); len(diagnostics) != 0 {
 				t.Fatalf("locally encoded failure diagnostics = %#v", diagnostics)
 			}
 		})
+	}
+}
+
+func TestFailedAssistantMetadataAndDiagnosticsSurviveReopen(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	path := filepath.Join(directory, "failure-metadata.jsonl")
+	transcript, err := Create(path, CreateOptions{
+		ID:         "failure-metadata",
+		WorkingDir: directory,
+		NewEntryID: sequenceIDs("assistant"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := time.UnixMilli(1_785_542_401_123).UTC()
+	diagnostic, err := llm.NewAssistantDiagnostic(llm.AssistantDiagnosticSpec{
+		Type:      "provider-recovery",
+		Timestamp: at,
+		Error: &llm.AssistantDiagnosticError{
+			Name: "UpstreamError", Message: "redacted upstream failure",
+			Stack: "redacted stack", Code: json.RawMessage(`"E_RETRY"`),
+		},
+		Details: json.RawMessage(`{"attempt":2,"recovered":false}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, err := llm.NewFailure("request failed", errors.New("local cause must not be serialized"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := llm.AssistantResponseMetadata{
+		ResponseID: "resp_failure", ResponseModel: "upstream-model", RawStopReason: "upstream_error",
+	}
+	thinking, err := llm.NewThinkingBlock("completed reasoning before failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("call-before-failure", "inspect", []byte(`{"path":"README.md"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantFailureMessageWithBlocksAndMetadata(
+		[]llm.AssistantBlock{thinking, call}, llm.FinishError, failure, llm.Usage{}, at,
+		llm.AssistantProvenance{Provider: "fixture-provider", API: "fixture-api", Model: "fixture-model"},
+		&response, []llm.AssistantDiagnostic{diagnostic},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := transcript.Append(context.Background(), message, AppendOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range [][]byte{
+		[]byte(`"provider":"fixture-provider"`), []byte(`"api":"fixture-api"`),
+		[]byte(`"model":"fixture-model"`), []byte(`"responseId":"resp_failure"`),
+		[]byte(`"responseModel":"upstream-model"`), []byte(`"rawStopReason":"upstream_error"`),
+		[]byte(`"diagnostics":[`),
+	} {
+		if !bytes.Contains(entry.RawJSON(), field) {
+			t.Fatalf("encoded failure is missing %s: %s", field, entry.RawJSON())
+		}
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, ok := reopened.BuildContext().Messages()[0].(llm.AssistantFailureMessage)
+	if !ok {
+		t.Fatalf("reopened failure = %T", reopened.BuildContext().Messages()[0])
+	}
+	if provenance := got.AssistantProvenance(); provenance != (llm.AssistantProvenance{Provider: "fixture-provider", API: "fixture-api", Model: "fixture-model"}) {
+		t.Fatalf("reopened provenance = %#v", provenance)
+	}
+	if metadata, ok := got.ResponseMetadata(); !ok || metadata != response {
+		t.Fatalf("reopened response metadata = (%#v, %t)", metadata, ok)
+	}
+	diagnostics := got.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Type() != "provider-recovery" || !diagnostics[0].Timestamp().Equal(at) || string(diagnostics[0].Details()) != `{"attempt":2,"recovered":false}` {
+		t.Fatalf("reopened diagnostics = %#v", diagnostics)
+	}
+	errorInfo, ok := diagnostics[0].ErrorInfo()
+	if !ok || errorInfo.Name != "UpstreamError" || errorInfo.Message != "redacted upstream failure" || errorInfo.Stack != "redacted stack" || string(errorInfo.Code) != `"E_RETRY"` {
+		t.Fatalf("reopened diagnostic error = (%#v, %t)", errorInfo, ok)
+	}
+	blocks := got.Blocks()
+	if len(blocks) != 2 || blocks[0].(llm.ThinkingBlock).Thinking() != "completed reasoning before failure" || blocks[1].(llm.ToolCallBlock).ID() != "call-before-failure" {
+		t.Fatalf("reopened failure blocks = %#v", blocks)
+	}
+	// Accessors must not expose the durable diagnostic's mutable JSON buffers.
+	errorInfo.Code[0] = '0'
+	details := diagnostics[0].Details()
+	details[0] = '['
+	again := got.Diagnostics()[0]
+	againError, _ := again.ErrorInfo()
+	if string(againError.Code) != `"E_RETRY"` || string(again.Details()) != `{"attempt":2,"recovered":false}` {
+		t.Fatalf("diagnostic accessors shared storage: %#v / %s", againError, again.Details())
 	}
 }
 
@@ -237,7 +367,7 @@ func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {
 
 	user := mustUserMessage(t, "run it", clock())
 	call := mustToolCall(t, "call-1", "bash", []byte(`{"command":"printf ok"}`))
-	toolUse, err := llm.NewAssistantToolUseMessage(
+	toolUse, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{mustTextBlock(t, "running"), call},
 		mustUsage(t, 4, 2),
 		clock(),
@@ -255,7 +385,7 @@ func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	final, err := llm.NewAssistantTextMessage(
+	final, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, "done")},
 		llm.FinishStop,
 		mustUsage(t, 6, 1),
@@ -267,11 +397,7 @@ func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {
 
 	messages := []llm.ConversationMessage{user, toolUse, toolResult, final}
 	for index, message := range messages {
-		options := AppendOptions{}
-		if message.Role() == llm.RoleAssistant {
-			options.Assistant = testAssistantProvenance
-		}
-		entry, err := session.Append(context.Background(), message, options)
+		entry, err := session.Append(context.Background(), message, AppendOptions{})
 		if err != nil {
 			t.Fatalf("Append(%d) error = %v", index, err)
 		}
@@ -376,7 +502,7 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 
 	arguments := []byte(" {\n  \"html\": \"<tag>\", \"escaped\": \"\\u003ctag\\u003e\",\n  \"count\": 1.00e2\n} ")
 	messageTime := time.Date(2026, time.August, 1, 5, 6, 7, 987654321, time.FixedZone("west", -7*60*60))
-	message, err := llm.NewAssistantToolUseMessage(
+	message, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{mustToolCall(t, "call-1", "echo", arguments)},
 		mustUsage(t, 2, 3),
 		messageTime,
@@ -384,7 +510,7 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry, err := session.Append(context.Background(), message, AppendOptions{Assistant: testAssistantProvenance})
+	entry, err := session.Append(context.Background(), message, AppendOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +722,7 @@ func TestMessageCodecRoundTripsFailureAndErrorToolResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failure, err := llm.NewAssistantFailureMessage(
+	failure, err := newAssistantFailureMessage(
 		[]llm.TextBlock{mustTextBlock(t, "partial")},
 		llm.FinishAborted,
 		"cancelled",
@@ -612,7 +738,7 @@ func TestMessageCodecRoundTripsFailureAndErrorToolResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Append(context.Background(), failure, AppendOptions{Assistant: testAssistantProvenance}); err != nil {
+	if _, err := session.Append(context.Background(), failure, AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := session.Append(context.Background(), result, AppendOptions{}); err != nil {

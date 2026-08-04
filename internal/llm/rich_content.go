@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -132,6 +133,145 @@ func (p AssistantProvenance) validate() error {
 
 func (p AssistantProvenance) Matches(provider, api, model string) bool {
 	return p.Provider == provider && p.API == api && p.Model == model
+}
+
+// AssistantDiagnostic is pi's redacted, provider-neutral diagnostic record.
+// Error code and details remain raw JSON so session round-trips do not coerce
+// large numbers or expose adapter-specific structs to the agent loop.
+type AssistantDiagnostic struct {
+	typ       string
+	timestamp time.Time
+	errorInfo *AssistantDiagnosticError
+	details   json.RawMessage
+}
+
+type AssistantDiagnosticError struct {
+	Name, Message, Stack string
+	Code                 json.RawMessage
+}
+
+type AssistantDiagnosticSpec struct {
+	Type      string
+	Timestamp time.Time
+	Error     *AssistantDiagnosticError
+	Details   json.RawMessage
+}
+
+func NewAssistantDiagnostic(spec AssistantDiagnosticSpec) (AssistantDiagnostic, error) {
+	diagnostic := AssistantDiagnostic{
+		typ: spec.Type, timestamp: spec.Timestamp.UTC().Truncate(time.Millisecond),
+		details: bytes.Clone(spec.Details),
+	}
+	if spec.Error != nil {
+		copy := *spec.Error
+		copy.Code = bytes.Clone(spec.Error.Code)
+		diagnostic.errorInfo = &copy
+	}
+	if err := diagnostic.validate(); err != nil {
+		return AssistantDiagnostic{}, err
+	}
+	return diagnostic, nil
+}
+
+func (d AssistantDiagnostic) validate() error {
+	if !utf8.ValidString(d.typ) || strings.TrimSpace(d.typ) == "" || len(d.typ) > 256 {
+		return fmt.Errorf("%w: assistant diagnostic type", ErrInvalidRichContent)
+	}
+	if d.timestamp.IsZero() || !time.UnixMilli(d.timestamp.UnixMilli()).Equal(d.timestamp) {
+		return fmt.Errorf("%w: assistant diagnostic timestamp", ErrInvalidRichContent)
+	}
+	if d.errorInfo != nil {
+		for _, value := range []string{d.errorInfo.Name, d.errorInfo.Message, d.errorInfo.Stack} {
+			if !utf8.ValidString(value) {
+				return fmt.Errorf("%w: assistant diagnostic error", ErrInvalidRichContent)
+			}
+		}
+		if strings.TrimSpace(d.errorInfo.Message) == "" {
+			return fmt.Errorf("%w: assistant diagnostic error message", ErrInvalidRichContent)
+		}
+		if len(d.errorInfo.Code) != 0 {
+			var code any
+			if json.Unmarshal(d.errorInfo.Code, &code) != nil {
+				return fmt.Errorf("%w: assistant diagnostic error code", ErrInvalidRichContent)
+			}
+			switch code.(type) {
+			case string, float64:
+			default:
+				return fmt.Errorf("%w: assistant diagnostic error code", ErrInvalidRichContent)
+			}
+		}
+	}
+	if len(d.details) != 0 {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(d.details, &object) != nil || object == nil {
+			return fmt.Errorf("%w: assistant diagnostic details", ErrInvalidRichContent)
+		}
+	}
+	return nil
+}
+
+func (d AssistantDiagnostic) Type() string         { return d.typ }
+func (d AssistantDiagnostic) Timestamp() time.Time { return d.timestamp }
+func (d AssistantDiagnostic) ErrorInfo() (AssistantDiagnosticError, bool) {
+	if d.errorInfo == nil {
+		return AssistantDiagnosticError{}, false
+	}
+	copy := *d.errorInfo
+	copy.Code = bytes.Clone(d.errorInfo.Code)
+	return copy, true
+}
+func (d AssistantDiagnostic) Details() json.RawMessage { return bytes.Clone(d.details) }
+
+// AssistantMetadata contains the fields shared by every terminal assistant
+// variant. Provenance is required; response metadata and diagnostics follow
+// pi's optional fields.
+type AssistantMetadata struct {
+	Provenance  AssistantProvenance
+	Response    *AssistantResponseMetadata
+	Diagnostics []AssistantDiagnostic
+}
+
+func (m AssistantMetadata) validate() error {
+	if err := m.Provenance.validate(); err != nil {
+		return err
+	}
+	if m.Response != nil {
+		if err := m.Response.validate(); err != nil {
+			return err
+		}
+	}
+	for _, diagnostic := range m.Diagnostics {
+		if err := diagnostic.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cloneAssistantMetadata(metadata AssistantMetadata) AssistantMetadata {
+	if metadata.Response != nil {
+		copy := *metadata.Response
+		metadata.Response = &copy
+	}
+	metadata.Diagnostics = cloneAssistantDiagnostics(metadata.Diagnostics)
+	return metadata
+}
+
+func cloneAssistantDiagnostics(values []AssistantDiagnostic) []AssistantDiagnostic {
+	if values == nil {
+		return nil
+	}
+	result := make([]AssistantDiagnostic, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].details = bytes.Clone(value.details)
+		if value.errorInfo != nil {
+			copy := *value.errorInfo
+			copy.Code = bytes.Clone(value.errorInfo.Code)
+			result[index].errorInfo = &copy
+		}
+	}
+	return result
 }
 
 // ThinkingBlock mirrors pi's provider-neutral thinking content. The signature

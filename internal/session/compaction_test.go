@@ -459,7 +459,7 @@ func FuzzCompactionHelpersNeverPanic(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assistantMessage, err := llm.NewAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, usage, time.UnixMilli(2))
+		assistantMessage, err := newAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, usage, time.UnixMilli(2))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -484,7 +484,7 @@ func TestEstimateContextTokensUsesToolUsageAndTrailingSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := mustToolCall(t, "call", "read", []byte(`{"path":"a"}`))
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, usage, time.UnixMilli(1))
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{call}, usage, time.UnixMilli(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +521,7 @@ func TestSerializeConversationAndEstimateRichMessagesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking, mustTextBlock(t, "answer")}, llm.FinishStop, usage, time.UnixMilli(2))
+	assistant, err := newAssistantRichMessage([]llm.AssistantBlock{thinking, mustTextBlock(t, "answer")}, llm.FinishStop, usage, time.UnixMilli(2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +549,7 @@ func TestTokenEstimateOverflowFailsPolicyCutAndCompactWithoutWrite(t *testing.T)
 		t.Fatal(err)
 	}
 	assistantBlock := mustTextBlock(t, "assistant")
-	assistant, err := llm.NewAssistantTextMessage([]llm.TextBlock{assistantBlock}, llm.FinishStop, maxUsage, time.UnixMilli(1))
+	assistant, err := newAssistantTextMessage([]llm.TextBlock{assistantBlock}, llm.FinishStop, maxUsage, time.UnixMilli(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +584,7 @@ func TestTokenEstimateOverflowFailsPolicyCutAndCompactWithoutWrite(t *testing.T)
 		t.Fatal(err)
 	}
 	defer session.Close()
-	if _, err := session.Append(context.Background(), assistant, AppendOptions{Assistant: testAssistantProvenance}); err != nil {
+	if _, err := session.Append(context.Background(), assistant, AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := session.Append(context.Background(), tail, AppendOptions{}); err != nil {

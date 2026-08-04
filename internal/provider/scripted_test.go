@@ -359,7 +359,7 @@ func TestScriptedProviderStreamsExplicitFailureContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFailure() error = %v", err)
 	}
-	failure, err := llm.NewAssistantFailureMessageWithFailure(
+	failure, err := newAssistantFailureMessageWithFailure(
 		[]llm.TextBlock{mustTextBlock(t, "partial")},
 		llm.FinishError,
 		failureDescriptor,
@@ -531,7 +531,7 @@ func TestScriptedProviderSupportsConcurrentStreamAllocation(t *testing.T) {
 			if blockErr != nil {
 				return nil, blockErr
 			}
-			return llm.NewAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, llm.Usage{}, time.Time{})
+			return newAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, llm.Usage{}, time.Time{})
 		})
 		if err != nil {
 			t.Fatalf("FactoryResponseStep() error = %v", err)
@@ -670,7 +670,7 @@ func FuzzScriptedTextRoundTrip(f *testing.F) {
 		if err != nil {
 			t.Skip()
 		}
-		terminal, err := llm.NewAssistantTextMessage(
+		terminal, err := newAssistantTextMessage(
 			[]llm.TextBlock{block},
 			llm.FinishStop,
 			llm.Usage{},
@@ -751,7 +751,7 @@ func mustTextBlock(t *testing.T, text string) llm.TextBlock {
 
 func mustTextTerminal(t *testing.T, text string) llm.AssistantTextMessage {
 	t.Helper()
-	message, err := llm.NewAssistantTextMessage(
+	message, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, text)},
 		llm.FinishStop,
 		llm.Usage{},
@@ -769,7 +769,7 @@ func mustToolTerminal(t *testing.T, id, name string, raw []byte) llm.AssistantTo
 	if err != nil {
 		t.Fatalf("NewToolCallBlock() error = %v", err)
 	}
-	message, err := llm.NewAssistantToolUseMessage(
+	message, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{call},
 		llm.Usage{},
 		time.Time{},

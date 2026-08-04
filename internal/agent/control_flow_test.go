@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -200,7 +201,7 @@ func newQueueAgent(
 	followUpMode agent.QueueMode,
 ) *agent.Agent {
 	t.Helper()
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,9 +244,10 @@ func TestContinueQueueAllAcknowledgesDurablePrefixAndPreservesFaultRemainder(t *
 		}
 	}
 	ackSnapshot := make(chan []string, 1)
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		text, queued := queuedUserText(event.Message)
-		if event.Kind != agent.EventMessageCommitted || !queued || text != "queue:a" {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		observed := snapshotAgentEvent(event)
+		text, queued := queuedUserText(observed.Message)
+		if observed.Kind != agent.MessageEndEventType || !queued || text != "queue:a" {
 			return
 		}
 		steering, _ := runtime.Queues()
@@ -493,7 +495,7 @@ func TestStatePendingToolCallsTracksSequentialAndParallelBatches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+		assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -505,8 +507,8 @@ func TestStatePendingToolCallsTracksSequentialAndParallelBatches(t *testing.T) {
 		}
 		runtime := newAgent(t, transcript, scripted, tool)
 		states := make(chan agent.State, 2)
-		runtime.Subscribe(func(_ context.Context, event agent.Event) {
-			if event.Kind == agent.EventToolStarted {
+		runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+			if _, ok := event.(agent.ToolExecutionStartEvent); ok {
 				states <- runtime.State()
 			}
 		})
@@ -533,7 +535,7 @@ func TestStatePendingToolCallsTracksSequentialAndParallelBatches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+		assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -549,11 +551,11 @@ func TestStatePendingToolCallsTracksSequentialAndParallelBatches(t *testing.T) {
 		}
 		started := make(chan stateEvent, 2)
 		settled := make(chan stateEvent, 2)
-		runtime.Subscribe(func(_ context.Context, event agent.Event) {
-			switch event.Kind {
-			case agent.EventToolStarted:
+		runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+			switch event := event.(type) {
+			case agent.ToolExecutionStartEvent:
 				started <- stateEvent{callID: event.ToolCallID, state: runtime.State()}
-			case agent.EventToolSettled:
+			case agent.ToolExecutionEndEvent:
 				settled <- stateEvent{callID: event.ToolCallID, state: runtime.State()}
 			}
 		})
@@ -621,7 +623,7 @@ func TestParallelBatchSettlesEventsByCompletionButCommitsSourceOrder(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,8 +632,8 @@ func TestParallelBatchSettlesEventsByCompletionButCommitsSourceOrder(t *testing.
 	runtime := newAgent(t, transcript, scripted, tool)
 	var mu sync.Mutex
 	var settled []string
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind == agent.EventToolSettled {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		if event, ok := event.(agent.ToolExecutionEndEvent); ok {
 			mu.Lock()
 			settled = append(settled, event.ToolName)
 			mu.Unlock()
@@ -669,11 +671,11 @@ func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,11 +708,11 @@ func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		switch event.Kind {
-		case agent.EventToolStarted:
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		switch event := event.(type) {
+		case agent.ToolExecutionStartEvent:
 			lifecycle = append(lifecycle, "start:"+event.ToolName)
-		case agent.EventToolSettled:
+		case agent.ToolExecutionEndEvent:
 			lifecycle = append(lifecycle, "end:"+event.ToolName)
 		}
 	})
@@ -767,11 +769,11 @@ func TestParallelToolLookupPanicSettlesAsAssociatedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,17 +784,18 @@ func TestParallelToolLookupPanicSettlesAsAssociatedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var events []agent.EventKind
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind == agent.EventToolStarted || event.Kind == agent.EventToolSettled {
-			events = append(events, event.Kind)
+	var events []agent.AgentEventType
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		switch event.(type) {
+		case agent.ToolExecutionStartEvent, agent.ToolExecutionEndEvent:
+			events = append(events, event.Type())
 		}
 	})
 	result, err := runtime.Run(context.Background(), "go")
 	if err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
-	if !reflect.DeepEqual(events, []agent.EventKind{agent.EventToolStarted, agent.EventToolSettled}) {
+	if !reflect.DeepEqual(events, []agent.AgentEventType{agent.ToolExecutionStartEventType, agent.ToolExecutionEndEventType}) {
 		t.Fatalf("lookup panic events = %v", events)
 	}
 }
@@ -871,6 +874,78 @@ func TestUnmarshalableToolDetailsFailBeforeDurableResult(t *testing.T) {
 	}
 }
 
+func TestToolDetailsAreIsolatedAcrossHookObserversAndDurability(t *testing.T) {
+	transcript := newSession(t)
+	updateDetails := map[string]any{"nested": map[string]any{"value": "update"}}
+	outputDetails := map[string]any{"nested": map[string]any{"value": "output"}}
+	tool := &fakeTool{name: "echo", execute: func(_ context.Context, _ []byte, report func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+		report(agent.ToolUpdate{Text: "working", Details: updateDetails})
+		return agent.ToolOutput{Text: "done", Details: outputDetails}, nil
+	}}
+	runtime, err := agent.New(agent.Config{
+		Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "finished")),
+		Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
+		AfterToolCall: func(_ context.Context, input agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+			details := input.Result.Details.(map[string]any)
+			if got := details["nested"].(map[string]any)["value"]; got != "output" {
+				t.Fatalf("after hook details = %#v", details)
+			}
+			details["nested"].(map[string]any)["value"] = "hook-mutated"
+			return agent.AfterToolCallResult{}, nil
+		},
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mutateDetails := func(value any, replacement string) {
+		value.(map[string]any)["nested"].(map[string]any)["value"] = replacement
+	}
+	readDetails := func(value any) any {
+		return value.(map[string]any)["nested"].(map[string]any)["value"]
+	}
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		switch value := event.(type) {
+		case agent.ToolExecutionUpdateEvent:
+			mutateDetails(updateDetails, "source-mutated")
+			mutateDetails(value.PartialResult.Details, "observer-mutated")
+		case agent.ToolExecutionEndEvent:
+			mutateDetails(outputDetails, "source-mutated")
+			mutateDetails(value.Result.Details, "observer-mutated")
+		}
+	})
+	var updates, ends int
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		switch value := event.(type) {
+		case agent.ToolExecutionUpdateEvent:
+			updates++
+			if got := readDetails(value.PartialResult.Details); got != "update" {
+				t.Errorf("second update observer saw %v", got)
+			}
+		case agent.ToolExecutionEndEvent:
+			ends++
+			if got := readDetails(value.Result.Details); got != "output" {
+				t.Errorf("second end observer saw %v", got)
+			}
+		}
+	})
+	if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	if updates != 1 || ends != 1 {
+		t.Fatalf("tool event counts = updates %d, ends %d", updates, ends)
+	}
+	stored := toolResultAt(t, transcript.Context().Messages(), 2)
+	var details map[string]map[string]string
+	if err := json.Unmarshal(stored.Details(), &details); err != nil {
+		t.Fatal(err)
+	}
+	if got := details["nested"]["value"]; got != "output" {
+		t.Fatalf("durable details = %#v", details)
+	}
+}
+
 func ptr[T any](value T) *T { return &value }
 
 func TestSteeringFollowUpContinueAndTransformBoundaries(t *testing.T) {
@@ -913,7 +988,7 @@ func TestTransformContextIsProviderOnlyAndFailsBeforeProvider(t *testing.T) {
 	t.Run("provider sees replacement snapshot, transcript does not", func(t *testing.T) {
 		transcript := newSession(t)
 		scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
-		model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+		model, err := newTestModel("scripted", "scripted", "scripted-1")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -939,7 +1014,7 @@ func TestTransformContextIsProviderOnlyAndFailsBeforeProvider(t *testing.T) {
 	t.Run("error is explicit and provider is not called", func(t *testing.T) {
 		transcript := newSession(t)
 		scripted := newScriptedProvider(t, mustTextTerminal(t, "unused"))
-		model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+		model, err := newTestModel("scripted", "scripted", "scripted-1")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -968,7 +1043,7 @@ func TestAbortWaitsForParallelWorkersAndCommitsCancelledBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1010,7 +1085,7 @@ func TestToolLevelSequentialOverrideDowngradesWholeBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1043,7 +1118,7 @@ func TestMixedToolBatchPreservesEverySourceResultAndOnlyAllTerminateStops(t *tes
 		}
 		calls = append(calls, call)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage(calls, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage(calls, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1074,7 +1149,7 @@ func TestTerminatingBatchStillDrainsInitialSteeringAndFollowUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,7 +1185,7 @@ func TestSequentialCancellationAssociatesUnstartedCallsAndStopsProvider(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,7 +1194,7 @@ func TestSequentialCancellationAssociatesUnstartedCallsAndStopsProvider(t *testi
 		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 	}
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1185,7 +1260,7 @@ func TestCancelledSequentialBatchCommitFaultStopsBeforeSuccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
+	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1194,7 +1269,7 @@ func TestCancelledSequentialBatchCommitFaultStopsBeforeSuccessor(t *testing.T) {
 		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 	}
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1237,8 +1312,9 @@ func TestBatchCompletionClearsPendingToolBeforeNextTurnStarted(t *testing.T) {
 	)
 	runtime := newAgent(t, transcript, scripted, &fakeTool{name: "bash"})
 	var observed bool
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind != agent.EventTurnStarted || event.Turn != 2 {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		started, ok := event.(agent.TurnStartEvent)
+		if !ok || started.Turn != 2 {
 			return
 		}
 		observed = true
@@ -1275,8 +1351,8 @@ func TestContinueBusyAdmissionDoesNotDrainQueuedMessage(t *testing.T) {
 	blocked := make(chan struct{})
 	release := make(chan struct{})
 	blockNextRun := true
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if !blockNextRun || event.Kind != agent.EventRunStarted {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		if _, ok := event.(agent.AgentStartEvent); !blockNextRun || !ok {
 			return
 		}
 		close(blocked)

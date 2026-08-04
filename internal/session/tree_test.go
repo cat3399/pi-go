@@ -104,6 +104,64 @@ func TestResetLeafPersistsNewRootForest(t *testing.T) {
 	}
 }
 
+func TestTreeResolvesLatestLabelAndTimestampAcrossReopen(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "labels.jsonl")
+	transcript, err := Create(path, CreateOptions{
+		ID:         "labels",
+		WorkingDir: directory,
+		Now:        sequenceClock(time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)),
+		NewEntryID: sequenceIDs("target", "label-1", "label-2", "clear", "label-3"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := appendUser(t, transcript, "target")
+	first := "first"
+	if _, err := transcript.AppendPayload(context.Background(), LabelPayload{TargetID: target.ID(), Label: &first}); err != nil {
+		t.Fatal(err)
+	}
+	second := "second"
+	latest, err := transcript.AppendPayload(context.Background(), LabelPayload{TargetID: target.ID(), Label: &second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := transcript.Tree()
+	if len(tree) != 1 || tree[0].Label == nil || *tree[0].Label != second || tree[0].LabelTimestamp == nil || !tree[0].LabelTimestamp.Equal(latest.Timestamp()) {
+		t.Fatalf("resolved label = %#v", tree)
+	}
+	*tree[0].Label = "mutated"
+	*tree[0].LabelTimestamp = time.Time{}
+	if got := transcript.Tree()[0]; got.Label == nil || *got.Label != second || got.LabelTimestamp == nil || !got.LabelTimestamp.Equal(latest.Timestamp()) {
+		t.Fatalf("Tree exposed mutable label metadata: %#v", got)
+	}
+	empty := ""
+	if _, err := transcript.AppendPayload(context.Background(), LabelPayload{TargetID: target.ID(), Label: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	cleared := transcript.Tree()[0]
+	if cleared.Label != nil || cleared.LabelTimestamp != nil {
+		t.Fatalf("empty label did not clear metadata: %#v", cleared)
+	}
+	final := "final"
+	finalChange, err := transcript.AppendPayload(context.Background(), LabelPayload{TargetID: target.ID(), Label: &final})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	resolved := reopened.Tree()[0]
+	if resolved.Label == nil || *resolved.Label != final || resolved.LabelTimestamp == nil || !resolved.LabelTimestamp.Equal(finalChange.Timestamp()) {
+		t.Fatalf("reopened label metadata = %#v", resolved)
+	}
+}
+
 func TestExtractBranchIsAtomicAndNeverMutatesSource(t *testing.T) {
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "source.jsonl")

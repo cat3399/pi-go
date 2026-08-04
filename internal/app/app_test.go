@@ -21,6 +21,44 @@ import (
 	"github.com/cat3399/pi-go/internal/tool"
 )
 
+func newTestModel(providerID, api, id string) (provider.Model, error) {
+	return provider.NewModel(provider.ModelSpec{
+		Provider:      providerID,
+		API:           api,
+		ID:            id,
+		Name:          id,
+		BaseURL:       "",
+		Input:         []provider.InputKind{provider.InputText},
+		Cost:          provider.CostRates{},
+		ContextWindow: 200_000,
+		MaxTokens:     8_192,
+	})
+}
+
+func testAssistantProvenance() llm.AssistantProvenance {
+	return llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "app-test"}
+}
+
+func newAssistantTextMessage(content []llm.TextBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantTextMessage, error) {
+	return llm.NewAssistantTextMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantToolUseMessage(content []llm.AssistantBlock, usage llm.Usage, timestamp time.Time) (llm.AssistantToolUseMessage, error) {
+	return llm.NewAssistantToolUseMessage(content, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantRichMessage(content []llm.AssistantBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantRichMessage, error) {
+	return llm.NewAssistantRichMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessage(content []llm.TextBlock, finish llm.FinishReason, message string, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessage(content, finish, message, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessageWithFailure(content []llm.TextBlock, finish llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp, testAssistantProvenance())
+}
+
 var appTestEpoch = time.Date(2026, time.August, 1, 12, 30, 0, 0, time.UTC)
 
 func TestRunCompletesToolWorkflowAndReopensSession(t *testing.T) {
@@ -368,7 +406,7 @@ func testDependencies(
 	runner tool.Runner,
 ) app.Dependencies {
 	t.Helper()
-	model, err := provider.NewModelRef("scripted", "scripted", "app-test")
+	model, err := newTestModel("scripted", "scripted", "app-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,7 +480,7 @@ func textTerminalBlocks(t *testing.T, texts ...string) llm.AssistantTextMessage 
 		}
 		blocks[index] = block
 	}
-	terminal, err := llm.NewAssistantTextMessage(blocks, llm.FinishStop, testUsage(t), appTestEpoch)
+	terminal, err := newAssistantTextMessage(blocks, llm.FinishStop, testUsage(t), appTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +493,7 @@ func toolTerminal(t *testing.T, id, name string, arguments []byte) llm.Assistant
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, testUsage(t), appTestEpoch)
+	terminal, err := newAssistantToolUseMessage([]llm.AssistantBlock{call}, testUsage(t), appTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}

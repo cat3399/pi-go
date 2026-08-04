@@ -182,6 +182,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		return newResponsesFailureStream(
 			context.Background(),
 			clock,
+			request.Model(),
 			FailureInvalidRequest,
 			fmt.Errorf("%w: nil context", ErrInvalidRequest),
 			"OpenAI Responses request requires a context",
@@ -191,13 +192,14 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		return newResponsesFailureStream(
 			ctx,
 			clock,
+			request.Model(),
 			FailureConfiguration,
 			fmt.Errorf("%w: nil provider", ErrInvalidOpenAIResponsesConfig),
 			"OpenAI Responses provider is not configured",
 		)
 	}
 	if err := request.validate(); err != nil {
-		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	if request.Model().API() != OpenAIResponsesAPI {
 		cause := fmt.Errorf(
@@ -206,28 +208,28 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 			request.Model().Provider(),
 			request.Model().API(),
 		)
-		return newResponsesFailureStream(ctx, clock, FailureConfiguration, cause, "")
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureConfiguration, cause, "")
 	}
 	systemRole, err := p.systemRole.wireValue()
 	if err != nil {
-		return newResponsesFailureStream(ctx, clock, FailureConfiguration, err, "")
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureConfiguration, err, "")
 	}
 	if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SupportsDeveloperRole != nil && !*compat.SupportsDeveloperRole {
 		systemRole = "system"
 	}
 	payload, err := encodeOpenAIResponsesRequest(request, systemRole)
 	if err != nil {
-		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	options := request.StreamOptions()
 	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
-		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	endpoint := p.endpoint
 	if baseURL := request.Model().BaseURL(); baseURL != "" {
 		endpoint, err = responsesEndpoint(baseURL)
 		if err != nil {
-			return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+			return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 		}
 	}
 	streamContext, cancel := context.WithCancelCause(ctx)
@@ -278,7 +280,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	}
 }
 
-func (*OpenAIResponsesProvider) SupportsModel(model ModelRef) bool {
+func (*OpenAIResponsesProvider) SupportsModel(model Model) bool {
 	return model.API() == OpenAIResponsesAPI
 }
 
@@ -307,7 +309,7 @@ func mergeResponseHeaders(groups ...map[string]string) map[string]string {
 	return merged
 }
 
-func applyPayloadHook(hook PayloadHook, model ModelRef, payload []byte) ([]byte, error) {
+func applyPayloadHook(hook PayloadHook, model Model, payload []byte) ([]byte, error) {
 	if hook == nil {
 		return payload, nil
 	}
@@ -321,7 +323,7 @@ func applyPayloadHook(hook PayloadHook, model ModelRef, payload []byte) ([]byte,
 	return append([]byte(nil), result...), nil
 }
 
-func applyFinalHeaders(headers http.Header, model ModelRef, hook HeaderHook, overrides map[string]*string) error {
+func applyFinalHeaders(headers http.Header, model Model, hook HeaderHook, overrides map[string]*string) error {
 	// HeaderOverrides is the Go representation of the original
 	// Record<string, string | null> request option. Apply it while assembling
 	// the request so before_provider_headers remains the final transform and

@@ -33,7 +33,7 @@ func TestRichContentCopiesAndValidatesBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, time.Time{})
+	message, err := newAssistantRichMessage([]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

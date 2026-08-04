@@ -110,7 +110,6 @@ func UsageCostFromLLM(cost llm.Cost) UsageCost {
 }
 
 type AppendOptions struct {
-	Assistant AssistantProvenance
 }
 
 // CompactionUsage keeps the provider-normalized usage and the coding-agent v3
@@ -365,12 +364,22 @@ func (r CompactionRecord) clonePayload(p CompactionPayload) EntryPayload {
 // TreeNode is an immutable snapshot of the durable forest. Children preserve
 // JSONL append order; this is the only unambiguous ordering for equal clocks.
 type TreeNode struct {
-	Entry    Entry
-	Children []TreeNode
+	Entry          Entry
+	Children       []TreeNode
+	Label          *string
+	LabelTimestamp *time.Time
 }
 
 func (n TreeNode) clone() TreeNode {
 	n.Entry = n.Entry.clone()
+	if n.Label != nil {
+		label := *n.Label
+		n.Label = &label
+	}
+	if n.LabelTimestamp != nil {
+		timestamp := *n.LabelTimestamp
+		n.LabelTimestamp = &timestamp
+	}
 	n.Children = append([]TreeNode(nil), n.Children...)
 	for index := range n.Children {
 		n.Children[index] = n.Children[index].clone()

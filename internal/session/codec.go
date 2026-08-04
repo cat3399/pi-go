@@ -533,8 +533,7 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if !exists {
 		return nil, nil, fmt.Errorf("assistant message is missing content")
 	}
-	allowSignatures := stopReason != "error" && stopReason != "aborted"
-	blocks, diagnostics, err := decodeBlocks(entryID, content, true, allowSignatures)
+	blocks, diagnostics, err := decodeBlocks(entryID, content, true, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -546,6 +545,10 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	if unsafeResponse {
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: -1})
 	}
+	assistantDiagnostics, err := decodeAssistantDiagnostics(object["diagnostics"])
+	if err != nil {
+		return nil, nil, err
+	}
 
 	switch stopReason {
 	case "stop", "length":
@@ -555,9 +558,9 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		var message llm.AssistantTerminal
 		if hasThinking(blocks) {
-			message, err = llm.NewAssistantRichMessageWithMetadata(blocks, finish, usage, timestamp, provenance, response)
+			message, err = llm.NewAssistantRichMessageWithMetadata(blocks, finish, usage, timestamp, provenance, response, assistantDiagnostics)
 		} else {
-			message, err = llm.NewAssistantTextMessageWithMetadata(textBlocks(blocks), finish, usage, timestamp, provenance, response)
+			message, err = llm.NewAssistantTextMessageWithMetadata(textBlocks(blocks), finish, usage, timestamp, provenance, response, assistantDiagnostics)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -567,7 +570,7 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 		}
 		return message, diagnostics, nil
 	case "toolUse":
-		message, err := llm.NewAssistantToolUseMessageWithMetadata(blocks, usage, timestamp, provenance, response)
+		message, err := llm.NewAssistantToolUseMessageWithMetadata(blocks, usage, timestamp, provenance, response, assistantDiagnostics)
 		if err != nil {
 			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 			return nil, diagnostics, nil
@@ -583,10 +586,11 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 			return nil, diagnostics, nil
 		}
-		if len(textBlocks(blocks)) != len(blocks) {
-			diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: -1})
+		failure, failureErr := llm.NewFailure(errorMessage, nil)
+		if failureErr != nil {
+			return nil, diagnostics, failureErr
 		}
-		message, err := llm.NewAssistantFailureMessage(textBlocks(blocks), finish, errorMessage, usage, timestamp)
+		message, err := llm.NewAssistantFailureMessageWithBlocksAndMetadata(blocks, finish, failure, usage, timestamp, provenance, response, assistantDiagnostics)
 		return message, diagnostics, err
 	default:
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
@@ -594,20 +598,75 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 	}
 }
 
-func decodeLLMAssistantProvenance(object map[string]json.RawMessage) (*llm.AssistantProvenance, error) {
+func decodeLLMAssistantProvenance(object map[string]json.RawMessage) (llm.AssistantProvenance, error) {
 	provider, err := requiredString(object, "provider")
 	if err != nil {
-		return nil, err
+		return llm.AssistantProvenance{}, err
 	}
 	api, err := requiredString(object, "api")
 	if err != nil {
-		return nil, err
+		return llm.AssistantProvenance{}, err
 	}
 	model, err := requiredString(object, "model")
 	if err != nil {
-		return nil, err
+		return llm.AssistantProvenance{}, err
 	}
-	return &llm.AssistantProvenance{Provider: provider, API: api, Model: model}, nil
+	return llm.AssistantProvenance{Provider: provider, API: api, Model: model}, nil
+}
+
+func decodeAssistantDiagnostics(raw json.RawMessage) ([]llm.AssistantDiagnostic, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var values []json.RawMessage
+	if json.Unmarshal(raw, &values) != nil || values == nil {
+		return nil, fmt.Errorf("invalid assistant diagnostics")
+	}
+	result := make([]llm.AssistantDiagnostic, 0, len(values))
+	for _, value := range values {
+		object, err := decodeObject(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid assistant diagnostic")
+		}
+		typ, err := requiredString(object, "type")
+		if err != nil {
+			return nil, fmt.Errorf("invalid assistant diagnostic type")
+		}
+		millis, err := requiredUint64(object, "timestamp")
+		if err != nil || millis > uint64(^uint64(0)>>1) {
+			return nil, fmt.Errorf("invalid assistant diagnostic timestamp")
+		}
+		spec := llm.AssistantDiagnosticSpec{Type: typ, Timestamp: time.UnixMilli(int64(millis))}
+		if errorRaw, exists := object["error"]; exists {
+			errorObject, err := decodeObject(errorRaw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid assistant diagnostic error")
+			}
+			message, err := requiredString(errorObject, "message")
+			if err != nil {
+				return nil, fmt.Errorf("invalid assistant diagnostic error")
+			}
+			info := &llm.AssistantDiagnosticError{Message: message}
+			for key, target := range map[string]*string{"name": &info.Name, "stack": &info.Stack} {
+				if field, exists := errorObject[key]; exists && json.Unmarshal(field, target) != nil {
+					return nil, fmt.Errorf("invalid assistant diagnostic error %s", key)
+				}
+			}
+			if code, exists := errorObject["code"]; exists {
+				info.Code = append(json.RawMessage(nil), code...)
+			}
+			spec.Error = info
+		}
+		if details, exists := object["details"]; exists {
+			spec.Details = append(json.RawMessage(nil), details...)
+		}
+		diagnostic, err := llm.NewAssistantDiagnostic(spec)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, diagnostic)
+	}
+	return result, nil
 }
 
 func decodeResponseMetadata(object map[string]json.RawMessage) (*llm.AssistantResponseMetadata, bool) {

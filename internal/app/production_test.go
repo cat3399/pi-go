@@ -488,7 +488,8 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 		[]llm.AssistantBlock{reasoning, commentary, slowCall, fastCall},
 		llm.Usage{},
 		productionTestTime,
-		&responsesProvenance,
+		responsesProvenance,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -512,33 +513,22 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 		llm.FinishStop,
 		llm.Usage{},
 		productionTestTime,
-		&foreignProvenance,
+		foreignProvenance,
+		nil,
 		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	responsesStorage := session.AssistantProvenance{
-		Provider: responsesProvenance.Provider,
-		API:      responsesProvenance.API,
-		Model:    responsesProvenance.Model,
-		Cost:     session.ZeroUsageCost(),
-	}
-	foreignStorage := session.AssistantProvenance{
-		Provider: foreignProvenance.Provider,
-		API:      foreignProvenance.API,
-		Model:    foreignProvenance.Model,
-		Cost:     session.ZeroUsageCost(),
 	}
 	for _, appendCase := range []struct {
 		message llm.ConversationMessage
 		options session.AppendOptions
 	}{
 		{message: seedUser},
-		{message: assistant, options: session.AppendOptions{Assistant: responsesStorage}},
+		{message: assistant},
 		{message: slowResult},
 		{message: fastResult},
-		{message: foreignAssistant, options: session.AppendOptions{Assistant: foreignStorage}},
+		{message: foreignAssistant},
 	} {
 		if _, err := transcript.Append(context.Background(), appendCase.message, appendCase.options); err != nil {
 			t.Fatal(err)

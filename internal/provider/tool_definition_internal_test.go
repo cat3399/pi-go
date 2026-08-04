@@ -10,10 +10,24 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
+func newInternalTestModel(providerID, api, id string) (Model, error) {
+	return NewModel(ModelSpec{
+		Provider:      providerID,
+		API:           api,
+		ID:            id,
+		Name:          id,
+		BaseURL:       "",
+		Input:         []InputKind{InputText},
+		Cost:          CostRates{},
+		ContextWindow: 200_000,
+		MaxTokens:     8_192,
+	})
+}
+
 func TestOpenAIResponsesRejectsInvalidFunctionNameBeforeNetwork(t *testing.T) {
 	t.Parallel()
 
-	model, err := NewModelRef(OpenAIProviderID, OpenAIResponsesAPI, "gpt-test")
+	model, err := newInternalTestModel(OpenAIProviderID, OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +76,7 @@ func TestOpenAIResponsesRejectsInvalidFunctionNameBeforeNetwork(t *testing.T) {
 func TestOpenAIResponsesRejectsInvalidStrictSchemaBeforeNetwork(t *testing.T) {
 	t.Parallel()
 
-	model, err := NewModelRef(OpenAIProviderID, OpenAIResponsesAPI, "gpt-test")
+	model, err := newInternalTestModel(OpenAIProviderID, OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}

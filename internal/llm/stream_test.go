@@ -13,7 +13,7 @@ func TestStreamCollectorSuccessAndImmutableSnapshots(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, textStart(t, 0))
 	accept(t, collector, textDelta(t, 0, "你"))
 
@@ -92,7 +92,7 @@ func TestStreamCollectorErrorRetainsPartialText(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, textStart(t, 0))
 	accept(t, collector, textDelta(t, 0, "partial"))
 	accept(t, collector, streamError(t, llm.FinishAborted, "cancelled"))
@@ -113,11 +113,57 @@ func TestStreamCollectorErrorRetainsPartialText(t *testing.T) {
 	}
 }
 
+func TestStreamCollectorErrorRetainsThinkingAndCompleteToolCall(t *testing.T) {
+	t.Parallel()
+
+	collector := &llm.StreamCollector{}
+	accept(t, collector, newStartEvent(t))
+	thinkingStart, err := llm.NewThinkingStartEvent(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingDelta, err := llm.NewThinkingDeltaEvent(0, "partial plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept(t, collector, thinkingStart)
+	accept(t, collector, thinkingDelta)
+	thinking, err := llm.NewThinkingBlock("partial plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingEnd, err := llm.NewThinkingEndEvent(0, thinking)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept(t, collector, thinkingEnd)
+	call := mustToolCall(t, "call-1", "inspect", []byte(`{"path":"README.md"}`))
+	accept(t, collector, toolCallStart(t, 1, call.ID(), call.Name()))
+	accept(t, collector, toolCallDelta(t, 1, call.ArgumentsJSON()))
+	accept(t, collector, toolCallEnd(t, 1, call))
+	accept(t, collector, streamError(t, llm.FinishError, "failed after planning"))
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := collector.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, ok := result.(llm.AssistantFailureMessage)
+	if !ok {
+		t.Fatalf("result = %T", result)
+	}
+	blocks := failure.Blocks()
+	if len(blocks) != 2 || blocks[0].(llm.ThinkingBlock).Thinking() != "partial plan" || blocks[1].(llm.ToolCallBlock).ID() != "call-1" {
+		t.Fatalf("failure blocks = %#v", blocks)
+	}
+}
+
 func TestStreamCollectorMixedTextAndToolCall(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, textStart(t, 0))
 	accept(t, collector, textDelta(t, 0, "running"))
 	accept(t, collector, textEnd(t, 0, "running"))
@@ -128,8 +174,16 @@ func TestStreamCollectorMixedTextAndToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
 	}
-	if len(partial.Blocks()) != 1 || partial.Blocks()[0].Kind() != llm.AssistantBlockText {
-		t.Fatalf("completed blocks = %#v, want one text block", partial.Blocks())
+	if completed := partial.CompletedBlocks(); len(completed) != 1 || completed[0].Kind() != llm.AssistantBlockText {
+		t.Fatalf("completed blocks = %#v, want one text block", completed)
+	}
+	blocks := partial.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("canonical partial blocks = %#v", blocks)
+	}
+	partialCall, ok := blocks[1].(llm.PartialToolCallBlock)
+	if !ok || partialCall.ID() != "call-1" || partialCall.Name() != "echo" || !bytes.Equal(partialCall.ArgumentsFragment(), []byte(`{"text":`)) {
+		t.Fatalf("canonical partial tool call = %#v", blocks[1])
 	}
 	active, ok := partial.ActiveBlock()
 	if !ok || active.Kind() != llm.AssistantBlockToolCall || active.ContentIndex() != 1 {
@@ -178,7 +232,7 @@ func TestStreamCollectorSupportsMultipleToolCalls(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	for index := range 2 {
 		id := "call-1"
 		if index == 1 {
@@ -205,7 +259,7 @@ func TestStreamCollectorErrorDoesNotExposeToolCall(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, toolCallStart(t, 0, "call-1", "echo"))
 	accept(t, collector, toolCallDelta(t, 0, []byte(`{"partial"`)))
 	accept(t, collector, streamError(t, llm.FinishAborted, "cancelled"))
@@ -246,56 +300,56 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 		{
 			name: "second start",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), llm.NewStartEvent()}
+				return []llm.StreamEvent{newStartEvent(t), newStartEvent(t)}
 			},
 		},
 		{
 			name: "non-sequential content index",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 1)}
+				return []llm.StreamEvent{newStartEvent(t), textStart(t, 1)}
 			},
 		},
 		{
 			name: "duplicate content index",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), textStart(t, 0)}
+				return []llm.StreamEvent{newStartEvent(t), textStart(t, 0), textStart(t, 0)}
 			},
 		},
 		{
 			name: "delta index mismatch",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), textDelta(t, 1, "x")}
+				return []llm.StreamEvent{newStartEvent(t), textStart(t, 0), textDelta(t, 1, "x")}
 			},
 		},
 		{
 			name: "end content mismatch",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), textDelta(t, 0, "x"), textEnd(t, 0, "y")}
+				return []llm.StreamEvent{newStartEvent(t), textStart(t, 0), textDelta(t, 0, "x"), textEnd(t, 0, "y")}
 			},
 		},
 		{
 			name: "done with open block",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), textStart(t, 0), done(t, llm.FinishStop, time.Time{})}
+				return []llm.StreamEvent{newStartEvent(t), textStart(t, 0), done(t, llm.FinishStop, time.Time{})}
 			},
 		},
 		{
 			name: "tool-use terminal without a call",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), done(t, llm.FinishToolUse, time.Time{})}
+				return []llm.StreamEvent{newStartEvent(t), done(t, llm.FinishToolUse, time.Time{})}
 			},
 		},
 		{
 			name: "tool delta without start",
 			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{llm.NewStartEvent(), toolCallDelta(t, 0, []byte("{}"))}
+				return []llm.StreamEvent{newStartEvent(t), toolCallDelta(t, 0, []byte("{}"))}
 			},
 		},
 		{
 			name: "tool end identity mismatch",
 			events: func(t *testing.T) []llm.StreamEvent {
 				return []llm.StreamEvent{
-					llm.NewStartEvent(),
+					newStartEvent(t),
 					toolCallStart(t, 0, "call-1", "echo"),
 					toolCallDelta(t, 0, []byte("{}")),
 					toolCallEnd(t, 0, mustToolCall(t, "call-2", "echo", []byte("{}"))),
@@ -306,7 +360,7 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 			name: "tool end arguments mismatch",
 			events: func(t *testing.T) []llm.StreamEvent {
 				return []llm.StreamEvent{
-					llm.NewStartEvent(),
+					newStartEvent(t),
 					toolCallStart(t, 0, "call-1", "echo"),
 					toolCallDelta(t, 0, []byte("{}")),
 					toolCallEnd(t, 0, mustToolCall(t, "call-1", "echo", []byte(`{"x":1}`))),
@@ -318,7 +372,7 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 			events: func(t *testing.T) []llm.StreamEvent {
 				call := mustToolCall(t, "call-1", "echo", []byte("{}"))
 				return []llm.StreamEvent{
-					llm.NewStartEvent(),
+					newStartEvent(t),
 					toolCallStart(t, 0, "call-1", "echo"),
 					toolCallDelta(t, 0, []byte("{}")),
 					toolCallEnd(t, 0, call),
@@ -355,7 +409,7 @@ func TestStreamCollectorAcceptsInterleavedToolCalls(t *testing.T) {
 	first := mustToolCall(t, "call-a", "echo", []byte(`{"a":1}`))
 	second := mustToolCall(t, "call-b", "echo", []byte(`{"b":2}`))
 	events := []llm.StreamEvent{
-		llm.NewStartEvent(),
+		newStartEvent(t),
 		toolCallStart(t, 0, "call-a", "echo"), toolCallStart(t, 1, "call-b", "echo"),
 		toolCallDelta(t, 1, []byte(`{"b":2}`)), toolCallDelta(t, 0, []byte(`{"a":1}`)),
 		toolCallEnd(t, 1, second), toolCallEnd(t, 0, first), done(t, llm.FinishToolUse, time.Time{}),
@@ -382,7 +436,7 @@ func TestStreamCollectorRejectsDuplicateTerminal(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, done(t, llm.FinishStop, time.Time{}))
 	err := collector.Accept(streamError(t, llm.FinishError, "late error"))
 	if !errors.Is(err, llm.ErrDuplicateTerminal) || !errors.Is(err, llm.ErrStreamProtocol) {
@@ -419,7 +473,7 @@ func TestStreamCollectorRejectsEveryDuplicateTerminalPair(t *testing.T) {
 
 			collector := &llm.StreamCollector{}
 			if tt.first == doneTerminal {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 				accept(t, collector, done(t, llm.FinishStop, time.Time{}))
 			} else {
 				accept(t, collector, streamError(t, llm.FinishError, "first"))
@@ -443,7 +497,7 @@ func TestStreamCollectorRejectsEventAfterTerminal(t *testing.T) {
 	t.Parallel()
 
 	collector := &llm.StreamCollector{}
-	accept(t, collector, llm.NewStartEvent())
+	accept(t, collector, newStartEvent(t))
 	accept(t, collector, done(t, llm.FinishStop, time.Time{}))
 	err := collector.Accept(textStart(t, 0))
 	if !errors.Is(err, llm.ErrStreamProtocol) || errors.Is(err, llm.ErrDuplicateTerminal) {
@@ -463,21 +517,21 @@ func TestStreamCollectorRejectsExportedZeroValues(t *testing.T) {
 		{
 			name: "zero done",
 			setup: func(t *testing.T, collector *llm.StreamCollector) {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 			},
 			event: llm.DoneEvent{},
 		},
 		{
 			name: "zero tool start",
 			setup: func(t *testing.T, collector *llm.StreamCollector) {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 			},
 			event: llm.ToolCallStartEvent{},
 		},
 		{
 			name: "zero tool end",
 			setup: func(t *testing.T, collector *llm.StreamCollector) {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 				accept(t, collector, toolCallStart(t, 0, "call", "echo"))
 			},
 			event: llm.ToolCallEndEvent{},
@@ -528,13 +582,13 @@ func TestStreamCollectorRejectsUnexpectedEOF(t *testing.T) {
 		{
 			name: "after start",
 			setup: func(t *testing.T, collector *llm.StreamCollector) {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 			},
 		},
 		{
 			name: "mid block",
 			setup: func(t *testing.T, collector *llm.StreamCollector) {
-				accept(t, collector, llm.NewStartEvent())
+				accept(t, collector, newStartEvent(t))
 				accept(t, collector, textStart(t, 0))
 				accept(t, collector, textDelta(t, 0, "partial"))
 			},
@@ -560,13 +614,13 @@ func TestStreamCollectorRejectsUnexpectedEOF(t *testing.T) {
 func TestStreamEventConstructorsRejectInvalidTerminalAndText(t *testing.T) {
 	t.Parallel()
 
-	if _, err := llm.NewDoneEvent(llm.FinishPending, llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidStreamEvent) {
+	if _, err := llm.NewDoneEvent(llm.FinishPending, llm.Usage{}, time.Time{}, testAssistantProvenance()); !errors.Is(err, llm.ErrInvalidStreamEvent) {
 		t.Fatalf("NewDoneEvent(pending) error = %v, want ErrInvalidStreamEvent", err)
 	}
-	if _, err := llm.NewErrorEvent(llm.FinishStop, "bad", llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidStreamEvent) {
+	if _, err := llm.NewErrorEvent(llm.FinishStop, "bad", llm.Usage{}, time.Time{}, testAssistantProvenance()); !errors.Is(err, llm.ErrInvalidStreamEvent) {
 		t.Fatalf("NewErrorEvent(stop) error = %v, want ErrInvalidStreamEvent", err)
 	}
-	if _, err := llm.NewErrorEvent(llm.FinishError, " ", llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidStreamEvent) {
+	if _, err := llm.NewErrorEvent(llm.FinishError, " ", llm.Usage{}, time.Time{}, testAssistantProvenance()); !errors.Is(err, llm.ErrInvalidStreamEvent) {
 		t.Fatalf("NewErrorEvent(blank) error = %v, want ErrInvalidStreamEvent", err)
 	}
 	if _, err := llm.NewTextDeltaEvent(-1, "x"); !errors.Is(err, llm.ErrInvalidStreamEvent) {
@@ -589,7 +643,7 @@ func FuzzStreamCollectorDoesNotPanic(f *testing.F) {
 			var event llm.StreamEvent
 			switch operation % 7 {
 			case 0:
-				event = llm.NewStartEvent()
+				event = newStartEvent(t)
 			case 1:
 				event = textStart(t, int(operation>>4))
 			case 2:
@@ -692,7 +746,7 @@ func mustToolCall(t *testing.T, id, name string, arguments []byte) llm.ToolCallB
 func done(t *testing.T, reason llm.FinishReason, timestamp time.Time) llm.DoneEvent {
 	t.Helper()
 
-	event, err := llm.NewDoneEvent(reason, llm.Usage{}, timestamp)
+	event, err := llm.NewDoneEvent(reason, llm.Usage{}, timestamp, testAssistantProvenance())
 	if err != nil {
 		t.Fatalf("NewDoneEvent() error = %v", err)
 	}
@@ -702,7 +756,7 @@ func done(t *testing.T, reason llm.FinishReason, timestamp time.Time) llm.DoneEv
 func streamError(t *testing.T, reason llm.FinishReason, message string) llm.ErrorEvent {
 	t.Helper()
 
-	event, err := llm.NewErrorEvent(reason, message, llm.Usage{}, time.Time{})
+	event, err := llm.NewErrorEvent(reason, message, llm.Usage{}, time.Time{}, testAssistantProvenance())
 	if err != nil {
 		t.Fatalf("NewErrorEvent() error = %v", err)
 	}

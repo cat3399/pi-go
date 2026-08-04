@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
@@ -47,41 +48,56 @@ func TestRunToolLoopCommitsCausalOrder(t *testing.T) {
 
 	var lifecycle []string
 	var providerProgress int
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		switch event.Kind {
-		case agent.EventProviderProgress:
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		switch event := event.(type) {
+		case agent.MessageStartEvent:
+			partial, ok := event.Message.(agentmsg.AssistantPartial)
+			if !ok {
+				return
+			}
 			providerProgress++
-			if event.ProviderSnapshot.FinishReason() != llm.FinishPending {
-				t.Errorf("provider progress exposed terminal finish %s", event.ProviderSnapshot.FinishReason())
+			if partial.Snapshot().FinishReason() != llm.FinishPending {
+				t.Errorf("provider progress exposed terminal finish %s", partial.Snapshot().FinishReason())
 			}
 			return
-		case agent.EventToolProgress:
+		case agent.MessageUpdateEvent:
+			providerProgress++
+			partial := event.AssistantMessageEvent.Partial()
+			if partial.FinishReason() != llm.FinishPending {
+				t.Errorf("provider progress exposed terminal finish %s", partial.FinishReason())
+			}
+			if reflect.TypeOf(partial.ProviderEvent()) != reflect.TypeOf(event.AssistantMessageEvent.Event()) {
+				t.Error("assistantMessageEvent partial/raw event diverged")
+			}
 			return
-		case agent.EventRunStarted:
+		case agent.ToolExecutionUpdateEvent:
+			return
+		case agent.AgentStartEvent:
 			lifecycle = append(lifecycle, "run")
-		case agent.EventTurnStarted:
+		case agent.TurnStartEvent:
 			lifecycle = append(lifecycle, fmt.Sprintf("turn:%d", event.Turn))
 			if event.Turn == 2 {
 				if got := len(transcript.Context().Messages()); got != 3 {
 					t.Errorf("ProviderTurn2 started with %d durable messages, want 3", got)
 				}
 			}
-		case agent.EventMessageCommitted:
-			label := "message:" + event.Message.Role().String()
-			if assistant, ok := event.Message.(llm.AssistantTerminal); ok {
+		case agent.MessageEndEvent:
+			standard := event.Message.(agentmsg.LLM).Conversation()
+			label := "message:" + standard.Role().String()
+			if assistant, ok := standard.(llm.AssistantTerminal); ok {
 				label += ":" + assistant.FinishReason().String()
 			}
 			lifecycle = append(lifecycle, label)
-		case agent.EventToolStarted:
+		case agent.ToolExecutionStartEvent:
 			lifecycle = append(lifecycle, "tool:start")
 			if got := len(transcript.Context().Messages()); got != 2 {
 				t.Errorf("tool started with %d durable messages, want 2", got)
 			}
-		case agent.EventToolSettled:
+		case agent.ToolExecutionEndEvent:
 			lifecycle = append(lifecycle, "tool:end")
-		case agent.EventTurnSettled:
+		case agent.TurnEndEvent:
 			lifecycle = append(lifecycle, fmt.Sprintf("turn-end:%d", event.Turn))
-		case agent.EventRunSettled:
+		case agent.AgentEndEvent:
 			lifecycle = append(lifecycle, "run-end")
 		}
 	})
@@ -190,7 +206,7 @@ func TestAgentCanRunAgainOnlyAfterPriorSettlement(t *testing.T) {
 func TestNewAndRunRejectInvalidPreflightWithoutState(t *testing.T) {
 	transcript := newSession(t)
 	scripted := newScriptedProvider(t, mustTextTerminal(t, "unused"))
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,9 +474,9 @@ func TestLateToolUpdatesAreDiscardedAfterSettlement(t *testing.T) {
 	runtime := newAgent(t, transcript, scripted, executor)
 	var progress atomic.Uint32
 	var total atomic.Uint32
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
 		total.Add(1)
-		if event.Kind == agent.EventToolProgress {
+		if _, ok := event.(agent.ToolExecutionUpdateEvent); ok {
 			progress.Add(1)
 		}
 	})
@@ -484,8 +500,8 @@ func TestBusyAndWaitForIdleIncludeObserverSettlement(t *testing.T) {
 	runtime := newAgent(t, transcript, scripted, nil)
 	settling := make(chan struct{})
 	release := make(chan struct{})
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind == agent.EventRunSettled {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		if _, ok := event.(agent.AgentEndEvent); ok {
 			close(settling)
 			<-release
 		}
@@ -526,7 +542,7 @@ func TestBusyAndWaitForIdleIncludeObserverSettlement(t *testing.T) {
 func TestBusyRunDoesNotInvokeOrBlockOnSharedClock(t *testing.T) {
 	transcript := newSession(t)
 	scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,8 +712,8 @@ func TestCancellationAfterNormalToolResultPreservesResultAndSkipsProviderTwo(t *
 	)
 	runtime := newAgent(t, transcript, scripted, executor)
 	runContext, cancelRun := context.WithCancel(context.Background())
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind == agent.EventMessageCommitted && event.Message.Role() == llm.RoleToolResult {
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		if ended, ok := event.(agent.MessageEndEvent); ok && ended.Message.Role() == agentmsg.RoleToolResult {
 			cancelRun()
 		}
 	})
@@ -842,8 +858,8 @@ func TestFinalTerminalAndAbortHaveOneAcceptanceBoundary(t *testing.T) {
 		scripted := newScriptedProvider(t, mustTextTerminal(t, "success"))
 		runtime := newAgent(t, transcript, scripted, nil)
 		runContext := make(chan context.Context, 1)
-		runtime.Subscribe(func(ctx context.Context, event agent.Event) {
-			if event.Kind == agent.EventRunStarted {
+		runtime.Subscribe(func(ctx context.Context, event agent.AgentEvent) {
+			if _, ok := event.(agent.AgentStartEvent); ok {
 				runContext <- ctx
 			}
 		})
@@ -890,10 +906,10 @@ func TestTranscriptFailureIsFatalAndPreventsToolSideEffect(t *testing.T) {
 	)
 	runtime := newAgent(t, transcript, scripted, executor)
 	settled := make(chan struct{})
-	runtime.Subscribe(func(_ context.Context, event agent.Event) {
-		if event.Kind == agent.EventRunSettled {
-			if !errors.Is(event.RunError, agent.ErrTranscriptCommit) || event.Terminal != nil {
-				t.Errorf("fatal settlement = terminal %T, error %v", event.Terminal, event.RunError)
+	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+		if ended, ok := event.(agent.AgentEndEvent); ok {
+			if !errors.Is(ended.Err, agent.ErrTranscriptCommit) || ended.Terminal != nil {
+				t.Errorf("fatal settlement = terminal %T, error %v", ended.Terminal, ended.Err)
 			}
 			close(settled)
 		}
@@ -989,7 +1005,7 @@ func TestMultipleToolCallsExecuteAsOneBatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		terminal, err := llm.NewAssistantToolUseMessage(
+		terminal, err := newAssistantToolUseMessage(
 			[]llm.AssistantBlock{callOne, callTwo},
 			mustUsage(t, 1, 1),
 			agentTestEpoch,
@@ -1165,7 +1181,7 @@ func newCloseBarrierProvider(t *testing.T, text string) *closeBarrierProvider {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done, err := llm.NewDoneEvent(llm.FinishStop, mustUsage(t, 1, 1), agentTestEpoch)
+	done, err := llm.NewDoneEvent(llm.FinishStop, mustUsage(t, 1, 1), agentTestEpoch, testAssistantProvenance())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,7 +1189,7 @@ func newCloseBarrierProvider(t *testing.T, text string) *closeBarrierProvider {
 	releaseClose := make(chan struct{})
 	return &closeBarrierProvider{
 		stream: &closeBarrierStream{
-			events:       []llm.StreamEvent{llm.NewStartEvent(), textStart, textDelta, textEnd, done},
+			events:       []llm.StreamEvent{newStartEvent(t), textStart, textDelta, textEnd, done},
 			closeEntered: closeEntered,
 			releaseClose: releaseClose,
 		},

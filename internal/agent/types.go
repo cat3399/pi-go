@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -128,7 +129,7 @@ type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCal
 // Provider and Transcript deliberately remain loop dependencies. They are
 // resource-lifetime owners, not mutable product settings.
 type TurnSnapshot struct {
-	Model          provider.ModelRef
+	Model          provider.Model
 	ThinkingLevel  provider.ThinkingLevel
 	SystemPrompt   string
 	Tool           ToolExecutor
@@ -192,7 +193,7 @@ type ToolExecutionOverride interface {
 type Config struct {
 	Provider     provider.Provider
 	Transcript   Transcript
-	Model        provider.ModelRef
+	Model        provider.Model
 	SystemPrompt string
 	Tool         ToolExecutor
 	// ToolExecution controls a batch unless any selected named tool requests
@@ -231,7 +232,7 @@ type Config struct {
 type runtimeConfig struct {
 	provider              provider.Provider
 	transcript            Transcript
-	model                 provider.ModelRef
+	model                 provider.Model
 	systemPrompt          string
 	tool                  ToolExecutor
 	toolName              string
@@ -530,118 +531,427 @@ func (s State) PendingToolCall() (string, bool) {
 	return s.pendingToolCalls[0], true
 }
 
-// EventKind is the compact lifecycle vocabulary needed by current application
-// callers. MessageCommitted is emitted only after the durable append succeeds.
-type EventKind uint8
+// AgentEventType is the Go discriminator for pi's AgentEvent union. Concrete
+// event structs carry only fields valid for that member; there is no generic
+// bag whose zero values need interpretation.
+type AgentEventType string
 
 const (
-	EventRunStarted EventKind = iota + 1
-	EventTurnStarted
-	EventProviderProgress
-	EventMessageCommitted
-	EventToolStarted
-	EventToolProgress
-	EventToolSettled
-	EventTurnSettled
-	EventRunSettled
-	EventCompactionStarted
-	EventCompactionSettled
-	EventRetryScheduled
-	EventRetryAttempt
-	EventRetryFinished
-	EventSummarizationRetryScheduled
-	EventSummarizationRetryAttempt
-	EventSummarizationRetryFinished
-	// EventQueueUpdated is emitted only after a reserved queued message has
-	// been durably committed and removed from its source queue.
-	EventQueueUpdated
+	AgentStartEventType          AgentEventType = "agent_start"
+	AgentEndEventType            AgentEventType = "agent_end"
+	TurnStartEventType           AgentEventType = "turn_start"
+	TurnEndEventType             AgentEventType = "turn_end"
+	MessageStartEventType        AgentEventType = "message_start"
+	MessageUpdateEventType       AgentEventType = "message_update"
+	MessageEndEventType          AgentEventType = "message_end"
+	ToolExecutionStartEventType  AgentEventType = "tool_execution_start"
+	ToolExecutionUpdateEventType AgentEventType = "tool_execution_update"
+	ToolExecutionEndEventType    AgentEventType = "tool_execution_end"
+
+	// Control events describe coordinator mechanics that are not members of
+	// pi's AgentEvent union. They have a separate SubscribeControl boundary so
+	// Agent.Subscribe remains source- and data-shape compatible with pi.
+	QueueUpdateEventType                 AgentEventType = "queue_update"
+	CompactionStartEventType             AgentEventType = "compaction_start"
+	CompactionEndEventType               AgentEventType = "compaction_end"
+	ProviderRetryScheduledEventType      AgentEventType = "provider_retry_scheduled"
+	ProviderRetryAttemptEventType        AgentEventType = "provider_retry_attempt"
+	ProviderRetryFinishedEventType       AgentEventType = "provider_retry_finished"
+	SummarizationRetryScheduledEventType AgentEventType = "summarization_retry_scheduled"
+	SummarizationRetryAttemptEventType   AgentEventType = "summarization_retry_attempt_start"
+	SummarizationRetryFinishedEventType  AgentEventType = "summarization_retry_finished"
 )
 
-func (k EventKind) String() string {
-	switch k {
-	case EventRunStarted:
-		return "run_started"
-	case EventTurnStarted:
-		return "turn_started"
-	case EventProviderProgress:
-		return "provider_progress"
-	case EventMessageCommitted:
-		return "message_committed"
-	case EventToolStarted:
-		return "tool_started"
-	case EventToolProgress:
-		return "tool_progress"
-	case EventToolSettled:
-		return "tool_settled"
-	case EventTurnSettled:
-		return "turn_settled"
-	case EventRunSettled:
-		return "run_settled"
-	case EventCompactionStarted:
-		return "compaction_started"
-	case EventCompactionSettled:
-		return "compaction_settled"
-	case EventRetryScheduled:
-		return "retry_scheduled"
-	case EventRetryAttempt:
-		return "retry_attempt"
-	case EventRetryFinished:
-		return "retry_finished"
-	case EventSummarizationRetryScheduled:
-		return "summarization_retry_scheduled"
-	case EventSummarizationRetryAttempt:
-		return "summarization_retry_attempt"
-	case EventSummarizationRetryFinished:
-		return "summarization_retry_finished"
-	case EventQueueUpdated:
-		return "queue_updated"
+// AgentEvent is sealed to the event vocabulary emitted by Agent.Subscribe.
+type AgentEvent interface {
+	Type() AgentEventType
+	agentEvent()
+}
+
+// AgentControlEvent is the typed diagnostic/control plane for mechanics that
+// pi's low-level AgentEvent intentionally does not expose.
+type AgentControlEvent interface {
+	Type() AgentEventType
+	agentControlEvent()
+}
+
+type agentRuntimeEvent interface {
+	Type() AgentEventType
+	agentRuntimeEvent()
+}
+
+// AssistantMessageEvent is the canonical message_update payload: the raw
+// provider-neutral delta plus the complete assistant partial after that delta.
+type AssistantMessageEvent struct {
+	event   llm.StreamEvent
+	partial agentmsg.AssistantPartial
+}
+
+func newAssistantMessageEvent(event llm.StreamEvent, partial agentmsg.AssistantPartial) AssistantMessageEvent {
+	return AssistantMessageEvent{event: event, partial: partial}
+}
+
+func (e AssistantMessageEvent) Event() llm.StreamEvent             { return e.event }
+func (e AssistantMessageEvent) Partial() agentmsg.AssistantPartial { return e.partial }
+
+type AgentStartEvent struct{ RunID uint64 }
+type AgentEndEvent struct {
+	RunID    uint64
+	Turn     uint32
+	Messages []agentmsg.Message
+	Terminal llm.AssistantTerminal
+	Err      error
+}
+type TurnStartEvent struct {
+	RunID uint64
+	Turn  uint32
+}
+type TurnEndEvent struct {
+	RunID       uint64
+	Turn        uint32
+	Message     agentmsg.Message
+	ToolResults []agentmsg.Message
+}
+type MessageStartEvent struct {
+	RunID   uint64
+	Turn    uint32
+	Message agentmsg.Message
+}
+type MessageUpdateEvent struct {
+	RunID                 uint64
+	Turn                  uint32
+	Message               agentmsg.Message
+	AssistantMessageEvent AssistantMessageEvent
+}
+type MessageEndEvent struct {
+	RunID   uint64
+	Turn    uint32
+	Message agentmsg.Message
+	Model   provider.Model
+}
+type ToolExecutionStartEvent struct {
+	RunID      uint64
+	Turn       uint32
+	ToolCallID string
+	ToolName   string
+	Arguments  json.RawMessage
+}
+type ToolExecutionUpdateEvent struct {
+	RunID         uint64
+	Turn          uint32
+	ToolCallID    string
+	ToolName      string
+	Arguments     json.RawMessage
+	PartialResult ToolUpdate
+}
+type ToolExecutionEndEvent struct {
+	RunID      uint64
+	Turn       uint32
+	ToolCallID string
+	ToolName   string
+	Arguments  json.RawMessage
+	Result     ToolOutput
+	IsError    bool
+	Err        error
+}
+type QueueUpdateEvent struct {
+	RunID uint64
+	Turn  uint32
+}
+type CompactionStartEvent struct {
+	RunID     uint64
+	Turn      uint32
+	Reason    CompactionReason
+	WillRetry bool
+}
+type CompactionEndEvent struct {
+	RunID     uint64
+	Turn      uint32
+	Reason    CompactionReason
+	Result    *session.CompactResult
+	Aborted   bool
+	WillRetry bool
+	// ErrorMessage is the transport-neutral AgentSessionEvent payload. Err
+	// retains the wrapped Go cause for internal observers that need errors.Is.
+	ErrorMessage string
+	Err          error
+}
+type ProviderRetryScheduledEvent struct {
+	RunID       uint64
+	Turn        uint32
+	Attempt     uint32
+	Delay       time.Duration
+	FailureKind provider.FailureKind
+	HTTPStatus  int
+}
+type ProviderRetryAttemptEvent struct {
+	RunID   uint64
+	Turn    uint32
+	Attempt uint32
+}
+type ProviderRetryFinishedEvent struct {
+	RunID        uint64
+	Turn         uint32
+	Attempt      uint32
+	FailureKind  provider.FailureKind
+	HTTPStatus   int
+	Succeeded    bool
+	FinishReason provider.RetryFinishReason
+}
+type SummarizationRetryScheduledEvent struct {
+	RunID       uint64
+	Turn        uint32
+	Reason      CompactionReason
+	Attempt     uint32
+	Delay       time.Duration
+	FailureKind provider.FailureKind
+	HTTPStatus  int
+}
+type SummarizationRetryAttemptEvent struct {
+	RunID   uint64
+	Turn    uint32
+	Reason  CompactionReason
+	Attempt uint32
+}
+type SummarizationRetryFinishedEvent struct {
+	RunID        uint64
+	Turn         uint32
+	Reason       CompactionReason
+	Attempt      uint32
+	FailureKind  provider.FailureKind
+	HTTPStatus   int
+	Succeeded    bool
+	FinishReason provider.RetryFinishReason
+}
+
+func (AgentStartEvent) Type() AgentEventType             { return AgentStartEventType }
+func (AgentEndEvent) Type() AgentEventType               { return AgentEndEventType }
+func (TurnStartEvent) Type() AgentEventType              { return TurnStartEventType }
+func (TurnEndEvent) Type() AgentEventType                { return TurnEndEventType }
+func (MessageStartEvent) Type() AgentEventType           { return MessageStartEventType }
+func (MessageUpdateEvent) Type() AgentEventType          { return MessageUpdateEventType }
+func (MessageEndEvent) Type() AgentEventType             { return MessageEndEventType }
+func (ToolExecutionStartEvent) Type() AgentEventType     { return ToolExecutionStartEventType }
+func (ToolExecutionUpdateEvent) Type() AgentEventType    { return ToolExecutionUpdateEventType }
+func (ToolExecutionEndEvent) Type() AgentEventType       { return ToolExecutionEndEventType }
+func (QueueUpdateEvent) Type() AgentEventType            { return QueueUpdateEventType }
+func (CompactionStartEvent) Type() AgentEventType        { return CompactionStartEventType }
+func (CompactionEndEvent) Type() AgentEventType          { return CompactionEndEventType }
+func (ProviderRetryScheduledEvent) Type() AgentEventType { return ProviderRetryScheduledEventType }
+func (ProviderRetryAttemptEvent) Type() AgentEventType   { return ProviderRetryAttemptEventType }
+func (ProviderRetryFinishedEvent) Type() AgentEventType  { return ProviderRetryFinishedEventType }
+func (SummarizationRetryScheduledEvent) Type() AgentEventType {
+	return SummarizationRetryScheduledEventType
+}
+func (SummarizationRetryAttemptEvent) Type() AgentEventType {
+	return SummarizationRetryAttemptEventType
+}
+func (SummarizationRetryFinishedEvent) Type() AgentEventType {
+	return SummarizationRetryFinishedEventType
+}
+
+func (AgentStartEvent) agentEvent()          {}
+func (AgentEndEvent) agentEvent()            {}
+func (TurnStartEvent) agentEvent()           {}
+func (TurnEndEvent) agentEvent()             {}
+func (MessageStartEvent) agentEvent()        {}
+func (MessageUpdateEvent) agentEvent()       {}
+func (MessageEndEvent) agentEvent()          {}
+func (ToolExecutionStartEvent) agentEvent()  {}
+func (ToolExecutionUpdateEvent) agentEvent() {}
+func (ToolExecutionEndEvent) agentEvent()    {}
+
+func (QueueUpdateEvent) agentControlEvent()                 {}
+func (CompactionStartEvent) agentControlEvent()             {}
+func (CompactionEndEvent) agentControlEvent()               {}
+func (ProviderRetryScheduledEvent) agentControlEvent()      {}
+func (ProviderRetryAttemptEvent) agentControlEvent()        {}
+func (ProviderRetryFinishedEvent) agentControlEvent()       {}
+func (SummarizationRetryScheduledEvent) agentControlEvent() {}
+func (SummarizationRetryAttemptEvent) agentControlEvent()   {}
+func (SummarizationRetryFinishedEvent) agentControlEvent()  {}
+
+func (AgentStartEvent) agentRuntimeEvent()                  {}
+func (AgentEndEvent) agentRuntimeEvent()                    {}
+func (TurnStartEvent) agentRuntimeEvent()                   {}
+func (TurnEndEvent) agentRuntimeEvent()                     {}
+func (MessageStartEvent) agentRuntimeEvent()                {}
+func (MessageUpdateEvent) agentRuntimeEvent()               {}
+func (MessageEndEvent) agentRuntimeEvent()                  {}
+func (ToolExecutionStartEvent) agentRuntimeEvent()          {}
+func (ToolExecutionUpdateEvent) agentRuntimeEvent()         {}
+func (ToolExecutionEndEvent) agentRuntimeEvent()            {}
+func (QueueUpdateEvent) agentRuntimeEvent()                 {}
+func (CompactionStartEvent) agentRuntimeEvent()             {}
+func (CompactionEndEvent) agentRuntimeEvent()               {}
+func (ProviderRetryScheduledEvent) agentRuntimeEvent()      {}
+func (ProviderRetryAttemptEvent) agentRuntimeEvent()        {}
+func (ProviderRetryFinishedEvent) agentRuntimeEvent()       {}
+func (SummarizationRetryScheduledEvent) agentRuntimeEvent() {}
+func (SummarizationRetryAttemptEvent) agentRuntimeEvent()   {}
+func (SummarizationRetryFinishedEvent) agentRuntimeEvent()  {}
+
+func cloneAgentEvent(event AgentEvent) AgentEvent {
+	switch value := event.(type) {
+	case AgentStartEvent:
+		return value
+	case AgentEndEvent:
+		value.Messages = agentmsg.Clone(value.Messages)
+		return value
+	case TurnStartEvent:
+		return value
+	case TurnEndEvent:
+		value.Message = agentmsg.CloneOne(value.Message)
+		value.ToolResults = agentmsg.Clone(value.ToolResults)
+		return value
+	case MessageStartEvent:
+		value.Message = agentmsg.CloneOne(value.Message)
+		return value
+	case MessageUpdateEvent:
+		value.Message = agentmsg.CloneOne(value.Message)
+		return value
+	case MessageEndEvent:
+		value.Message = agentmsg.CloneOne(value.Message)
+		return value
+	case ToolExecutionStartEvent:
+		value.Arguments = bytes.Clone(value.Arguments)
+		return value
+	case ToolExecutionUpdateEvent:
+		value.Arguments = bytes.Clone(value.Arguments)
+		value.PartialResult = cloneToolUpdate(value.PartialResult)
+		return value
+	case ToolExecutionEndEvent:
+		value.Arguments = bytes.Clone(value.Arguments)
+		value.Result = cloneToolOutput(value.Result)
+		return value
 	default:
-		return "unknown"
+		return nil
 	}
 }
 
-// Event is passed by value to observers. The llm values it carries are
-// immutable snapshots; zero-valued fields do not apply to that event kind.
-type Event struct {
-	Kind             EventKind
-	RunID            uint64
-	Turn             uint32
-	Message          llm.ConversationMessage
-	AgentMessage     agentmsg.Message
-	ProviderSnapshot llm.StreamSnapshot
-	ProviderEvent    llm.StreamEvent
-	ToolCallID       string
-	ToolName         string
-	ToolArguments    []byte
-	ToolUpdate       ToolUpdate
-	ToolOutput       ToolOutput
-	ToolError        error
-	Terminal         llm.AssistantTerminal
-	RunError         error
-	// RetryAttempt identifies the request slot. EventRetryAttempt means request
-	// reconstruction begins; EventSummarizationRetryAttempt means provider
-	// redispatch begins. Cancellation observed earlier closes a scheduled slot
-	// without an attempt event.
-	RetryAttempt      uint32
-	RetryDelay        time.Duration
-	RetryFailureKind  provider.FailureKind
-	RetryHTTPStatus   int
-	RetrySucceeded    bool
-	RetryFinishReason provider.RetryFinishReason
-	// CompactionReason scopes compaction and summarization-retry events.
-	// CompactionWillRetry is true only for overflow recovery intent.
-	CompactionReason    CompactionReason
-	CompactionWillRetry bool
-	Compaction          *session.CompactResult
-	// Model is the immutable turn model which produced an assistant terminal.
-	// Session policy must not substitute a model selected later by observers.
-	Model provider.ModelRef
+func cloneAgentControlEvent(event AgentControlEvent) AgentControlEvent {
+	switch value := event.(type) {
+	case QueueUpdateEvent, CompactionStartEvent,
+		ProviderRetryScheduledEvent, ProviderRetryAttemptEvent, ProviderRetryFinishedEvent,
+		SummarizationRetryScheduledEvent, SummarizationRetryAttemptEvent, SummarizationRetryFinishedEvent:
+		return value
+	case CompactionEndEvent:
+		if value.Result != nil {
+			result := session.CloneCompactResult(*value.Result)
+			value.Result = &result
+		}
+		return value
+	default:
+		return nil
+	}
 }
 
-// Observer is invoked synchronously in subscription order. The Agent holds no
-// internal mutex while it runs, and run settlement waits for it to return.
-// It must not synchronously call Abort or WaitForIdle on that same active run.
-type Observer func(context.Context, Event)
+func cloneAgentRuntimeEvent(event agentRuntimeEvent) agentRuntimeEvent {
+	if value, ok := event.(AgentEvent); ok {
+		return cloneAgentEvent(value).(agentRuntimeEvent)
+	}
+	if value, ok := event.(AgentControlEvent); ok {
+		return cloneAgentControlEvent(value).(agentRuntimeEvent)
+	}
+	return nil
+}
+
+func agentEventTurn(event agentRuntimeEvent) uint32 {
+	switch value := event.(type) {
+	case AgentEndEvent:
+		return value.Turn
+	case TurnStartEvent:
+		return value.Turn
+	case TurnEndEvent:
+		return value.Turn
+	case MessageStartEvent:
+		return value.Turn
+	case MessageUpdateEvent:
+		return value.Turn
+	case MessageEndEvent:
+		return value.Turn
+	case ToolExecutionStartEvent:
+		return value.Turn
+	case ToolExecutionUpdateEvent:
+		return value.Turn
+	case ToolExecutionEndEvent:
+		return value.Turn
+	case QueueUpdateEvent:
+		return value.Turn
+	case CompactionStartEvent:
+		return value.Turn
+	case CompactionEndEvent:
+		return value.Turn
+	case ProviderRetryScheduledEvent:
+		return value.Turn
+	case ProviderRetryAttemptEvent:
+		return value.Turn
+	case ProviderRetryFinishedEvent:
+		return value.Turn
+	case SummarizationRetryScheduledEvent:
+		return value.Turn
+	case SummarizationRetryAttemptEvent:
+		return value.Turn
+	case SummarizationRetryFinishedEvent:
+		return value.Turn
+	default:
+		return 0
+	}
+}
+
+func agentEventRunID(event agentRuntimeEvent) uint64 {
+	switch value := event.(type) {
+	case AgentStartEvent:
+		return value.RunID
+	case AgentEndEvent:
+		return value.RunID
+	case TurnStartEvent:
+		return value.RunID
+	case TurnEndEvent:
+		return value.RunID
+	case MessageStartEvent:
+		return value.RunID
+	case MessageUpdateEvent:
+		return value.RunID
+	case MessageEndEvent:
+		return value.RunID
+	case ToolExecutionStartEvent:
+		return value.RunID
+	case ToolExecutionUpdateEvent:
+		return value.RunID
+	case ToolExecutionEndEvent:
+		return value.RunID
+	case QueueUpdateEvent:
+		return value.RunID
+	case CompactionStartEvent:
+		return value.RunID
+	case CompactionEndEvent:
+		return value.RunID
+	case ProviderRetryScheduledEvent:
+		return value.RunID
+	case ProviderRetryAttemptEvent:
+		return value.RunID
+	case ProviderRetryFinishedEvent:
+		return value.RunID
+	case SummarizationRetryScheduledEvent:
+		return value.RunID
+	case SummarizationRetryAttemptEvent:
+		return value.RunID
+	case SummarizationRetryFinishedEvent:
+		return value.RunID
+	default:
+		return 0
+	}
+}
+
+// Observer is invoked synchronously in subscription order. Each observer gets
+// an independent snapshot of mutable slices/maps. Agent holds no internal
+// mutex while callbacks run.
+type Observer func(context.Context, AgentEvent)
+
+// ControlObserver observes coordinator mechanics separately from pi's public
+// AgentEvent lifecycle.
+type ControlObserver func(context.Context, AgentControlEvent)
 
 // Result describes a settled accepted run. A provider error or abort is a
 // terminal result, not a returned Go error. Returned errors are preflight or

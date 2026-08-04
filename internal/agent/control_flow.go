@@ -312,13 +312,16 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 	defer func() {
 		a.enterSettling(active)
 		result.providerTurns, result.toolExecutions = a.runCounts(active)
-		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: a.runTurn(active), Terminal: result.terminal, RunError: runErr})
+		a.notify(active.ctx, AgentEndEvent{
+			RunID: active.id, Turn: a.runTurn(active), Messages: a.runMessages(active),
+			Terminal: result.terminal, Err: runErr,
+		})
 	}()
-	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
+	a.notify(active.ctx, AgentStartEvent{RunID: active.id})
 	turn := uint32(1)
 	turnStarted := len(initial) > 0 || len(extra) > 0
 	if turnStarted {
-		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+		a.notify(active.ctx, TurnStartEvent{RunID: active.id, Turn: turn})
 		if err := a.commitQueued(active, turn, initial); err != nil {
 			return result, err
 		}
@@ -335,7 +338,7 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 		}
 		if len(queued) > 0 {
 			if !turnStarted {
-				a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+				a.notify(active.ctx, TurnStartEvent{RunID: active.id, Turn: turn})
 			}
 			if err := a.commitQueued(active, turn, queued); err != nil {
 				return result, err
@@ -345,7 +348,7 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 	}
 	for {
 		if !turnStarted {
-			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			a.notify(active.ctx, TurnStartEvent{RunID: active.id, Turn: turn})
 			turnStarted = true
 		}
 		terminal, err := a.providerTurnV2(active, turn)
@@ -358,7 +361,9 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 		}
 		toolUse, usesTools := terminal.(llm.AssistantToolUseMessage)
 		if !usesTools {
-			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: terminal})
+			if err := a.notifyTurnEnd(active, turn, terminal); err != nil {
+				return result, err
+			}
 			if terminal.FinishReason() == llm.FinishError || terminal.FinishReason() == llm.FinishAborted {
 				return a.acceptFinalV2(active, result, terminal)
 			}
@@ -401,7 +406,9 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 		if err := a.completeToolBatchV2(active, turn); err != nil {
 			return result, err
 		}
-		a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: toolUse})
+		if err := a.notifyTurnEnd(active, turn, toolUse); err != nil {
+			return result, err
+		}
 		if batch.cancelled || a.runCause(active) != nil {
 			failure, err := a.failureTerminal(nil, llm.FinishAborted, runToolCancelText, a.contextCause(active), llm.Usage{})
 			if err != nil {
@@ -411,12 +418,14 @@ func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.Conversa
 			if err := a.setRunPhaseV2(active, turn, PhaseSettling); err != nil {
 				return result, err
 			}
-			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+			a.notify(active.ctx, TurnStartEvent{RunID: active.id, Turn: turn})
 			committedFailure, err := a.commitAssistantV2(active, turn, failure)
 			if err != nil {
 				return result, err
 			}
-			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: committedFailure})
+			if err := a.notifyTurnEnd(active, turn, committedFailure); err != nil {
+				return result, err
+			}
 			return a.acceptFinalV2(active, result, committedFailure)
 		}
 		queued, err := a.reserveQueue(active, true)
@@ -458,7 +467,7 @@ func (a *Agent) startQueuedTurnV2(active *activeRun, turn uint32, messages []llm
 	if err := a.setRunPhaseV2(active, turn, PhaseProvider); err != nil {
 		return err
 	}
-	a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
+	a.notify(active.ctx, TurnStartEvent{RunID: active.id, Turn: turn})
 	return a.commitQueued(active, turn, messages)
 }
 
@@ -494,7 +503,7 @@ func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.Conv
 				}
 				// Match pi's queue contract: consumers see the updated queue before
 				// this queued user message emits message_start/message_end.
-				a.notify(active.ctx, Event{Kind: EventQueueUpdated, RunID: active.id, Turn: turn})
+				a.notify(active.ctx, QueueUpdateEvent{RunID: active.id, Turn: turn})
 				return nil
 			}); err != nil {
 				return err
@@ -589,10 +598,10 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 			if !retryOpen {
 				return
 			}
-			a.notify(active.ctx, Event{
-				Kind: EventRetryFinished, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt,
-				RetryFailureKind: kind, RetryHTTPStatus: status, RetrySucceeded: succeeded,
-				RetryFinishReason: reason,
+			a.notify(active.ctx, ProviderRetryFinishedEvent{
+				RunID: active.id, Turn: turn, Attempt: providerAttempt,
+				FailureKind: kind, HTTPStatus: status, Succeeded: succeeded,
+				FinishReason: reason,
 			})
 			retryOpen = false
 		}
@@ -604,7 +613,7 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 			// Attempt means request reconstruction has begun. Cancellation
 			// observed before this point closes the scheduled scope without an
 			// attempt; transform/build failures after it still get a finish.
-			a.notify(active.ctx, Event{Kind: EventRetryAttempt, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt})
+			a.notify(active.ctx, ProviderRetryAttemptEvent{RunID: active.id, Turn: turn, Attempt: providerAttempt})
 		}
 		// A snapshot is the atomic turn configuration boundary: request,
 		// threshold policy, terminal provenance and the next tool batch all see
@@ -667,9 +676,9 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 			}
 			chainAttempt = 0
 			status, _ := providerFailure.HTTPStatus()
-			a.notify(active.ctx, Event{
-				Kind: EventRetryScheduled, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt + 1,
-				RetryFailureKind: provider.FailureContextOverflow, RetryHTTPStatus: status,
+			a.notify(active.ctx, ProviderRetryScheduledEvent{
+				RunID: active.id, Turn: turn, Attempt: providerAttempt + 1,
+				FailureKind: provider.FailureContextOverflow, HTTPStatus: status,
 			})
 			retryInFlight = true
 			continue
@@ -692,17 +701,17 @@ func (a *Agent) providerTurnV2(active *activeRun, turn uint32) (llm.AssistantTer
 		}
 		active.phase = PhaseRetryWait
 		a.mu.Unlock()
-		a.notify(active.ctx, Event{
-			Kind: EventRetryScheduled, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt + 1,
-			RetryDelay: delay, RetryFailureKind: kind, RetryHTTPStatus: status,
+		a.notify(active.ctx, ProviderRetryScheduledEvent{
+			RunID: active.id, Turn: turn, Attempt: providerAttempt + 1,
+			Delay: delay, FailureKind: kind, HTTPStatus: status,
 		})
 		// Failed attempts remain runtime-only. runV2 commits only the terminal
 		// returned from this function, so a resend is rebuilt from unchanged
 		// durable conversation context.
 		if err := a.config.retry.Wait(active.ctx, delay); err != nil {
-			a.notify(active.ctx, Event{
-				Kind: EventRetryFinished, RunID: active.id, Turn: turn, RetryAttempt: providerAttempt + 1,
-				RetryFailureKind: provider.FailureCancelled, RetryFinishReason: provider.RetryFinishCancelled,
+			a.notify(active.ctx, ProviderRetryFinishedEvent{
+				RunID: active.id, Turn: turn, Attempt: providerAttempt + 1,
+				FailureKind: provider.FailureCancelled, FinishReason: provider.RetryFinishCancelled,
 			})
 			return a.failureTerminal(nil, llm.FinishAborted, "Run cancelled while waiting to retry provider", err, llm.Usage{})
 		}
@@ -850,25 +859,21 @@ func (a *Agent) compactProviderContext(active *activeRun, turn uint32, reason Co
 	active.phase = PhaseCompacting
 	a.mu.Unlock()
 	willRetry := reason == CompactionContextOverflow
-	a.notify(active.ctx, Event{
-		Kind: EventCompactionStarted, RunID: active.id, Turn: turn,
-		CompactionReason: reason, CompactionWillRetry: willRetry,
-	})
+	a.notify(active.ctx, CompactionStartEvent{RunID: active.id, Turn: turn, Reason: reason, WillRetry: willRetry})
 	result, err := a.config.compactor.Compact(active.ctx, session.CompactRequest{
 		KeepRecentTokens: a.config.keepRecentTokens,
 		Summarizer:       a.observedSummarizer(active, turn, reason),
 	})
 	if err != nil {
-		a.notify(active.ctx, Event{
-			Kind: EventCompactionSettled, RunID: active.id, Turn: turn,
-			RunError: safeCompactionEventError(err), CompactionReason: reason, CompactionWillRetry: willRetry,
+		eventErr := safeCompactionEventError(err)
+		a.notify(active.ctx, CompactionEndEvent{
+			RunID: active.id, Turn: turn, Reason: reason,
+			Aborted: context.Cause(active.ctx) != nil, WillRetry: willRetry,
+			ErrorMessage: eventErr.Error(), Err: eventErr,
 		})
 		return fmt.Errorf("automatic context compaction: %w", err)
 	}
-	a.notify(active.ctx, Event{
-		Kind: EventCompactionSettled, RunID: active.id, Turn: turn, Compaction: &result,
-		CompactionReason: reason, CompactionWillRetry: willRetry,
-	})
+	a.notify(active.ctx, CompactionEndEvent{RunID: active.id, Turn: turn, Reason: reason, Result: &result, WillRetry: willRetry})
 	return nil
 }
 
@@ -894,19 +899,23 @@ func (s observedSummarizer) Summarize(ctx context.Context, input session.Summary
 		return s.base.Summarize(ctx, input)
 	}
 	return observable.SummarizeWithRetryObserver(ctx, input, func(_ context.Context, retry provider.RetryEvent) {
-		kind := EventSummarizationRetryScheduled
 		switch retry.Kind {
+		case provider.RetryScheduled:
+			s.agent.notify(s.active.ctx, SummarizationRetryScheduledEvent{
+				RunID: s.active.id, Turn: s.turn, Reason: s.reason, Attempt: retry.Attempt,
+				Delay: retry.Delay, FailureKind: retry.FailureKind, HTTPStatus: retry.HTTPStatus,
+			})
 		case provider.RetryAttempt:
-			kind = EventSummarizationRetryAttempt
+			s.agent.notify(s.active.ctx, SummarizationRetryAttemptEvent{
+				RunID: s.active.id, Turn: s.turn, Reason: s.reason, Attempt: retry.Attempt,
+			})
 		case provider.RetryFinished:
-			kind = EventSummarizationRetryFinished
+			s.agent.notify(s.active.ctx, SummarizationRetryFinishedEvent{
+				RunID: s.active.id, Turn: s.turn, Reason: s.reason, Attempt: retry.Attempt,
+				FailureKind: retry.FailureKind, HTTPStatus: retry.HTTPStatus,
+				Succeeded: retry.Succeeded, FinishReason: retry.FinishReason,
+			})
 		}
-		s.agent.notify(s.active.ctx, Event{
-			Kind: kind, RunID: s.active.id, Turn: s.turn, CompactionReason: s.reason,
-			RetryAttempt: retry.Attempt, RetryDelay: retry.Delay,
-			RetryFailureKind: retry.FailureKind, RetryHTTPStatus: retry.HTTPStatus,
-			RetrySucceeded: retry.Succeeded, RetryFinishReason: retry.FinishReason,
-		})
 	})
 }
 
@@ -1090,11 +1099,15 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 }
 
 func (a *Agent) emitToolStart(active *activeRun, turn uint32, call llm.ToolCallBlock) {
-	a.notify(active.ctx, Event{Kind: EventToolStarted, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolArguments: call.ArgumentsJSON()})
+	a.notify(active.ctx, ToolExecutionStartEvent{RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), Arguments: call.ArgumentsJSON()})
 }
 func (a *Agent) emitToolSettled(active *activeRun, turn uint32, outcome batchOutcome) {
 	a.removePendingToolCallV2(active, outcome.call.ID())
-	a.notify(active.ctx, Event{Kind: EventToolSettled, RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), ToolArguments: outcome.call.ArgumentsJSON(), ToolOutput: outcome.output, ToolError: outcome.err})
+	a.notify(active.ctx, ToolExecutionEndEvent{
+		RunID: active.id, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(),
+		Arguments: outcome.call.ArgumentsJSON(), Result: cloneToolOutput(outcome.output),
+		IsError: outcome.err != nil, Err: outcome.err,
+	})
 }
 func (a *Agent) executeOneV2(active *activeRun, turn uint32, snapshot TurnSnapshot, assistant llm.AssistantToolUseMessage, call llm.ToolCallBlock) batchOutcome {
 	if err := a.beginToolCallV2(active, turn, call); err != nil {
@@ -1226,15 +1239,20 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, snapshot Tur
 		if !accepting || !validToolUpdate(update) {
 			return
 		}
-		a.notify(active.ctx, Event{Kind: EventToolProgress, RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(), ToolArguments: call.ArgumentsJSON(), ToolUpdate: update})
+		update = cloneToolUpdate(update)
+		a.notify(active.ctx, ToolExecutionUpdateEvent{
+			RunID: active.id, Turn: turn, ToolCallID: call.ID(), ToolName: call.Name(),
+			Arguments: call.ArgumentsJSON(), PartialResult: update,
+		})
 	}
 	outcome.output, outcome.err = executeNamedToolSafely(snapshot.Tool, active.ctx, call.Name(), call.ArgumentsJSON(), report)
 	updates.Lock()
 	accepting = false
 	updates.Unlock()
 	outcome.output, outcome.err = normalizeToolOutcome(outcome.output, outcome.err)
+	outcome.output = ownToolOutput(outcome.output)
 	if snapshot.AfterToolCall != nil {
-		after, afterErr := callAfterToolHook(snapshot.AfterToolCall, active.ctx, AfterToolCallContext{Assistant: assistant, ToolCall: call, Arguments: call.ArgumentsJSON(), Context: contextMessages, Result: outcome.output, IsError: outcome.err != nil})
+		after, afterErr := callAfterToolHook(snapshot.AfterToolCall, active.ctx, AfterToolCallContext{Assistant: assistant, ToolCall: call, Arguments: call.ArgumentsJSON(), Context: contextMessages, Result: cloneToolOutput(outcome.output), IsError: outcome.err != nil})
 		if afterErr != nil {
 			outcome.output, outcome.err = ToolOutput{Text: afterErr.Error()}, afterErr
 		} else {
@@ -1243,7 +1261,13 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, snapshot Tur
 				outcome.output.Text = ""
 			}
 			if after.Details != nil {
-				outcome.output.Details = *after.Details
+				if details, ok := cloneToolDetails(*after.Details); ok {
+					outcome.output.Details = details
+				} else {
+					// Preserve the invalid value for commitToolResultV2's existing
+					// fatal validation path without exposing it to observers.
+					outcome.output.Details = *after.Details
+				}
 			}
 			if after.Usage != nil {
 				usage := *after.Usage
@@ -1301,6 +1325,9 @@ func validToolUpdate(update ToolUpdate) bool {
 		default:
 			return false
 		}
+	}
+	if _, ok := cloneToolDetails(update.Details); !ok {
+		return false
 	}
 	seen := map[string]struct{}{}
 	for _, name := range update.AddedToolNames {

@@ -79,7 +79,7 @@ func TestNewAssistantToolUseMessage(t *testing.T) {
 		t.Fatalf("NewToolCallBlock() error = %v", err)
 	}
 	timestamp := time.Date(2026, time.August, 1, 1, 2, 3, 0, time.UTC)
-	message, err := llm.NewAssistantToolUseMessage(
+	message, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{mustTextBlock(t, "running"), call},
 		llm.Usage{},
 		timestamp,
@@ -135,7 +135,7 @@ func TestNewAssistantToolUseMessageRejectsMissingOrDuplicateCall(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := llm.NewAssistantToolUseMessage(tt.content, llm.Usage{}, time.Time{})
+			_, err := newAssistantToolUseMessage(tt.content, llm.Usage{}, time.Time{})
 			if !errors.Is(err, llm.ErrInvalidToolCall) {
 				t.Fatalf("NewAssistantToolUseMessage() error = %v, want ErrInvalidToolCall", err)
 			}

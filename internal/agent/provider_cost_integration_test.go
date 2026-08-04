@@ -74,7 +74,7 @@ func TestOpenAIAdapterCostsSurviveAgentSessionJSONLReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			model, err := provider.NewModel(provider.ModelSpec{
+			model, err := newAgentModel(provider.ModelSpec{
 				Provider: "fixture", API: test.api, ID: "priced",
 				Cost: provider.CostRates{Input: 2, Output: 3, CacheRead: 0.5, CacheWrite: 4},
 			})
@@ -151,7 +151,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 		t.Run(test.name, func(t *testing.T) {
 			var order []string
 			payloadHook := func(label string) provider.PayloadHook {
-				return func(_ provider.ModelRef, payload []byte) ([]byte, error) {
+				return func(_ provider.Model, payload []byte) ([]byte, error) {
 					order = append(order, label+":payload")
 					var object map[string]any
 					if err := json.Unmarshal(payload, &object); err != nil {
@@ -162,7 +162,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 				}
 			}
 			headerHook := func(label string) provider.HeaderHook {
-				return func(_ provider.ModelRef, headers map[string]*string) error {
+				return func(_ provider.Model, headers map[string]*string) error {
 					order = append(order, label+":headers")
 					value := "yes"
 					headers["X-"+label+"-Hook"] = &value
@@ -170,7 +170,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 				}
 			}
 			responseHook := func(label string) provider.ResponseHook {
-				return func(_ provider.ModelRef, response provider.ResponseInfo) error {
+				return func(_ provider.Model, response provider.ResponseInfo) error {
 					order = append(order, label+":response")
 					if response.StatusCode != http.StatusOK {
 						t.Errorf("response status = %d", response.StatusCode)
@@ -203,7 +203,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			model, err := provider.NewModel(provider.ModelSpec{Provider: "fixture", API: test.api, ID: "model"})
+			model, err := newAgentModel(provider.ModelSpec{Provider: "fixture", API: test.api, ID: "model"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -215,7 +215,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 					Metadata:        map[string]any{"caller": map[string]any{"kept": true}},
 					OnPayload:       payloadHook("stream"), OnHeaders: headerHook("stream"), OnResponse: responseHook("stream"),
 				},
-				ResolveStreamOptions: func(context.Context, provider.ModelRef) (provider.StreamOptions, error) {
+				ResolveStreamOptions: func(context.Context, provider.Model) (provider.StreamOptions, error) {
 					return provider.StreamOptions{APIKey: "resolved-secret", Headers: map[string]string{"X-Resolved": "yes"}, OnPayload: payloadHook("resolver"), OnHeaders: headerHook("resolver"), OnResponse: responseHook("resolver")}, nil
 				},
 				Hooks: agent.Hooks{BeforeProviderRequest: payloadHook("agent"), BeforeProviderHeaders: headerHook("agent"), AfterProviderResponse: responseHook("agent")},
@@ -240,8 +240,8 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 	}
 }
 
-func TestUnknownAssistantCostPersistsAsZero(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+func TestZeroRateAssistantCostPersistsAsKnownZero(t *testing.T) {
+	model, _ := newTestModel("scripted", "scripted", "model")
 	transcript := newSession(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: transcript, Model: model})
 	if err != nil {
@@ -252,7 +252,7 @@ func TestUnknownAssistantCostPersistsAsZero(t *testing.T) {
 	}
 	identity, ok := transcript.Context().AssistantProvenance()
 	if !ok || identity.Cost != session.ZeroUsageCost() {
-		t.Fatalf("unknown cost provenance = (%#v, %t)", identity, ok)
+		t.Fatalf("zero-rate cost provenance = (%#v, %t)", identity, ok)
 	}
 }
 
@@ -263,9 +263,9 @@ func assertUsageCost(t *testing.T, context session.Context, wantInput, wantOutpu
 	if !ok {
 		t.Fatalf("assistant = %T", messages[len(messages)-1])
 	}
-	cost, ok := terminal.Usage().Cost()
-	if !ok || !closeCost(cost.Input, wantInput) || !closeCost(cost.Output, wantOutput) || !closeCost(cost.Total, wantTotal) {
-		t.Fatalf("terminal cost = (%#v, %t)", cost, ok)
+	cost := terminal.Usage().Cost()
+	if !closeCost(cost.Input, wantInput) || !closeCost(cost.Output, wantOutput) || !closeCost(cost.Total, wantTotal) {
+		t.Fatalf("terminal cost = %#v", cost)
 	}
 	identity, ok := context.AssistantProvenance()
 	if !ok {

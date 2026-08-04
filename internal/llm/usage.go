@@ -21,16 +21,15 @@ type UsageSpec struct {
 	CacheWrite   uint64
 	Reasoning    *uint64
 	CacheWrite1h *uint64
-	// Cost is optional because providers may report token accounting without
-	// pricing. Nil means unknown, which is distinct from a real zero-priced
-	// request. Rates and arithmetic belong to Model; this is the normalized
-	// observed/request cost carried by messages and tool results.
+	// Cost may be omitted while parsing provider token accounting. The resulting
+	// Usage still carries pi's mandatory cost object, initialized to zero until
+	// the selected Model applies its rates.
 	Cost *Cost
 }
 
-// Cost mirrors pi's usage.cost object.  It intentionally uses float64 rather
-// than a decimal string because provider pricing is a calculated runtime
-// value; callers must keep nil when the provider did not report/calculate it.
+// Cost mirrors pi's mandatory usage.cost object. It intentionally uses
+// float64 rather than a decimal string because pricing is calculated at the
+// selected Model boundary.
 type Cost struct{ Input, Output, CacheRead, CacheWrite, Total float64 }
 
 // Usage is immutable normalized token accounting. TotalTokens is always the
@@ -46,7 +45,6 @@ type Usage struct {
 	cacheWrite1h    uint64
 	hasCacheWrite1h bool
 	cost            Cost
-	hasCost         bool
 }
 
 func NewUsage(spec UsageSpec) (Usage, error) {
@@ -104,7 +102,6 @@ func NewUsage(spec UsageSpec) (Usage, error) {
 	}
 	if spec.Cost != nil {
 		usage.cost = *spec.Cost
-		usage.hasCost = true
 	}
 
 	return usage, nil
@@ -138,7 +135,7 @@ func (u Usage) CacheWrite1h() (uint64, bool) {
 	return u.cacheWrite1h, u.hasCacheWrite1h
 }
 
-func (u Usage) Cost() (Cost, bool) { return u.cost, u.hasCost }
+func (u Usage) Cost() Cost { return u.cost }
 
 // WithCost returns the same normalized token accounting with a calculated
 // model-bound cost. It is the terminal provider/session boundary: adapters

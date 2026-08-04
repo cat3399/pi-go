@@ -42,6 +42,34 @@ func TestRuntimeCompatMergeRecursivelyClonesNamedMapsAndSlices(t *testing.T) {
 	}
 }
 
+func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
+	model := builtinOpenAIModel(DefaultOpenAIModel)
+	if model.Provider != OpenAIProviderID || model.ID != "gpt-5.5" || model.Name != "GPT-5.5" ||
+		model.API != OpenAIResponsesAPI || model.BaseURL != "https://api.openai.com/v1" || !model.Reasoning ||
+		model.ContextWindow != 272_000 || model.MaxTokens != 128_000 {
+		t.Fatalf("builtin identity/capabilities = %#v", model)
+	}
+	if len(model.Input) != 2 || model.Input[0] != provider.InputText || model.Input[1] != provider.InputImage {
+		t.Fatalf("builtin input = %#v", model.Input)
+	}
+	off, hasOff := model.ThinkingLevelMap[provider.ThinkingOff]
+	minimal, hasMinimal := model.ThinkingLevelMap[provider.ThinkingMinimal]
+	xhigh, hasXHigh := model.ThinkingLevelMap[provider.ThinkingXHigh]
+	if !hasOff || off == nil || *off != "none" || !hasMinimal || minimal != nil || !hasXHigh || xhigh == nil || *xhigh != "xhigh" {
+		t.Fatalf("builtin thinking map = %#v", model.ThinkingLevelMap)
+	}
+	if model.Cost.Input != 5 || model.Cost.Output != 30 || model.Cost.CacheRead != 0.5 || model.Cost.CacheWrite != 0 || len(model.Cost.Tiers) != 1 {
+		t.Fatalf("builtin base cost = %#v", model.Cost)
+	}
+	tier := model.Cost.Tiers[0]
+	if tier.InputTokensAbove != 272_000 || tier.Input != 10 || tier.Output != 45 || tier.CacheRead != 1 || tier.CacheWrite != 0 {
+		t.Fatalf("builtin long-context tier = %#v", tier)
+	}
+	if _, err := model.Ref(); err != nil {
+		t.Fatalf("builtin is not a complete provider Model: %v", err)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

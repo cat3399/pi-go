@@ -30,11 +30,11 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "test-model", BaseURL: "", Reasoning: true, Input: []provider.InputKind{provider.InputText, provider.InputImage}, ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingHigh: ptr("high")}, MaxTokens: 77, Headers: map[string]string{"X-Model": "model"}})
+	model, err := newModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "test-model", BaseURL: "", Reasoning: true, Input: []provider.InputKind{provider.InputText, provider.InputImage}, ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingHigh: ptr("high")}, MaxTokens: 77, Headers: map[string]string{"X-Model": "model"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request, err := provider.NewRequestWithOptions(model, "system", []llm.ConversationMessage{user}, provider.RequestOptions{ThinkingLevel: provider.ThinkingHigh, Stream: provider.StreamOptions{APIKey: "request-key", Headers: map[string]string{"X-Model": "request", "X-Request": "yes"}, MaxTokens: 9}})
+	request, err := provider.NewRequestWithOptions(model, "system", []llm.ConversationMessage{user}, provider.RequestOptions{ThinkingLevel: provider.ThinkingHigh, Stream: provider.StreamOptions{APIKey: "request-key", Headers: map[string]string{"X-Model": "request", "X-Request": "yes"}, MaxTokens: uint64Pointer(9)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +78,8 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 	if u := message.Usage(); u.Input() != 6 || u.Output() != 3 || u.CacheRead() != 2 || u.CacheWrite() != 1 || u.TotalTokens() != 12 {
 		t.Fatalf("usage=%#v", u)
 	}
-	if provenance, ok := message.AssistantProvenance(); !ok || !provenance.Matches("compatible", provider.OpenAICompletionsAPI, "test-model") {
-		t.Fatalf("assistant provenance=(%#v, %t)", provenance, ok)
+	if provenance := message.AssistantProvenance(); !provenance.Matches("compatible", provider.OpenAICompletionsAPI, "test-model") {
+		t.Fatalf("assistant provenance=%#v", provenance)
 	}
 	if response, ok := message.ResponseMetadata(); !ok || response != (llm.AssistantResponseMetadata{ResponseID: "chat-1", ResponseModel: "resolved-model", RawStopReason: "stop"}) {
 		t.Fatalf("assistant response metadata=(%#v, %t)", response, ok)
@@ -102,7 +102,7 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 
 func TestOpenAICompletionsOmitsUnsupportedStreamOptionsAndInfersFinishReason(t *testing.T) {
 	supportsUsage, supportsFinish := false, false
-	model, err := provider.NewModel(provider.ModelSpec{
+	model, err := newModel(provider.ModelSpec{
 		Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "no-finish",
 		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
 			SupportsUsageInStreaming: &supportsUsage,
@@ -139,7 +139,7 @@ func TestOpenAICompletionsOmitsUnsupportedStreamOptionsAndInfersFinishReason(t *
 }
 
 func TestOpenAICompletionsInterleavedToolCalls(t *testing.T) {
-	model, err := provider.NewModelRef("another-provider", provider.OpenAICompletionsAPI, "chat")
+	model, err := newTestModel("another-provider", provider.OpenAICompletionsAPI, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestOpenAICompletionsInterleavedToolCalls(t *testing.T) {
 }
 
 func TestOpenAICompletionsHTTPErrorAndCancellation(t *testing.T) {
-	model, err := provider.NewModelRef("compatible", provider.OpenAICompletionsAPI, "chat")
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestOpenAICompletionsHTTPErrorAndCancellation(t *testing.T) {
 }
 
 func TestOpenAICompletionsPreservesIncomingReasoningButRejectsSSEError(t *testing.T) {
-	model, err := provider.NewModelRef("compatible", provider.OpenAICompletionsAPI, "chat")
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestOpenAICompletionsPreservesIncomingReasoningButRejectsSSEError(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, time.Time{})
+	prior, err := newAssistantRichMessage([]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestOpenAICompletionsPreservesIncomingReasoningButRejectsSSEError(t *testin
 
 func TestOpenAICompletionsReplaysReasoningToolDetailsAndToolImages(t *testing.T) {
 	requiresBridge := true
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "chat", Reasoning: true, Input: []provider.InputKind{provider.InputText, provider.InputImage}, Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{RequiresAssistantAfterToolResult: &requiresBridge}}})
+	model, err := newModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "chat", Reasoning: true, Input: []provider.InputKind{provider.InputText, provider.InputImage}, Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{RequiresAssistantAfterToolResult: &requiresBridge}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestOpenAICompletionsReplaysReasoningToolDetailsAndToolImages(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{thinking, call}, llm.Usage{}, time.Time{}, &llm.AssistantProvenance{Provider: "compatible", API: provider.OpenAICompletionsAPI, Model: "chat"}, nil)
+	prior, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{thinking, call}, llm.Usage{}, time.Time{}, llm.AssistantProvenance{Provider: "compatible", API: provider.OpenAICompletionsAPI, Model: "chat"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestOpenAICompletionsReplaysReasoningToolDetailsAndToolImages(t *testing.T)
 
 func TestOpenAICompletionsNormalizesCrossModelHistoryAndUnsupportedImages(t *testing.T) {
 	requiresBridge := true
-	model, err := provider.NewModel(provider.ModelSpec{
+	model, err := newModel(provider.ModelSpec{
 		Provider: provider.OpenAIProviderID, API: provider.OpenAICompletionsAPI, ID: "target",
 		Input:  []provider.InputKind{provider.InputText},
 		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{RequiresAssistantAfterToolResult: &requiresBridge}},
@@ -391,7 +391,7 @@ func TestOpenAICompletionsNormalizesCrossModelHistoryAndUnsupportedImages(t *tes
 	}
 	prior, err := llm.NewAssistantToolUseMessageWithMetadata(
 		[]llm.AssistantBlock{visible, redacted, call}, llm.Usage{}, time.Time{},
-		&llm.AssistantProvenance{Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, Model: "source"}, nil,
+		llm.AssistantProvenance{Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, Model: "source"}, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -453,7 +453,7 @@ func TestOpenAICompletionsNormalizesCrossModelHistoryAndUnsupportedImages(t *tes
 }
 
 func TestOpenAICompletionsClampsInconsistentCacheUsage(t *testing.T) {
-	model, err := provider.NewModelRef("compatible", provider.OpenAICompletionsAPI, "chat")
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
 	if err != nil {
 		t.Fatal(err)
 	}

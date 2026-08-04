@@ -187,7 +187,7 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 	}))
 	defer server.Close()
 
-	model, err := provider.NewModelRef(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "fixture-integrated")
+	model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "fixture-integrated")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,14 +217,14 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 	}
 
 	var eventMu sync.Mutex
-	var events []agent.Event
+	var events []agentEventSnapshot
 	toolSettled := make(chan string, 2)
-	coordinator.Subscribe(func(_ context.Context, event agent.Event) {
+	subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
 		eventMu.Lock()
-		events = append(events, event)
+		events = append(events, snapshotAgentEvent(event))
 		eventMu.Unlock()
-		if event.Kind == agent.EventToolSettled {
-			toolSettled <- event.ToolCallID
+		if settled, ok := event.(agent.ToolExecutionEndEvent); ok {
+			toolSettled <- settled.ToolCallID
 		}
 	})
 	type runOutcome struct {
@@ -295,7 +295,7 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 	assertCoreIntegrationSession(t, transcript)
 
 	eventMu.Lock()
-	recordedEvents := append([]agent.Event(nil), events...)
+	recordedEvents := append([]agentEventSnapshot(nil), events...)
 	eventMu.Unlock()
 	assertCoreIntegrationLifecycle(t, recordedEvents)
 	if err := coordinator.WaitForIdle(context.Background()); err != nil {
@@ -436,18 +436,18 @@ func assertCoreIntegrationSession(t *testing.T, transcript *session.Session) {
 	}
 }
 
-func assertCoreIntegrationLifecycle(t *testing.T, events []agent.Event) {
+func assertCoreIntegrationLifecycle(t *testing.T, events []agentEventSnapshot) {
 	t.Helper()
-	var retries, settled []agent.Event
+	var retries, settled []agentEventSnapshot
 	for _, event := range events {
 		switch event.Kind {
-		case agent.EventRetryScheduled, agent.EventRetryAttempt, agent.EventRetryFinished:
+		case agent.ProviderRetryScheduledEventType, agent.ProviderRetryAttemptEventType, agent.ProviderRetryFinishedEventType:
 			retries = append(retries, event)
-		case agent.EventRunSettled:
+		case agent.AgentEndEventType:
 			settled = append(settled, event)
 		}
 	}
-	if len(retries) != 3 || retries[0].Kind != agent.EventRetryScheduled || retries[1].Kind != agent.EventRetryAttempt || retries[2].Kind != agent.EventRetryFinished {
+	if len(retries) != 3 || retries[0].Kind != agent.ProviderRetryScheduledEventType || retries[1].Kind != agent.ProviderRetryAttemptEventType || retries[2].Kind != agent.ProviderRetryFinishedEventType {
 		t.Fatalf("retry lifecycle = %+v", retries)
 	}
 	if retries[0].Turn != 2 || retries[0].RetryAttempt != 2 || retries[0].RetryFailureKind != provider.FailureTransport ||

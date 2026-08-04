@@ -69,7 +69,7 @@ type Model struct {
 	UnknownFields     []string `json:"-"`
 }
 
-func (m Model) Ref() (provider.ModelRef, error) {
+func (m Model) Ref() (provider.Model, error) {
 	return provider.NewModel(provider.ModelSpec{
 		Provider: m.Provider, API: m.API, ID: m.ID, Name: m.Name, BaseURL: m.BaseURL,
 		Headers: m.Headers, Reasoning: m.Reasoning, ThinkingLevelMap: m.ThinkingLevelMap, Input: m.Input,
@@ -450,7 +450,8 @@ func filterPattern(models []Model, pattern string) []Model {
 func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings) Snapshot {
 	// The hand-written baseline is deliberately tiny because the fixed upstream
 	// catalog cannot be regenerated from its absent manifest/source data.
-	byKey := map[string]Model{modelKey(OpenAIProviderID, DefaultOpenAIModel): {Provider: OpenAIProviderID, ID: DefaultOpenAIModel, Name: DefaultOpenAIModel, API: OpenAIResponsesAPI}}
+	builtin := builtinOpenAIModel(DefaultOpenAIModel)
+	byKey := map[string]Model{modelKey(OpenAIProviderID, DefaultOpenAIModel): builtin}
 	ids := make([]string, 0, len(providers)+len(cached))
 	for id := range providers {
 		ids = append(ids, id)
@@ -468,6 +469,24 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 	for _, id := range ids {
 		p := providers[id]
 		for _, m := range p.Models {
+			if p.ID == OpenAIProviderID {
+				baseline := builtinOpenAIModel(m.ID)
+				if m.Name == "" {
+					m.Name = baseline.Name
+				}
+				if m.BaseURL == "" && p.BaseURL == "" {
+					m.BaseURL = baseline.BaseURL
+				}
+				if len(m.Input) == 0 {
+					m.Input = baseline.Input
+				}
+				if m.ContextWindow == 0 {
+					m.ContextWindow = baseline.ContextWindow
+				}
+				if m.MaxTokens == 0 {
+					m.MaxTokens = baseline.MaxTokens
+				}
+			}
 			if m.API == "" {
 				m.API = p.API
 			}
@@ -525,7 +544,7 @@ func (r *Runtime) customModel(providerID, modelID string) (Model, bool) {
 	if providerID != OpenAIProviderID {
 		return Model{}, false
 	}
-	model := Model{Provider: OpenAIProviderID, ID: modelID, Name: modelID, API: OpenAIResponsesAPI}
+	model := builtinOpenAIModel(modelID)
 	if configured, ok := r.providers[providerID]; ok {
 		if configured.API != "" {
 			model.API = configured.API
@@ -538,6 +557,38 @@ func (r *Runtime) customModel(providerID, modelID string) (Model, bool) {
 		}
 	}
 	return model, true
+}
+
+func builtinOpenAIModel(modelID string) Model {
+	off := "none"
+	xhigh := "xhigh"
+	name := modelID
+	if modelID == DefaultOpenAIModel {
+		name = "GPT-5.5"
+	}
+	return Model{
+		Provider:  OpenAIProviderID,
+		ID:        modelID,
+		Name:      name,
+		API:       OpenAIResponsesAPI,
+		BaseURL:   "https://api.openai.com/v1",
+		Reasoning: true,
+		ThinkingLevelMap: map[provider.ThinkingLevel]*string{
+			provider.ThinkingOff:     &off,
+			provider.ThinkingMinimal: nil,
+			provider.ThinkingXHigh:   &xhigh,
+		},
+		Input: []provider.InputKind{provider.InputText, provider.InputImage},
+		Cost: provider.CostRates{
+			Input: 5, Output: 30, CacheRead: 0.5,
+			Tiers: []provider.CostTier{{
+				InputTokensAbove: 272_000,
+				Input:            10, Output: 45, CacheRead: 1,
+			}},
+		},
+		ContextWindow: 272_000,
+		MaxTokens:     128_000,
+	}
 }
 
 func applyModelOverride(model Model, override modelOverride) Model {

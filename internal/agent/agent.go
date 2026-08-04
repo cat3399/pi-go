@@ -38,11 +38,23 @@ type activeRun struct {
 	// provider code starts. It is then the immutable configuration that owns
 	// the resulting assistant/tool batch and its durable provenance.
 	snapshot *TurnSnapshot
+	// committed contains exactly the AgentMessages produced by this low-level
+	// run, matching pi's agent_end payload. turnToolResults is reset lazily when
+	// the first message of a new turn is recorded.
+	committed         []agentmsg.Message
+	turnToolResults   []agentmsg.Message
+	committedTurn     uint32
+	streamStartedTurn uint32
 }
 
 type observerEntry struct {
 	id       uint64
 	observer Observer
+}
+
+type controlObserverEntry struct {
+	id       uint64
+	observer ControlObserver
 }
 
 // Agent is the existing stateful execution coordinator. Provider, tool, transcript
@@ -61,8 +73,9 @@ type Agent struct {
 	starting bool
 	nextID   uint64
 
-	observers      []observerEntry
-	nextObserverID uint64
+	observers        []observerEntry
+	controlObservers []controlObserverEntry
+	nextObserverID   uint64
 
 	steeringQueue []llm.ConversationMessage
 	followUpQueue []llm.ConversationMessage
@@ -102,6 +115,35 @@ func (a *Agent) Subscribe(observer Observer) func() {
 					copy(a.observers[index:], a.observers[index+1:])
 					a.observers[len(a.observers)-1] = observerEntry{}
 					a.observers = a.observers[:len(a.observers)-1]
+					break
+				}
+			}
+			a.mu.Unlock()
+		})
+	}
+}
+
+// SubscribeControl observes typed retry, compaction, and queue coordination
+// without widening the pi-compatible AgentEvent union delivered by Subscribe.
+func (a *Agent) SubscribeControl(observer ControlObserver) func() {
+	if a == nil || observer == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	a.nextObserverID++
+	id := a.nextObserverID
+	a.controlObservers = append(a.controlObservers, controlObserverEntry{id: id, observer: observer})
+	a.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.mu.Lock()
+			for index := range a.controlObservers {
+				if a.controlObservers[index].id == id {
+					copy(a.controlObservers[index:], a.controlObservers[index+1:])
+					a.controlObservers[len(a.controlObservers)-1] = controlObserverEntry{}
+					a.controlObservers = a.controlObservers[:len(a.controlObservers)-1]
 					break
 				}
 			}
@@ -222,13 +264,10 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (result sessio
 		if compactErr != nil {
 			eventErr = safeCompactionEventError(compactErr)
 		}
-		a.notify(active.ctx, Event{Kind: EventRunSettled, RunID: active.id, Turn: 1, RunError: eventErr})
+		a.notify(active.ctx, AgentEndEvent{RunID: active.id, Turn: 1, Messages: a.runMessages(active), Err: eventErr})
 	}()
-	a.notify(active.ctx, Event{Kind: EventRunStarted, RunID: active.id})
-	a.notify(active.ctx, Event{
-		Kind: EventCompactionStarted, RunID: active.id, Turn: 1,
-		CompactionReason: CompactionManual, CompactionWillRetry: false,
-	})
+	a.notify(active.ctx, AgentStartEvent{RunID: active.id})
+	a.notify(active.ctx, CompactionStartEvent{RunID: active.id, Turn: 1, Reason: CompactionManual})
 	result, compactErr = a.config.compactor.Compact(active.ctx, session.CompactRequest{
 		KeepRecentTokens: a.config.keepRecentTokens,
 		Instructions:     instructions,
@@ -236,16 +275,13 @@ func (a *Agent) Compact(ctx context.Context, instructions string) (result sessio
 	})
 	if compactErr != nil {
 		eventErr := safeCompactionEventError(compactErr)
-		a.notify(active.ctx, Event{
-			Kind: EventCompactionSettled, RunID: active.id, Turn: 1, RunError: eventErr,
-			CompactionReason: CompactionManual, CompactionWillRetry: false,
+		a.notify(active.ctx, CompactionEndEvent{
+			RunID: active.id, Turn: 1, Reason: CompactionManual,
+			Aborted: context.Cause(active.ctx) != nil, Err: eventErr,
 		})
 		return session.CompactResult{}, compactErr
 	}
-	a.notify(active.ctx, Event{
-		Kind: EventCompactionSettled, RunID: active.id, Turn: 1, Compaction: &result,
-		CompactionReason: CompactionManual, CompactionWillRetry: false,
-	})
+	a.notify(active.ctx, CompactionEndEvent{RunID: active.id, Turn: 1, Reason: CompactionManual, Result: &result})
 	return result, nil
 }
 
@@ -497,7 +533,10 @@ func (a *Agent) runCause(active *activeRun) error {
 	return context.Cause(active.ctx)
 }
 
-func (a *Agent) notify(ctx context.Context, event Event) {
+func (a *Agent) notify(ctx context.Context, event agentRuntimeEvent) {
+	if event == nil {
+		return
+	}
 	a.mu.Lock()
 	observers := make([]Observer, 0, len(a.observers))
 	for _, entry := range a.observers {
@@ -505,10 +544,104 @@ func (a *Agent) notify(ctx context.Context, event Event) {
 			observers = append(observers, entry.observer)
 		}
 	}
-	a.mu.Unlock()
-	for _, observer := range observers {
-		observer(ctx, event)
+	controlObservers := make([]ControlObserver, 0, len(a.controlObservers))
+	for _, entry := range a.controlObservers {
+		if entry.observer != nil {
+			controlObservers = append(controlObservers, entry.observer)
+		}
 	}
+	a.mu.Unlock()
+	if publicEvent, ok := event.(AgentEvent); ok {
+		for _, observer := range observers {
+			observer(ctx, cloneAgentEvent(publicEvent))
+		}
+	}
+	if controlEvent, ok := event.(AgentControlEvent); ok {
+		for _, observer := range controlObservers {
+			observer(ctx, cloneAgentControlEvent(controlEvent))
+		}
+	}
+}
+
+func (a *Agent) markStreamStarted(active *activeRun, turn uint32) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active || active.terminalAccepted {
+		return fmt.Errorf("%w: inactive provider stream", ErrInvariant)
+	}
+	active.streamStartedTurn = turn
+	return nil
+}
+
+func (a *Agent) emitMessageStartIfNeeded(active *activeRun, turn uint32, message agentmsg.Message) error {
+	if message == nil {
+		return fmt.Errorf("%w: nil message start", ErrInvariant)
+	}
+	a.mu.Lock()
+	if a.active != active || active.terminalAccepted {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: inactive message start", ErrInvariant)
+	}
+	streamStarted := message.Role() == agentmsg.RoleAssistant && active.streamStartedTurn == turn
+	a.mu.Unlock()
+	if !streamStarted {
+		a.notify(active.ctx, MessageStartEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(message)})
+	}
+	return nil
+}
+
+func (a *Agent) recordCommittedMessage(active *activeRun, turn uint32, message agentmsg.Message) error {
+	if message == nil {
+		return fmt.Errorf("%w: nil committed message", ErrInvariant)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active {
+		return fmt.Errorf("%w: inactive committed message", ErrInvariant)
+	}
+	if active.committedTurn != turn {
+		active.committedTurn = turn
+		active.turnToolResults = nil
+	}
+	active.committed = append(active.committed, agentmsg.CloneOne(message))
+	if message.Role() == agentmsg.RoleToolResult {
+		active.turnToolResults = append(active.turnToolResults, agentmsg.CloneOne(message))
+	}
+	return nil
+}
+
+func (a *Agent) runMessages(active *activeRun) []agentmsg.Message {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active {
+		return nil
+	}
+	return agentmsg.Clone(active.committed)
+}
+
+func (a *Agent) turnEndEvent(active *activeRun, turn uint32, terminal llm.AssistantTerminal) (TurnEndEvent, error) {
+	message, err := agentmsg.NewLLM(terminal)
+	if err != nil {
+		return TurnEndEvent{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != active {
+		return TurnEndEvent{}, fmt.Errorf("%w: inactive turn end", ErrInvariant)
+	}
+	return TurnEndEvent{
+		RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(message),
+		ToolResults: agentmsg.Clone(active.turnToolResults),
+	}, nil
+}
+
+func (a *Agent) notifyTurnEnd(active *activeRun, turn uint32, terminal llm.AssistantTerminal) error {
+	event, err := a.turnEndEvent(active, turn, terminal)
+	if err != nil {
+		return err
+	}
+	a.notify(active.ctx, event)
+	return nil
 }
 
 func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) (llm.ConversationMessage, error) {
@@ -541,7 +674,7 @@ func (a *Agent) commitAfterAppend(
 		}
 	}
 	options := session.AppendOptions{}
-	var eventModel provider.ModelRef
+	var eventModel provider.Model
 	if message.Role() == llm.RoleAssistant {
 		snapshot, snapshotErr := a.activeSnapshot(active)
 		if snapshotErr != nil {
@@ -553,12 +686,6 @@ func (a *Agent) commitAfterAppend(
 				return nil, snapshotErr
 			}
 			snapshot = TurnSnapshot{Model: a.config.model}
-		}
-		options.Assistant = session.AssistantProvenance{
-			API:      snapshot.Model.API(),
-			Provider: snapshot.Model.Provider(),
-			Model:    snapshot.Model.ID(),
-			Cost:     assistantSessionCost(message),
 		}
 		eventModel = snapshot.Model
 	}
@@ -574,14 +701,13 @@ func (a *Agent) commitAfterAppend(
 			return nil, err
 		}
 	}
-	a.notify(active.ctx, Event{
-		Kind:         EventMessageCommitted,
-		RunID:        active.id,
-		Turn:         turn,
-		Message:      message,
-		AgentMessage: agentmsg.CloneOne(final),
-		Model:        eventModel,
-	})
+	if err := a.emitMessageStartIfNeeded(active, turn, final); err != nil {
+		return nil, err
+	}
+	if err := a.recordCommittedMessage(active, turn, final); err != nil {
+		return nil, err
+	}
+	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final), Model: eventModel})
 	return message, nil
 }
 
@@ -610,6 +736,9 @@ func (a *Agent) commitAgentMessage(active *activeRun, turn uint32, message agent
 	if err != nil {
 		return err
 	}
+	if err := a.emitMessageStartIfNeeded(active, turn, final); err != nil {
+		return err
+	}
 	if standard, ok := final.(agentmsg.LLM); ok {
 		return a.commitConversationAfterMessageEnd(active, turn, standard.Conversation(), final)
 	}
@@ -628,19 +757,19 @@ func (a *Agent) commitAgentMessage(active *activeRun, turn uint32, message agent
 	if convertErr != nil {
 		return fmt.Errorf("%w: project committed AgentMessage: %w", ErrInvariant, convertErr)
 	}
-	var projected llm.ConversationMessage
-	if len(converted) == 1 {
-		projected = converted[0]
-	} else if len(converted) > 1 {
+	if len(converted) > 1 {
 		return fmt.Errorf("%w: one AgentMessage projected to multiple LLM messages", ErrInvariant)
 	}
-	a.notify(active.ctx, Event{Kind: EventMessageCommitted, RunID: active.id, Turn: turn, Message: projected, AgentMessage: agentmsg.CloneOne(final)})
+	if err := a.recordCommittedMessage(active, turn, final); err != nil {
+		return err
+	}
+	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final)})
 	return nil
 }
 
 func (a *Agent) commitConversationAfterMessageEnd(active *activeRun, turn uint32, message llm.ConversationMessage, final agentmsg.Message) error {
 	options := session.AppendOptions{}
-	var eventModel provider.ModelRef
+	var eventModel provider.Model
 	if message.Role() == llm.RoleAssistant {
 		snapshot, snapshotErr := a.activeSnapshot(active)
 		if snapshotErr != nil {
@@ -649,7 +778,6 @@ func (a *Agent) commitConversationAfterMessageEnd(active *activeRun, turn uint32
 			}
 			snapshot = TurnSnapshot{Model: a.config.model}
 		}
-		options.Assistant = session.AssistantProvenance{API: snapshot.Model.API(), Provider: snapshot.Model.Provider(), Model: snapshot.Model.ID(), Cost: assistantSessionCost(message)}
 		eventModel = snapshot.Model
 	}
 	settlementBase := context.WithoutCancel(active.ctx)
@@ -659,20 +787,11 @@ func (a *Agent) commitConversationAfterMessageEnd(active *activeRun, turn uint32
 	if err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 	}
-	a.notify(active.ctx, Event{Kind: EventMessageCommitted, RunID: active.id, Turn: turn, Message: message, AgentMessage: agentmsg.CloneOne(final), Model: eventModel})
+	if err := a.recordCommittedMessage(active, turn, final); err != nil {
+		return err
+	}
+	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final), Model: eventModel})
 	return nil
-}
-
-func assistantSessionCost(message llm.ConversationMessage) session.UsageCost {
-	terminal, ok := message.(llm.AssistantTerminal)
-	if !ok {
-		return session.ZeroUsageCost()
-	}
-	cost, known := terminal.Usage().Cost()
-	if !known {
-		return session.ZeroUsageCost()
-	}
-	return session.UsageCostFromLLM(cost)
 }
 
 func (a *Agent) collectProvider(
@@ -699,15 +818,6 @@ func (a *Agent) collectProvider(
 	}()
 
 	collector := &llm.StreamCollector{}
-	// Reuse the timestamp of the context message that caused this provider
-	// turn. This keeps partial events deterministic and avoids an extra call to
-	// the Agent clock (busy/admission semantics guarantee one clock read per
-	// newly created durable message).
-	var partialTimestamp time.Time
-	if messages := a.config.transcript.Context().Messages(); len(messages) != 0 {
-		partialTimestamp = messages[len(messages)-1].Timestamp()
-	}
-	partialModel := request.Model()
 	for {
 		event, nextErr := stream.Next()
 		if errors.Is(nextErr, io.EOF) {
@@ -732,22 +842,23 @@ func (a *Agent) collectProvider(
 		partial, partialErr := agentmsg.NewAssistantPartial(agentmsg.AssistantPartialSpec{
 			Snapshot: snapshot,
 			Event:    event,
-			API:      partialModel.API(),
-			Provider: partialModel.Provider(),
-			Model:    partialModel.ID(),
-			At:       partialTimestamp,
 		})
 		if partialErr != nil {
 			return nil, fmt.Errorf("%w: partial message: %w", ErrProviderStream, partialErr)
 		}
-		a.notify(active.ctx, Event{
-			Kind:             EventProviderProgress,
-			RunID:            active.id,
-			Turn:             turn,
-			ProviderSnapshot: snapshot,
-			ProviderEvent:    event,
-			AgentMessage:     partial,
-		})
+		if _, started := event.(llm.StartEvent); started {
+			if err := a.markStreamStarted(active, turn); err != nil {
+				return nil, err
+			}
+			a.notify(active.ctx, MessageStartEvent{
+				RunID: active.id, Turn: turn, Message: partial,
+			})
+		} else {
+			a.notify(active.ctx, MessageUpdateEvent{
+				RunID: active.id, Turn: turn, Message: partial,
+				AssistantMessageEvent: newAssistantMessageEvent(event, partial),
+			})
+		}
 	}
 
 	// Claim the one allowed close attempt before invoking foreign code. If
@@ -764,6 +875,19 @@ func (a *Agent) collectProvider(
 	terminal, err = collector.Result()
 	if err != nil {
 		return nil, fmt.Errorf("%w: collect result: %w", ErrProviderStream, err)
+	}
+	provenance := terminal.AssistantProvenance()
+	model := request.Model()
+	if !provenance.Matches(model.Provider(), model.API(), model.ID()) {
+		return nil, fmt.Errorf("%w: terminal provenance does not match request model", ErrProviderStream)
+	}
+	pricedUsage, err := terminal.Usage().WithCost(model.CalculateCost(terminal.Usage()))
+	if err != nil {
+		return nil, fmt.Errorf("%w: price terminal usage: %w", ErrProviderStream, err)
+	}
+	terminal, err = llm.WithAssistantUsage(terminal, pricedUsage)
+	if err != nil {
+		return nil, fmt.Errorf("%w: canonicalize terminal usage: %w", ErrProviderStream, err)
 	}
 	return terminal, nil
 }
@@ -791,7 +915,9 @@ func (a *Agent) failureTerminal(
 	if err != nil {
 		return llm.AssistantFailureMessage{}, err
 	}
-	terminal, err := llm.NewAssistantFailureMessageWithFailure(content, reason, failure, usage, timestamp)
+	terminal, err := llm.NewAssistantFailureMessageWithFailure(content, reason, failure, usage, timestamp, llm.AssistantProvenance{
+		Provider: a.config.model.Provider(), API: a.config.model.API(), Model: a.config.model.ID(),
+	})
 	if err != nil {
 		return llm.AssistantFailureMessage{}, fmt.Errorf("%w: failure terminal: %w", ErrInvariant, err)
 	}

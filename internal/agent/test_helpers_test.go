@@ -10,10 +10,78 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
 )
+
+func newTestModel(providerID, api, id string) (provider.Model, error) {
+	return newAgentModel(provider.ModelSpec{
+		Provider:      providerID,
+		API:           api,
+		ID:            id,
+		Name:          id,
+		BaseURL:       "",
+		Input:         []provider.InputKind{provider.InputText},
+		Cost:          provider.CostRates{},
+		ContextWindow: 2,
+		MaxTokens:     1,
+	})
+}
+
+func newAgentModel(spec provider.ModelSpec) (provider.Model, error) {
+	if spec.Name == "" {
+		spec.Name = spec.ID
+	}
+	if len(spec.Input) == 0 {
+		spec.Input = []provider.InputKind{provider.InputText}
+	}
+	if spec.ContextWindow == 0 {
+		spec.ContextWindow = 2
+	}
+	if spec.MaxTokens == 0 {
+		spec.MaxTokens = 1
+	}
+	return provider.NewModel(spec)
+}
+
+func testAssistantProvenance() llm.AssistantProvenance {
+	return llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "scripted-1"}
+}
+
+func newAssistantTextMessage(content []llm.TextBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantTextMessage, error) {
+	return llm.NewAssistantTextMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantToolUseMessage(content []llm.AssistantBlock, usage llm.Usage, timestamp time.Time) (llm.AssistantToolUseMessage, error) {
+	return llm.NewAssistantToolUseMessage(content, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantRichMessage(content []llm.AssistantBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantRichMessage, error) {
+	return llm.NewAssistantRichMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessage(content []llm.TextBlock, finish llm.FinishReason, message string, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessage(content, finish, message, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessageWithFailure(content []llm.TextBlock, finish llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp, testAssistantProvenance())
+}
+
+func newErrorEventWithFailure(reason llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.ErrorEvent, error) {
+	return llm.NewErrorEventWithFailure(reason, failure, usage, timestamp, testAssistantProvenance())
+}
+
+func newStartEvent(t *testing.T) llm.StartEvent {
+	t.Helper()
+	event, err := llm.NewStartEvent(testAssistantProvenance(), agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
 
 var agentTestEpoch = time.Date(2026, time.August, 1, 10, 11, 12, 0, time.UTC)
 
@@ -21,6 +89,126 @@ type fakeTool struct {
 	name    string
 	execute func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error)
 	calls   atomic.Uint32
+}
+
+// agentEventSnapshot keeps assertions about both public lifecycle and separate
+// control-plane metadata concise without widening AgentEvent in production.
+type agentEventSnapshot struct {
+	Kind                agent.AgentEventType
+	RunID               uint64
+	Turn                uint32
+	Message             llm.ConversationMessage
+	AgentMessage        agentmsg.Message
+	ProviderSnapshot    llm.StreamSnapshot
+	ProviderEvent       llm.StreamEvent
+	ToolCallID          string
+	ToolName            string
+	ToolArguments       []byte
+	ToolUpdate          agent.ToolUpdate
+	ToolOutput          agent.ToolOutput
+	ToolError           error
+	Terminal            llm.AssistantTerminal
+	RunError            error
+	RetryAttempt        uint32
+	RetryDelay          time.Duration
+	RetryFailureKind    provider.FailureKind
+	RetryHTTPStatus     int
+	RetrySucceeded      bool
+	RetryFinishReason   provider.RetryFinishReason
+	CompactionReason    agent.CompactionReason
+	CompactionWillRetry bool
+	Compaction          *session.CompactResult
+}
+
+func snapshotAgentEvent(event any) agentEventSnapshot {
+	typed, ok := event.(interface{ Type() agent.AgentEventType })
+	if !ok {
+		return agentEventSnapshot{}
+	}
+	result := agentEventSnapshot{Kind: typed.Type()}
+	switch value := event.(type) {
+	case agent.AgentStartEvent:
+		result.RunID = value.RunID
+	case agent.AgentEndEvent:
+		result.RunID, result.Turn, result.Terminal, result.RunError = value.RunID, value.Turn, value.Terminal, value.Err
+	case agent.TurnStartEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+	case agent.TurnEndEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		if standard, ok := value.Message.(agentmsg.LLM); ok {
+			result.Message = standard.Conversation()
+			result.Terminal, _ = result.Message.(llm.AssistantTerminal)
+		}
+	case agent.MessageStartEvent:
+		result.RunID, result.Turn, result.AgentMessage = value.RunID, value.Turn, value.Message
+		if partial, ok := value.Message.(agentmsg.AssistantPartial); ok {
+			result.ProviderSnapshot = partial.Snapshot()
+			result.ProviderEvent = partial.ProviderEvent()
+		}
+	case agent.MessageUpdateEvent:
+		result.RunID, result.Turn, result.AgentMessage = value.RunID, value.Turn, value.Message
+		result.ProviderEvent = value.AssistantMessageEvent.Event()
+		result.ProviderSnapshot = value.AssistantMessageEvent.Partial().Snapshot()
+	case agent.MessageEndEvent:
+		result.RunID, result.Turn, result.AgentMessage = value.RunID, value.Turn, value.Message
+		if standard, ok := value.Message.(agentmsg.LLM); ok {
+			result.Message = standard.Conversation()
+			result.Terminal, _ = result.Message.(llm.AssistantTerminal)
+		}
+	case agent.ToolExecutionStartEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		result.ToolCallID, result.ToolName, result.ToolArguments = value.ToolCallID, value.ToolName, value.Arguments
+	case agent.ToolExecutionUpdateEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		result.ToolCallID, result.ToolName, result.ToolArguments, result.ToolUpdate = value.ToolCallID, value.ToolName, value.Arguments, value.PartialResult
+	case agent.ToolExecutionEndEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		result.ToolCallID, result.ToolName, result.ToolArguments = value.ToolCallID, value.ToolName, value.Arguments
+		result.ToolOutput, result.ToolError = value.Result, value.Err
+	case agent.QueueUpdateEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+	case agent.CompactionStartEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		result.CompactionReason, result.CompactionWillRetry = value.Reason, value.WillRetry
+	case agent.CompactionEndEvent:
+		result.RunID, result.Turn = value.RunID, value.Turn
+		result.CompactionReason, result.CompactionWillRetry = value.Reason, value.WillRetry
+		result.Compaction, result.RunError = value.Result, value.Err
+	case agent.ProviderRetryScheduledEvent:
+		result.RunID, result.Turn, result.RetryAttempt, result.RetryDelay = value.RunID, value.Turn, value.Attempt, value.Delay
+		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
+	case agent.ProviderRetryAttemptEvent:
+		result.RunID, result.Turn, result.RetryAttempt = value.RunID, value.Turn, value.Attempt
+	case agent.ProviderRetryFinishedEvent:
+		result.RunID, result.Turn, result.RetryAttempt = value.RunID, value.Turn, value.Attempt
+		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
+		result.RetrySucceeded, result.RetryFinishReason = value.Succeeded, value.FinishReason
+	case agent.SummarizationRetryScheduledEvent:
+		result.RunID, result.Turn, result.RetryAttempt, result.RetryDelay = value.RunID, value.Turn, value.Attempt, value.Delay
+		result.CompactionReason, result.RetryFailureKind, result.RetryHTTPStatus = value.Reason, value.FailureKind, value.HTTPStatus
+	case agent.SummarizationRetryAttemptEvent:
+		result.RunID, result.Turn, result.RetryAttempt, result.CompactionReason = value.RunID, value.Turn, value.Attempt, value.Reason
+	case agent.SummarizationRetryFinishedEvent:
+		result.RunID, result.Turn, result.RetryAttempt, result.CompactionReason = value.RunID, value.Turn, value.Attempt, value.Reason
+		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
+		result.RetrySucceeded, result.RetryFinishReason = value.Succeeded, value.FinishReason
+	}
+	return result
+}
+
+type observedAgentEvent interface{ Type() agent.AgentEventType }
+
+func subscribeAllAgentEvents(runtime *agent.Agent, observer func(context.Context, observedAgentEvent)) func() {
+	unsubscribeEvents := runtime.Subscribe(func(ctx context.Context, event agent.AgentEvent) {
+		observer(ctx, event)
+	})
+	unsubscribeControl := runtime.SubscribeControl(func(ctx context.Context, event agent.AgentControlEvent) {
+		observer(ctx, event)
+	})
+	return func() {
+		unsubscribeEvents()
+		unsubscribeControl()
+	}
 }
 
 func (t *fakeTool) Name() string { return t.name }
@@ -94,7 +282,7 @@ func newAgent(
 	tool agent.ToolExecutor,
 ) *agent.Agent {
 	t.Helper()
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +324,7 @@ func mustTextBlock(t *testing.T, text string) llm.TextBlock {
 
 func mustTextTerminal(t *testing.T, text string) llm.AssistantTextMessage {
 	t.Helper()
-	terminal, err := llm.NewAssistantTextMessage(
+	terminal, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, text)},
 		llm.FinishStop,
 		mustUsage(t, 2, 1),
@@ -148,9 +336,24 @@ func mustTextTerminal(t *testing.T, text string) llm.AssistantTextMessage {
 	return terminal
 }
 
-func mustLengthTerminal(t *testing.T, text string) llm.AssistantTextMessage {
+func mustTextTerminalWithProvenance(t *testing.T, text string, provenance llm.AssistantProvenance) llm.AssistantTextMessage {
 	t.Helper()
 	terminal, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{mustTextBlock(t, text)},
+		llm.FinishStop,
+		mustUsage(t, 2, 1),
+		agentTestEpoch,
+		provenance,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return terminal
+}
+
+func mustLengthTerminal(t *testing.T, text string) llm.AssistantTextMessage {
+	t.Helper()
+	terminal, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, text)},
 		llm.FinishLength,
 		mustUsage(t, 2, 2),
@@ -168,7 +371,7 @@ func mustToolUseTerminal(t *testing.T, id, name string, arguments []byte) llm.As
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := llm.NewAssistantToolUseMessage(
+	terminal, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{mustTextBlock(t, "running"), call},
 		mustUsage(t, 4, 2),
 		agentTestEpoch,

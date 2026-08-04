@@ -72,7 +72,7 @@ type openAIResponsesStream struct {
 	clock             Clock
 	timestamp         time.Time
 	payload           []byte
-	model             ModelRef
+	model             Model
 	headers           map[string]string
 	maxEventBytes     int
 	maxErrorBodyBytes int
@@ -112,6 +112,7 @@ type openAIResponsesStream struct {
 func newResponsesFailureStream(
 	ctx context.Context,
 	clock Clock,
+	model Model,
 	kind FailureKind,
 	cause error,
 	message string,
@@ -128,6 +129,7 @@ func newResponsesFailureStream(
 		cancel:    cancel,
 		clock:     clock,
 		timestamp: clock(),
+		model:     model,
 		preflight: &responsesFailureSpec{
 			kind:    kind,
 			cause:   cause,
@@ -194,7 +196,7 @@ func (s *openAIResponsesStream) Next() (event llm.StreamEvent, err error) {
 	}
 	if !s.started {
 		s.started = true
-		return llm.NewStartEvent(), nil
+		return llm.NewStartEvent(assistantProvenanceForModel(s.model), s.timestamp)
 	}
 
 	for {
@@ -535,7 +537,7 @@ func (s *openAIResponsesStream) finishFailure(spec responsesFailureSpec) (llm.St
 	if s.pendingDone != nil {
 		usage = s.pendingDone.Usage()
 	}
-	event, err := llm.NewErrorEventWithFailure(reason, terminalFailure, usage, s.timestamp)
+	event, err := llm.NewErrorEventWithFailure(reason, terminalFailure, usage, s.timestamp, assistantProvenanceForModel(s.model))
 	if err != nil {
 		s.finishTransport()
 		return nil, closedStreamError(fmt.Errorf("construct OpenAI Responses error event: %w", err))

@@ -373,7 +373,11 @@ func (s *scriptedStream) resolveStep() (llm.AssistantTerminal, FailureKind, erro
 	}
 	switch s.step.kind {
 	case fixedStep:
-		return s.step.terminal, 0, nil
+		terminal, err := llm.WithAssistantProvenance(s.step.terminal, assistantProvenanceForModel(s.request.Model()))
+		if err != nil {
+			return nil, FailureInvalidResponse, err
+		}
+		return terminal, 0, nil
 	case factoryStep:
 		terminal, err := invokeResponseFactory(s.step.factory, s.ctx, s.request.clone(), s.callIndex)
 		if err != nil {
@@ -381,6 +385,10 @@ func (s *scriptedStream) resolveStep() (llm.AssistantTerminal, FailureKind, erro
 		}
 		if err := llm.ValidateAssistantTerminal(terminal); err != nil {
 			return nil, FailureInvalidResponse, fmt.Errorf("factory returned invalid terminal: %w", err)
+		}
+		terminal, err = llm.WithAssistantProvenance(terminal, assistantProvenanceForModel(s.request.Model()))
+		if err != nil {
+			return nil, FailureInvalidResponse, err
 		}
 		return terminal, 0, nil
 	default:
@@ -437,7 +445,7 @@ func (s *scriptedStream) errorEvent(
 	if err != nil {
 		return llm.ErrorEvent{}, fmt.Errorf("construct terminal failure: %w", err)
 	}
-	event, err := llm.NewErrorEventWithFailure(reason, failure, llm.Usage{}, s.clock())
+	event, err := llm.NewErrorEventWithFailure(reason, failure, llm.Usage{}, s.clock(), assistantProvenanceForModel(s.request.Model()))
 	if err != nil {
 		return llm.ErrorEvent{}, fmt.Errorf("construct provider terminal error: %w", err)
 	}
@@ -475,7 +483,11 @@ func buildEvents(terminal llm.AssistantTerminal, chunkRunes int) ([]llm.StreamEv
 	if err := llm.ValidateAssistantTerminal(terminal); err != nil {
 		return nil, err
 	}
-	events := []llm.StreamEvent{llm.NewStartEvent()}
+	start, err := llm.NewStartEvent(terminal.AssistantProvenance(), terminal.Timestamp())
+	if err != nil {
+		return nil, err
+	}
+	events := []llm.StreamEvent{start}
 	for index, block := range terminal.Blocks() {
 		switch block := block.(type) {
 		case llm.TextBlock:
@@ -541,21 +553,37 @@ func buildEvents(terminal llm.AssistantTerminal, chunkRunes int) ([]llm.StreamEv
 
 	switch terminal := terminal.(type) {
 	case llm.AssistantTextMessage, llm.AssistantToolUseMessage, llm.AssistantRichMessage:
-		done, err := llm.NewDoneEvent(
+		response, hasResponse := terminal.ResponseMetadata()
+		var responsePointer *llm.AssistantResponseMetadata
+		if hasResponse {
+			responsePointer = &response
+		}
+		done, err := llm.NewDoneEventWithMetadata(
 			terminal.FinishReason(),
 			terminal.Usage(),
 			terminal.Timestamp(),
+			terminal.AssistantProvenance(),
+			responsePointer,
+			terminal.Diagnostics(),
 		)
 		if err != nil {
 			return nil, err
 		}
 		events = append(events, done)
 	case llm.AssistantFailureMessage:
-		event, err := llm.NewErrorEventWithFailure(
+		response, hasResponse := terminal.ResponseMetadata()
+		var responsePointer *llm.AssistantResponseMetadata
+		if hasResponse {
+			responsePointer = &response
+		}
+		event, err := llm.NewErrorEventWithMetadata(
 			terminal.FinishReason(),
 			terminal.Failure(),
 			terminal.Usage(),
 			terminal.Timestamp(),
+			terminal.AssistantProvenance(),
+			responsePointer,
+			terminal.Diagnostics(),
 		)
 		if err != nil {
 			return nil, err

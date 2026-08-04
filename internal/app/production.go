@@ -254,67 +254,6 @@ func clockBeginningWith(first time.Time, subsequent session.Clock) session.Clock
 	}
 }
 
-func resolveProductionModel(parsed options) (provider.ModelRef, error) {
-	if parsed.hasAPIKey && parsed.modelID == "" {
-		return provider.ModelRef{}, fmt.Errorf(
-			"%w: --api-key requires an explicit --model",
-			ErrInvalidArguments,
-		)
-	}
-	if parsed.providerID != "" && parsed.modelID == "" {
-		return provider.ModelRef{}, fmt.Errorf(
-			"%w: --provider requires --model",
-			ErrInvalidArguments,
-		)
-	}
-
-	providerID := parsed.providerID
-	modelID := parsed.modelID
-	if modelID == "" {
-		providerID = openAIProviderID
-		modelID = defaultOpenAIModel
-	} else if providerID == "" {
-		prefix, remainder, hasPrefix := strings.Cut(modelID, "/")
-		switch {
-		case hasPrefix && strings.EqualFold(prefix, openAIProviderID):
-			providerID = openAIProviderID
-			modelID = remainder
-		case hasPrefix:
-			return provider.ModelRef{}, fmt.Errorf(
-				"%w: --model selects an unknown provider",
-				ErrInvalidArguments,
-			)
-		case modelID == defaultOpenAIModel:
-			providerID = openAIProviderID
-		default:
-			return provider.ModelRef{}, fmt.Errorf(
-				"%w: bare model is outside the migrated registry; specify --provider openai or --model openai/<id>",
-				ErrInvalidArguments,
-			)
-		}
-	} else {
-		if !strings.EqualFold(providerID, openAIProviderID) {
-			return provider.ModelRef{}, fmt.Errorf(
-				"%w: selected provider is not supported by this production assembly",
-				ErrInvalidArguments,
-			)
-		}
-		providerID = openAIProviderID
-		prefix := openAIProviderID + "/"
-		if len(modelID) >= len(prefix) && strings.EqualFold(modelID[:len(prefix)], prefix) {
-			modelID = modelID[len(prefix):]
-		}
-	}
-	if !validSelectorValue(modelID) || strings.TrimSpace(modelID) != modelID {
-		return provider.ModelRef{}, fmt.Errorf("%w: resolved model ID is invalid", ErrInvalidArguments)
-	}
-	model, err := provider.NewModelRef(providerID, openAIResponsesAPI, modelID)
-	if err != nil {
-		return provider.ModelRef{}, fmt.Errorf("%w: %w", ErrInvalidArguments, err)
-	}
-	return model, nil
-}
-
 func resolveOpenAIAPIKey(
 	ctx context.Context,
 	parsed options,

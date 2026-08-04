@@ -17,12 +17,12 @@ import (
 // ordinary provider request; it never owns a Session lock or durable state.
 type ContextSummarizer struct {
 	provider Provider
-	model    ModelRef
+	model    Model
 	now      func() time.Time
 	retry    RetryController
 }
 
-func NewContextSummarizer(implementation Provider, model ModelRef, now func() time.Time) (*ContextSummarizer, error) {
+func NewContextSummarizer(implementation Provider, model Model, now func() time.Time) (*ContextSummarizer, error) {
 	return NewContextSummarizerWithRetry(implementation, model, now, RetryPolicy{
 		MaxAttempts: 3, InitialDelay: 250 * time.Millisecond, MaxDelay: 2 * time.Second,
 	})
@@ -32,7 +32,7 @@ func NewContextSummarizer(implementation Provider, model ModelRef, now func() ti
 // and product policy. Retry remains entirely inside this one summary request;
 // Session sees either one accepted SummaryOutput or one error and therefore
 // never appends a checkpoint for a failed attempt.
-func NewContextSummarizerWithRetry(implementation Provider, model ModelRef, now func() time.Time, policy RetryPolicy) (*ContextSummarizer, error) {
+func NewContextSummarizerWithRetry(implementation Provider, model Model, now func() time.Time, policy RetryPolicy) (*ContextSummarizer, error) {
 	if implementation == nil || isTypedNil(implementation) {
 		return nil, errors.New("context summarizer requires a provider")
 	}

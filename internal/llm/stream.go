@@ -40,13 +40,31 @@ type StreamEvent interface {
 	streamEvent()
 }
 
-type StartEvent struct{}
+type StartEvent struct {
+	provenance AssistantProvenance
+	timestamp  time.Time
+}
 
-func NewStartEvent() StartEvent {
-	return StartEvent{}
+func NewStartEvent(provenance AssistantProvenance, timestamp time.Time) (StartEvent, error) {
+	event := StartEvent{provenance: provenance, timestamp: normalizeStreamTimestamp(timestamp)}
+	if err := event.validate(); err != nil {
+		return StartEvent{}, err
+	}
+	return event, nil
 }
 
 func (StartEvent) streamEvent() {}
+func (e StartEvent) validate() error {
+	if err := e.provenance.validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidStreamEvent, err)
+	}
+	if e.timestamp.IsZero() || !time.UnixMilli(e.timestamp.UnixMilli()).Equal(e.timestamp) {
+		return fmt.Errorf("%w: start timestamp", ErrInvalidStreamEvent)
+	}
+	return nil
+}
+func (e StartEvent) AssistantProvenance() AssistantProvenance { return e.provenance }
+func (e StartEvent) Timestamp() time.Time                     { return e.timestamp }
 
 type TextStartEvent struct {
 	contentIndex int
@@ -316,41 +334,25 @@ func (e ToolCallEndEvent) ToolCall() ToolCallBlock {
 }
 
 type DoneEvent struct {
-	reason     FinishReason
-	usage      Usage
-	timestamp  time.Time
-	response   *AssistantResponseMetadata
-	provenance *AssistantProvenance
+	reason    FinishReason
+	usage     Usage
+	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
-func NewDoneEventWithMetadata(reason FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (DoneEvent, error) {
-	event, err := NewDoneEvent(reason, usage, timestamp)
-	if err != nil {
-		return DoneEvent{}, err
+func NewDoneEventWithMetadata(reason FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (DoneEvent, error) {
+	event := DoneEvent{
+		reason: reason, usage: usage, timestamp: normalizeStreamTimestamp(timestamp),
+		metadata: cloneAssistantMetadata(AssistantMetadata{Provenance: provenance, Response: response, Diagnostics: diagnostics}),
 	}
-	if response != nil {
-		copy := *response
-		if err := copy.validate(); err != nil {
-			return DoneEvent{}, err
-		}
-		event.response = &copy
-	}
-	if provenance != nil {
-		copy := *provenance
-		if err := copy.validate(); err != nil {
-			return DoneEvent{}, err
-		}
-		event.provenance = &copy
-	}
-	return event, nil
-}
-
-func NewDoneEvent(reason FinishReason, usage Usage, timestamp time.Time) (DoneEvent, error) {
-	event := DoneEvent{reason: reason, usage: usage, timestamp: timestamp}
 	if err := event.validate(); err != nil {
 		return DoneEvent{}, err
 	}
 	return event, nil
+}
+
+func NewDoneEvent(reason FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance) (DoneEvent, error) {
+	return NewDoneEventWithMetadata(reason, usage, timestamp, provenance, nil, nil)
 }
 
 func (DoneEvent) streamEvent() {}
@@ -359,7 +361,7 @@ func (e DoneEvent) validate() error {
 	if e.reason != FinishStop && e.reason != FinishLength && e.reason != FinishToolUse {
 		return fmt.Errorf("%w: done reason %q", ErrInvalidStreamEvent, e.reason)
 	}
-	return nil
+	return e.metadata.validate()
 }
 
 func (e DoneEvent) Reason() FinishReason {
@@ -374,16 +376,14 @@ func (e DoneEvent) Timestamp() time.Time {
 	return e.timestamp
 }
 func (e DoneEvent) ResponseMetadata() (AssistantResponseMetadata, bool) {
-	if e.response == nil {
+	if e.metadata.Response == nil {
 		return AssistantResponseMetadata{}, false
 	}
-	return *e.response, true
+	return *e.metadata.Response, true
 }
-func (e DoneEvent) AssistantProvenance() (AssistantProvenance, bool) {
-	if e.provenance == nil {
-		return AssistantProvenance{}, false
-	}
-	return *e.provenance, true
+func (e DoneEvent) AssistantProvenance() AssistantProvenance { return e.metadata.Provenance }
+func (e DoneEvent) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(e.metadata.Diagnostics)
 }
 
 type ErrorEvent struct {
@@ -391,6 +391,7 @@ type ErrorEvent struct {
 	failure   Failure
 	usage     Usage
 	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
 func NewErrorEvent(
@@ -398,12 +399,13 @@ func NewErrorEvent(
 	errorMessage string,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
 ) (ErrorEvent, error) {
 	failure, err := NewFailure(errorMessage, nil)
 	if err != nil {
 		return ErrorEvent{}, fmt.Errorf("%w: %w", ErrInvalidStreamEvent, err)
 	}
-	return NewErrorEventWithFailure(reason, failure, usage, timestamp)
+	return NewErrorEventWithFailure(reason, failure, usage, timestamp, provenance)
 }
 
 func NewErrorEventWithFailure(
@@ -411,17 +413,43 @@ func NewErrorEventWithFailure(
 	failure Failure,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
+) (ErrorEvent, error) {
+	return NewErrorEventWithMetadata(reason, failure, usage, timestamp, provenance, nil, nil)
+}
+
+func NewErrorEventWithMetadata(
+	reason FinishReason,
+	failure Failure,
+	usage Usage,
+	timestamp time.Time,
+	provenance AssistantProvenance,
+	response *AssistantResponseMetadata,
+	diagnostics []AssistantDiagnostic,
 ) (ErrorEvent, error) {
 	event := ErrorEvent{
 		reason:    reason,
 		failure:   failure,
 		usage:     usage,
-		timestamp: timestamp,
+		timestamp: normalizeStreamTimestamp(timestamp),
+		metadata: cloneAssistantMetadata(AssistantMetadata{
+			Provenance: provenance, Response: response, Diagnostics: diagnostics,
+		}),
 	}
 	if err := event.validate(); err != nil {
 		return ErrorEvent{}, err
 	}
 	return event, nil
+}
+
+// normalizeStreamTimestamp maps Go's richer time representation to pi's
+// millisecond Unix timestamp. A zero time is the deterministic Go spelling
+// used by synthetic providers for the wire value 0, not an absent timestamp.
+func normalizeStreamTimestamp(timestamp time.Time) time.Time {
+	if timestamp.IsZero() {
+		return time.UnixMilli(0).UTC()
+	}
+	return time.UnixMilli(timestamp.UnixMilli()).UTC()
 }
 
 func (ErrorEvent) streamEvent() {}
@@ -433,7 +461,7 @@ func (e ErrorEvent) validate() error {
 	if err := e.failure.validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidStreamEvent, err)
 	}
-	return nil
+	return e.metadata.validate()
 }
 
 func (e ErrorEvent) Reason() FinishReason {
@@ -455,15 +483,27 @@ func (e ErrorEvent) Usage() Usage {
 func (e ErrorEvent) Timestamp() time.Time {
 	return e.timestamp
 }
+func (e ErrorEvent) AssistantProvenance() AssistantProvenance { return e.metadata.Provenance }
+func (e ErrorEvent) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if e.metadata.Response == nil {
+		return AssistantResponseMetadata{}, false
+	}
+	return *e.metadata.Response, true
+}
+func (e ErrorEvent) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(e.metadata.Diagnostics)
+}
 
-// AssistantFailureMessage is the unique failed terminal value. It retains text
-// completed before the failure but never exposes a tool call as executable.
+// AssistantFailureMessage is the unique failed terminal value. It retains all
+// assistant blocks completed before the failure but never exposes a tool call
+// as executable.
 type AssistantFailureMessage struct {
-	content   []TextBlock
+	content   []AssistantBlock
 	finish    FinishReason
 	failure   Failure
 	usage     Usage
 	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
 func NewAssistantFailureMessage(
@@ -472,12 +512,13 @@ func NewAssistantFailureMessage(
 	errorMessage string,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
 ) (AssistantFailureMessage, error) {
 	failure, err := NewFailure(errorMessage, nil)
 	if err != nil {
 		return AssistantFailureMessage{}, err
 	}
-	return NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp)
+	return NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp, provenance)
 }
 
 func NewAssistantFailureMessageWithFailure(
@@ -486,13 +527,50 @@ func NewAssistantFailureMessageWithFailure(
 	failure Failure,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
+) (AssistantFailureMessage, error) {
+	return NewAssistantFailureMessageWithMetadata(content, finish, failure, usage, timestamp, provenance, nil, nil)
+}
+
+func NewAssistantFailureMessageWithMetadata(
+	content []TextBlock,
+	finish FinishReason,
+	failure Failure,
+	usage Usage,
+	timestamp time.Time,
+	provenance AssistantProvenance,
+	response *AssistantResponseMetadata,
+	diagnostics []AssistantDiagnostic,
+) (AssistantFailureMessage, error) {
+	blocks := make([]AssistantBlock, len(content))
+	for index, block := range content {
+		blocks[index] = block
+	}
+	return NewAssistantFailureMessageWithBlocksAndMetadata(blocks, finish, failure, usage, timestamp, provenance, response, diagnostics)
+}
+
+// NewAssistantFailureMessageWithBlocksAndMetadata preserves every complete
+// assistant block produced before a failed/aborted terminal. The distinct
+// failure concrete type ensures retained tool calls can never be executed.
+func NewAssistantFailureMessageWithBlocksAndMetadata(
+	content []AssistantBlock,
+	finish FinishReason,
+	failure Failure,
+	usage Usage,
+	timestamp time.Time,
+	provenance AssistantProvenance,
+	response *AssistantResponseMetadata,
+	diagnostics []AssistantDiagnostic,
 ) (AssistantFailureMessage, error) {
 	message := AssistantFailureMessage{
-		content:   append([]TextBlock(nil), content...),
+		content:   append([]AssistantBlock(nil), content...),
 		finish:    finish,
 		failure:   failure,
 		usage:     usage,
 		timestamp: timestamp,
+		metadata: cloneAssistantMetadata(AssistantMetadata{
+			Provenance: provenance, Response: response, Diagnostics: diagnostics,
+		}),
 	}
 	if err := message.validate(); err != nil {
 		return AssistantFailureMessage{}, err
@@ -510,12 +588,43 @@ func (m AssistantFailureMessage) validate() error {
 	if err := m.failure.validate(); err != nil {
 		return err
 	}
-	for _, block := range m.content {
-		if err := block.validate(); err != nil {
-			return err
+	seenCalls := map[string]struct{}{}
+	for _, candidate := range m.content {
+		switch block := candidate.(type) {
+		case TextBlock:
+			if err := block.validate(); err != nil {
+				return err
+			}
+		case ThinkingBlock:
+			if err := block.validate(); err != nil {
+				return err
+			}
+		case ToolCallBlock:
+			if err := block.validate(); err != nil {
+				return err
+			}
+			if _, duplicate := seenCalls[block.ID()]; duplicate {
+				return fmt.Errorf("%w: duplicate id %q", ErrInvalidToolCall, block.ID())
+			}
+			seenCalls[block.ID()] = struct{}{}
+		default:
+			return fmt.Errorf("%w: failure assistant block %T", ErrInvalidRichContent, candidate)
 		}
 	}
-	return nil
+	return m.metadata.validate()
+}
+
+func (m AssistantFailureMessage) AssistantProvenance() AssistantProvenance {
+	return m.metadata.Provenance
+}
+func (m AssistantFailureMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
+	if m.metadata.Response == nil {
+		return AssistantResponseMetadata{}, false
+	}
+	return *m.metadata.Response, true
+}
+func (m AssistantFailureMessage) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(m.metadata.Diagnostics)
 }
 
 func (AssistantFailureMessage) Role() Role {
@@ -523,15 +632,17 @@ func (AssistantFailureMessage) Role() Role {
 }
 
 func (m AssistantFailureMessage) Content() []TextBlock {
-	return append([]TextBlock(nil), m.content...)
+	content := make([]TextBlock, 0, len(m.content))
+	for _, block := range m.content {
+		if text, ok := block.(TextBlock); ok {
+			content = append(content, text)
+		}
+	}
+	return content
 }
 
 func (m AssistantFailureMessage) Blocks() []AssistantBlock {
-	blocks := make([]AssistantBlock, len(m.content))
-	for index, block := range m.content {
-		blocks[index] = block
-	}
-	return blocks
+	return append([]AssistantBlock(nil), m.content...)
 }
 
 func (m AssistantFailureMessage) FinishReason() FinishReason {
@@ -565,6 +676,28 @@ type StreamActiveBlock struct {
 	arguments    []byte
 }
 
+// PartialThinkingBlock and PartialToolCallBlock are the in-progress members of
+// pi's assistant content union. They can appear only in StreamSnapshot.Blocks;
+// terminal constructors reject them until their matching end event arrives.
+type PartialThinkingBlock struct{ thinking string }
+
+func (PartialThinkingBlock) assistantBlock()          {}
+func (PartialThinkingBlock) Kind() AssistantBlockKind { return AssistantBlockThinking }
+func (b PartialThinkingBlock) Thinking() string       { return b.thinking }
+
+type PartialToolCallBlock struct {
+	id, name  string
+	arguments []byte
+}
+
+func (PartialToolCallBlock) assistantBlock()          {}
+func (PartialToolCallBlock) Kind() AssistantBlockKind { return AssistantBlockToolCall }
+func (b PartialToolCallBlock) ID() string             { return b.id }
+func (b PartialToolCallBlock) Name() string           { return b.name }
+func (b PartialToolCallBlock) ArgumentsFragment() []byte {
+	return bytes.Clone(b.arguments)
+}
+
 func (b StreamActiveBlock) Kind() AssistantBlockKind {
 	return b.kind
 }
@@ -587,14 +720,35 @@ func (b StreamActiveBlock) ToolCall() (id, name string, argumentsJSON []byte, ok
 // StreamSnapshot is an immutable view of completed blocks plus an optional
 // active partial block.
 type StreamSnapshot struct {
-	blocks   []AssistantBlock
-	active   *StreamActiveBlock
-	finish   FinishReason
-	terminal bool
-	failure  *Failure
+	blocks     []AssistantBlock
+	active     *StreamActiveBlock
+	finish     FinishReason
+	terminal   bool
+	failure    *Failure
+	provenance AssistantProvenance
+	timestamp  time.Time
 }
 
 func (s StreamSnapshot) Blocks() []AssistantBlock {
+	blocks := append([]AssistantBlock(nil), s.blocks...)
+	if s.active == nil {
+		return blocks
+	}
+	switch s.active.kind {
+	case AssistantBlockText:
+		blocks = append(blocks, TextBlock{text: s.active.text})
+	case AssistantBlockThinking:
+		blocks = append(blocks, PartialThinkingBlock{thinking: s.active.text})
+	case AssistantBlockToolCall:
+		blocks = append(blocks, PartialToolCallBlock{
+			id: s.active.toolCallID, name: s.active.toolName,
+			arguments: bytes.Clone(s.active.arguments),
+		})
+	}
+	return blocks
+}
+
+func (s StreamSnapshot) CompletedBlocks() []AssistantBlock {
 	return append([]AssistantBlock(nil), s.blocks...)
 }
 
@@ -641,6 +795,8 @@ func (s StreamSnapshot) Failure() (Failure, bool) {
 	}
 	return *s.failure, true
 }
+func (s StreamSnapshot) AssistantProvenance() AssistantProvenance { return s.provenance }
+func (s StreamSnapshot) Timestamp() time.Time                     { return s.timestamp }
 
 type streamPhase uint8
 
@@ -657,6 +813,7 @@ const (
 // share or mutate collector state.
 type StreamCollector struct {
 	phase     streamPhase
+	start     StartEvent
 	blocks    map[int]AssistantBlock
 	slots     map[int]*collectorSlot
 	nextIndex int
@@ -696,6 +853,7 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 			return c.fail(nil, "start arrived after stream activity")
 		}
 		c.phase = streamActive
+		c.start = event
 		c.blocks = make(map[int]AssistantBlock)
 		c.slots = make(map[int]*collectorSlot)
 		return nil
@@ -798,6 +956,9 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 			return c.fail(nil, "done arrived before all content blocks ended")
 		}
 		blocks := c.orderedBlocks()
+		if !event.AssistantProvenance().Matches(c.start.provenance.Provider, c.start.provenance.API, c.start.provenance.Model) {
+			return c.fail(nil, "done provenance does not match start")
+		}
 		var message AssistantTerminal
 		var err error
 		switch event.reason {
@@ -815,33 +976,24 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 					return c.fail(nil, "%s terminal contains a tool call", event.reason)
 				}
 			}
-			response, _ := event.ResponseMetadata()
+			response, hasResponse := event.ResponseMetadata()
 			var responsePointer *AssistantResponseMetadata
-			if _, ok := event.ResponseMetadata(); ok {
+			if hasResponse {
 				responsePointer = &response
 			}
-			provenance, _ := event.AssistantProvenance()
-			var provenancePointer *AssistantProvenance
-			if _, ok := event.AssistantProvenance(); ok {
-				provenancePointer = &provenance
-			}
+			provenance := event.AssistantProvenance()
 			if hasThinking {
-				message, err = NewAssistantRichMessageWithMetadata(blocks, event.reason, event.usage, event.timestamp, provenancePointer, responsePointer)
+				message, err = NewAssistantRichMessageWithMetadata(blocks, event.reason, event.usage, event.timestamp, provenance, responsePointer, event.Diagnostics())
 			} else {
-				message, err = NewAssistantTextMessageWithMetadata(text, event.reason, event.usage, event.timestamp, provenancePointer, responsePointer)
+				message, err = NewAssistantTextMessageWithMetadata(text, event.reason, event.usage, event.timestamp, provenance, responsePointer, event.Diagnostics())
 			}
 		case FinishToolUse:
-			response, _ := event.ResponseMetadata()
+			response, hasResponse := event.ResponseMetadata()
 			var responsePointer *AssistantResponseMetadata
-			if _, ok := event.ResponseMetadata(); ok {
+			if hasResponse {
 				responsePointer = &response
 			}
-			provenance, _ := event.AssistantProvenance()
-			var provenancePointer *AssistantProvenance
-			if _, ok := event.AssistantProvenance(); ok {
-				provenancePointer = &provenance
-			}
-			message, err = NewAssistantToolUseMessageWithMetadata(blocks, event.usage, event.timestamp, provenancePointer, responsePointer)
+			message, err = NewAssistantToolUseMessageWithMetadata(blocks, event.usage, event.timestamp, event.AssistantProvenance(), responsePointer, event.Diagnostics())
 		}
 		if err != nil {
 			return c.fail(err, "done is not a valid terminal")
@@ -857,29 +1009,24 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		if c.phase != streamNew && c.phase != streamActive {
 			return c.fail(nil, "error arrived in invalid stream phase")
 		}
-		content := make([]TextBlock, 0, len(c.blocks)+len(c.slots))
-		for _, block := range c.orderedBlocks() {
-			if text, ok := block.(TextBlock); ok {
-				content = append(content, text)
-			}
+		content, contentErr := c.failureBlocks()
+		if contentErr != nil {
+			return c.fail(contentErr, "partial failure content is invalid")
 		}
-		for _, index := range c.openIndices() {
-			slot := c.slots[index]
-			if slot.kind != AssistantBlockText {
-				continue
-			}
-			block, err := NewTextBlock(slot.text.String())
-			if err != nil {
-				return c.fail(err, "partial failure content is invalid")
-			}
-			content = append(content, block)
+		response, hasResponse := event.ResponseMetadata()
+		var responsePointer *AssistantResponseMetadata
+		if hasResponse {
+			responsePointer = &response
 		}
-		message, err := NewAssistantFailureMessageWithFailure(
+		message, err := NewAssistantFailureMessageWithBlocksAndMetadata(
 			content,
 			event.reason,
 			event.failure,
 			event.usage,
 			event.timestamp,
+			event.AssistantProvenance(),
+			responsePointer,
+			event.Diagnostics(),
 		)
 		if err != nil {
 			return c.fail(err, "error produced an invalid terminal")
@@ -918,9 +1065,11 @@ func (c *StreamCollector) Snapshot() (StreamSnapshot, error) {
 	}
 	if c.terminal != nil {
 		snapshot := StreamSnapshot{
-			blocks:   c.terminal.Blocks(),
-			finish:   c.terminal.FinishReason(),
-			terminal: true,
+			blocks:     c.terminal.Blocks(),
+			finish:     c.terminal.FinishReason(),
+			terminal:   true,
+			provenance: c.terminal.AssistantProvenance(),
+			timestamp:  c.terminal.Timestamp(),
 		}
 		if failure, ok := c.terminal.(AssistantFailureMessage); ok {
 			terminalFailure := failure.Failure()
@@ -930,8 +1079,8 @@ func (c *StreamCollector) Snapshot() (StreamSnapshot, error) {
 	}
 
 	snapshot := StreamSnapshot{
-		blocks: c.orderedBlocks(),
-		finish: FinishPending,
+		blocks: c.orderedBlocks(), finish: FinishPending,
+		provenance: c.start.provenance, timestamp: c.start.timestamp,
 	}
 	if indices := c.openIndices(); len(indices) != 0 {
 		slot := c.slots[indices[0]]
@@ -1001,10 +1150,52 @@ func (c *StreamCollector) openIndices() []int {
 	return result
 }
 
+func (c *StreamCollector) failureBlocks() ([]AssistantBlock, error) {
+	result := make([]AssistantBlock, 0, len(c.blocks)+len(c.slots))
+	for index := 0; index < c.nextIndex; index++ {
+		if block, ok := c.blocks[index]; ok {
+			result = append(result, block)
+			continue
+		}
+		slot, ok := c.slots[index]
+		if !ok {
+			continue
+		}
+		switch slot.kind {
+		case AssistantBlockText:
+			block, err := NewTextBlock(slot.text.String())
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, block)
+		case AssistantBlockThinking:
+			// An untouched thinking_start has no valid terminal representation;
+			// preserve it as soon as the provider has emitted actual content.
+			if slot.text.Len() == 0 {
+				continue
+			}
+			block, err := NewThinkingBlock(slot.text.String())
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, block)
+		case AssistantBlockToolCall:
+			// Incomplete JSON is a streaming fragment rather than a valid ToolCall
+			// member. Complete arguments remain visible on the failure message but
+			// the failure concrete type makes them non-executable.
+			block, err := NewToolCallBlock(slot.id, slot.name, slot.arguments)
+			if err == nil {
+				result = append(result, block)
+			}
+		}
+	}
+	return result, nil
+}
+
 func validateStreamEvent(event StreamEvent) error {
 	switch event := event.(type) {
 	case StartEvent:
-		return nil
+		return event.validate()
 	case TextStartEvent:
 		return event.validate()
 	case TextDeltaEvent:

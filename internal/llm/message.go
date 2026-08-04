@@ -153,34 +153,24 @@ func (m UserTextMessage) Timestamp() time.Time {
 // only text blocks. Tool-use and failed terminal messages have separate
 // constructors in their behavior slices.
 type AssistantTextMessage struct {
-	content    []TextBlock
-	finish     FinishReason
-	usage      Usage
-	timestamp  time.Time
-	response   *AssistantResponseMetadata
-	provenance *AssistantProvenance
+	content   []TextBlock
+	finish    FinishReason
+	usage     Usage
+	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
-func NewAssistantTextMessageWithMetadata(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantTextMessage, error) {
-	m, err := NewAssistantTextMessage(content, finish, usage, timestamp)
-	if err != nil {
+func NewAssistantTextMessageWithMetadata(content []TextBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (AssistantTextMessage, error) {
+	message := AssistantTextMessage{
+		content: append([]TextBlock(nil), content...), finish: finish, usage: usage,
+		timestamp: timestamp, metadata: cloneAssistantMetadata(AssistantMetadata{
+			Provenance: provenance, Response: response, Diagnostics: diagnostics,
+		}),
+	}
+	if err := message.validate(); err != nil {
 		return AssistantTextMessage{}, err
 	}
-	if response != nil {
-		copy := *response
-		if err := copy.validate(); err != nil {
-			return AssistantTextMessage{}, err
-		}
-		m.response = &copy
-	}
-	if provenance != nil {
-		copy := *provenance
-		if err := copy.validate(); err != nil {
-			return AssistantTextMessage{}, err
-		}
-		m.provenance = &copy
-	}
-	return m, nil
+	return message, nil
 }
 
 func (AssistantTextMessage) assistantTerminal()   {}
@@ -191,26 +181,9 @@ func NewAssistantTextMessage(
 	finish FinishReason,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
 ) (AssistantTextMessage, error) {
-	if finish != FinishStop && finish != FinishLength {
-		return AssistantTextMessage{}, fmt.Errorf(
-			"%w: successful text message cannot finish with %q",
-			ErrInvalidFinishReason,
-			finish,
-		)
-	}
-	for _, block := range content {
-		if err := block.validate(); err != nil {
-			return AssistantTextMessage{}, err
-		}
-	}
-
-	return AssistantTextMessage{
-		content:   append([]TextBlock(nil), content...),
-		finish:    finish,
-		usage:     usage,
-		timestamp: timestamp,
-	}, nil
+	return NewAssistantTextMessageWithMetadata(content, finish, usage, timestamp, provenance, nil, nil)
 }
 
 func (m AssistantTextMessage) validate() error {
@@ -226,29 +199,17 @@ func (m AssistantTextMessage) validate() error {
 			return err
 		}
 	}
-	if m.response != nil {
-		if err := m.response.validate(); err != nil {
-			return err
-		}
-	}
-	if m.provenance != nil {
-		if err := m.provenance.validate(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return m.metadata.validate()
 }
-func (m AssistantTextMessage) AssistantProvenance() (AssistantProvenance, bool) {
-	if m.provenance == nil {
-		return AssistantProvenance{}, false
-	}
-	return *m.provenance, true
-}
+func (m AssistantTextMessage) AssistantProvenance() AssistantProvenance { return m.metadata.Provenance }
 func (m AssistantTextMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
-	if m.response == nil {
+	if m.metadata.Response == nil {
 		return AssistantResponseMetadata{}, false
 	}
-	return *m.response, true
+	return *m.metadata.Response, true
+}
+func (m AssistantTextMessage) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(m.metadata.Diagnostics)
 }
 
 func (AssistantTextMessage) Role() Role {
@@ -320,6 +281,9 @@ type AssistantTerminal interface {
 	Blocks() []AssistantBlock
 	FinishReason() FinishReason
 	Usage() Usage
+	AssistantProvenance() AssistantProvenance
+	ResponseMetadata() (AssistantResponseMetadata, bool)
+	Diagnostics() []AssistantDiagnostic
 	assistantTerminal()
 }
 
@@ -337,5 +301,41 @@ func ValidateAssistantTerminal(message AssistantTerminal) error {
 		return message.validate()
 	default:
 		return fmt.Errorf("invalid assistant terminal %T", message)
+	}
+}
+
+// WithAssistantUsage replaces only the canonical usage object while
+// preserving content, provenance, response metadata, diagnostics, failure and
+// timestamp. Agent uses it to apply the selected Model's pricing exactly once
+// at the provider boundary.
+func WithAssistantUsage(message AssistantTerminal, usage Usage) (AssistantTerminal, error) {
+	return rebuildAssistantTerminal(message, usage, message.AssistantProvenance())
+}
+
+// WithAssistantProvenance binds a provider-produced terminal to the complete
+// request identity while preserving all other assistant fields. It is used by
+// generic/mock providers whose response factories are model-agnostic.
+func WithAssistantProvenance(message AssistantTerminal, provenance AssistantProvenance) (AssistantTerminal, error) {
+	return rebuildAssistantTerminal(message, message.Usage(), provenance)
+}
+
+func rebuildAssistantTerminal(message AssistantTerminal, usage Usage, provenance AssistantProvenance) (AssistantTerminal, error) {
+	response, hasResponse := message.ResponseMetadata()
+	var responsePointer *AssistantResponseMetadata
+	if hasResponse {
+		responsePointer = &response
+	}
+	diagnostics := message.Diagnostics()
+	switch value := message.(type) {
+	case AssistantTextMessage:
+		return NewAssistantTextMessageWithMetadata(value.Content(), value.FinishReason(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
+	case AssistantRichMessage:
+		return NewAssistantRichMessageWithMetadata(value.Blocks(), value.FinishReason(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
+	case AssistantToolUseMessage:
+		return NewAssistantToolUseMessageWithMetadata(value.Blocks(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
+	case AssistantFailureMessage:
+		return NewAssistantFailureMessageWithBlocksAndMetadata(value.Blocks(), value.FinishReason(), value.Failure(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
+	default:
+		return nil, fmt.Errorf("invalid assistant terminal %T", message)
 	}
 }

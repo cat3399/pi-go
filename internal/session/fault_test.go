@@ -552,12 +552,8 @@ func TestAppendValidationAndEncodingFailuresDoNotWrite(t *testing.T) {
 
 	storage := &fakeStorage{createCreated: true, appendStarted: true}
 	session := newFakeSession(t, storage, sequenceIDs("entry-1", "entry-2"))
-	assistant, err := llmAssistantForFaultTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := session.Append(context.Background(), assistant, AppendOptions{}); !errors.Is(err, ErrInvalidEntry) {
-		t.Fatalf("assistant without identity error = %v, want ErrInvalidEntry", err)
+	if _, err := session.Append(context.Background(), llm.AssistantTextMessage{}, AppendOptions{}); err == nil {
+		t.Fatal("invalid assistant message was accepted")
 	}
 	if len(storage.appendCalls) != 0 || session.Poisoned() {
 		t.Fatal("encoding failure reached storage or poisoned writer")
@@ -722,16 +718,4 @@ func newFakeSession(t *testing.T, storage *fakeStorage, ids IDGenerator) *Sessio
 	}
 	t.Cleanup(func() { _ = session.Close() })
 	return session
-}
-
-func llmAssistantForFaultTest() (llm.ConversationMessage, error) {
-	block, err := llm.NewTextBlock("assistant")
-	if err != nil {
-		return nil, err
-	}
-	usage, err := llm.NewUsage(llm.UsageSpec{})
-	if err != nil {
-		return nil, err
-	}
-	return llm.NewAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, usage, time.UnixMilli(1))
 }

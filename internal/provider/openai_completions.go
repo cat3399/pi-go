@@ -1,7 +1,7 @@
 package provider
 
 // This file implements the standard OpenAI Chat Completions wire dialect.  It
-// intentionally consumes the generic ModelRef/Request values: the provider
+// intentionally consumes the generic Model/Request values: the provider
 // name selects a router registration, while the API dialect selects this
 // adapter.
 
@@ -119,7 +119,7 @@ func completionsEndpoint(base string) (string, error) {
 	return u.String(), nil
 }
 
-func (*OpenAICompletionsProvider) SupportsModel(model ModelRef) bool {
+func (*OpenAICompletionsProvider) SupportsModel(model Model) bool {
 	return model.API() == OpenAICompletionsAPI
 }
 
@@ -129,30 +129,30 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 		clock = p.clock
 	}
 	if ctx == nil {
-		return newCompletionsFailureStream(context.Background(), clock, FailureInvalidRequest, fmt.Errorf("%w: nil context", ErrInvalidRequest), "OpenAI Chat Completions request requires a context")
+		return newCompletionsFailureStream(context.Background(), clock, request.Model(), FailureInvalidRequest, fmt.Errorf("%w: nil context", ErrInvalidRequest), "OpenAI Chat Completions request requires a context")
 	}
 	if p == nil {
-		return newCompletionsFailureStream(ctx, clock, FailureConfiguration, fmt.Errorf("%w: nil provider", ErrInvalidOpenAICompletionsConfig), "OpenAI Chat Completions provider is not configured")
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureConfiguration, fmt.Errorf("%w: nil provider", ErrInvalidOpenAICompletionsConfig), "OpenAI Chat Completions provider is not configured")
 	}
 	if err := request.validate(); err != nil {
-		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	if request.Model().API() != OpenAICompletionsAPI {
-		return newCompletionsFailureStream(ctx, clock, FailureConfiguration, fmt.Errorf("%w: model routes to provider %q API %q", ErrOpenAICompletionsRequest, request.Model().Provider(), request.Model().API()), "")
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureConfiguration, fmt.Errorf("%w: model routes to provider %q API %q", ErrOpenAICompletionsRequest, request.Model().Provider(), request.Model().API()), "")
 	}
 	payload, err := encodeOpenAICompletionsRequest(request)
 	if err != nil {
-		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	options := request.StreamOptions()
 	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
-		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
 	endpoint := p.endpoint
 	if base := request.Model().BaseURL(); base != "" {
 		endpoint, err = completionsEndpoint(base)
 		if err != nil {
-			return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
+			return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 		}
 	}
 	streamCtx, cancel := context.WithCancelCause(ctx)
@@ -188,75 +188,75 @@ func completionsHasAuthorization(groups ...map[string]string) bool {
 	return false
 }
 
-func completionsCompat(model ModelRef) *OpenAICompletionsCompat {
+func completionsCompat(model Model) *OpenAICompletionsCompat {
 	return model.Compat().OpenAICompletions
 }
-func completionsSupportsUsage(model ModelRef) bool {
+func completionsSupportsUsage(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsUsageInStreaming == nil || *compat.SupportsUsageInStreaming
 }
-func completionsSupportsFinishReason(model ModelRef) bool {
+func completionsSupportsFinishReason(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsFinishReason == nil || *compat.SupportsFinishReason
 }
-func completionsSupportsStore(model ModelRef) bool {
+func completionsSupportsStore(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsStore == nil || *compat.SupportsStore
 }
-func completionsSupportsDeveloperRole(model ModelRef) bool {
+func completionsSupportsDeveloperRole(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsDeveloperRole == nil || *compat.SupportsDeveloperRole
 }
-func completionsSupportsStrict(model ModelRef) bool {
+func completionsSupportsStrict(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsStrictMode == nil || *compat.SupportsStrictMode
 }
-func completionsRequiresToolResultName(model ModelRef) bool {
+func completionsRequiresToolResultName(model Model) bool {
 	compat := completionsCompat(model)
 	return compat != nil && compat.RequiresToolResultName != nil && *compat.RequiresToolResultName
 }
-func completionsRequiresAssistantAfterToolResult(model ModelRef) bool {
+func completionsRequiresAssistantAfterToolResult(model Model) bool {
 	compat := completionsCompat(model)
 	return compat != nil && compat.RequiresAssistantAfterToolResult != nil && *compat.RequiresAssistantAfterToolResult
 }
-func completionsMaxTokensField(model ModelRef) string {
+func completionsMaxTokensField(model Model) string {
 	compat := completionsCompat(model)
 	if compat != nil && compat.MaxTokensField != nil {
 		return *compat.MaxTokensField
 	}
 	return "max_completion_tokens"
 }
-func completionsThinkingFormat(model ModelRef) string {
+func completionsThinkingFormat(model Model) string {
 	compat := completionsCompat(model)
 	if compat != nil && compat.ThinkingFormat != nil {
 		return *compat.ThinkingFormat
 	}
 	return "openai"
 }
-func completionsSendSessionAffinity(model ModelRef) bool {
+func completionsSendSessionAffinity(model Model) bool {
 	compat := completionsCompat(model)
 	return compat != nil && compat.SendSessionAffinityHeaders != nil && *compat.SendSessionAffinityHeaders
 }
-func completionsSessionAffinityFormat(model ModelRef) string {
+func completionsSessionAffinityFormat(model Model) string {
 	compat := completionsCompat(model)
 	if compat != nil && compat.SessionAffinityFormat != nil {
 		return *compat.SessionAffinityFormat
 	}
 	return "openai"
 }
-func completionsSupportsReasoningEffort(model ModelRef) bool {
+func completionsSupportsReasoningEffort(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsReasoningEffort == nil || *compat.SupportsReasoningEffort
 }
-func completionsRequiresThinkingAsText(model ModelRef) bool {
+func completionsRequiresThinkingAsText(model Model) bool {
 	compat := completionsCompat(model)
 	return compat != nil && compat.RequiresThinkingAsText != nil && *compat.RequiresThinkingAsText
 }
-func completionsRequiresReasoningContent(model ModelRef) bool {
+func completionsRequiresReasoningContent(model Model) bool {
 	compat := completionsCompat(model)
 	return compat != nil && compat.RequiresReasoningContentOnAssistantMessages != nil && *compat.RequiresReasoningContentOnAssistantMessages
 }
-func completionsSupportsImages(model ModelRef) bool {
+func completionsSupportsImages(model Model) bool {
 	for _, input := range model.Input() {
 		if input == InputImage {
 			return true
@@ -424,9 +424,9 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 			p.ToolChoice = choice.Mode
 		}
 	}
-	max := request.StreamOptions().MaxTokens
-	if max == 0 {
-		max = request.Model().MaxTokens()
+	max := request.Model().MaxTokens()
+	if configured := request.StreamOptions().MaxTokens; configured != nil {
+		max = *configured
 	}
 	if completionsMaxTokensField(request.Model()) == "max_tokens" {
 		p.MaxTokens = max
@@ -447,7 +447,7 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	return encoded, nil
 }
 
-func encodeCompletionsTools(definitions []ToolDefinition, model ModelRef) ([]completionsFunctionTool, error) {
+func encodeCompletionsTools(definitions []ToolDefinition, model Model) ([]completionsFunctionTool, error) {
 	tools := make([]completionsFunctionTool, 0, len(definitions))
 	for _, tool := range definitions {
 		if err := tool.validate(); err != nil {
@@ -463,7 +463,7 @@ func encodeCompletionsTools(definitions []ToolDefinition, model ModelRef) ([]com
 	return tools, nil
 }
 
-func encodeCompletionsMessage(message llm.ConversationMessage, target llm.AssistantProvenance, model ModelRef, toolCallIDs map[string]string) (any, bool, error) {
+func encodeCompletionsMessage(message llm.ConversationMessage, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string) (any, bool, error) {
 	switch m := message.(type) {
 	case llm.UserTextMessage:
 		blocks := m.Content()
@@ -545,16 +545,16 @@ func completionsToolResultImageParts(blocks []llm.ToolResultContentBlock) ([]any
 }
 
 type completionsProvenanceCarrier interface {
-	AssistantProvenance() (llm.AssistantProvenance, bool)
+	AssistantProvenance() llm.AssistantProvenance
 }
 
-func encodeCompletionsAssistant(blocks []llm.AssistantBlock, source completionsProvenanceCarrier, target llm.AssistantProvenance, model ModelRef, toolCallIDs map[string]string) (any, bool, error) {
+func encodeCompletionsAssistant(blocks []llm.AssistantBlock, source completionsProvenanceCarrier, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string) (any, bool, error) {
 	var text strings.Builder
 	calls := make([]any, 0)
 	reasoningField, reasoningText := "", ""
 	reasoningDetails := make([]any, 0)
-	provenance, same := source.AssistantProvenance()
-	same = same && provenance.Matches(target.Provider, target.API, target.Model)
+	provenance := source.AssistantProvenance()
+	same := provenance.Matches(target.Provider, target.API, target.Model)
 	for _, block := range blocks {
 		switch b := block.(type) {
 		case llm.TextBlock:
@@ -666,7 +666,7 @@ func joinToolTextBlocks(blocks []llm.TextBlock) string {
 	}
 	return strings.Join(parts, "\n")
 }
-func completionsUserParts(blocks []llm.UserContentBlock, model ModelRef) ([]any, error) {
+func completionsUserParts(blocks []llm.UserContentBlock, model Model) ([]any, error) {
 	parts := make([]any, 0, len(blocks))
 	previousPlaceholder := false
 	for _, block := range blocks {
@@ -694,7 +694,7 @@ func completionsUserParts(blocks []llm.UserContentBlock, model ModelRef) ([]any,
 	}
 	return parts, nil
 }
-func completionsToolResult(blocks []llm.ToolResultContentBlock, model ModelRef) (string, bool, error) {
+func completionsToolResult(blocks []llm.ToolResultContentBlock, model Model) (string, bool, error) {
 	parts := make([]string, 0, len(blocks))
 	images := false
 	previousPlaceholder := false
@@ -770,7 +770,7 @@ type openAICompletionsStream struct {
 	clock                                  Clock
 	timestamp                              time.Time
 	payload                                []byte
-	model                                  ModelRef
+	model                                  Model
 	headers                                map[string]string
 	maxEventBytes, maxErrorBodyBytes       int
 	onResponse                             ResponseHook
@@ -800,7 +800,7 @@ type openAICompletionsStream struct {
 	rawStopReason                          string
 }
 
-func newCompletionsFailureStream(ctx context.Context, clock Clock, kind FailureKind, cause error, message string) EventStream {
+func newCompletionsFailureStream(ctx context.Context, clock Clock, model Model, kind FailureKind, cause error, message string) EventStream {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -808,7 +808,7 @@ func newCompletionsFailureStream(ctx context.Context, clock Clock, kind FailureK
 		clock = time.Now
 	}
 	c, cancel := context.WithCancelCause(ctx)
-	return &openAICompletionsStream{ctx: c, cancel: cancel, clock: clock, timestamp: clock(), preflight: &completionsFailureSpec{kind: kind, cause: cause, message: message}, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail), textIndex: -1, thinkingIndex: -1}
+	return &openAICompletionsStream{ctx: c, cancel: cancel, clock: clock, timestamp: clock(), model: model, preflight: &completionsFailureSpec{kind: kind, cause: cause, message: message}, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail), textIndex: -1, thinkingIndex: -1}
 }
 
 func (s *openAICompletionsStream) Next() (llm.StreamEvent, error) {
@@ -832,7 +832,7 @@ func (s *openAICompletionsStream) Next() (llm.StreamEvent, error) {
 			return s.failure(f)
 		}
 		s.started = true
-		return llm.NewStartEvent(), nil
+		return llm.NewStartEvent(assistantProvenanceForModel(s.model), s.timestamp)
 	}
 	for {
 		if cause := context.Cause(s.ctx); cause != nil {
@@ -874,12 +874,12 @@ func (s *openAICompletionsStream) settle() (llm.StreamEvent, error) {
 			s.terminalReason = llm.FinishStop
 		}
 	}
-	provenance := &llm.AssistantProvenance{Provider: s.model.Provider(), API: s.model.API(), Model: s.model.ID()}
+	provenance := assistantProvenanceForModel(s.model)
 	var response *llm.AssistantResponseMetadata
 	if s.responseID != "" || s.responseModel != "" || s.rawStopReason != "" {
 		response = &llm.AssistantResponseMetadata{ResponseID: s.responseID, ResponseModel: s.responseModel, RawStopReason: s.rawStopReason}
 	}
-	done, err := llm.NewDoneEventWithMetadata(s.finishReason(), s.usage, s.timestamp, provenance, response)
+	done, err := llm.NewDoneEventWithMetadata(s.finishReason(), s.usage, s.timestamp, provenance, response, nil)
 	if err != nil {
 		return s.failure(&completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions stream returned invalid terminal state"})
 	}
@@ -1337,7 +1337,7 @@ func (s *openAICompletionsStream) failure(spec *completionsFailureSpec) (llm.Str
 	if spec.kind == FailureCancelled {
 		reason = llm.FinishAborted
 	}
-	e, err := llm.NewErrorEventWithFailure(reason, terminal, s.usage, s.timestamp)
+	e, err := llm.NewErrorEventWithFailure(reason, terminal, s.usage, s.timestamp, assistantProvenanceForModel(s.model))
 	if err != nil {
 		return nil, closedStreamError(err)
 	}

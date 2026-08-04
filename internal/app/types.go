@@ -38,7 +38,7 @@ type SessionPathFactory func(workingDir string) (string, error)
 // selectable through ordinary CLI arguments.
 type Dependencies struct {
 	Provider           provider.Provider
-	Model              provider.ModelRef
+	Model              provider.Model
 	Stream             provider.StreamOptions
 	Hooks              agent.Hooks
 	SystemPrompt       string
@@ -65,7 +65,7 @@ type Dependencies struct {
 
 type runtimeDependencies struct {
 	provider           provider.Provider
-	model              provider.ModelRef
+	model              provider.Model
 	stream             provider.StreamOptions
 	hooks              agent.Hooks
 	systemPrompt       string

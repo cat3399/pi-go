@@ -3,9 +3,11 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -23,7 +25,7 @@ import (
 type SessionConfig struct {
 	Provider      provider.Provider
 	Transcript    Transcript
-	Model         provider.ModelRef
+	Model         provider.Model
 	ThinkingLevel provider.ThinkingLevel
 	SystemPrompt  string
 	// SystemPromptOptions preserves the structured inputs exposed by the
@@ -38,7 +40,7 @@ type SessionConfig struct {
 	Stream              provider.StreamOptions
 	// ResolveStreamOptions resolves credentials and request headers for the
 	// model selected by a concrete turn. It is invoked outside session locks.
-	ResolveStreamOptions func(context.Context, provider.ModelRef) (provider.StreamOptions, error)
+	ResolveStreamOptions func(context.Context, provider.Model) (provider.StreamOptions, error)
 	Hooks                Hooks
 
 	ToolExecution     ToolExecutionMode
@@ -58,53 +60,127 @@ type SessionConfig struct {
 // Conversation remains durable in Transcript, which is intentionally the
 // only source of truth for a resumed session.
 type SessionState struct {
-	Model         provider.ModelRef
+	Model         provider.Model
 	ThinkingLevel provider.ThinkingLevel
 	SystemPrompt  string
 	Tools         []provider.ToolDefinition
 	Active        State
 }
 
-// SessionEvent is the product event surface. It preserves the coordinator
-// event ordering while attaching the current session configuration snapshot.
-type SessionEvent struct {
-	// Type mirrors pi AgentSession control-plane event names. Event is retained
-	// for the lower-level coordinator payload where applicable.
-	Type     string
-	Event    Event
-	State    SessionState
-	Steering []llm.ConversationMessage
-	FollowUp []llm.ConversationMessage
-	// WillRetry is meaningful on agent_end. It tells consumers whether this
-	// completed low-level run is followed by a session retry continuation.
-	WillRetry bool
-	// Retry fields are populated on auto_retry_start and auto_retry_end. They
-	// describe the whole session retry series rather than a low-level attempt.
-	RetryAttempt      uint32
-	RetryMaxAttempts  uint32
-	RetryDelay        time.Duration
-	RetrySucceeded    bool
-	RetryErrorMessage string
-	FinalError        string
-	// SummarizationSource scopes a retry to the compaction workflow. It is
-	// deliberately explicit so clients never infer it from a concurrent
-	// top-level agent retry.
-	SummarizationSource    string
-	RetryFailureKind       provider.FailureKind
-	RetryHTTPStatus        int
-	RetryFinishReason      provider.RetryFinishReason
-	CompactionReason       CompactionReason
-	CompactionResult       *session.CompactResult
-	CompactionAborted      bool
-	CompactionWillRetry    bool
-	CompactionErrorMessage string
-	Message                llm.ConversationMessage
-	AgentMessage           agentmsg.Message
-	Terminal               llm.AssistantTerminal
-	ToolResults            []llm.ConversationMessage
-	Messages               []llm.ConversationMessage
-	AgentMessages          []agentmsg.Message
+// SessionEvent is pi's AgentSessionEvent union. Core AgentEvent members are
+// reused directly; session-only control members have their own concrete
+// structs and therefore cannot carry unrelated zero-valued fields.
+type SessionEvent interface {
+	Type() AgentEventType
+	sessionEvent()
 }
+
+const (
+	AgentSettledEventType         AgentEventType = "agent_settled"
+	ThinkingLevelChangedEventType AgentEventType = "thinking_level_changed"
+	AutoRetryStartEventType       AgentEventType = "auto_retry_start"
+	AutoRetryEndEventType         AgentEventType = "auto_retry_end"
+	EntryAppendedEventType        AgentEventType = "entry_appended"
+	SessionInfoChangedEventType   AgentEventType = "session_info_changed"
+	BashExecutionUpdateEventType  AgentEventType = "bash_execution_update"
+)
+
+type SessionAgentEndEvent struct {
+	Messages  []agentmsg.Message
+	Terminal  llm.AssistantTerminal
+	WillRetry bool
+}
+type AgentSettledEvent struct{}
+type SessionQueueUpdateEvent struct {
+	Steering         []string
+	FollowUp         []string
+	SteeringMessages []llm.ConversationMessage
+	FollowUpMessages []llm.ConversationMessage
+}
+type ThinkingLevelChangedEvent struct{ Level provider.ThinkingLevel }
+type AutoRetryStartEvent struct {
+	Attempt      uint32
+	MaxAttempts  uint32
+	Delay        time.Duration
+	ErrorMessage string
+}
+type AutoRetryEndEvent struct {
+	Success    bool
+	Attempt    uint32
+	FinalError string
+}
+type SessionSummarizationRetryScheduledEvent struct {
+	Attempt      uint32
+	MaxAttempts  uint32
+	Delay        time.Duration
+	ErrorMessage string
+	Reason       CompactionReason
+	FailureKind  provider.FailureKind
+	HTTPStatus   int
+}
+type SessionSummarizationRetryAttemptEvent struct {
+	Source string
+	Reason CompactionReason
+}
+type SessionSummarizationRetryFinishedEvent struct {
+	Reason       CompactionReason
+	Attempt      uint32
+	FailureKind  provider.FailureKind
+	HTTPStatus   int
+	Succeeded    bool
+	FinishReason provider.RetryFinishReason
+	FinalError   string
+}
+type EntryAppendedEvent struct{ Entry session.Entry }
+type SessionInfoChangeEvent struct{ Name *string }
+type BashExecutionUpdateEvent struct {
+	ID    *string
+	Delta string
+}
+
+func (SessionAgentEndEvent) Type() AgentEventType      { return AgentEndEventType }
+func (AgentSettledEvent) Type() AgentEventType         { return AgentSettledEventType }
+func (SessionQueueUpdateEvent) Type() AgentEventType   { return QueueUpdateEventType }
+func (ThinkingLevelChangedEvent) Type() AgentEventType { return ThinkingLevelChangedEventType }
+func (AutoRetryStartEvent) Type() AgentEventType       { return AutoRetryStartEventType }
+func (AutoRetryEndEvent) Type() AgentEventType         { return AutoRetryEndEventType }
+func (SessionSummarizationRetryScheduledEvent) Type() AgentEventType {
+	return SummarizationRetryScheduledEventType
+}
+func (SessionSummarizationRetryAttemptEvent) Type() AgentEventType {
+	return SummarizationRetryAttemptEventType
+}
+func (SessionSummarizationRetryFinishedEvent) Type() AgentEventType {
+	return SummarizationRetryFinishedEventType
+}
+func (EntryAppendedEvent) Type() AgentEventType       { return EntryAppendedEventType }
+func (SessionInfoChangeEvent) Type() AgentEventType   { return SessionInfoChangedEventType }
+func (BashExecutionUpdateEvent) Type() AgentEventType { return BashExecutionUpdateEventType }
+
+func (AgentStartEvent) sessionEvent()                         {}
+func (TurnStartEvent) sessionEvent()                          {}
+func (TurnEndEvent) sessionEvent()                            {}
+func (MessageStartEvent) sessionEvent()                       {}
+func (MessageUpdateEvent) sessionEvent()                      {}
+func (MessageEndEvent) sessionEvent()                         {}
+func (ToolExecutionStartEvent) sessionEvent()                 {}
+func (ToolExecutionUpdateEvent) sessionEvent()                {}
+func (ToolExecutionEndEvent) sessionEvent()                   {}
+func (CompactionStartEvent) sessionEvent()                    {}
+func (CompactionEndEvent) sessionEvent()                      {}
+func (SessionAgentEndEvent) sessionEvent()                    {}
+func (AgentSettledEvent) sessionEvent()                       {}
+func (SessionQueueUpdateEvent) sessionEvent()                 {}
+func (ThinkingLevelChangedEvent) sessionEvent()               {}
+func (AutoRetryStartEvent) sessionEvent()                     {}
+func (AutoRetryEndEvent) sessionEvent()                       {}
+func (SessionSummarizationRetryScheduledEvent) sessionEvent() {}
+func (SessionSummarizationRetryAttemptEvent) sessionEvent()   {}
+func (SessionSummarizationRetryFinishedEvent) sessionEvent()  {}
+func (EntryAppendedEvent) sessionEvent()                      {}
+func (SessionInfoChangeEvent) sessionEvent()                  {}
+func (BashExecutionUpdateEvent) sessionEvent()                {}
+
 type SessionObserver func(context.Context, SessionEvent)
 
 // AgentSession owns the persistent agent product state. It never invokes
@@ -116,7 +192,7 @@ type AgentSession struct {
 	mu             sync.RWMutex
 	loop           *Agent
 	transcript     Transcript
-	model          provider.ModelRef
+	model          provider.Model
 	thinkingLevel  provider.ThinkingLevel
 	systemPrompt   string
 	systemOptions  BuildSystemPromptOptions
@@ -125,7 +201,7 @@ type AgentSession struct {
 	beforeToolCall BeforeToolCallHook
 	afterToolCall  AfterToolCallHook
 	stream         provider.StreamOptions
-	resolveStream  func(context.Context, provider.ModelRef) (provider.StreamOptions, error)
+	resolveStream  func(context.Context, provider.Model) (provider.StreamOptions, error)
 	hooks          Hooks
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
@@ -161,7 +237,7 @@ type sessionRun struct {
 	committed             []llm.ConversationMessage
 	committedAgent        []agentmsg.Message
 	toolResults           []llm.ConversationMessage
-	terminalModel         provider.ModelRef
+	terminalModel         provider.Model
 	started               bool
 	extensionSystemPrompt *string
 }
@@ -344,7 +420,12 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		return nil, err
 	}
 	s.loop = loop
-	s.loopUnsubscribe = loop.Subscribe(s.handleLoopEvent)
+	unsubscribeEvents := loop.Subscribe(s.handleLoopEvent)
+	unsubscribeControl := loop.SubscribeControl(s.handleLoopControlEvent)
+	s.loopUnsubscribe = func() {
+		unsubscribeEvents()
+		unsubscribeControl()
+	}
 	if s.hooks.SessionStart != nil {
 		if hookErr := s.hooks.SessionStart(context.Background(), SessionStartHookEvent{Reason: SessionStartup}); hookErr != nil {
 			s.loopUnsubscribe()
@@ -354,12 +435,23 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	return s, nil
 }
 
-func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
+func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) {
+	if runtimeEvent, ok := event.(agentRuntimeEvent); ok {
+		s.handleLoopRuntimeEvent(ctx, runtimeEvent)
+	}
+}
+
+func (s *AgentSession) handleLoopControlEvent(ctx context.Context, event AgentControlEvent) {
+	if runtimeEvent, ok := event.(agentRuntimeEvent); ok {
+		s.handleLoopRuntimeEvent(ctx, runtimeEvent)
+	}
+}
+
+func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRuntimeEvent) {
 	if s == nil {
 		return
 	}
 	s.mu.RLock()
-	state := SessionState{Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
 		if entry.observer != nil {
@@ -367,15 +459,14 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		}
 	}
 	s.mu.RUnlock()
-	state.Active = s.activeState()
 	types := []string{}
 	var message llm.ConversationMessage
 	var agentMessage agentmsg.Message
 	var terminal llm.AssistantTerminal
-	var toolResults, messages []llm.ConversationMessage
 	var agentMessages []agentmsg.Message
-	switch event.Kind {
-	case EventRunStarted:
+	var willRetry bool
+	switch value := event.(type) {
+	case AgentStartEvent:
 		s.lifecycleMu.Lock()
 		if s.run == nil {
 			s.lifecycleMu.Unlock()
@@ -394,75 +485,108 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		// emits its own agent_start. AgentSession adds agent_settled only once after
 		// the complete retry/compaction/queue series becomes idle.
 		types = []string{"agent_start"}
-	case EventTurnStarted:
+	case TurnStartEvent:
 		s.resetSessionTurn(event)
 		types = []string{"turn_start"}
-	case EventProviderProgress:
-		agentMessage = agentmsg.CloneOne(event.AgentMessage)
-		if _, ok := event.ProviderEvent.(llm.StartEvent); ok {
+	case MessageStartEvent:
+		agentMessage = agentmsg.CloneOne(value.Message)
+		if agentMessage != nil && agentMessage.Role() == agentmsg.RoleAssistant {
 			if s.beginAssistantMessage() {
-				types = append(types, "message_start")
+				types = []string{"message_start"}
 				s.beginAssistantHookMessage()
 			}
 		} else {
-			if s.beginAssistantMessage() {
-				types = append(types, "message_start")
-				s.beginAssistantHookMessage()
-			}
-			types = append(types, "message_update")
+			types = []string{"message_start"}
 		}
-	case EventMessageCommitted:
-		message = event.Message
-		agentMessage = agentmsg.CloneOne(event.AgentMessage)
-		if agentMessage == nil && event.Message != nil {
-			agentMessage, _ = agentmsg.NewLLM(event.Message)
-		}
-		if agentMessage != nil && agentMessage.Role() != agentmsg.RoleAssistant {
+	case MessageUpdateEvent:
+		agentMessage = agentmsg.CloneOne(value.Message)
+		if s.beginAssistantMessage() {
 			types = append(types, "message_start")
-		} else if agentMessage != nil && s.beginAssistantMessage() {
-			types = append(types, "message_start")
+			s.beginAssistantHookMessage()
 		}
-		s.recordCommitted(event.Message, agentMessage, event.Model)
-		types = append(types, "message_end")
-	case EventToolStarted:
+		types = append(types, "message_update")
+	case MessageEndEvent:
+		agentMessage = agentmsg.CloneOne(value.Message)
+		if standard, ok := value.Message.(agentmsg.LLM); ok {
+			message = standard.Conversation()
+		}
+		s.recordCommitted(message, agentMessage, value.Model)
+		types = []string{"message_end"}
+	case ToolExecutionStartEvent:
 		types = []string{"tool_execution_start"}
-	case EventToolProgress:
+	case ToolExecutionUpdateEvent:
 		types = []string{"tool_execution_update"}
-	case EventToolSettled:
+	case ToolExecutionEndEvent:
 		types = []string{"tool_execution_end"}
-	case EventTurnSettled:
-		terminal = event.Terminal
-		toolResults = s.sessionTurnResults()
+	case TurnEndEvent:
+		if standard, ok := value.Message.(agentmsg.LLM); ok {
+			terminal, _ = standard.Conversation().(llm.AssistantTerminal)
+		}
 		types = []string{"turn_end"}
-	case EventRunSettled:
+	case AgentEndEvent:
 		types = []string{"agent_end"}
-		terminal = event.Terminal
-		messages = s.sessionCommittedMessages()
+		terminal = value.Terminal
 		agentMessages = s.sessionCommittedAgentMessages()
-	case EventQueueUpdated:
+		willRetry = s.willRetry(value.Terminal)
+	case QueueUpdateEvent:
 		types = []string{"queue_update"}
 	}
-	steering, follow := s.RichQueues()
-	willRetry := event.Kind == EventRunSettled && s.willRetry(event.Terminal)
 	for _, kind := range types {
 		s.dispatchExtensionHook(ctx, kind, message, agentMessage, terminal, event)
-		s.emitToObservers(ctx, observers, SessionEvent{Type: kind, Event: event, State: state, Steering: steering, FollowUp: follow, WillRetry: willRetry, Message: message, AgentMessage: agentmsg.CloneOne(agentMessage), Terminal: terminal, ToolResults: toolResults, Messages: messages, AgentMessages: agentMessages})
+		var emitted SessionEvent
+		switch kind {
+		case "agent_start":
+			emitted = AgentStartEvent{RunID: agentEventRunID(event)}
+		case "turn_start":
+			emitted = TurnStartEvent{RunID: agentEventRunID(event), Turn: agentEventTurn(event)}
+		case "message_start":
+			emitted = MessageStartEvent{
+				RunID: agentEventRunID(event), Turn: agentEventTurn(event),
+				Message: agentmsg.CloneOne(agentMessage),
+			}
+		case "message_update":
+			if value, ok := event.(MessageUpdateEvent); ok {
+				emitted = value
+			}
+		case "message_end":
+			if value, ok := event.(MessageEndEvent); ok {
+				emitted = value
+			}
+		case "tool_execution_start":
+			emitted, _ = event.(ToolExecutionStartEvent)
+		case "tool_execution_update":
+			emitted, _ = event.(ToolExecutionUpdateEvent)
+		case "tool_execution_end":
+			emitted, _ = event.(ToolExecutionEndEvent)
+		case "turn_end":
+			if value, ok := event.(TurnEndEvent); ok {
+				emitted = value
+			}
+		case "agent_end":
+			emitted = SessionAgentEndEvent{Messages: agentmsg.Clone(agentMessages), Terminal: terminal, WillRetry: willRetry}
+		case "queue_update":
+			queue := s.sessionQueueUpdateEvent()
+			emitted = queue
+		}
+		if emitted != nil {
+			s.emitToObservers(ctx, observers, emitted)
+		}
 	}
 	// Upstream ends a successful retry immediately after the successful
 	// assistant message has been committed, before that low run emits
 	// agent_end. A final failed low run ends only after its agent_end.
-	if event.Kind == EventMessageCommitted && retrySucceededMessage(event.Message) {
+	if _, ended := event.(MessageEndEvent); ended && retrySucceededMessage(message) {
 		s.endRetrySeries(ctx, true, "")
 	}
-	if event.Kind == EventRunSettled && !willRetry {
-		s.endRetrySeries(ctx, false, retryFinalError(event))
+	if ended, ok := event.(AgentEndEvent); ok && !willRetry {
+		s.endRetrySeries(ctx, false, retryFinalError(ended))
 	}
 }
 
 // dispatchExtensionHook is observational for post-commit lifecycle events.
 // Mutation/cancellation hooks run at their safe pre-boundaries (context and
 // compaction); an error here cannot retroactively alter durable history.
-func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, message llm.ConversationMessage, agentMessage agentmsg.Message, terminal llm.AssistantTerminal, event Event) {
+func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, message llm.ConversationMessage, agentMessage agentmsg.Message, terminal llm.AssistantTerminal, event agentRuntimeEvent) {
 	if s == nil {
 		return
 	}
@@ -480,22 +604,33 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: lifecycle, Messages: s.sessionCommittedAgentMessages(), Terminal: terminal})
 		}
 	}
-	if s.hooks.Message != nil && agentMessage != nil && event.Kind != EventMessageCommitted {
+	if s.hooks.Message != nil && agentMessage != nil {
 		var messageType MessageHookType
+		var providerEvent llm.StreamEvent
 		switch kind {
 		case "message_start":
-			messageType = MessageStartHookEvent
+			// Non-assistant starts already ran synchronously in
+			// messageEndTransform before persistence.
+			if agentMessage.Role() == agentmsg.RoleAssistant {
+				messageType = MessageStartHookEvent
+				if partial, ok := agentMessage.(agentmsg.AssistantPartial); ok {
+					providerEvent = partial.ProviderEvent()
+				}
+			}
 		case "message_update":
 			messageType = MessageUpdateHookEvent
+			if update, ok := event.(MessageUpdateEvent); ok {
+				providerEvent = update.AssistantMessageEvent.Event()
+			}
 		}
 		if messageType != "" {
-			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage), ProviderEvent: event.ProviderEvent})
+			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage), ProviderEvent: providerEvent})
 		}
 	}
 	if s.hooks.Turn != nil {
 		turnIndex := uint32(0)
-		if event.Turn > 0 {
-			turnIndex = event.Turn - 1
+		if turn := agentEventTurn(event); turn > 0 {
+			turnIndex = turn - 1
 		}
 		switch kind {
 		case "turn_start":
@@ -526,22 +661,24 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 		}
 	}
 	if s.hooks.ToolExecution != nil {
-		toolEvent := ToolExecutionLifecycleEvent{
-			ToolCallID: event.ToolCallID,
-			ToolName:   event.ToolName,
-			Arguments:  bytes.Clone(event.ToolArguments),
-			IsError:    event.ToolError != nil,
-		}
-		switch kind {
-		case "tool_execution_start":
+		toolEvent := ToolExecutionLifecycleEvent{}
+		switch value := event.(type) {
+		case ToolExecutionStartEvent:
 			toolEvent.Type = ToolExecutionStartHookEvent
-		case "tool_execution_update":
+			toolEvent.ToolCallID, toolEvent.ToolName = value.ToolCallID, value.ToolName
+			toolEvent.Arguments = bytes.Clone(value.Arguments)
+		case ToolExecutionUpdateEvent:
 			toolEvent.Type = ToolExecutionUpdateHookEvent
-			update := cloneToolUpdate(event.ToolUpdate)
+			toolEvent.ToolCallID, toolEvent.ToolName = value.ToolCallID, value.ToolName
+			toolEvent.Arguments = bytes.Clone(value.Arguments)
+			update := cloneToolUpdate(value.PartialResult)
 			toolEvent.Update = &update
-		case "tool_execution_end":
+		case ToolExecutionEndEvent:
 			toolEvent.Type = ToolExecutionEndHookEvent
-			result := cloneToolOutput(event.ToolOutput)
+			toolEvent.ToolCallID, toolEvent.ToolName = value.ToolCallID, value.ToolName
+			toolEvent.Arguments = bytes.Clone(value.Arguments)
+			toolEvent.IsError = value.IsError
+			result := cloneToolOutput(value.Result)
 			toolEvent.Result = &result
 		}
 		if toolEvent.Type != "" {
@@ -552,6 +689,7 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 
 func cloneToolUpdate(value ToolUpdate) ToolUpdate {
 	value.Content = append([]llm.ToolResultContentBlock(nil), value.Content...)
+	value.Details, _ = cloneToolDetails(value.Details)
 	value.AddedToolNames = append([]string(nil), value.AddedToolNames...)
 	if value.Usage != nil {
 		usage := *value.Usage
@@ -562,12 +700,38 @@ func cloneToolUpdate(value ToolUpdate) ToolUpdate {
 
 func cloneToolOutput(value ToolOutput) ToolOutput {
 	value.Content = append([]llm.ToolResultContentBlock(nil), value.Content...)
+	value.Details, _ = cloneToolDetails(value.Details)
 	value.AddedToolNames = append([]string(nil), value.AddedToolNames...)
 	if value.Usage != nil {
 		usage := *value.Usage
 		value.Usage = &usage
 	}
 	return value
+}
+
+// cloneToolDetails validates before reflective cloning. Besides enforcing the
+// documented JSON-like boundary, this prevents a cyclic extension value from
+// reaching CloneJSONValue's recursive walk.
+func cloneToolDetails(value any) (any, bool) {
+	if value == nil {
+		return nil, true
+	}
+	if _, err := json.Marshal(value); err != nil {
+		return nil, false
+	}
+	return provider.CloneJSONValue(value), true
+}
+
+// ownToolOutput snapshots every valid caller-owned field as soon as Execute
+// returns. An invalid Details value is retained only so the durable boundary
+// can report the existing ErrInvariant; observer/hook clones omit it safely.
+func ownToolOutput(value ToolOutput) ToolOutput {
+	originalDetails := value.Details
+	owned := cloneToolOutput(value)
+	if originalDetails != nil && owned.Details == nil {
+		owned.Details = originalDetails
+	}
+	return owned
 }
 
 func retrySucceededMessage(message llm.ConversationMessage) bool {
@@ -578,9 +742,9 @@ func retrySucceededMessage(message llm.ConversationMessage) bool {
 	return terminal.FinishReason() != llm.FinishError && terminal.FinishReason() != llm.FinishAborted
 }
 
-func retryFinalError(event Event) string {
-	if event.RunError != nil {
-		return event.RunError.Error()
+func retryFinalError(event AgentEndEvent) string {
+	if event.Err != nil {
+		return event.Err.Error()
 	}
 	if failure, ok := event.Terminal.(llm.AssistantFailureMessage); ok {
 		return failure.ErrorMessage()
@@ -588,7 +752,7 @@ func retryFinalError(event Event) string {
 	return ""
 }
 
-func (s *AgentSession) resetSessionTurn(_ Event) {
+func (s *AgentSession) resetSessionTurn(_ agentRuntimeEvent) {
 	s.lifecycleMu.Lock()
 	if s.run != nil {
 		s.run.assistantStarted = false
@@ -618,7 +782,7 @@ func (s *AgentSession) beginAssistantHookMessage() bool {
 	return true
 }
 
-func (s *AgentSession) recordCommitted(message llm.ConversationMessage, agentMessage agentmsg.Message, model provider.ModelRef) {
+func (s *AgentSession) recordCommitted(message llm.ConversationMessage, agentMessage agentmsg.Message, model provider.Model) {
 	if message == nil && agentMessage == nil {
 		return
 	}
@@ -763,7 +927,7 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 		return
 	}
 	s.mu.RLock()
-	state := SessionState{Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
+	thinkingLevel := s.thinkingLevel
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
 		if entry.observer != nil {
@@ -771,26 +935,38 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 		}
 	}
 	s.mu.RUnlock()
-	state.Active = s.activeState()
 	if kind == "agent_settled" {
-		state.Active = State{phase: PhaseIdle}
 		if s.hooks.Agent != nil {
 			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: AgentSettledHookEvent, Messages: s.sessionCommittedAgentMessages()})
 		}
 	}
-	steering, follow := s.RichQueues()
 	var retryEvent retryControl
 	if len(retry) != 0 {
 		retryEvent = retry[0]
 	}
-	s.emitToObservers(ctx, observers, SessionEvent{
-		Type: kind, State: state, Steering: steering, FollowUp: follow,
-		RetryAttempt: retryEvent.attempt, RetryMaxAttempts: retryEvent.max, RetryDelay: retryEvent.delay,
-		RetrySucceeded: retryEvent.succeeded, RetryErrorMessage: retryEvent.errorMessage, FinalError: retryEvent.finalError,
-	})
+	var event SessionEvent
+	switch kind {
+	case "agent_settled":
+		event = AgentSettledEvent{}
+	case "thinking_level_changed":
+		event = ThinkingLevelChangedEvent{Level: thinkingLevel}
+	case "queue_update":
+		queue := s.sessionQueueUpdateEvent()
+		event = queue
+	case "auto_retry_start":
+		event = AutoRetryStartEvent{
+			Attempt: retryEvent.attempt, MaxAttempts: retryEvent.max,
+			Delay: retryEvent.delay, ErrorMessage: retryEvent.errorMessage,
+		}
+	case "auto_retry_end":
+		event = AutoRetryEndEvent{Success: retryEvent.succeeded, Attempt: retryEvent.attempt, FinalError: retryEvent.finalError}
+	}
+	if event != nil {
+		s.emitToObservers(ctx, observers, event)
+	}
 }
 
-func (s *AgentSession) Model() provider.ModelRef              { return s.State().Model }
+func (s *AgentSession) Model() provider.Model                 { return s.State().Model }
 func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel { return s.State().ThinkingLevel }
 func (s *AgentSession) SystemPrompt() string                  { return s.State().SystemPrompt }
 func (s *AgentSession) Tools() []provider.ToolDefinition      { return s.State().Tools }
@@ -800,7 +976,7 @@ func (s *AgentSession) Transcript() Transcript {
 	}
 	return s.transcript
 }
-func (s *AgentSession) SetModel(model provider.ModelRef) error {
+func (s *AgentSession) SetModel(model provider.Model) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
@@ -830,7 +1006,6 @@ func (s *AgentSession) SetModel(model provider.ModelRef) error {
 		previousCopy := previous
 		_ = hook(context.Background(), ModelSelectEvent{Model: model, PreviousModel: &previousCopy, Source: ModelSelectSet})
 	}
-	s.emitControl(context.Background(), "model_changed")
 	return nil
 }
 
@@ -1265,7 +1440,7 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 	}
 	terminalModel := s.terminalRunModel(run)
 	currentModel := s.State().Model
-	if terminalModel.ID() != "" && !sameModelRef(terminalModel, currentModel) {
+	if terminalModel.ID() != "" && !sameModelIdentity(terminalModel, currentModel) {
 		return false
 	}
 	if terminalModel.ID() == "" {
@@ -1306,20 +1481,20 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 	return false
 }
 
-func (s *AgentSession) terminalRunModel(run *sessionRun) provider.ModelRef {
+func (s *AgentSession) terminalRunModel(run *sessionRun) provider.Model {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if s.run != run {
-		return provider.ModelRef{}
+		return provider.Model{}
 	}
 	return run.terminalModel
 }
 
-func sameModelRef(left, right provider.ModelRef) bool {
+func sameModelIdentity(left, right provider.Model) bool {
 	return left.Provider() == right.Provider() && left.ID() == right.ID()
 }
 
-func (s *AgentSession) compactionLimitsFor(model provider.ModelRef) (uint64, uint64) {
+func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64) {
 	s.mu.RLock()
 	window, reserve := s.contextWindow, s.contextReserve
 	s.mu.RUnlock()
@@ -1490,7 +1665,6 @@ func (s *AgentSession) emitCompaction(ctx context.Context, kind string, reason C
 		return
 	}
 	s.mu.RLock()
-	state := SessionState{Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
 		if entry.observer != nil {
@@ -1498,13 +1672,23 @@ func (s *AgentSession) emitCompaction(ctx context.Context, kind string, reason C
 		}
 	}
 	s.mu.RUnlock()
-	state.Active = s.activeState()
-	steering, follow := s.RichQueues()
-	s.emitToObservers(ctx, observers, SessionEvent{
-		Type: kind, State: state, Steering: steering, FollowUp: follow,
-		CompactionReason: reason, CompactionResult: result, CompactionAborted: aborted,
-		CompactionWillRetry: willRetry, CompactionErrorMessage: errorMessage,
-	})
+	var event SessionEvent
+	switch kind {
+	case "compaction_start":
+		event = CompactionStartEvent{Reason: reason, WillRetry: willRetry}
+	case "compaction_end":
+		var eventErr error
+		if errorMessage != "" {
+			eventErr = errors.New(errorMessage)
+		}
+		event = CompactionEndEvent{
+			Reason: reason, Result: result, Aborted: aborted,
+			WillRetry: willRetry, ErrorMessage: errorMessage, Err: eventErr,
+		}
+	}
+	if event != nil {
+		s.emitToObservers(ctx, observers, event)
+	}
 }
 
 func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, reason CompactionReason, retry provider.RetryEvent) {
@@ -1512,7 +1696,6 @@ func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, rea
 		return
 	}
 	s.mu.RLock()
-	state := SessionState{Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
 		if entry.observer != nil {
@@ -1520,20 +1703,30 @@ func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, rea
 		}
 	}
 	s.mu.RUnlock()
-	state.Active = s.activeState()
-	steering, follow := s.RichQueues()
 	maxRetries := s.maxRetries()
 	if retry.MaxAttempts != 0 {
 		maxRetries = retryBudget(retry.MaxAttempts)
 	}
-	s.emitToObservers(ctx, observers, SessionEvent{
-		Type: kind, State: state, Steering: steering, FollowUp: follow,
-		SummarizationSource: "compaction", CompactionReason: reason,
-		RetryAttempt: retryBudget(retry.Attempt), RetryMaxAttempts: maxRetries, RetryDelay: retry.Delay,
-		RetryErrorMessage: retry.ErrorMessage, RetryFailureKind: retry.FailureKind,
-		RetryHTTPStatus: retry.HTTPStatus, RetrySucceeded: retry.Succeeded,
-		RetryFinishReason: retry.FinishReason, FinalError: retry.FinalError,
-	})
+	var event SessionEvent
+	switch kind {
+	case "summarization_retry_scheduled":
+		event = SessionSummarizationRetryScheduledEvent{
+			Attempt: retryBudget(retry.Attempt), MaxAttempts: maxRetries,
+			Delay: retry.Delay, ErrorMessage: retry.ErrorMessage, Reason: reason,
+			FailureKind: retry.FailureKind, HTTPStatus: retry.HTTPStatus,
+		}
+	case "summarization_retry_attempt_start":
+		event = SessionSummarizationRetryAttemptEvent{Source: "compaction", Reason: reason}
+	case "summarization_retry_finished":
+		event = SessionSummarizationRetryFinishedEvent{
+			Reason: reason, Attempt: retryBudget(retry.Attempt), FailureKind: retry.FailureKind,
+			HTTPStatus: retry.HTTPStatus, Succeeded: retry.Succeeded,
+			FinishReason: retry.FinishReason, FinalError: retry.FinalError,
+		}
+	}
+	if event != nil {
+		s.emitToObservers(ctx, observers, event)
+	}
 }
 
 // emitToObservers gives every observer a fresh event. Session observers are
@@ -1546,32 +1739,54 @@ func (s *AgentSession) emitToObservers(ctx context.Context, observers []SessionO
 }
 
 func cloneSessionEvent(event SessionEvent) SessionEvent {
-	event.State.Tools = append([]provider.ToolDefinition(nil), event.State.Tools...)
-	event.Steering = append([]llm.ConversationMessage(nil), event.Steering...)
-	event.FollowUp = append([]llm.ConversationMessage(nil), event.FollowUp...)
-	event.ToolResults = append([]llm.ConversationMessage(nil), event.ToolResults...)
-	event.Messages = append([]llm.ConversationMessage(nil), event.Messages...)
-	event.AgentMessage = agentmsg.CloneOne(event.AgentMessage)
-	event.AgentMessages = agentmsg.Clone(event.AgentMessages)
-	event.Event.AgentMessage = agentmsg.CloneOne(event.Event.AgentMessage)
-	event.Event.ToolArguments = bytes.Clone(event.Event.ToolArguments)
-	event.Event.ToolOutput.Content = append([]llm.ToolResultContentBlock(nil), event.Event.ToolOutput.Content...)
-	event.Event.ToolOutput.AddedToolNames = append([]string(nil), event.Event.ToolOutput.AddedToolNames...)
-	if event.Event.ToolOutput.Usage != nil {
-		usage := *event.Event.ToolOutput.Usage
-		event.Event.ToolOutput.Usage = &usage
+	switch value := event.(type) {
+	case AgentStartEvent, TurnStartEvent, TurnEndEvent, MessageStartEvent, MessageUpdateEvent,
+		MessageEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolExecutionEndEvent:
+		agentEvent, ok := value.(AgentEvent)
+		if !ok {
+			return nil
+		}
+		cloned := cloneAgentEvent(agentEvent)
+		if sessionEvent, ok := cloned.(SessionEvent); ok {
+			return sessionEvent
+		}
+	case CompactionStartEvent, CompactionEndEvent:
+		controlEvent, ok := value.(AgentControlEvent)
+		if !ok {
+			return nil
+		}
+		cloned := cloneAgentControlEvent(controlEvent)
+		if sessionEvent, ok := cloned.(SessionEvent); ok {
+			return sessionEvent
+		}
+	case SessionAgentEndEvent:
+		value.Messages = agentmsg.Clone(value.Messages)
+		return value
+	case AgentSettledEvent, ThinkingLevelChangedEvent,
+		AutoRetryStartEvent, AutoRetryEndEvent,
+		SessionSummarizationRetryScheduledEvent, SessionSummarizationRetryAttemptEvent,
+		SessionSummarizationRetryFinishedEvent, EntryAppendedEvent:
+		return value
+	case SessionQueueUpdateEvent:
+		value.Steering = append([]string(nil), value.Steering...)
+		value.FollowUp = append([]string(nil), value.FollowUp...)
+		value.SteeringMessages = append([]llm.ConversationMessage(nil), value.SteeringMessages...)
+		value.FollowUpMessages = append([]llm.ConversationMessage(nil), value.FollowUpMessages...)
+		return value
+	case SessionInfoChangeEvent:
+		if value.Name != nil {
+			name := *value.Name
+			value.Name = &name
+		}
+		return value
+	case BashExecutionUpdateEvent:
+		if value.ID != nil {
+			id := *value.ID
+			value.ID = &id
+		}
+		return value
 	}
-	event.Event.ToolUpdate.Content = append([]llm.ToolResultContentBlock(nil), event.Event.ToolUpdate.Content...)
-	event.Event.ToolUpdate.AddedToolNames = append([]string(nil), event.Event.ToolUpdate.AddedToolNames...)
-	if event.Event.ToolUpdate.Usage != nil {
-		usage := *event.Event.ToolUpdate.Usage
-		event.Event.ToolUpdate.Usage = &usage
-	}
-	if event.CompactionResult != nil {
-		result := session.CloneCompactResult(*event.CompactionResult)
-		event.CompactionResult = &result
-	}
-	return event
+	return nil
 }
 
 func (s *AgentSession) sessionRunStarted(run *sessionRun) bool {
@@ -1726,6 +1941,40 @@ func (s *AgentSession) RichQueues() (steering, followUp []llm.ConversationMessag
 		return nil, nil
 	}
 	return s.loop.RichQueues()
+}
+
+func (s *AgentSession) sessionQueueUpdateEvent() SessionQueueUpdateEvent {
+	steering, followUp := s.RichQueues()
+	event := SessionQueueUpdateEvent{
+		SteeringMessages: append([]llm.ConversationMessage(nil), steering...),
+		FollowUpMessages: append([]llm.ConversationMessage(nil), followUp...),
+		Steering:         make([]string, len(steering)),
+		FollowUp:         make([]string, len(followUp)),
+	}
+	for index, message := range steering {
+		event.Steering[index] = queuedMessageText(message)
+	}
+	for index, message := range followUp {
+		event.FollowUp[index] = queuedMessageText(message)
+	}
+	return event
+}
+
+func queuedMessageText(message llm.ConversationMessage) string {
+	var builder strings.Builder
+	switch value := message.(type) {
+	case llm.UserTextMessage:
+		for _, block := range value.Content() {
+			builder.WriteString(block.Text())
+		}
+	case llm.UserContentMessage:
+		for _, block := range value.Content() {
+			if text, ok := block.(llm.TextBlock); ok {
+				builder.WriteString(text.Text())
+			}
+		}
+	}
+	return builder.String()
 }
 func (s *AgentSession) ClearSteeringQueue() {
 	s.clearQueues(func() { s.loop.ClearSteeringQueue() })

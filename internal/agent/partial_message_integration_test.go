@@ -12,7 +12,7 @@ import (
 )
 
 func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	thinking, err := llm.NewThinkingBlock("plan")
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolUse, err := llm.NewAssistantToolUseMessage(
+	toolUse, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{thinking, mustTextBlock(t, "working"), call},
 		mustUsage(t, 5, 3), agentTestEpoch,
 	)
@@ -59,10 +59,17 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 		t.Fatal(err)
 	}
 	unsubscribe := runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type != "message_start" && event.Type != "message_update" {
+		if event.Type() != "message_start" && event.Type() != "message_update" {
 			return
 		}
-		if partial, ok := event.AgentMessage.(agentmsg.AssistantPartial); ok {
+		var message agentmsg.Message
+		switch value := event.(type) {
+		case agent.MessageStartEvent:
+			message = value.Message
+		case agent.MessageUpdateEvent:
+			message = value.Message
+		}
+		if partial, ok := message.(agentmsg.AssistantPartial); ok {
 			observerPartials = append(observerPartials, partial)
 		}
 	})
@@ -87,9 +94,9 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 			t.Fatalf("partial timestamp/reason = %v/%q", partial.Timestamp(), partial.FinishReason())
 		}
 		usage := partial.Usage()
-		cost, hasCost := usage.Cost()
-		if usage.Input() != 0 || usage.Output() != 0 || usage.CacheRead() != 0 || usage.CacheWrite() != 0 || usage.TotalTokens() != 0 || !hasCost || cost != (llm.Cost{}) {
-			t.Fatalf("partial usage = %#v, cost=%#v present=%t", usage, cost, hasCost)
+		cost := usage.Cost()
+		if usage.Input() != 0 || usage.Output() != 0 || usage.CacheRead() != 0 || usage.CacheWrite() != 0 || usage.TotalTokens() != 0 || cost != (llm.Cost{}) {
+			t.Fatalf("partial usage = %#v, cost=%#v", usage, cost)
 		}
 		if active, ok := partial.Snapshot().ActiveBlock(); ok {
 			seen[active.Kind()] = true
@@ -114,12 +121,12 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 }
 
 func TestTurnAndToolExecutionHooksMirrorOriginalLifecycle(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	call, err := llm.NewToolCallBlock("call-1", "fixture", []byte(`{"value":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolUse, err := llm.NewAssistantToolUseMessage(
+	toolUse, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{mustTextBlock(t, "working"), call},
 		mustUsage(t, 5, 3), agentTestEpoch,
 	)
@@ -192,7 +199,7 @@ func TestTurnAndToolExecutionHooksMirrorOriginalLifecycle(t *testing.T) {
 }
 
 func TestBeforeAgentStartReceivesRichMultiMessagePrompt(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	text, _ := llm.NewTextBlock("look")
 	image, err := llm.NewImageDataBlock("image/png", []byte{1, 2, 3})
 	if err != nil {

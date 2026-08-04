@@ -15,7 +15,7 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
-func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json.RawMessage, error) {
+func encodeMessage(message llm.ConversationMessage, _ AppendOptions) (json.RawMessage, error) {
 	switch message := message.(type) {
 	case llm.UserTextMessage:
 		content, err := encodeTextBlocks(message.Content())
@@ -38,31 +38,43 @@ func encodeMessage(message llm.ConversationMessage, options AppendOptions) (json
 		encoded = strconv.AppendInt(encoded, message.Timestamp().UnixMilli(), 10)
 		return append(encoded, '}'), nil
 	case llm.AssistantTextMessage:
-		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
-			return nil, err
+		identity := assistantProvenanceFromMessage(message)
+		response, ok := message.ResponseMetadata()
+		var responsePointer *llm.AssistantResponseMetadata
+		if ok {
+			responsePointer = &response
 		}
-		response, _ := message.ResponseMetadata()
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), identity, responsePointer, message.Diagnostics())
 	case llm.AssistantToolUseMessage:
-		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
-			return nil, err
-		}
+		identity := assistantProvenanceFromMessage(message)
 		response, ok := message.ResponseMetadata()
 		if !ok {
 			response = llm.AssistantResponseMetadata{}
 		}
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
+		var responsePointer *llm.AssistantResponseMetadata
+		if ok {
+			responsePointer = &response
+		}
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), identity, responsePointer, message.Diagnostics())
 	case llm.AssistantRichMessage:
-		if err := validateMessageAssistantProvenance(message, options.Assistant); err != nil {
-			return nil, err
-		}
+		identity := assistantProvenanceFromMessage(message)
 		response, ok := message.ResponseMetadata()
 		if !ok {
 			response = llm.AssistantResponseMetadata{}
 		}
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), options.Assistant, &response)
+		var responsePointer *llm.AssistantResponseMetadata
+		if ok {
+			responsePointer = &response
+		}
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), "", message.Timestamp().UnixMilli(), identity, responsePointer, message.Diagnostics())
 	case llm.AssistantFailureMessage:
-		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), message.ErrorMessage(), message.Timestamp().UnixMilli(), options.Assistant, nil)
+		identity := assistantProvenanceFromMessage(message)
+		response, ok := message.ResponseMetadata()
+		var responsePointer *llm.AssistantResponseMetadata
+		if ok {
+			responsePointer = &response
+		}
+		return encodeAssistant(message.Blocks(), message.FinishReason(), message.Usage(), message.ErrorMessage(), message.Timestamp().UnixMilli(), identity, responsePointer, message.Diagnostics())
 	case llm.ToolResultMessage:
 		content, err := encodeTextBlocks(message.Content())
 		if err != nil {
@@ -206,36 +218,35 @@ func encodePortableUsage(usage llm.Usage) (json.RawMessage, error) {
 	}
 	encoded = append(encoded, `,"totalTokens":`...)
 	encoded = strconv.AppendUint(encoded, usage.TotalTokens(), 10)
-	if cost, ok := usage.Cost(); ok {
-		costJSON, err := json.Marshal(struct {
-			Input      float64 `json:"input"`
-			Output     float64 `json:"output"`
-			CacheRead  float64 `json:"cacheRead"`
-			CacheWrite float64 `json:"cacheWrite"`
-			Total      float64 `json:"total"`
-		}{cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite, cost.Total})
-		if err != nil {
-			return nil, err
-		}
-		encoded = append(encoded, `,"cost":`...)
-		encoded = append(encoded, costJSON...)
+	cost := usage.Cost()
+	costJSON, err := json.Marshal(struct {
+		Input      float64 `json:"input"`
+		Output     float64 `json:"output"`
+		CacheRead  float64 `json:"cacheRead"`
+		CacheWrite float64 `json:"cacheWrite"`
+		Total      float64 `json:"total"`
+	}{cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite, cost.Total})
+	if err != nil {
+		return nil, err
 	}
+	encoded = append(encoded, `,"cost":`...)
+	encoded = append(encoded, costJSON...)
 	return append(encoded, '}'), nil
 }
 
 type llmAssistantProvenanceCarrier interface {
-	AssistantProvenance() (llm.AssistantProvenance, bool)
+	AssistantProvenance() llm.AssistantProvenance
+	Usage() llm.Usage
 }
 
-func validateMessageAssistantProvenance(message llmAssistantProvenanceCarrier, identity AssistantProvenance) error {
-	provenance, ok := message.AssistantProvenance()
-	if !ok {
-		return nil
+func assistantProvenanceFromMessage(message llmAssistantProvenanceCarrier) AssistantProvenance {
+	provenance := message.AssistantProvenance()
+	return AssistantProvenance{
+		Provider: provenance.Provider,
+		API:      provenance.API,
+		Model:    provenance.Model,
+		Cost:     UsageCostFromLLM(message.Usage().Cost()),
 	}
-	if provenance.Provider != identity.Provider || provenance.API != identity.API || provenance.Model != identity.Model {
-		return fmt.Errorf("%w: assistant message provenance does not match append provenance", ErrInvalidEntry)
-	}
-	return nil
 }
 
 func encodeAssistant(
@@ -244,7 +255,7 @@ func encodeAssistant(
 	usage llm.Usage,
 	errorMessage string,
 	timestamp int64,
-	identity AssistantProvenance, response *llm.AssistantResponseMetadata,
+	identity AssistantProvenance, response *llm.AssistantResponseMetadata, diagnostics []llm.AssistantDiagnostic,
 ) (json.RawMessage, error) {
 	if err := validateAssistantProvenance(identity); err != nil {
 		return nil, err
@@ -254,7 +265,7 @@ func encodeAssistant(
 		switch block := block.(type) {
 		case llm.TextBlock:
 			wire := textBlockWire{Type: "text", Text: block.Text()}
-			if signature, ok := block.TextSignature(); ok && errorMessage == "" {
+			if signature, ok := block.TextSignature(); ok {
 				wire.TextSignature = signature
 			}
 			raw, err := json.Marshal(wire)
@@ -342,9 +353,44 @@ func encodeAssistant(
 			}
 		}
 	}
+	if diagnostics != nil {
+		diagnosticsJSON, err := encodeAssistantDiagnostics(diagnostics)
+		if err != nil {
+			return nil, err
+		}
+		encoded = append(encoded, `,"diagnostics":`...)
+		encoded = append(encoded, diagnosticsJSON...)
+	}
 	encoded = append(encoded, `,"timestamp":`...)
 	encoded = strconv.AppendInt(encoded, timestamp, 10)
 	return append(encoded, '}'), nil
+}
+
+func encodeAssistantDiagnostics(values []llm.AssistantDiagnostic) (json.RawMessage, error) {
+	result := make([]map[string]any, 0, len(values))
+	for _, diagnostic := range values {
+		object := map[string]any{
+			"type": diagnostic.Type(), "timestamp": diagnostic.Timestamp().UnixMilli(),
+		}
+		if info, ok := diagnostic.ErrorInfo(); ok {
+			errorObject := map[string]any{"message": info.Message}
+			if info.Name != "" {
+				errorObject["name"] = info.Name
+			}
+			if info.Stack != "" {
+				errorObject["stack"] = info.Stack
+			}
+			if len(info.Code) != 0 {
+				errorObject["code"] = json.RawMessage(info.Code)
+			}
+			object["error"] = errorObject
+		}
+		if details := diagnostic.Details(); len(details) != 0 {
+			object["details"] = json.RawMessage(details)
+		}
+		result = append(result, object)
+	}
+	return json.Marshal(result)
 }
 
 func encodeTextBlocks(blocks []llm.TextBlock) ([]json.RawMessage, error) {
@@ -591,8 +637,8 @@ func encodeCompactionUsage(value CompactionUsage) (json.RawMessage, error) {
 }
 
 // encodePayloadEntry is the durable half of the v3 non-message entry union.
-// Standard LLM messages continue through encodeMessage because their assistant
-// provenance has a separate append boundary.
+// Standard LLM messages continue through encodeMessage, which derives complete
+// assistant provenance and usage directly from the immutable message value.
 func encodePayloadEntry(id, parentID string, hasParent bool, timestamp time.Time, payload EntryPayload) (json.RawMessage, error) {
 	base := map[string]any{"id": id, "parentId": any(nil), "timestamp": formatISOTime(timestamp)}
 	if hasParent {

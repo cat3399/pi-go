@@ -54,7 +54,7 @@ func TestRegistryExecutorForwardsSequentialOverrideToProviderCapability(t *testi
 	}
 	transcript := newSession(t)
 	scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
-	model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestProviderParallelToolCapabilityMatchesEffectiveExecutionMode(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			transcript := newSession(t)
 			scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
-			model, err := provider.NewModelRef("scripted", "scripted", "scripted-1")
+			model, err := newTestModel("scripted", "scripted", "scripted-1")
 			if err != nil {
 				t.Fatal(err)
 			}

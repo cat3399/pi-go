@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 // Entry returns an immutable snapshot selected by durable entry ID.
@@ -110,8 +112,29 @@ func (s *Session) Tree() []TreeNode {
 	nodes := make([]TreeNode, len(s.entries))
 	children := make([][]int, len(s.entries))
 	roots := make([]int, 0)
+	labels := make(map[string]string)
+	labelTimestamps := make(map[string]time.Time)
+	for _, entry := range s.entries {
+		payload, ok := entry.payload.(LabelPayload)
+		if !ok {
+			continue
+		}
+		if payload.Label == nil || *payload.Label == "" {
+			delete(labels, payload.TargetID)
+			delete(labelTimestamps, payload.TargetID)
+			continue
+		}
+		labels[payload.TargetID] = *payload.Label
+		labelTimestamps[payload.TargetID] = entry.timestamp
+	}
 	for index, entry := range s.entries {
 		nodes[index].Entry = entry.clone()
+		if label, ok := labels[entry.id]; ok {
+			labelCopy := label
+			timestamp := labelTimestamps[entry.id]
+			nodes[index].Label = &labelCopy
+			nodes[index].LabelTimestamp = &timestamp
+		}
 		if !entry.hasParent {
 			roots = append(roots, index)
 			continue
@@ -127,6 +150,11 @@ func (s *Session) Tree() []TreeNode {
 		for childIndex, child := range children[index] {
 			nodes[index].Children[childIndex] = nodes[child]
 		}
+		// Match SessionManager.getTree(): siblings are timestamp ordered while
+		// stable ties retain their JSONL order.
+		sort.SliceStable(nodes[index].Children, func(left, right int) bool {
+			return nodes[index].Children[left].Entry.timestamp.Before(nodes[index].Children[right].Entry.timestamp)
+		})
 	}
 	forest := make([]TreeNode, len(roots))
 	for index, root := range roots {

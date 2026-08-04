@@ -60,7 +60,7 @@ type CostRates struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cacheRead"`
 	CacheWrite float64 `json:"cacheWrite"`
-	// Tiers are request-wide: the highest threshold not exceeding input usage
+	// Tiers are request-wide: the highest threshold exceeded by input usage
 	// prices the whole request, matching pi's ModelCost.tiers semantics.
 	Tiers []CostTier `json:"tiers,omitempty"`
 }
@@ -152,13 +152,14 @@ type ModelSpec struct {
 	Compat                           ModelCompat
 }
 
-// ModelRef is the minimum stable identity needed to route one provider call.
-// Catalog metadata and adapter configuration remain outside this value.
-type ModelRef struct {
+// Model is pi's complete, immutable model contract. Routing identity and the
+// metadata needed by the agent loop travel together; there is no identity-only
+// model value that can reach a provider request.
+type Model struct {
 	provider string
 	api      string
 	id       string
-	metadata *modelMetadata
+	metadata modelMetadata
 }
 
 type modelMetadata struct {
@@ -174,39 +175,52 @@ type modelMetadata struct {
 	compat           ModelCompat
 }
 
-func NewModelRef(provider, api, id string) (ModelRef, error) {
-	model := ModelRef{provider: provider, api: api, id: id}
-	if err := model.validate(); err != nil {
-		return ModelRef{}, err
-	}
-	return model, nil
-}
-
-// NewModel constructs a generic model value. ModelRef is retained as the
-// name for source compatibility with the first Go milestone, but it is now a
-// complete model contract rather than only an OpenAI route key.
-func NewModel(spec ModelSpec) (ModelRef, error) {
+// NewModel constructs a complete model value. Every field required by pi's
+// Model shape must be supplied, even when a particular adapter does not use it.
+func NewModel(spec ModelSpec) (Model, error) {
 	input := append([]InputKind(nil), spec.Input...)
-	if len(input) == 0 {
-		input = []InputKind{InputText}
-	}
 	if err := validateModelSpec(spec, input); err != nil {
-		return ModelRef{}, err
+		return Model{}, err
 	}
-	model := ModelRef{provider: spec.Provider, api: spec.API, id: spec.ID, metadata: &modelMetadata{
+	model := Model{provider: spec.Provider, api: spec.API, id: spec.ID, metadata: modelMetadata{
 		name: spec.Name, baseURL: spec.BaseURL, reasoning: spec.Reasoning,
 		thinkingLevelMap: cloneThinkingLevelMap(spec.ThinkingLevelMap), input: input, cost: cloneCostRates(spec.Cost),
 		contextWindow: spec.ContextWindow, maxTokens: spec.MaxTokens, headers: cloneStrings(spec.Headers), compat: CloneModelCompat(spec.Compat),
 	}}
 	if err := model.validate(); err != nil {
-		return ModelRef{}, err
+		return Model{}, err
 	}
 	return model, nil
 }
 
 func validateModelSpec(spec ModelSpec, input []InputKind) error {
-	if spec.ContextWindow != 0 && spec.MaxTokens > spec.ContextWindow {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "provider", value: spec.Provider},
+		{name: "api", value: spec.API},
+		{name: "id", value: spec.ID},
+		{name: "name", value: spec.Name},
+	} {
+		if !utf8.ValidString(field.value) || strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("%w: %s must be non-empty valid UTF-8", ErrInvalidModel, field.name)
+		}
+	}
+	if !utf8.ValidString(spec.BaseURL) {
+		return fmt.Errorf("%w: base URL must be valid UTF-8", ErrInvalidModel)
+	}
+	if spec.ContextWindow == 0 {
+		return fmt.Errorf("%w: context window must be greater than zero", ErrInvalidModel)
+	}
+	if spec.MaxTokens == 0 {
+		return fmt.Errorf("%w: max tokens must be greater than zero", ErrInvalidModel)
+	}
+	if spec.MaxTokens > spec.ContextWindow {
 		return fmt.Errorf("%w: max tokens cannot exceed context window", ErrInvalidModel)
+	}
+	if len(input) == 0 {
+		return fmt.Errorf("%w: input capabilities must be non-empty", ErrInvalidModel)
 	}
 	for _, rate := range []float64{spec.Cost.Input, spec.Cost.Output, spec.Cost.CacheRead, spec.Cost.CacheWrite} {
 		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
@@ -296,66 +310,53 @@ func compatMap(value *OpenAICompletionsCompat, selectValue func(*OpenAICompletio
 	return selectValue(value)
 }
 
-func (m ModelRef) validate() error {
-	fields := []struct {
-		name  string
-		value string
-	}{
-		{name: "provider", value: m.provider},
-		{name: "api", value: m.api},
-		{name: "id", value: m.id},
-	}
-	for _, field := range fields {
-		if !utf8.ValidString(field.value) || strings.TrimSpace(field.value) == "" {
-			return fmt.Errorf("%w: %s must be non-empty valid UTF-8", ErrInvalidModel, field.name)
-		}
-	}
-	return nil
+func (m Model) validate() error {
+	return validateModelSpec(ModelSpec{
+		Provider: m.provider, API: m.api, ID: m.id, Name: m.metadata.name,
+		BaseURL: m.metadata.baseURL, Reasoning: m.metadata.reasoning,
+		ThinkingLevelMap: m.metadata.thinkingLevelMap, Input: m.metadata.input,
+		Cost: m.metadata.cost, ContextWindow: m.metadata.contextWindow,
+		MaxTokens: m.metadata.maxTokens, Headers: m.metadata.headers,
+		Compat: m.metadata.compat,
+	}, m.metadata.input)
 }
 
-func (m ModelRef) Provider() string { return m.provider }
-func (m ModelRef) API() string      { return m.api }
-func (m ModelRef) ID() string       { return m.id }
+func (m Model) Provider() string { return m.provider }
+func (m Model) API() string      { return m.api }
+func (m Model) ID() string       { return m.id }
+
+func assistantProvenanceForModel(model Model) llm.AssistantProvenance {
+	providerID, api, modelID := model.Provider(), model.API(), model.ID()
+	// A zero Request is a Go-only invalid-input case with no equivalent in pi's
+	// TypeScript call signature. Its failure still has to satisfy the mandatory
+	// AssistantMessage provenance contract, so preserve every supplied identity
+	// component and use an explicit sentinel only for the absent components.
+	if strings.TrimSpace(providerID) == "" {
+		providerID = "unknown"
+	}
+	if strings.TrimSpace(api) == "" {
+		api = "unknown"
+	}
+	if strings.TrimSpace(modelID) == "" {
+		modelID = "unknown"
+	}
+	return llm.AssistantProvenance{Provider: providerID, API: api, Model: modelID}
+}
 
 // Equal follows pi model identity: provider plus model id. API is an adapter
 // property and catalog metadata must not change logical model equality.
-func (m ModelRef) Equal(other ModelRef) bool { return m.provider == other.provider && m.id == other.id }
-func (m ModelRef) Name() string {
-	if m.metadata == nil {
-		return ""
-	}
-	return m.metadata.name
-}
-func (m ModelRef) BaseURL() string {
-	if m.metadata == nil {
-		return ""
-	}
-	return m.metadata.baseURL
-}
-func (m ModelRef) Reasoning() bool { return m.metadata != nil && m.metadata.reasoning }
-func (m ModelRef) ContextWindow() uint64 {
-	if m.metadata == nil {
-		return 0
-	}
-	return m.metadata.contextWindow
-}
-func (m ModelRef) MaxTokens() uint64 {
-	if m.metadata == nil {
-		return 0
-	}
-	return m.metadata.maxTokens
-}
-func (m ModelRef) Cost() CostRates {
-	if m.metadata == nil {
-		return CostRates{}
-	}
-	return cloneCostRates(m.metadata.cost)
-}
+func (m Model) Equal(other Model) bool { return m.provider == other.provider && m.id == other.id }
+func (m Model) Name() string           { return m.metadata.name }
+func (m Model) BaseURL() string        { return m.metadata.baseURL }
+func (m Model) Reasoning() bool        { return m.metadata.reasoning }
+func (m Model) ContextWindow() uint64  { return m.metadata.contextWindow }
+func (m Model) MaxTokens() uint64      { return m.metadata.maxTokens }
+func (m Model) Cost() CostRates        { return cloneCostRates(m.metadata.cost) }
 
 // CalculateCost implements pi's request-wide tier selection. The highest
 // threshold strictly below total input/cache tokens applies to the whole
 // request; one-hour Anthropic cache writes cost 2x input rate.
-func (m ModelRef) CalculateCost(usage llm.Usage) llm.Cost {
+func (m Model) CalculateCost(usage llm.Usage) llm.Cost {
 	rates := m.Cost()
 	inputTokens := usage.Input() + usage.CacheRead() + usage.CacheWrite()
 	matched := int64(-1)
@@ -377,28 +378,16 @@ func (m ModelRef) CalculateCost(usage llm.Usage) llm.Cost {
 	cost.Total = cost.Input + cost.Output + cost.CacheRead + cost.CacheWrite
 	return cost
 }
-func (m ModelRef) Input() []InputKind {
-	if m.metadata == nil {
-		return []InputKind{InputText}
-	}
+func (m Model) Input() []InputKind {
 	return append([]InputKind(nil), m.metadata.input...)
 }
-func (m ModelRef) Headers() map[string]string {
-	if m.metadata == nil {
-		return nil
-	}
+func (m Model) Headers() map[string]string {
 	return cloneStrings(m.metadata.headers)
 }
-func (m ModelRef) Compat() ModelCompat {
-	if m.metadata == nil {
-		return ModelCompat{}
-	}
+func (m Model) Compat() ModelCompat {
 	return CloneModelCompat(m.metadata.compat)
 }
-func (m ModelRef) ThinkingLevelMap() map[ThinkingLevel]*string {
-	if m.metadata == nil {
-		return nil
-	}
+func (m Model) ThinkingLevelMap() map[ThinkingLevel]*string {
 	return cloneThinkingLevelMap(m.metadata.thinkingLevelMap)
 }
 
@@ -406,7 +395,7 @@ var extendedThinkingLevels = []ThinkingLevel{ThinkingOff, ThinkingMinimal, Think
 
 // SupportedThinkingLevels and ClampThinkingLevel mirror pi's models.ts.
 // A null mapping disables any level (including off); xhigh/max are opt-in.
-func (m ModelRef) SupportedThinkingLevels() []ThinkingLevel {
+func (m Model) SupportedThinkingLevels() []ThinkingLevel {
 	if !m.Reasoning() {
 		return []ThinkingLevel{ThinkingOff}
 	}
@@ -425,7 +414,7 @@ func (m ModelRef) SupportedThinkingLevels() []ThinkingLevel {
 	return levels
 }
 
-func (m ModelRef) ClampThinkingLevel(level ThinkingLevel) ThinkingLevel {
+func (m Model) ClampThinkingLevel(level ThinkingLevel) ThinkingLevel {
 	if level == "" {
 		level = ThinkingOff
 	}
@@ -468,7 +457,7 @@ func (m ModelRef) ClampThinkingLevel(level ThinkingLevel) ThinkingLevel {
 	return ThinkingOff
 }
 
-func (m ModelRef) ThinkingEffort(level ThinkingLevel) (string, bool) {
+func (m Model) ThinkingEffort(level ThinkingLevel) (string, bool) {
 	if !m.Reasoning() {
 		return "", false
 	}
@@ -515,9 +504,14 @@ func cloneAny(values map[string]any) map[string]any {
 }
 
 // CloneJSONMap returns a recursively independent copy of a JSON-like value
-// map while retaining concrete named map/slice types used by compatibility
-// extensions.
+// map while retaining concrete named container and struct types used by
+// compatibility extensions.
 func CloneJSONMap(values map[string]any) map[string]any { return cloneAny(values) }
+
+// CloneJSONValue is the corresponding value boundary for opaque tool details
+// and extension payloads. Callers remain responsible for validating that the
+// value is JSON-serializable before accepting it into durable state.
+func CloneJSONValue(value any) any { return cloneJSONLike(value) }
 
 func cloneJSONLike(value any) any {
 	if value == nil {
@@ -568,6 +562,18 @@ func cloneJSONReflect(value reflect.Value) reflect.Value {
 		out := reflect.New(value.Type().Elem())
 		out.Elem().Set(cloneJSONReflect(value.Elem()))
 		return out
+	case reflect.Struct:
+		// Seed the copy so unexported scalar state (for example time.Time's
+		// internals) retains ordinary value semantics, then recursively detach
+		// every exported/settable field.
+		out := reflect.New(value.Type()).Elem()
+		out.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if out.Field(i).CanSet() && value.Type().Field(i).IsExported() {
+				out.Field(i).Set(cloneJSONReflect(value.Field(i)))
+			}
+		}
+		return out
 	default:
 		return value
 	}
@@ -583,7 +589,28 @@ func CloneStreamOptions(value StreamOptions) StreamOptions {
 		copy := *value.Temperature
 		value.Temperature = &copy
 	}
+	value.MaxTokens = cloneUint64(value.MaxTokens)
+	value.TimeoutMS = cloneUint64(value.TimeoutMS)
+	value.WebsocketConnectTimeoutMS = cloneUint64(value.WebsocketConnectTimeoutMS)
+	value.MaxRetries = cloneUint32(value.MaxRetries)
+	value.MaxRetryDelayMS = cloneUint64(value.MaxRetryDelayMS)
 	return value
+}
+
+func cloneUint64(value *uint64) *uint64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneUint32(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 // MergeStreamOptions applies one turn-scoped overlay without discarding
@@ -601,8 +628,8 @@ func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
 	}
 	result.Headers = mergeHeaderMap(result.Headers, overlay.Headers)
 	result.HeaderOverrides = mergeHeaderOverrideMap(result.HeaderOverrides, overlay.HeaderOverrides)
-	if overlay.MaxTokens != 0 {
-		result.MaxTokens = overlay.MaxTokens
+	if overlay.MaxTokens != nil {
+		result.MaxTokens = cloneUint64(overlay.MaxTokens)
 	}
 	if overlay.SessionID != "" {
 		result.SessionID = overlay.SessionID
@@ -620,17 +647,17 @@ func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
 	if overlay.CacheRetention != "" {
 		result.CacheRetention = overlay.CacheRetention
 	}
-	if overlay.TimeoutMS != 0 {
-		result.TimeoutMS = overlay.TimeoutMS
+	if overlay.TimeoutMS != nil {
+		result.TimeoutMS = cloneUint64(overlay.TimeoutMS)
 	}
-	if overlay.WebsocketConnectTimeoutMS != 0 {
-		result.WebsocketConnectTimeoutMS = overlay.WebsocketConnectTimeoutMS
+	if overlay.WebsocketConnectTimeoutMS != nil {
+		result.WebsocketConnectTimeoutMS = cloneUint64(overlay.WebsocketConnectTimeoutMS)
 	}
-	if overlay.MaxRetries != 0 {
-		result.MaxRetries = overlay.MaxRetries
+	if overlay.MaxRetries != nil {
+		result.MaxRetries = cloneUint32(overlay.MaxRetries)
 	}
-	if overlay.MaxRetryDelayMS != 0 {
-		result.MaxRetryDelayMS = overlay.MaxRetryDelayMS
+	if overlay.MaxRetryDelayMS != nil {
+		result.MaxRetryDelayMS = cloneUint64(overlay.MaxRetryDelayMS)
 	}
 	result.Metadata = mergeAnyMap(result.Metadata, overlay.Metadata)
 	result.Env = mergeStringMap(result.Env, overlay.Env)
@@ -645,7 +672,7 @@ func composePayloadHooks(first, second PayloadHook) PayloadHook {
 	if second == nil {
 		return first
 	}
-	return func(model ModelRef, payload []byte) ([]byte, error) {
+	return func(model Model, payload []byte) ([]byte, error) {
 		current, err := first(model, append([]byte(nil), payload...))
 		if err != nil {
 			return nil, err
@@ -661,7 +688,7 @@ func composeHeaderHooks(first, second HeaderHook) HeaderHook {
 	if second == nil {
 		return first
 	}
-	return func(model ModelRef, headers map[string]*string) error {
+	return func(model Model, headers map[string]*string) error {
 		if err := first(model, headers); err != nil {
 			return err
 		}
@@ -676,7 +703,7 @@ func composeResponseHooks(first, second ResponseHook) ResponseHook {
 	if second == nil {
 		return first
 	}
-	return func(model ModelRef, response ResponseInfo) error {
+	return func(model Model, response ResponseInfo) error {
 		if err := first(model, response); err != nil {
 			return err
 		}
@@ -857,7 +884,7 @@ func cloneThinkingLevelMap(values map[ThinkingLevel]*string) map[ThinkingLevel]*
 
 // Request is an immutable snapshot of one provider invocation.
 type Request struct {
-	model             ModelRef
+	model             Model
 	systemPrompt      string
 	messages          []llm.ConversationMessage
 	tools             []ToolDefinition
@@ -918,7 +945,7 @@ type StreamOptions struct {
 	// headers untouched, non-nil replaces/adds it, and nil explicitly removes
 	// it. Headers remains the ordinary convenient add/replace map.
 	HeaderOverrides map[string]*string
-	MaxTokens       uint64
+	MaxTokens       *uint64
 	SessionID       string
 	Transport       Transport
 	// Fetch overrides the provider's configured HTTP transport for this one
@@ -929,10 +956,10 @@ type StreamOptions struct {
 	OnResponse                ResponseHook
 	ThinkingBudgets           map[ThinkingLevel]uint64
 	CacheRetention            CacheRetention
-	TimeoutMS                 uint64
-	WebsocketConnectTimeoutMS uint64
-	MaxRetries                uint32
-	MaxRetryDelayMS           uint64
+	TimeoutMS                 *uint64
+	WebsocketConnectTimeoutMS *uint64
+	MaxRetries                *uint32
+	MaxRetryDelayMS           *uint64
 	Metadata                  map[string]any
 	Env                       map[string]string
 	// Extra is retained for source compatibility only. New portable options
@@ -944,15 +971,15 @@ type StreamOptions struct {
 // PayloadHook may make a final JSON-level request adjustment after an adapter
 // has produced its dialect payload. It is useful for transports/gateways while
 // keeping provider wire structs out of Agent.
-type PayloadHook func(model ModelRef, payload []byte) ([]byte, error)
-type HeaderHook func(model ModelRef, headers map[string]*string) error
+type PayloadHook func(model Model, payload []byte) ([]byte, error)
+type HeaderHook func(model Model, headers map[string]*string) error
 
 // ResponseInfo is a portable transport observation supplied to OnResponse.
 type ResponseInfo struct {
 	StatusCode int
 	Headers    map[string][]string
 }
-type ResponseHook func(model ModelRef, response ResponseInfo) error
+type ResponseHook func(model Model, response ResponseInfo) error
 
 type Transport string
 
@@ -972,7 +999,7 @@ const (
 )
 
 func NewRequest(
-	model ModelRef,
+	model Model,
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 ) (Request, error) {
@@ -982,7 +1009,7 @@ func NewRequest(
 // NewRequestWithTools creates one immutable provider request. The legacy
 // NewRequest convenience remains deliberately tool-free for existing callers.
 func NewRequestWithTools(
-	model ModelRef,
+	model Model,
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 	tools []ToolDefinition,
@@ -994,7 +1021,7 @@ func NewRequestWithTools(
 // tool-call concurrency capability. Callers that do not own a multi-call
 // scheduler must leave AllowParallelToolCalls false.
 func NewRequestWithOptions(
-	model ModelRef,
+	model Model,
 	systemPrompt string,
 	messages []llm.ConversationMessage,
 	options RequestOptions,
@@ -1262,7 +1289,7 @@ func (r Request) clone() Request {
 	return r
 }
 
-func (r Request) Model() ModelRef { return r.model }
+func (r Request) Model() Model { return r.model }
 
 func (r Request) SystemPrompt() string { return r.systemPrompt }
 
@@ -1400,7 +1427,7 @@ type Provider interface {
 // the control boundary instead of being sent to whichever adapter happened to
 // construct the session.
 type RouteValidator interface {
-	SupportsModel(ModelRef) bool
+	SupportsModel(Model) bool
 }
 
 // Router is the small runtime equivalent of pi's Models.stream(model,
@@ -1459,7 +1486,7 @@ func NewRouter(adapters map[string]Provider) (*Router, error) {
 	return &Router{adapters: copy}, nil
 }
 
-func (r *Router) SupportsModel(model ModelRef) bool {
+func (r *Router) SupportsModel(model Model) bool {
 	if r == nil {
 		return false
 	}

@@ -16,7 +16,7 @@ import (
 )
 
 func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,13 @@ func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 			}
 			if event.Type == agent.MessageEndHookEvent && event.Message.Role() == agentmsg.RoleAssistant {
 				wrapped := event.Message.(agentmsg.LLM).Conversation().(llm.AssistantTextMessage)
-				replacement, replaceErr := llm.NewAssistantTextMessage([]llm.TextBlock{mustTextBlock(t, "rewritten")}, wrapped.FinishReason(), wrapped.Usage(), wrapped.Timestamp())
+				replacement, replaceErr := llm.NewAssistantTextMessage(
+					[]llm.TextBlock{mustTextBlock(t, "rewritten")},
+					wrapped.FinishReason(),
+					wrapped.Usage(),
+					wrapped.Timestamp(),
+					wrapped.AssistantProvenance(),
+				)
 				if replaceErr != nil {
 					return agent.MessageHookResult{}, replaceErr
 				}
@@ -105,7 +111,7 @@ func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 }
 
 func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, err := provider.NewToolDefinition("blocked-by-message-end", "fixture", false, []byte(`{"type":"object"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +131,7 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 				return agent.MessageHookResult{}, nil
 			}
 			replacement, replaceErr := llm.NewAssistantTextMessage(
-				[]llm.TextBlock{mustTextBlock(t, "tool skipped")}, llm.FinishStop, toolUse.Usage(), toolUse.Timestamp(),
+				[]llm.TextBlock{mustTextBlock(t, "tool skipped")}, llm.FinishStop, toolUse.Usage(), toolUse.Timestamp(), toolUse.AssistantProvenance(),
 			)
 			if replaceErr != nil {
 				return agent.MessageHookResult{}, replaceErr
@@ -159,7 +165,7 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 }
 
 func TestMessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("identity", "fixture", false, []byte(`{"type":"object"}`))
 	transcript := newSession(t)
 	tool := &fakeTool{name: "identity", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
@@ -196,7 +202,7 @@ func TestMessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
 }
 
 func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "must not run"))
 	cancel := true
 	transcript := newSession(t)
@@ -218,7 +224,7 @@ func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T
 }
 
 func TestContextHookPresencePreservesFullAgentMessages(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	transcript := newSession(t)
 	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole","timestamp":1,"opaque":true}`)})
 	if err != nil {
@@ -273,7 +279,7 @@ func TestContextHookPresencePreservesFullAgentMessages(t *testing.T) {
 }
 
 func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, err := provider.NewToolDefinition("mutate", "fixture", false, []byte(`{"type":"object"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +359,7 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 }
 
 func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("blocked", "fixture", false, []byte(`{"type":"object"}`))
 	providerImpl := newScriptedProvider(t, mustToolUseTerminal(t, "call", "blocked", []byte(`{}`)), mustTextTerminal(t, "done"))
 	tool := &fakeTool{name: "blocked"}
@@ -380,7 +386,7 @@ func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
 }
 
 func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	transcript := newSession(t)
 	firstMessage, _ := llm.NewUserTextMessage("first", time.UnixMilli(1))
 	first, err := transcript.Append(context.Background(), firstMessage, session.AppendOptions{})
@@ -455,7 +461,10 @@ func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 }
 
 func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "model",
+		ContextWindow: 100, MaxTokens: 99,
+	})
 	t.Run("manual", func(t *testing.T) {
 		transcript := newSession(t)
 		for index, text := range []string{"old one", "old two", "recent"} {
@@ -535,7 +544,7 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 }
 
 func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
-	model, _ := provider.NewModelRef("scripted", "scripted", "model")
+	model, _ := newTestModel("scripted", "scripted", "model")
 	newTranscript := func(t *testing.T) *session.Session {
 		transcript := newSession(t)
 		for index, text := range []string{"old one", "old two", "recent"} {
@@ -576,10 +585,10 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			t.Fatal(err)
 		}
 		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-			if event.Type == "compaction_start" {
+			if event.Type() == agent.CompactionStartEventType {
 				sequence = append(sequence, "observer-start")
 			}
-			if event.Type == "compaction_end" {
+			if event.Type() == agent.CompactionEndEventType {
 				sequence = append(sequence, "observer-end")
 			}
 		})
@@ -612,7 +621,8 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			transcript := newTranscript(t)
 			beforeEntries := len(transcript.Entries())
 			var sequence []string
-			var settlement agent.SessionEvent
+			var settlement agent.CompactionEndEvent
+			var settled bool
 			runtime, err := agent.NewSession(agent.SessionConfig{
 				Provider: newScriptedProvider(t), Transcript: transcript, Model: model, KeepRecentTokens: 1,
 				Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
@@ -631,12 +641,12 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 				t.Fatal(err)
 			}
 			runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-				if event.Type == "compaction_start" {
+				if event.Type() == agent.CompactionStartEventType {
 					sequence = append(sequence, "observer-start")
 				}
-				if event.Type == "compaction_end" {
+				if event.Type() == agent.CompactionEndEventType {
 					sequence = append(sequence, "observer-end")
-					settlement = event
+					settlement, settled = event.(agent.CompactionEndEvent)
 				}
 			})
 			_, compactErr := runtime.Compact(context.Background(), "")
@@ -646,7 +656,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			if !test.wantAborted && (compactErr == nil || !errors.Is(compactErr, test.hookErr)) {
 				t.Fatalf("hook error = %v", compactErr)
 			}
-			if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || settlement.CompactionAborted != test.wantAborted || len(transcript.Entries()) != beforeEntries {
+			if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settled || settlement.Aborted != test.wantAborted || len(transcript.Entries()) != beforeEntries {
 				t.Fatalf("settlement = sequence=%v event=%#v entries=%d", sequence, settlement, len(transcript.Entries()))
 			}
 		})
@@ -654,7 +664,8 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 
 	t.Run("automatic cancel pairs observer settlement", func(t *testing.T) {
 		var sequence []string
-		var settlement agent.SessionEvent
+		var settlement agent.CompactionEndEvent
+		var settled bool
 		runtime, err := agent.NewSession(agent.SessionConfig{
 			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
 			ContextWindow: 1, KeepRecentTokens: 1,
@@ -671,18 +682,18 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			t.Fatal(err)
 		}
 		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-			if event.Type == "compaction_start" {
+			if event.Type() == agent.CompactionStartEventType {
 				sequence = append(sequence, "observer-start")
 			}
-			if event.Type == "compaction_end" {
+			if event.Type() == agent.CompactionEndEventType {
 				sequence = append(sequence, "observer-end")
-				settlement = event
+				settlement, settled = event.(agent.CompactionEndEvent)
 			}
 		})
 		if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 			t.Fatalf("Run = (%#v, %v)", result, err)
 		}
-		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settlement.CompactionAborted {
+		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settled || !settlement.Aborted {
 			t.Fatalf("automatic cancellation settlement = %v / %#v", sequence, settlement)
 		}
 	})

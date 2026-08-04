@@ -22,7 +22,7 @@ import (
 var responsesTestTime = time.Date(2026, time.August, 1, 16, 0, 0, 0, time.UTC)
 
 func TestOpenAIResponsesAcceptsRequestAuthorizationWithoutAPIKey(t *testing.T) {
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAIResponsesAPI, ID: "model", Headers: map[string]string{"Authorization": "Bearer header-key"}})
+	model, err := newModel(provider.ModelSpec{Provider: "compatible", API: provider.OpenAIResponsesAPI, ID: "model", Headers: map[string]string{"Authorization": "Bearer header-key"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ func TestOpenAIResponsesValidatesConfigurationRoutingAndTextScopeBeforeTransport
 		))
 		assertProviderFailure(t, terminalFailure(t, terminal), provider.FailureConfiguration, provider.ErrInvalidOpenAIResponsesConfig)
 	}
-	wrongModel, err := provider.NewModelRef("openai", "openai-completions", "model")
+	wrongModel, err := newTestModel("openai", "openai-completions", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +578,7 @@ func TestOpenAIResponsesUsesExplicitDeveloperRoleAndStableReplayIDs(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	prior, err := llm.NewAssistantTextMessage(
+	prior, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, "one"), mustTextBlock(t, "two")},
 		llm.FinishStop,
 		llm.Usage{},
@@ -629,7 +629,7 @@ func TestOpenAIResponsesSkipsFailedAssistantHistory(t *testing.T) {
 		if partial != "" {
 			content = []llm.TextBlock{mustTextBlock(t, partial)}
 		}
-		message, err := llm.NewAssistantFailureMessage(content, finish, "failed", llm.Usage{}, time.Time{})
+		message, err := newAssistantFailureMessage(content, finish, "failed", llm.Usage{}, time.Time{})
 		if err != nil {
 			t.Fatalf("NewAssistantFailureMessage() error = %v", err)
 		}
@@ -1068,7 +1068,7 @@ func mustResponsesProvider(t *testing.T, config provider.OpenAIResponsesConfig) 
 
 func mustResponsesRequest(t *testing.T, system string, messages []llm.ConversationMessage) provider.Request {
 	t.Helper()
-	model, err := provider.NewModelRef(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "test-model")
+	model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "test-model")
 	if err != nil {
 		t.Fatal(err)
 	}

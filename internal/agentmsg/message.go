@@ -87,18 +87,15 @@ type AssistantPartial struct {
 type AssistantPartialSpec struct {
 	Snapshot llm.StreamSnapshot
 	Event    llm.StreamEvent
-	API      string
-	Provider string
-	Model    string
-	At       time.Time
 }
 
 func NewAssistantPartial(spec AssistantPartialSpec) (AssistantPartial, error) {
 	if spec.Event == nil || spec.Snapshot.Terminal() || spec.Snapshot.FinishReason() != llm.FinishPending {
 		return AssistantPartial{}, fmt.Errorf("invalid partial assistant message")
 	}
-	if !utf8.ValidString(spec.API) || !utf8.ValidString(spec.Provider) || !utf8.ValidString(spec.Model) ||
-		strings.TrimSpace(spec.API) == "" || strings.TrimSpace(spec.Provider) == "" || strings.TrimSpace(spec.Model) == "" {
+	provenance := spec.Snapshot.AssistantProvenance()
+	if !utf8.ValidString(provenance.API) || !utf8.ValidString(provenance.Provider) || !utf8.ValidString(provenance.Model) ||
+		strings.TrimSpace(provenance.API) == "" || strings.TrimSpace(provenance.Provider) == "" || strings.TrimSpace(provenance.Model) == "" || spec.Snapshot.Timestamp().IsZero() {
 		return AssistantPartial{}, fmt.Errorf("invalid partial assistant provenance")
 	}
 	zeroCost := llm.Cost{}
@@ -109,11 +106,11 @@ func NewAssistantPartial(spec AssistantPartialSpec) (AssistantPartial, error) {
 	return AssistantPartial{
 		snapshot: spec.Snapshot,
 		event:    spec.Event,
-		api:      spec.API,
-		provider: spec.Provider,
-		model:    spec.Model,
+		api:      provenance.API,
+		provider: provenance.Provider,
+		model:    provenance.Model,
 		usage:    usage,
-		at:       spec.At,
+		at:       spec.Snapshot.Timestamp(),
 	}, nil
 }
 func (m AssistantPartial) Role() Role                     { return RoleAssistant }

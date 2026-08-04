@@ -8,6 +8,43 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 )
 
+func testAssistantProvenance() llm.AssistantProvenance {
+	return llm.AssistantProvenance{Provider: "fixture", API: "fixture", Model: "fixture"}
+}
+
+func newAssistantTextMessage(content []llm.TextBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantTextMessage, error) {
+	return llm.NewAssistantTextMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantToolUseMessage(content []llm.AssistantBlock, usage llm.Usage, timestamp time.Time) (llm.AssistantToolUseMessage, error) {
+	return llm.NewAssistantToolUseMessage(content, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantRichMessage(content []llm.AssistantBlock, finish llm.FinishReason, usage llm.Usage, timestamp time.Time) (llm.AssistantRichMessage, error) {
+	return llm.NewAssistantRichMessage(content, finish, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessage(content []llm.TextBlock, finish llm.FinishReason, message string, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessage(content, finish, message, usage, timestamp, testAssistantProvenance())
+}
+
+func newAssistantFailureMessageWithFailure(content []llm.TextBlock, finish llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.AssistantFailureMessage, error) {
+	return llm.NewAssistantFailureMessageWithFailure(content, finish, failure, usage, timestamp, testAssistantProvenance())
+}
+
+func newErrorEventWithFailure(reason llm.FinishReason, failure llm.Failure, usage llm.Usage, timestamp time.Time) (llm.ErrorEvent, error) {
+	return llm.NewErrorEventWithFailure(reason, failure, usage, timestamp, testAssistantProvenance())
+}
+
+func newStartEvent(t *testing.T) llm.StartEvent {
+	t.Helper()
+	event, err := llm.NewStartEvent(testAssistantProvenance(), time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return event
+}
+
 func TestNewUserTextMessage(t *testing.T) {
 	t.Parallel()
 
@@ -100,7 +137,7 @@ func TestMessageContentReturnsSnapshot(t *testing.T) {
 		t.Fatalf("user content mutated through snapshot: got %q", got)
 	}
 
-	assistant, err := llm.NewAssistantTextMessage(
+	assistant, err := newAssistantTextMessage(
 		[]llm.TextBlock{mustTextBlock(t, "first"), mustTextBlock(t, "second")},
 		llm.FinishStop,
 		llm.Usage{},
@@ -137,7 +174,7 @@ func TestNewAssistantTextMessageFinishReason(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			message, err := llm.NewAssistantTextMessage(nil, tt.finish, llm.Usage{}, time.Time{})
+			message, err := newAssistantTextMessage(nil, tt.finish, llm.Usage{}, time.Time{})
 			if tt.wantErr {
 				if !errors.Is(err, llm.ErrInvalidFinishReason) {
 					t.Fatalf("error = %v, want ErrInvalidFinishReason", err)

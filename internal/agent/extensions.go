@@ -190,8 +190,8 @@ const (
 )
 
 type ModelSelectEvent struct {
-	Model         provider.ModelRef
-	PreviousModel *provider.ModelRef
+	Model         provider.Model
+	PreviousModel *provider.Model
 	Source        ModelSelectSource
 }
 type ModelSelectHook func(context.Context, ModelSelectEvent) error

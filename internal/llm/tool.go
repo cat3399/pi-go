@@ -110,33 +110,21 @@ func (c ToolCallBlock) ArgumentsJSON() []byte {
 // AssistantToolUseMessage is a successful terminal assistant message with at
 // least one complete tool call. Text and tool blocks retain provider order.
 type AssistantToolUseMessage struct {
-	content    []AssistantBlock
-	usage      Usage
-	timestamp  time.Time
-	response   *AssistantResponseMetadata
-	provenance *AssistantProvenance
+	content   []AssistantBlock
+	usage     Usage
+	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
-func NewAssistantToolUseMessageWithMetadata(content []AssistantBlock, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantToolUseMessage, error) {
-	m, err := NewAssistantToolUseMessage(content, usage, timestamp)
-	if err != nil {
+func NewAssistantToolUseMessageWithMetadata(content []AssistantBlock, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (AssistantToolUseMessage, error) {
+	message := AssistantToolUseMessage{
+		content: append([]AssistantBlock(nil), content...), usage: usage, timestamp: timestamp,
+		metadata: cloneAssistantMetadata(AssistantMetadata{Provenance: provenance, Response: response, Diagnostics: diagnostics}),
+	}
+	if err := message.validate(); err != nil {
 		return AssistantToolUseMessage{}, err
 	}
-	if response != nil {
-		copy := *response
-		if err := copy.validate(); err != nil {
-			return AssistantToolUseMessage{}, err
-		}
-		m.response = &copy
-	}
-	if provenance != nil {
-		copy := *provenance
-		if err := copy.validate(); err != nil {
-			return AssistantToolUseMessage{}, err
-		}
-		m.provenance = &copy
-	}
-	return m, nil
+	return message, nil
 }
 
 func (AssistantToolUseMessage) assistantTerminal()   {}
@@ -146,23 +134,28 @@ func NewAssistantToolUseMessage(
 	content []AssistantBlock,
 	usage Usage,
 	timestamp time.Time,
+	provenance AssistantProvenance,
 ) (AssistantToolUseMessage, error) {
+	return NewAssistantToolUseMessageWithMetadata(content, usage, timestamp, provenance, nil, nil)
+}
+
+func validateAssistantToolUseContent(content []AssistantBlock) error {
 	seenCalls := make(map[string]struct{})
 	toolCalls := 0
 	for _, block := range content {
 		switch block := block.(type) {
 		case TextBlock:
 			if err := block.validate(); err != nil {
-				return AssistantToolUseMessage{}, err
+				return err
 			}
 			continue
 		case ToolCallBlock:
 			if err := block.validate(); err != nil {
-				return AssistantToolUseMessage{}, err
+				return err
 			}
 			toolCalls++
 			if _, duplicate := seenCalls[block.ID()]; duplicate {
-				return AssistantToolUseMessage{}, fmt.Errorf(
+				return fmt.Errorf(
 					"%w: duplicate id %q",
 					ErrInvalidToolCall,
 					block.ID(),
@@ -171,10 +164,10 @@ func NewAssistantToolUseMessage(
 			seenCalls[block.ID()] = struct{}{}
 		case ThinkingBlock:
 			if err := block.validate(); err != nil {
-				return AssistantToolUseMessage{}, err
+				return err
 			}
 		default:
-			return AssistantToolUseMessage{}, fmt.Errorf(
+			return fmt.Errorf(
 				"%w: unsupported content block %T",
 				ErrInvalidToolCall,
 				block,
@@ -182,96 +175,77 @@ func NewAssistantToolUseMessage(
 		}
 	}
 	if toolCalls == 0 {
-		return AssistantToolUseMessage{}, fmt.Errorf("%w: tool-use message has no tool call", ErrInvalidToolCall)
+		return fmt.Errorf("%w: tool-use message has no tool call", ErrInvalidToolCall)
 	}
-
-	return AssistantToolUseMessage{
-		content:   append([]AssistantBlock(nil), content...),
-		usage:     usage,
-		timestamp: timestamp,
-	}, nil
+	return nil
 }
 
 // AssistantRichMessage is a completed non-tool assistant response that may
 // contain interleaved thinking and text. It is kept distinct from the legacy
 // text-only value so existing callers cannot accidentally accept reasoning.
 type AssistantRichMessage struct {
-	content    []AssistantBlock
-	finish     FinishReason
-	usage      Usage
-	timestamp  time.Time
-	response   *AssistantResponseMetadata
-	provenance *AssistantProvenance
+	content   []AssistantBlock
+	finish    FinishReason
+	usage     Usage
+	timestamp time.Time
+	metadata  AssistantMetadata
 }
 
-func NewAssistantRichMessageWithMetadata(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance *AssistantProvenance, response *AssistantResponseMetadata) (AssistantRichMessage, error) {
-	m, err := NewAssistantRichMessage(content, finish, usage, timestamp)
-	if err != nil {
+func NewAssistantRichMessageWithMetadata(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (AssistantRichMessage, error) {
+	message := AssistantRichMessage{
+		content: append([]AssistantBlock(nil), content...), finish: finish, usage: usage, timestamp: timestamp,
+		metadata: cloneAssistantMetadata(AssistantMetadata{Provenance: provenance, Response: response, Diagnostics: diagnostics}),
+	}
+	if err := message.validate(); err != nil {
 		return AssistantRichMessage{}, err
 	}
-	if response != nil {
-		copy := *response
-		if err := copy.validate(); err != nil {
-			return AssistantRichMessage{}, err
-		}
-		m.response = &copy
-	}
-	if provenance != nil {
-		copy := *provenance
-		if err := copy.validate(); err != nil {
-			return AssistantRichMessage{}, err
-		}
-		m.provenance = &copy
-	}
-	return m, nil
+	return message, nil
 }
 
 func (AssistantRichMessage) assistantTerminal()   {}
 func (AssistantRichMessage) conversationMessage() {}
-func NewAssistantRichMessage(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time) (AssistantRichMessage, error) {
+func NewAssistantRichMessage(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance) (AssistantRichMessage, error) {
+	return NewAssistantRichMessageWithMetadata(content, finish, usage, timestamp, provenance, nil, nil)
+}
+
+func validateAssistantRichContent(content []AssistantBlock, finish FinishReason) error {
 	if finish != FinishStop && finish != FinishLength {
-		return AssistantRichMessage{}, fmt.Errorf("%w: rich assistant finish %q", ErrInvalidFinishReason, finish)
+		return fmt.Errorf("%w: rich assistant finish %q", ErrInvalidFinishReason, finish)
 	}
 	if len(content) == 0 {
-		return AssistantRichMessage{}, fmt.Errorf("%w: rich assistant has no content", ErrInvalidRichContent)
+		return fmt.Errorf("%w: rich assistant has no content", ErrInvalidRichContent)
 	}
 	for _, b := range content {
 		switch b := b.(type) {
 		case TextBlock:
 			if err := b.validate(); err != nil {
-				return AssistantRichMessage{}, err
+				return err
 			}
 		case ThinkingBlock:
 			if err := b.validate(); err != nil {
-				return AssistantRichMessage{}, err
+				return err
 			}
 		default:
-			return AssistantRichMessage{}, fmt.Errorf("%w: rich assistant block %T", ErrInvalidRichContent, b)
+			return fmt.Errorf("%w: rich assistant block %T", ErrInvalidRichContent, b)
 		}
 	}
-	return AssistantRichMessage{content: append([]AssistantBlock(nil), content...), finish: finish, usage: usage, timestamp: timestamp}, nil
+	return nil
 }
 func (m AssistantRichMessage) validate() error {
-	_, err := NewAssistantRichMessage(m.content, m.finish, m.usage, m.timestamp)
-	if err == nil && m.response != nil {
-		err = m.response.validate()
+	if err := validateAssistantRichContent(m.content, m.finish); err != nil {
+		return err
 	}
-	if err == nil && m.provenance != nil {
-		err = m.provenance.validate()
-	}
-	return err
+	return m.metadata.validate()
 }
-func (m AssistantRichMessage) AssistantProvenance() (AssistantProvenance, bool) {
-	if m.provenance == nil {
-		return AssistantProvenance{}, false
-	}
-	return *m.provenance, true
-}
+func (m AssistantRichMessage) AssistantProvenance() AssistantProvenance { return m.metadata.Provenance }
 func (m AssistantRichMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
-	if m.response == nil {
+	if m.metadata.Response == nil {
 		return AssistantResponseMetadata{}, false
 	}
-	return *m.response, true
+	return *m.metadata.Response, true
+}
+func (m AssistantRichMessage) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(m.metadata.Diagnostics)
 }
 func (AssistantRichMessage) Role() Role { return RoleAssistant }
 func (m AssistantRichMessage) Blocks() []AssistantBlock {
@@ -378,26 +352,22 @@ func (m ToolResultContentMessage) AddedToolNames() []string {
 func (m ToolResultContentMessage) HasAddedToolNames() bool { return m.hasAddedToolNames }
 
 func (m AssistantToolUseMessage) validate() error {
-	_, err := NewAssistantToolUseMessage(m.content, m.usage, m.timestamp)
-	if err == nil && m.response != nil {
-		err = m.response.validate()
+	if err := validateAssistantToolUseContent(m.content); err != nil {
+		return err
 	}
-	if err == nil && m.provenance != nil {
-		err = m.provenance.validate()
-	}
-	return err
+	return m.metadata.validate()
 }
-func (m AssistantToolUseMessage) AssistantProvenance() (AssistantProvenance, bool) {
-	if m.provenance == nil {
-		return AssistantProvenance{}, false
-	}
-	return *m.provenance, true
+func (m AssistantToolUseMessage) AssistantProvenance() AssistantProvenance {
+	return m.metadata.Provenance
 }
 func (m AssistantToolUseMessage) ResponseMetadata() (AssistantResponseMetadata, bool) {
-	if m.response == nil {
+	if m.metadata.Response == nil {
 		return AssistantResponseMetadata{}, false
 	}
-	return *m.response, true
+	return *m.metadata.Response, true
+}
+func (m AssistantToolUseMessage) Diagnostics() []AssistantDiagnostic {
+	return cloneAssistantDiagnostics(m.metadata.Diagnostics)
 }
 
 func (AssistantToolUseMessage) Role() Role {

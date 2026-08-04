@@ -862,8 +862,8 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 		reason = llm.FinishToolUse
 	}
 	response := &llm.AssistantResponseMetadata{ResponseID: event.Response.ID, RawStopReason: wantStatus}
-	provenance := &llm.AssistantProvenance{Provider: s.model.Provider(), API: s.model.API(), Model: s.model.ID()}
-	done, err := llm.NewDoneEventWithMetadata(reason, usage, s.timestamp, provenance, response)
+	provenance := assistantProvenanceForModel(s.model)
+	done, err := llm.NewDoneEventWithMetadata(reason, usage, s.timestamp, provenance, response, nil)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}

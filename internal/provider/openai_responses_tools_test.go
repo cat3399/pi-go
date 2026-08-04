@@ -82,7 +82,7 @@ func responsesReasoningSignatureForTest(t *testing.T, block llm.ThinkingBlock) m
 }
 
 func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mixed, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{text, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
+	mixed, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{text, call}, llm.Usage{}, responsesTestTime, llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 }
 
 func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{reasoning, call}, llm.Usage{}, responsesTestTime, &llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil)
+	assistant, err := llm.NewAssistantToolUseMessageWithMetadata([]llm.AssistantBlock{reasoning, call}, llm.Usage{}, responsesTestTime, llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "gpt-test"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,12 +283,7 @@ func TestOpenAIResponsesPreservesMessagePhaseAndIDForSameModelReplay(t *testing.
 	if _, err := transcript.Append(context.Background(), mustUser(t, "go"), session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{Assistant: session.AssistantProvenance{
-		API:      provider.OpenAIResponsesAPI,
-		Provider: provider.OpenAIProviderID,
-		Model:    "test-model",
-		Cost:     session.ZeroUsageCost(),
-	}}); err != nil {
+	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := transcript.Close(); err != nil {
@@ -354,12 +349,7 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{Assistant: session.AssistantProvenance{
-		API:      provider.OpenAIResponsesAPI,
-		Provider: provider.OpenAIProviderID,
-		Model:    "test-model",
-		Cost:     session.ZeroUsageCost(),
-	}}); err != nil {
+	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := transcript.Close(); err != nil {
@@ -488,13 +478,24 @@ func TestOpenAIResponsesOpaqueReplayRequiresExactAssistantProvenance(t *testing.
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
+			source := llm.AssistantProvenance{}
+			if testCase.source != nil {
+				source = *testCase.source
+			}
 			assistant, err := llm.NewAssistantToolUseMessageWithMetadata(
 				[]llm.AssistantBlock{reasoning, answer, call},
 				llm.Usage{},
 				responsesTestTime,
-				testCase.source,
+				source,
+				nil,
 				nil,
 			)
+			if testCase.source == nil {
+				if err == nil {
+					t.Fatal("missing assistant provenance was accepted")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -514,12 +515,7 @@ func TestOpenAIResponsesOpaqueReplayRequiresExactAssistantProvenance(t *testing.
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := transcript.Append(context.Background(), assistant, session.AppendOptions{Assistant: session.AssistantProvenance{
-					API:      testCase.source.API,
-					Provider: testCase.source.Provider,
-					Model:    testCase.source.Model,
-					Cost:     session.ZeroUsageCost(),
-				}}); err != nil {
+				if _, err := transcript.Append(context.Background(), assistant, session.AppendOptions{}); err != nil {
 					t.Fatal(err)
 				}
 				if _, err := transcript.Append(context.Background(), result, session.AppendOptions{}); err != nil {
@@ -588,7 +584,8 @@ func TestOpenAIResponsesDropsForeignRedactedReasoning(t *testing.T) {
 		llm.FinishStop,
 		llm.Usage{},
 		responsesTestTime,
-		&llm.AssistantProvenance{Provider: "foreign", API: provider.OpenAIResponsesAPI, Model: "test-model"},
+		llm.AssistantProvenance{Provider: "foreign", API: provider.OpenAIResponsesAPI, Model: "test-model"},
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -724,7 +721,7 @@ func TestToolDefinitionsAreValidatedAndImmutable(t *testing.T) {
 	if string(definition.ParametersJSON()) != wantSchema {
 		t.Fatalf("definition schema was mutated: %q", definition.ParametersJSON())
 	}
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -995,7 +992,7 @@ func FuzzToolDefinitionStrictLocalReferenceNeverPanics(f *testing.F) {
 func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
 	t.Parallel()
 
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1048,7 @@ func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
 func TestOpenAIResponsesReplayNormalizesAndGatesOriginlessItemIDs(t *testing.T) {
 	t.Parallel()
 
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1056,7 @@ func TestOpenAIResponsesReplayNormalizesAndGatesOriginlessItemIDs(t *testing.T) 
 	first := mustReplayCall(t, "call/one|"+sharedLongPrefix+"left", "one")
 	second := mustReplayCall(t, "call:two|"+sharedLongPrefix+"right", "two")
 	fcShaped := mustReplayCall(t, "call-three|fc_native-1", "three")
-	assistant, err := llm.NewAssistantToolUseMessage(
+	assistant, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{first, second, fcShaped},
 		llm.Usage{},
 		responsesTestTime,
@@ -1125,14 +1122,14 @@ func TestOpenAIResponsesReplayNormalizesAndGatesOriginlessItemIDs(t *testing.T) 
 func TestOpenAIResponsesReplayAssignsDistinctIDsToMultipleTextBlocks(t *testing.T) {
 	t.Parallel()
 
-	model, err := provider.NewModelRef("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	firstText := mustTextBlock(t, "before")
 	secondText := mustTextBlock(t, "after")
 	call := mustReplayCall(t, "call-1|fc_1", "bash")
-	assistant, err := llm.NewAssistantToolUseMessage(
+	assistant, err := newAssistantToolUseMessage(
 		[]llm.AssistantBlock{firstText, call, secondText},
 		llm.Usage{},
 		responsesTestTime,

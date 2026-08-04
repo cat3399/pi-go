@@ -39,11 +39,11 @@ func (sessionRetrySummarizer) SummarizeWithRetryObserver(ctx context.Context, _ 
 }
 
 func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
-	modelA, err := provider.NewModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "model-a", Reasoning: true, Input: []provider.InputKind{provider.InputText}})
+	modelA, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "model-a", Reasoning: true, Input: []provider.InputKind{provider.InputText}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelB, err := provider.NewModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "model-b", Reasoning: true, Input: []provider.InputKind{provider.InputText}})
+	modelB, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "model-b", Reasoning: true, Input: []provider.InputKind{provider.InputText}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,11 +121,11 @@ func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
 }
 
 func TestAgentSessionRoutesEachModelToItsRegisteredAdapter(t *testing.T) {
-	modelA, err := provider.NewModelRef("one", "api-one", "model-a")
+	modelA, err := newTestModel("one", "api-one", "model-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelB, err := provider.NewModelRef("two", "api-two", "model-b")
+	modelB, err := newTestModel("two", "api-two", "model-b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestAgentSessionRoutesEachModelToItsRegisteredAdapter(t *testing.T) {
 	if got := adapterB.Requests(); len(got) != 1 || got[0].Model().API() != "api-two" {
 		t.Fatalf("adapter two requests = %#v", got)
 	}
-	unsupported, err := provider.NewModelRef("three", "api-three", "model-c")
+	unsupported, err := newTestModel("three", "api-three", "model-c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestAgentSessionRoutesEachModelToItsRegisteredAdapter(t *testing.T) {
 }
 
 func TestAgentSessionPreservesRichToolResultWhenLegacyTextIsEmpty(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestAgentSessionPreservesRichToolResultWhenLegacyTextIsEmpty(t *testing.T) 
 }
 
 func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
 }
 
 func TestAgentSessionRunContentPreservesImageInTranscriptAndRequest(t *testing.T) {
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
+	model, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestAgentSessionRunContentPreservesImageInTranscriptAndRequest(t *testing.T
 }
 
 func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *testing.T) {
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
+	model, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 }
 
 func TestAgentSessionQueuesRichContentInPriorityOrder(t *testing.T) {
-	model, err := provider.NewModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
+	model, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "vision", Input: []provider.InputKind{provider.InputText, provider.InputImage}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestAgentSessionQueuesRichContentInPriorityOrder(t *testing.T) {
 }
 
 func TestAgentSessionQueueUpdatesOnlyForActualMutationAndDrain(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,8 +392,8 @@ func TestAgentSessionQueueUpdatesOnlyForActualMutationAndDrain(t *testing.T) {
 	type snapshot struct{ steering, followUp int }
 	var updates []snapshot
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type == "queue_update" {
-			updates = append(updates, snapshot{len(event.Steering), len(event.FollowUp)})
+		if update, ok := event.(agent.SessionQueueUpdateEvent); ok {
+			updates = append(updates, snapshot{len(update.Steering), len(update.FollowUp)})
 		}
 	})
 	runtime.ClearAllQueues()
@@ -416,7 +416,7 @@ func TestAgentSessionQueueUpdatesOnlyForActualMutationAndDrain(t *testing.T) {
 }
 
 func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,12 +432,12 @@ func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 	}
 	var lifecycle []string
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
-		case "queue_update":
+		switch value := event.(type) {
+		case agent.SessionQueueUpdateEvent:
 			lifecycle = append(lifecycle, "queue")
-		case "message_start":
-			if event.Message != nil && event.Message.Role() == llm.RoleUser {
-				lifecycle = append(lifecycle, "user:"+messageText(t, event.Message))
+		case agent.MessageStartEvent:
+			if message, ok := value.Message.(agentmsg.LLM); ok && message.Conversation().Role() == llm.RoleUser {
+				lifecycle = append(lifecycle, "user:"+messageText(t, message.Conversation()))
 			}
 		}
 	})
@@ -450,7 +450,7 @@ func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 }
 
 func TestAgentSessionEmitsOrderedLifecycleAndRejectsAfterClose(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,8 +460,8 @@ func TestAgentSessionEmitsOrderedLifecycleAndRejectsAfterClose(t *testing.T) {
 	}
 	var types []string
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type != "" {
-			types = append(types, event.Type)
+		if event.Type() != "" {
+			types = append(types, string(event.Type()))
 		}
 	})
 	if _, err := runtime.Run(context.Background(), "go"); err != nil {
@@ -484,7 +484,7 @@ func TestAgentSessionEmitsOrderedLifecycleAndRejectsAfterClose(t *testing.T) {
 }
 
 func TestAgentSessionEmitsExactToolLifecycle(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestAgentSessionEmitsExactToolLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolUse, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
+	toolUse, err := newAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestAgentSessionEmitsExactToolLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var types []string
-	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) { types = append(types, event.Type) })
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) { types = append(types, string(event.Type())) })
 	if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
@@ -537,7 +537,7 @@ func TestAgentSessionSynthesizesMessageLifecycleForTerminalWithoutProgress(t *te
 		t.Fatal(err)
 	}
 	var types []string
-	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) { types = append(types, event.Type) })
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) { types = append(types, string(event.Type())) })
 	if result, err := runtime.Run(context.Background(), "go"); err != nil || result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v), want settled failure", result, err)
 	}
@@ -551,11 +551,11 @@ func TestAgentSessionSynthesizesMessageLifecycleForTerminalWithoutProgress(t *te
 }
 
 func TestAgentSessionResolvesStreamOptionsForEachTurnModel(t *testing.T) {
-	modelA, err := provider.NewModelRef("one", "api-one", "a")
+	modelA, err := newTestModel("one", "api-one", "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelB, err := provider.NewModelRef("two", "api-two", "b")
+	modelB, err := newTestModel("two", "api-two", "b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestAgentSessionResolvesStreamOptionsForEachTurnModel(t *testing.T) {
 	}
 	var calls []string
 	runtime, err := agent.NewSession(agent.SessionConfig{Provider: router, Transcript: newSession(t), Model: modelA, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
-		ResolveStreamOptions: func(_ context.Context, model provider.ModelRef) (provider.StreamOptions, error) {
+		ResolveStreamOptions: func(_ context.Context, model provider.Model) (provider.StreamOptions, error) {
 			calls = append(calls, model.Provider())
 			return provider.StreamOptions{APIKey: "key-" + model.Provider(), Headers: map[string]string{"X-Provider": model.Provider()}}, nil
 		},
@@ -596,7 +596,7 @@ func TestAgentSessionResolvesStreamOptionsForEachTurnModel(t *testing.T) {
 }
 
 func TestAgentSessionPersistsRetryFailureButProjectsItOutOfRetryContext(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestAgentSessionPersistsRetryFailureButProjectsItOutOfRetryContext(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, llm.Usage{}, agentTestEpoch)
+	failed, err := newAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, llm.Usage{}, agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestAgentSessionPersistsRetryFailureButProjectsItOutOfRetryContext(t *testi
 }
 
 func TestAgentSessionProviderFailureSettlesBeforeNextPrompt(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestAgentSessionProviderFailureSettlesBeforeNextPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	failedTerminal, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, mustUsage(t, 0, 0), agentTestEpoch)
+	failedTerminal, err := newAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, mustUsage(t, 0, 0), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +695,7 @@ func TestAgentSessionProviderFailureSettlesBeforeNextPrompt(t *testing.T) {
 }
 
 func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -748,9 +748,9 @@ func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
 	}
 }
 
-func sessionTestModel(t *testing.T) provider.ModelRef {
+func sessionTestModel(t *testing.T) provider.Model {
 	t.Helper()
-	model, err := provider.NewModelRef("scripted", "scripted", "model")
+	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func sessionHTTPFailure(t *testing.T, status int) llm.AssistantFailureMessage {
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, message, mustUsage(t, 0, 0), agentTestEpoch)
+	terminal, err := newAssistantFailureMessageWithFailure(nil, llm.FinishError, message, mustUsage(t, 0, 0), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +823,8 @@ func TestAgentSessionRetryLifecycleAndAgentEndContinuation(t *testing.T) {
 	queued := false
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
 		events = append(events, event)
-		if event.Type == "agent_end" && !queued && !event.WillRetry {
+		ended, isEnd := event.(agent.SessionAgentEndEvent)
+		if isEnd && !queued && !ended.WillRetry {
 			queued = true
 			if err := runtime.FollowUp("from end"); err != nil {
 				t.Errorf("FollowUp from agent_end = %v", err)
@@ -836,11 +837,11 @@ func TestAgentSessionRetryLifecycleAndAgentEndContinuation(t *testing.T) {
 	var controls []string
 	var ends []bool
 	for _, event := range events {
-		switch event.Type {
+		switch event.Type() {
 		case "agent_start", "agent_end", "auto_retry_start", "auto_retry_end", "agent_settled":
-			controls = append(controls, event.Type)
-			if event.Type == "agent_end" {
-				ends = append(ends, event.WillRetry)
+			controls = append(controls, string(event.Type()))
+			if ended, ok := event.(agent.SessionAgentEndEvent); ok {
+				ends = append(ends, ended.WillRetry)
 			}
 		}
 	}
@@ -851,20 +852,21 @@ func TestAgentSessionRetryLifecycleAndAgentEndContinuation(t *testing.T) {
 	if len(ends) != 3 || !ends[0] || ends[1] || ends[2] {
 		t.Fatalf("agent_end willRetry = %v", ends)
 	}
-	var retryStart, retryEnd *agent.SessionEvent
-	for index := range events {
-		event := &events[index]
-		if event.Type == "auto_retry_start" {
-			retryStart = event
-		}
-		if event.Type == "auto_retry_end" {
-			retryEnd = event
+	var retryStart agent.AutoRetryStartEvent
+	var retryEnd agent.AutoRetryEndEvent
+	var sawRetryStart, sawRetryEnd bool
+	for _, event := range events {
+		switch value := event.(type) {
+		case agent.AutoRetryStartEvent:
+			retryStart, sawRetryStart = value, true
+		case agent.AutoRetryEndEvent:
+			retryEnd, sawRetryEnd = value, true
 		}
 	}
-	if retryStart == nil || retryStart.RetryAttempt != 1 || retryStart.RetryMaxAttempts != 1 || retryStart.RetryErrorMessage != "http failure" {
+	if !sawRetryStart || retryStart.Attempt != 1 || retryStart.MaxAttempts != 1 || retryStart.ErrorMessage != "http failure" {
 		t.Fatalf("retry start payload = %#v", retryStart)
 	}
-	if retryEnd == nil || !retryEnd.RetrySucceeded || retryEnd.RetryAttempt != 1 || retryEnd.RetryMaxAttempts != 1 {
+	if !sawRetryEnd || !retryEnd.Success || retryEnd.Attempt != 1 {
 		t.Fatalf("retry end payload = %#v", retryEnd)
 	}
 	if got := len(implementation.Requests()); got != 3 {
@@ -937,7 +939,7 @@ func TestAgentSessionRetryFinalFailureEndsAfterAgentEnd(t *testing.T) {
 	}
 	var controls []agent.SessionEvent
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
+		switch event.Type() {
 		case "agent_start", "agent_end", "auto_retry_start", "auto_retry_end", "agent_settled":
 			controls = append(controls, event)
 		}
@@ -947,14 +949,14 @@ func TestAgentSessionRetryFinalFailureEndsAfterAgentEnd(t *testing.T) {
 	}
 	types := make([]string, len(controls))
 	for index, event := range controls {
-		types[index] = event.Type
+		types[index] = string(event.Type())
 	}
 	want := []string{"agent_start", "agent_end", "auto_retry_start", "agent_start", "agent_end", "auto_retry_end", "agent_settled"}
 	if !sameStrings(types, want) {
 		t.Fatalf("lifecycle = %v, want %v", types, want)
 	}
-	ended := controls[5]
-	if ended.RetrySucceeded || ended.RetryAttempt != 1 || ended.RetryMaxAttempts != 1 || ended.FinalError != "http failure" {
+	ended, ok := controls[5].(agent.AutoRetryEndEvent)
+	if !ok || ended.Success || ended.Attempt != 1 || ended.FinalError != "http failure" {
 		t.Fatalf("final retry event = %#v", ended)
 	}
 }
@@ -971,7 +973,7 @@ func TestAgentSessionRetrySeriesSpansIntermediateFailures(t *testing.T) {
 	}
 	var controls []agent.SessionEvent
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
+		switch event.Type() {
 		case "agent_end", "auto_retry_start", "auto_retry_end":
 			controls = append(controls, event)
 		}
@@ -981,13 +983,17 @@ func TestAgentSessionRetrySeriesSpansIntermediateFailures(t *testing.T) {
 	}
 	types := make([]string, len(controls))
 	for index, event := range controls {
-		types[index] = event.Type
+		types[index] = string(event.Type())
 	}
 	want := []string{"agent_end", "auto_retry_start", "agent_end", "auto_retry_start", "auto_retry_end", "agent_end"}
 	if !sameStrings(types, want) {
 		t.Fatalf("retry series events = %v, want %v", types, want)
 	}
-	if !controls[0].WillRetry || !controls[2].WillRetry || controls[5].WillRetry || !controls[4].RetrySucceeded {
+	firstEnd, firstOK := controls[0].(agent.SessionAgentEndEvent)
+	secondEnd, secondOK := controls[2].(agent.SessionAgentEndEvent)
+	thirdEnd, thirdOK := controls[5].(agent.SessionAgentEndEvent)
+	retryEnd, retryOK := controls[4].(agent.AutoRetryEndEvent)
+	if !firstOK || !secondOK || !thirdOK || !retryOK || !firstEnd.WillRetry || !secondEnd.WillRetry || thirdEnd.WillRetry || !retryEnd.Success {
 		t.Fatalf("retry lifecycle payloads = %#v", controls)
 	}
 }
@@ -1012,9 +1018,9 @@ func TestAgentSessionRetryEndsOnToolUseBeforeLowAgentEnd(t *testing.T) {
 	}
 	var types []string
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
+		switch event.Type() {
 		case "agent_end", "auto_retry_start", "auto_retry_end":
-			types = append(types, event.Type)
+			types = append(types, string(event.Type()))
 		}
 	})
 	if result, err := runtime.Run(context.Background(), "tool retry"); err != nil || !result.Succeeded() {
@@ -1036,8 +1042,8 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 	if _, err := transcript.Append(context.Background(), oldUser, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	oldAssistant := mustTextTerminal(t, "old reply")
-	if _, err := transcript.Append(context.Background(), oldAssistant, session.AppendOptions{Assistant: session.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model", Cost: session.ZeroUsageCost()}}); err != nil {
+	oldAssistant := mustTextTerminalWithProvenance(t, "old reply", llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
+	if _, err := transcript.Append(context.Background(), oldAssistant, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	var summaries atomic.Uint32
@@ -1063,8 +1069,8 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 	}
 	var compactTypes []string
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type == "compaction_start" || event.Type == "compaction_end" {
-			compactTypes = append(compactTypes, event.Type)
+		if event.Type() == "compaction_start" || event.Type() == "compaction_end" {
+			compactTypes = append(compactTypes, string(event.Type()))
 		}
 	})
 	if result, err := runtime.Run(context.Background(), "new request"); err != nil || !result.Succeeded() {
@@ -1089,7 +1095,7 @@ func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, mustUsage(t, 0, 0), agentTestEpoch)
+	failed, err := newAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, mustUsage(t, 0, 0), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1133,16 +1139,16 @@ func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var ends []agent.SessionEvent
+	var ends []agent.CompactionEndEvent
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type == "compaction_end" {
-			ends = append(ends, event)
+		if ended, ok := event.(agent.CompactionEndEvent); ok {
+			ends = append(ends, ended)
 		}
 	})
 	if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v), want original successful result", result, err)
 	}
-	if len(ends) != 1 || ends[0].CompactionErrorMessage == "" || ends[0].CompactionAborted {
+	if len(ends) != 1 || ends[0].ErrorMessage == "" || ends[0].Aborted {
 		t.Fatalf("compaction end = %#v", ends)
 	}
 }
@@ -1171,8 +1177,8 @@ func TestAgentSessionManualCompactUsesSessionLifecycle(t *testing.T) {
 	}
 	var types []string
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if event.Type == "compaction_start" || event.Type == "compaction_end" || event.Type == "agent_start" || event.Type == "agent_settled" {
-			types = append(types, event.Type)
+		if event.Type() == "compaction_start" || event.Type() == "compaction_end" || event.Type() == "agent_start" || event.Type() == "agent_settled" {
+			types = append(types, string(event.Type()))
 		}
 	})
 	if result, err := runtime.Compact(context.Background(), "focus"); err != nil || !result.Committed {
@@ -1350,9 +1356,9 @@ func TestAgentSessionPreflightFailureDoesNotEmitSettled(t *testing.T) {
 			}
 			var controls []string
 			runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-				switch event.Type {
+				switch event.Type() {
 				case "agent_start", "agent_end", "agent_settled":
-					controls = append(controls, event.Type)
+					controls = append(controls, string(event.Type()))
 				}
 			})
 			if err := test.run(runtime); err == nil {
@@ -1418,7 +1424,7 @@ func TestAgentSessionObserverSubscriptionOrder(t *testing.T) {
 	for index := 1; index <= 3; index++ {
 		value := index
 		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-			if event.Type == "queue_update" {
+			if event.Type() == "queue_update" {
 				order = append(order, value)
 			}
 		})
@@ -1469,12 +1475,12 @@ func TestAgentSessionNilReceiverMutatorsReturnInvalidRun(t *testing.T) {
 func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *testing.T) {
 	for _, test := range []struct {
 		name       string
-		provenance session.AssistantProvenance
+		provenance llm.AssistantProvenance
 		has        bool
 		wantStarts int
 	}{
-		{name: "same provider and model", provenance: session.AssistantProvenance{Provider: "new", API: "scripted", Model: "model", Cost: session.ZeroUsageCost()}, has: true, wantStarts: 1},
-		{name: "old provider and model", provenance: session.AssistantProvenance{Provider: "old", API: "scripted", Model: "old-model", Cost: session.ZeroUsageCost()}, has: true, wantStarts: 0},
+		{name: "same provider and model", provenance: llm.AssistantProvenance{Provider: "new", API: "scripted", Model: "model"}, has: true, wantStarts: 1},
+		{name: "old provider and model", provenance: llm.AssistantProvenance{Provider: "old", API: "scripted", Model: "old-model"}, has: true, wantStarts: 0},
 		{name: "missing provenance", wantStarts: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1486,18 +1492,19 @@ func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *tes
 			if _, err := transcript.Append(context.Background(), oldUser, session.AppendOptions{}); err != nil {
 				t.Fatal(err)
 			}
-			options := session.AppendOptions{Assistant: session.AssistantProvenance{Provider: "stored", API: "scripted", Model: "stored-model", Cost: session.ZeroUsageCost()}}
+			storedProvenance := llm.AssistantProvenance{Provider: "stored", API: "scripted", Model: "stored-model"}
 			if test.has {
-				options.Assistant = test.provenance
+				storedProvenance = test.provenance
 			}
-			if _, err := transcript.Append(context.Background(), mustTextTerminal(t, "old reply"), options); err != nil {
+			storedAssistant := mustTextTerminalWithProvenance(t, "old reply", storedProvenance)
+			if _, err := transcript.Append(context.Background(), storedAssistant, session.AppendOptions{}); err != nil {
 				t.Fatal(err)
 			}
 			var durable agent.Transcript = transcript
 			if !test.has {
 				durable = noProvenanceTranscript{Session: transcript}
 			}
-			model, err := provider.NewModelRef("new", "scripted", "model")
+			model, err := newTestModel("new", "scripted", "model")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1514,10 +1521,10 @@ func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *tes
 			}
 			starts, agentStarted := 0, false
 			runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-				if event.Type == "agent_start" {
+				if event.Type() == "agent_start" {
 					agentStarted = true
 				}
-				if event.Type == "compaction_start" && !agentStarted {
+				if event.Type() == "compaction_start" && !agentStarted {
 					starts++
 				}
 			})
@@ -1540,7 +1547,8 @@ func TestAgentSessionSummarizationRetryPayloadUsesRetryBudgetAndCompactionSource
 	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), mustTextTerminal(t, "old reply"), session.AppendOptions{Assistant: session.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model", Cost: session.ZeroUsageCost()}}); err != nil {
+	oldAssistant := mustTextTerminalWithProvenance(t, "old reply", llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
+	if _, err := transcript.Append(context.Background(), oldAssistant, session.AppendOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
@@ -1553,7 +1561,7 @@ func TestAgentSessionSummarizationRetryPayloadUsesRetryBudgetAndCompactionSource
 	}
 	var events []agent.SessionEvent
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
+		switch event.Type() {
 		case "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished":
 			events = append(events, event)
 		}
@@ -1564,13 +1572,16 @@ func TestAgentSessionSummarizationRetryPayloadUsesRetryBudgetAndCompactionSource
 	if len(events) != 3 {
 		t.Fatalf("retry events = %#v", events)
 	}
-	if scheduled := events[0]; scheduled.SummarizationSource != "compaction" || scheduled.CompactionReason != agent.CompactionManual || scheduled.RetryAttempt != 1 || scheduled.RetryMaxAttempts != 2 || scheduled.RetryDelay != time.Millisecond || scheduled.RetryFailureKind != provider.FailureHTTPStatus || scheduled.RetryHTTPStatus != 503 || scheduled.RetryErrorMessage != "summary unavailable" {
+	scheduled, scheduledOK := events[0].(agent.SessionSummarizationRetryScheduledEvent)
+	if !scheduledOK || scheduled.Reason != agent.CompactionManual || scheduled.Attempt != 1 || scheduled.MaxAttempts != 2 || scheduled.Delay != time.Millisecond || scheduled.FailureKind != provider.FailureHTTPStatus || scheduled.HTTPStatus != 503 || scheduled.ErrorMessage != "summary unavailable" {
 		t.Fatalf("scheduled payload = %#v", scheduled)
 	}
-	if attempt := events[1]; attempt.SummarizationSource != "compaction" || attempt.CompactionReason != agent.CompactionManual || attempt.RetryAttempt != 1 || attempt.RetryMaxAttempts != 2 {
+	attempt, attemptOK := events[1].(agent.SessionSummarizationRetryAttemptEvent)
+	if !attemptOK || attempt.Source != "compaction" || attempt.Reason != agent.CompactionManual {
 		t.Fatalf("attempt payload = %#v", attempt)
 	}
-	if ended := events[2]; ended.RetryFinishReason != provider.RetryFinishSucceeded || !ended.RetrySucceeded || ended.RetryMaxAttempts != 2 {
+	ended, endedOK := events[2].(agent.SessionSummarizationRetryFinishedEvent)
+	if !endedOK || ended.FinishReason != provider.RetryFinishSucceeded || !ended.Succeeded {
 		t.Fatalf("finished payload = %#v", ended)
 	}
 }
@@ -1593,48 +1604,45 @@ func TestAgentSessionObserverEventsDoNotShareSlices(t *testing.T) {
 	}
 	var secondStarts, secondEnds, secondQueue int
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
-		case "tool_execution_start":
-			if len(event.Event.ToolArguments) != 0 {
-				event.Event.ToolArguments[0] = '!'
+		switch value := event.(type) {
+		case agent.ToolExecutionStartEvent:
+			if len(value.Arguments) != 0 {
+				value.Arguments[0] = '!'
 			}
-			if len(event.State.Tools) != 0 {
-				event.State.Tools = event.State.Tools[:0]
+		case agent.TurnEndEvent:
+			if len(value.ToolResults) != 0 {
+				value.ToolResults[0] = nil
 			}
-		case "turn_end":
-			if len(event.ToolResults) != 0 {
-				event.ToolResults[0] = nil
+		case agent.SessionAgentEndEvent:
+			if len(value.Messages) != 0 {
+				value.Messages[0] = nil
 			}
-		case "agent_end":
-			if len(event.Messages) != 0 {
-				event.Messages[0] = nil
-			}
-		case "queue_update":
-			event.Steering = nil
-			event.FollowUp = nil
+		case agent.SessionQueueUpdateEvent:
+			value.Steering = nil
+			value.FollowUp = nil
 		}
 	})
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		switch event.Type {
-		case "tool_execution_start":
-			if string(event.Event.ToolArguments) != `{"value":1}` || len(event.State.Tools) != 1 {
-				t.Errorf("tool event was mutated: args=%q tools=%d", event.Event.ToolArguments, len(event.State.Tools))
+		switch value := event.(type) {
+		case agent.ToolExecutionStartEvent:
+			if string(value.Arguments) != `{"value":1}` {
+				t.Errorf("tool event was mutated: args=%q", value.Arguments)
 			}
 			secondStarts++
-		case "turn_end":
-			if len(event.ToolResults) == 0 {
+		case agent.TurnEndEvent:
+			if len(value.ToolResults) == 0 {
 				return
 			}
-			if len(event.ToolResults) != 1 || event.ToolResults[0] == nil {
-				t.Errorf("tool results were mutated: %#v", event.ToolResults)
+			if len(value.ToolResults) != 1 || value.ToolResults[0] == nil {
+				t.Errorf("tool results were mutated: %#v", value.ToolResults)
 			}
 			secondEnds++
-		case "agent_end":
-			if len(event.Messages) == 0 || event.Messages[0] == nil {
-				t.Errorf("messages were mutated: %#v", event.Messages)
+		case agent.SessionAgentEndEvent:
+			if len(value.Messages) == 0 || value.Messages[0] == nil {
+				t.Errorf("messages were mutated: %#v", value.Messages)
 			}
-		case "queue_update":
-			if len(event.Steering)+len(event.FollowUp) == 0 {
+		case agent.SessionQueueUpdateEvent:
+			if len(value.Steering)+len(value.FollowUp) == 0 {
 				return
 			}
 			secondQueue++

@@ -54,9 +54,9 @@ func TestToolResultMetadataRoundTripsWithoutVendorShape(t *testing.T) {
 	if !ok || gotUsage.Input() != 11 {
 		t.Fatalf("usage=%#v,%t", gotUsage, ok)
 	}
-	gotCost, ok := gotUsage.Cost()
-	if !ok || gotCost.Total != .10 {
-		t.Fatalf("cost=%#v,%t", gotCost, ok)
+	gotCost := gotUsage.Cost()
+	if gotCost.Total != .10 {
+		t.Fatalf("cost=%#v", gotCost)
 	}
 }
 

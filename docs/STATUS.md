@@ -42,7 +42,7 @@ assembly 已经启用全部能力。
 
 ### P0：兼容数据模型已完成
 
-P0 已按原版类型、序列化行为和真实调用边界完成复审与修正。这里的“完成”仅表示共享
+P0 已按原版类型、序列化行为和真实调用边界完成复审与修正。这里的“完成”只表示共享
 数据契约已经可以支撑后续 AgentLoop、Agent、SessionManager 和 AgentSession 工作，不表示
 这些更高层阶段已经完成。
 
@@ -50,21 +50,31 @@ P0 已按原版类型、序列化行为和真实调用边界完成复审与修�
   写入 v3 JSONL、重开和沿分支投影；`ConvertToLLM` 是唯一的 LLM 投影边界；
 - selected branch 会派生 effective model/thinking（含 compaction、reopen 和 leaf switch）；
   `model_change` 缺失 `modelId` 会被严格拒绝；
-- ModelsStore 保存完整 Model 合约（input、thinking map、cost tiers、context/max tokens、compat），
-  并隔离/复制 JSON-like metadata；
+- Provider request 只接受完整且不可变的 Model，不存在 identity-only Model；ModelsStore 保存
+  input、thinking map、cost tiers、context/max tokens 与 compat，并隔离/复制 JSON-like metadata；
+  内置 `openai/gpt-5.5` 基线与原版 catalog 的名称、能力、上下文和分层价格一致；
 - request-scoped stream options 已具备 typed fetch、payload/header/response hooks、header 三态
-  删除和 thinking budgets；resolver 以 overlay 方式合并完整调用契约，provider header hook
-  位于最终 HTTP 边界；终态 usage 由 Model 计算 cost；
+  删除和 thinking budgets；所有可显式设为零的数值 option 均区分“未设置”和“设置为零”；
+  resolver 以 overlay 方式合并完整调用契约，provider header hook 位于最终 HTTP 边界；
+  usage 始终含完整 cost object，并在所选 Model 边界统一计价；
 - extension-neutral typed hook contract 覆盖 context、before agent start、provider request/headers/
   response、agent/turn/message/tool execution、model/thinking selection，以及 session start/shutdown/
   compact/tree/switch/fork；before-agent-start 可见完整 rich prompt、结构化 system prompt options
   和压缩后的 context；其中没有 JS loader、TUI 或 UI-only execution surface；
-- streaming message hook 和 observer 获得带 provider/model/usage/stop reason、rich partial content
-  及原始 stream event 的临时 AssistantMessage；partial 不会进入 provider context 或 durable history；
+- 每个 terminal AssistantMessage 都带 provider/API/model provenance；response id/model、原始
+  stop reason 和 diagnostics 在成功、失败、JSONL 重开及重新计价后均不丢失；失败消息还保留
+  失败前已完成的 text/thinking/tool-call content，但不会把其中的 tool call 变成可执行终态；
+- streaming message hook 和 observer 获得 canonical `assistantMessageEvent`、原始 stream event、
+  response 起始时间以及包含当前 text/thinking/tool-call active block 的临时 AssistantMessage；
+  partial 不会进入 provider context 或 durable history；
 - compaction override 的 summary、first-kept entry、tokens、usage、details 与 from-extension 标记
   会进入同一个 durable commit，并保持 public start、before hook、commit、after hook、public end 顺序；
 - deferred tools 不再只在 Request 收集：Responses 写入 client tool-search input，Kimi-compatible
-  Completions 写入对应 system tool schema，普通 compat 路径不受污染。
+  Completions 写入对应 system tool schema，普通 compat 路径不受污染；
+- session tree 节点解析最新 label 与 label timestamp；Agent 和 AgentSession 的订阅面都是封闭的
+  typed union，retry/compaction/queue 等低层控制事件不会混入原版 AgentEvent 生命周期；
+- tool result/update 的 details 在工具、hook、每个 observer 与 durable state 之间做 JSON 验证和
+  深复制，调用方后续修改不会反向污染事件或 session。
 
 ### P1–P2：AgentLoop 与 Agent 的边界尚未对齐
 
@@ -120,12 +130,12 @@ P0–P4，必须现在正确建模。
 
 ## 当前验证状态
 
-P0 最终实现已通过以下本地验证：
+P0 最终实现已通过原版对照、fixture/contract 测试及以下本地验证：
 
 - `go build ./...` 通过；
 - `go vet ./...` 通过；
-- `go test ./...` 通过；
-- `go test -race ./...` 通过。
+- `go test -count=1 ./...` 通过；
+- `go test -race -count=1 ./...` 通过。
 
 旧 reasoning replay 断言已按原版完整 reasoning item（包括 summary）修正，因此不再是
 常驻失败基线。P1 尚未实施。

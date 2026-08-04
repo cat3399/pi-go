@@ -16,7 +16,7 @@ func TestFailureCauseSurvivesEventCollectorSnapshotAndResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFailure() error = %v", err)
 	}
-	event, err := llm.NewErrorEventWithFailure(
+	event, err := newErrorEventWithFailure(
 		llm.FinishError,
 		failure,
 		llm.Usage{},
@@ -63,10 +63,10 @@ func TestFailureConstructorsRejectInvalidZeroValue(t *testing.T) {
 	if _, err := llm.NewFailure(" ", errors.New("cause")); !errors.Is(err, llm.ErrInvalidFailure) {
 		t.Fatalf("NewFailure(blank) error = %v, want ErrInvalidFailure", err)
 	}
-	if _, err := llm.NewErrorEventWithFailure(llm.FinishError, llm.Failure{}, llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidStreamEvent) {
+	if _, err := newErrorEventWithFailure(llm.FinishError, llm.Failure{}, llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidStreamEvent) {
 		t.Fatalf("NewErrorEventWithFailure(zero) error = %v, want ErrInvalidStreamEvent", err)
 	}
-	if _, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, llm.Failure{}, llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidFailure) {
+	if _, err := newAssistantFailureMessageWithFailure(nil, llm.FinishError, llm.Failure{}, llm.Usage{}, time.Time{}); !errors.Is(err, llm.ErrInvalidFailure) {
 		t.Fatalf("NewAssistantFailureMessageWithFailure(zero) error = %v, want ErrInvalidFailure", err)
 	}
 }
