@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/llm"
@@ -262,7 +263,37 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 			return fmt.Errorf("%w: invalid Chat Completions session affinity format", ErrInvalidModel)
 		}
 	}
+	for label, value := range map[string]map[string]any{
+		"chatTemplateKwargs": compatMap(spec.Compat.OpenAICompletions, func(value *OpenAICompletionsCompat) map[string]any { return value.ChatTemplateKwargs }),
+		"openRouterRouting":  compatMap(spec.Compat.OpenAICompletions, func(value *OpenAICompletionsCompat) map[string]any { return value.OpenRouterRouting }),
+		"vercelGatewayRouting": compatMap(spec.Compat.OpenAICompletions, func(value *OpenAICompletionsCompat) map[string]any {
+			return value.VercelGatewayRouting
+		}),
+	} {
+		if value == nil {
+			continue
+		}
+		if _, err := json.Marshal(value); err != nil {
+			return fmt.Errorf("%w: compat %s is not JSON-like: %v", ErrInvalidModel, label, err)
+		}
+	}
+	for api, raw := range spec.Compat.Additional {
+		if !utf8.ValidString(api) || strings.TrimSpace(api) == "" || !json.Valid(raw) {
+			return fmt.Errorf("%w: invalid additional compat entry", ErrInvalidModel)
+		}
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+			return fmt.Errorf("%w: additional compat for %q must be a JSON object", ErrInvalidModel, api)
+		}
+	}
 	return nil
+}
+
+func compatMap(value *OpenAICompletionsCompat, selectValue func(*OpenAICompletionsCompat) map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	return selectValue(value)
 }
 
 func (m ModelRef) validate() error {
@@ -484,19 +515,54 @@ func cloneAny(values map[string]any) map[string]any {
 }
 
 func cloneJSONLike(value any) any {
-	switch item := value.(type) {
-	case map[string]any:
-		return cloneAny(item)
-	case []any:
-		copy := make([]any, len(item))
-		for i := range item {
-			copy[i] = cloneJSONLike(item[i])
+	if value == nil {
+		return nil
+	}
+	return cloneJSONReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneJSONReflect(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
 		}
-		return copy
-	case []byte:
-		return append([]byte(nil), item...)
-	case json.RawMessage:
-		return append(json.RawMessage(nil), item...)
+		copy := cloneJSONReflect(value.Elem())
+		out := reflect.New(value.Type()).Elem()
+		out.Set(copy)
+		return out
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(cloneJSONReflect(iter.Key()), cloneJSONReflect(iter.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(cloneJSONReflect(value.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(value.Type()).Elem()
+		for i := 0; i < value.Len(); i++ {
+			out.Index(i).Set(cloneJSONReflect(value.Index(i)))
+		}
+		return out
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		out := reflect.New(value.Type().Elem())
+		out.Elem().Set(cloneJSONReflect(value.Elem()))
+		return out
 	default:
 		return value
 	}
@@ -676,6 +742,7 @@ type StreamOptions struct {
 	// request. It is intentionally an interface, not an untyped Extra value.
 	Fetch                     HTTPDoer
 	OnPayload                 PayloadHook
+	OnHeaders                 HeaderHook
 	OnResponse                ResponseHook
 	ThinkingBudgets           map[ThinkingLevel]uint64
 	CacheRetention            CacheRetention
@@ -694,14 +761,15 @@ type StreamOptions struct {
 // PayloadHook may make a final JSON-level request adjustment after an adapter
 // has produced its dialect payload. It is useful for transports/gateways while
 // keeping provider wire structs out of Agent.
-type PayloadHook func(payload []byte) ([]byte, error)
+type PayloadHook func(model ModelRef, payload []byte) ([]byte, error)
+type HeaderHook func(model ModelRef, headers map[string]*string) error
 
 // ResponseInfo is a portable transport observation supplied to OnResponse.
 type ResponseInfo struct {
 	StatusCode int
 	Headers    map[string][]string
 }
-type ResponseHook func(ResponseInfo) error
+type ResponseHook func(model ModelRef, response ResponseInfo) error
 
 type Transport string
 
@@ -748,6 +816,13 @@ func NewRequestWithOptions(
 	messages []llm.ConversationMessage,
 	options RequestOptions,
 ) (Request, error) {
+	for label, value := range map[string]any{"metadata": options.Metadata, "stream metadata": options.Stream.Metadata, "stream extra": options.Stream.Extra} {
+		if value != nil {
+			if _, err := json.Marshal(value); err != nil {
+				return Request{}, fmt.Errorf("%w: %s is not JSON-like: %v", ErrInvalidRequest, label, err)
+			}
+		}
+	}
 	request := Request{
 		model:             model,
 		systemPrompt:      systemPrompt,
@@ -782,6 +857,9 @@ func (r Request) validate() error {
 	}
 	if !utf8.ValidString(r.stream.APIKey) || !utf8.ValidString(r.stream.SessionID) {
 		return fmt.Errorf("%w: stream credentials/session are not valid UTF-8", ErrInvalidRequest)
+	}
+	if r.stream.APIKey != "" && (strings.TrimSpace(r.stream.APIKey) == "" || strings.ContainsFunc(r.stream.APIKey, unicode.IsControl)) {
+		return fmt.Errorf("%w: stream API key is invalid", ErrInvalidRequest)
 	}
 	if r.stream.Temperature != nil && (math.IsNaN(*r.stream.Temperature) || math.IsInf(*r.stream.Temperature, 0)) {
 		return fmt.Errorf("%w: invalid temperature", ErrInvalidRequest)

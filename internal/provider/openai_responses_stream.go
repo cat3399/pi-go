@@ -77,6 +77,9 @@ type openAIResponsesStream struct {
 	maxEventBytes     int
 	maxErrorBodyBytes int
 	onResponse        ResponseHook
+	onHeaders         HeaderHook
+	headerOverrides   map[string]*string
+	configurationFail *responsesFailureSpec
 	preflight         *responsesFailureSpec
 
 	lifecycleMu sync.Mutex
@@ -289,11 +292,27 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 			message: "Could not construct OpenAI Responses request",
 		}
 	}
-	request.Header.Set("Authorization", "Bearer "+s.apiKey)
+	if validBearerAPIKey(s.apiKey) {
+		request.Header.Set("Authorization", "Bearer "+s.apiKey)
+	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "text/event-stream")
 	for name, value := range s.headers {
 		request.Header.Set(name, value)
+	}
+	if err := applyFinalHeaders(request.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
+		return &responsesFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Responses header hook failed"}
+	}
+	if strings.TrimSpace(request.Header.Get("Authorization")) == "" {
+		if s.configurationFail != nil {
+			spec := *s.configurationFail
+			return &spec
+		}
+		return &responsesFailureSpec{
+			kind:    FailureConfiguration,
+			cause:   fmt.Errorf("%w: final Authorization header is missing", ErrInvalidOpenAIResponsesConfig),
+			message: "OpenAI API authorization was removed before the request",
+		}
 	}
 
 	response, err := invokeResponsesHTTPDoer(s.client, request)
@@ -316,7 +335,7 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 		return &responsesFailureSpec{kind: FailureInvalidResponse, cause: cause, message: cause.Error()}
 	}
 	if s.onResponse != nil {
-		if err := s.onResponse(responseInfo(response)); err != nil {
+		if err := s.onResponse(s.model, responseInfo(response)); err != nil {
 			return &responsesFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("response hook: %w", err), message: "OpenAI Responses response hook rejected the response"}
 		}
 	}

@@ -140,16 +140,12 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if request.Model().API() != OpenAICompletionsAPI {
 		return newCompletionsFailureStream(ctx, clock, FailureConfiguration, fmt.Errorf("%w: model routes to provider %q API %q", ErrOpenAICompletionsRequest, request.Model().Provider(), request.Model().API()), "")
 	}
-	if p.configurationFail != nil && requestAPIKey(request, "") == "" && !completionsHasAuthorization(request.Model().Headers(), p.headers, request.StreamOptions().Headers) {
-		spec := *p.configurationFail
-		return newCompletionsFailureStream(ctx, clock, spec.kind, spec.cause, spec.message)
-	}
 	payload, err := encodeOpenAICompletionsRequest(request)
 	if err != nil {
 		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
 	options := request.StreamOptions()
-	if payload, err = applyPayloadHook(options.OnPayload, payload); err != nil {
+	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
 		return newCompletionsFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
 	endpoint := p.endpoint
@@ -160,7 +156,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 		}
 	}
 	streamCtx, cancel := context.WithCancelCause(ctx)
-	headers := mergeRequestHeaders(request.Model().Headers(), p.headers, options)
+	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; sessionID != "" && completionsSendSessionAffinity(request.Model()) {
 		switch completionsSessionAffinityFormat(request.Model()) {
 		case "openrouter":
@@ -178,7 +174,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if options.Fetch != nil {
 		client = options.Fetch
 	}
-	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
+	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides), configurationFail: p.configurationFail, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
 }
 
 func completionsHasAuthorization(groups ...map[string]string) bool {
@@ -778,6 +774,9 @@ type openAICompletionsStream struct {
 	headers                                map[string]string
 	maxEventBytes, maxErrorBodyBytes       int
 	onResponse                             ResponseHook
+	onHeaders                              HeaderHook
+	headerOverrides                        map[string]*string
+	configurationFail                      *completionsFailureSpec
 	mu                                     sync.Mutex
 	body                                   io.ReadCloser
 	closed, finished, started, initialized bool
@@ -893,11 +892,27 @@ func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 	if err != nil {
 		return &completionsFailureSpec{kind: FailureInvalidRequest, cause: err, message: "Could not construct OpenAI Chat Completions request"}
 	}
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	if validBearerAPIKey(s.apiKey) {
+		req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	for k, v := range s.headers {
 		req.Header.Set(k, v)
+	}
+	if err := applyFinalHeaders(req.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
+		return &completionsFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Chat Completions header hook failed"}
+	}
+	if strings.TrimSpace(req.Header.Get("Authorization")) == "" {
+		if s.configurationFail != nil {
+			spec := *s.configurationFail
+			return &spec
+		}
+		return &completionsFailureSpec{
+			kind:    FailureConfiguration,
+			cause:   fmt.Errorf("%w: final Authorization header is missing", ErrInvalidOpenAICompletionsConfig),
+			message: "OpenAI API authorization was removed before the request",
+		}
 	}
 	resp, err := invokeResponsesHTTPDoer(s.client, req)
 	if err != nil {
@@ -910,7 +925,7 @@ func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: HTTP client returned nil response/body", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned an invalid response"}
 	}
 	if s.onResponse != nil {
-		if err := s.onResponse(responseInfo(resp)); err != nil {
+		if err := s.onResponse(s.model, responseInfo(resp)); err != nil {
 			_ = resp.Body.Close()
 			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("response hook: %w", err), message: "OpenAI Chat Completions response hook rejected the response"}
 		}

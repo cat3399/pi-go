@@ -208,10 +208,6 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		)
 		return newResponsesFailureStream(ctx, clock, FailureConfiguration, cause, "")
 	}
-	if p.configurationFail != nil && requestAPIKey(request, "") == "" && !completionsHasAuthorization(request.Model().Headers(), p.headers, request.StreamOptions().Headers) {
-		spec := *p.configurationFail
-		return newResponsesFailureStream(ctx, clock, spec.kind, spec.cause, spec.message)
-	}
 	systemRole, err := p.systemRole.wireValue()
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureConfiguration, err, "")
@@ -224,7 +220,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
 	options := request.StreamOptions()
-	if payload, err = applyPayloadHook(options.OnPayload, payload); err != nil {
+	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
 		return newResponsesFailureStream(ctx, clock, FailureInvalidRequest, err, "")
 	}
 	endpoint := p.endpoint
@@ -235,7 +231,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		}
 	}
 	streamContext, cancel := context.WithCancelCause(ctx)
-	headers := mergeRequestHeaders(request.Model().Headers(), p.headers, options)
+	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; sessionID != "" {
 		format := "openai"
 		if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SessionAffinityFormat != nil {
@@ -269,6 +265,9 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		maxEventBytes:     p.maxEventBytes,
 		maxErrorBodyBytes: p.maxErrorBodyBytes,
 		onResponse:        options.OnResponse,
+		onHeaders:         options.OnHeaders,
+		headerOverrides:   cloneHeaderOverrides(options.HeaderOverrides),
+		configurationFail: p.configurationFail,
 		slots:             make(map[int]*responsesTextSlot),
 		reasoningSlots:    make(map[int]*responsesReasoningSlot),
 		toolSlots:         make(map[int]*responsesToolSlot),
@@ -289,6 +288,10 @@ func requestAPIKey(request Request, fallback string) string {
 	}
 	return fallback
 }
+
+func validBearerAPIKey(value string) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) != "" && !strings.ContainsFunc(value, unicode.IsControl)
+}
 func mergeResponseHeaders(groups ...map[string]string) map[string]string {
 	merged := map[string]string{}
 	for _, group := range groups {
@@ -304,26 +307,11 @@ func mergeResponseHeaders(groups ...map[string]string) map[string]string {
 	return merged
 }
 
-func mergeRequestHeaders(modelHeaders, providerHeaders map[string]string, options StreamOptions) map[string]string {
-	merged := mergeResponseHeaders(modelHeaders, providerHeaders, options.Headers)
-	for name, value := range options.HeaderOverrides {
-		for existing := range merged {
-			if strings.EqualFold(existing, name) {
-				delete(merged, existing)
-			}
-		}
-		if value != nil {
-			merged[name] = *value
-		}
-	}
-	return merged
-}
-
-func applyPayloadHook(hook PayloadHook, payload []byte) ([]byte, error) {
+func applyPayloadHook(hook PayloadHook, model ModelRef, payload []byte) ([]byte, error) {
 	if hook == nil {
 		return payload, nil
 	}
-	result, err := hook(append([]byte(nil), payload...))
+	result, err := hook(model, append([]byte(nil), payload...))
 	if err != nil {
 		return nil, fmt.Errorf("payload hook: %w", err)
 	}
@@ -331,6 +319,35 @@ func applyPayloadHook(hook PayloadHook, payload []byte) ([]byte, error) {
 		return nil, fmt.Errorf("payload hook returned invalid JSON")
 	}
 	return append([]byte(nil), result...), nil
+}
+
+func applyFinalHeaders(headers http.Header, model ModelRef, hook HeaderHook, overrides map[string]*string) error {
+	if hook != nil {
+		values := make(map[string]*string, len(headers))
+		for name := range headers {
+			value := headers.Get(name)
+			copy := value
+			values[name] = &copy
+		}
+		if err := hook(model, values); err != nil {
+			return fmt.Errorf("header hook: %w", err)
+		}
+		for name := range headers {
+			headers.Del(name)
+		}
+		for name, value := range values {
+			if value != nil {
+				headers.Set(name, *value)
+			}
+		}
+	}
+	for name, value := range overrides {
+		headers.Del(name)
+		if value != nil {
+			headers.Set(name, *value)
+		}
+	}
+	return nil
 }
 
 func responseInfo(response *http.Response) ResponseInfo {

@@ -4,12 +4,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
@@ -43,6 +45,13 @@ var (
 type Transcript interface {
 	Context() session.Context
 	Append(context.Context, llm.ConversationMessage, session.AppendOptions) (session.Entry, error)
+}
+
+// AgentMessageTranscript is the durable extension of Transcript used for
+// non-LLM AgentMessage union members. Agent only requires it when a caller
+// actually injects such a message.
+type AgentMessageTranscript interface {
+	AppendAgentMessage(context.Context, agentmsg.Message, session.AppendOptions) (session.Entry, error)
 }
 
 // ContextBuilder is implemented by Session. Keeping it optional preserves the
@@ -87,8 +96,9 @@ type BeforeToolCallContext struct {
 	Context   []llm.ConversationMessage
 }
 type BeforeToolCallResult struct {
-	Block  bool
-	Reason string
+	Block     bool
+	Reason    string
+	Arguments *json.RawMessage
 }
 type AfterToolCallContext struct {
 	Assistant llm.AssistantToolUseMessage
@@ -191,15 +201,17 @@ type Config struct {
 	// TransformContext is an immutable request seam. It receives a copied
 	// transcript projection immediately before every provider call and must
 	// return a replacement snapshot; it never mutates durable transcript data.
-	TransformContext ContextTransform
-	SteeringMode     QueueMode
-	FollowUpMode     QueueMode
+	TransformContext      ContextTransform
+	TransformAgentContext AgentContextTransform
+	SteeringMode          QueueMode
+	FollowUpMode          QueueMode
 	// Tools is the immutable model-visible schema snapshot for this run. It is
 	// separate from Tool execution so deterministic providers can remain
 	// tool-free while production binds both views through one registry.
 	Tools          []provider.ToolDefinition
 	BeforeToolCall BeforeToolCallHook
 	AfterToolCall  AfterToolCallHook
+	MessageEnd     MessageEndHook
 	// PrepareTurn optionally replaces the static Model/SystemPrompt/Tool/Tools
 	// fields for every provider request. It is the only mutable-settings seam
 	// in Agent; callers that do not need a session keep the legacy static
@@ -217,28 +229,30 @@ type Config struct {
 }
 
 type runtimeConfig struct {
-	provider          provider.Provider
-	transcript        Transcript
-	model             provider.ModelRef
-	systemPrompt      string
-	tool              ToolExecutor
-	toolName          string
-	tools             []provider.ToolDefinition
-	beforeToolCall    BeforeToolCallHook
-	afterToolCall     AfterToolCallHook
-	prepareTurn       PrepareTurn
-	now               func() time.Time
-	settlementTimeout time.Duration
-	toolExecution     ToolExecutionMode
-	transformContext  ContextTransform
-	steeringMode      QueueMode
-	followUpMode      QueueMode
-	contextWindow     uint64
-	contextReserve    uint64
-	keepRecentTokens  uint64
-	summarizer        session.Summarizer
-	compactor         sessionCompactor
-	retry             provider.RetryController
+	provider              provider.Provider
+	transcript            Transcript
+	model                 provider.ModelRef
+	systemPrompt          string
+	tool                  ToolExecutor
+	toolName              string
+	tools                 []provider.ToolDefinition
+	beforeToolCall        BeforeToolCallHook
+	afterToolCall         AfterToolCallHook
+	messageEnd            MessageEndHook
+	prepareTurn           PrepareTurn
+	now                   func() time.Time
+	settlementTimeout     time.Duration
+	toolExecution         ToolExecutionMode
+	transformContext      ContextTransform
+	transformAgentContext AgentContextTransform
+	steeringMode          QueueMode
+	followUpMode          QueueMode
+	contextWindow         uint64
+	contextReserve        uint64
+	keepRecentTokens      uint64
+	summarizer            session.Summarizer
+	compactor             sessionCompactor
+	retry                 provider.RetryController
 }
 
 // ToolExecutionMode controls one assistant message's complete tool batch.
@@ -305,6 +319,8 @@ func (r CompactionReason) String() string {
 // ContextTransform is called synchronously by the coordinator before each
 // provider request. Both input and output are copied at the boundary.
 type ContextTransform func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error)
+type AgentContextTransform func(context.Context, []agentmsg.Message) (*[]agentmsg.Message, error)
+type MessageEndHook func(context.Context, agentmsg.Message) (agentmsg.Message, error)
 
 func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Provider) {
@@ -384,28 +400,30 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	}
 
 	return runtimeConfig{
-		provider:          config.Provider,
-		transcript:        config.Transcript,
-		model:             config.Model,
-		systemPrompt:      config.SystemPrompt,
-		tool:              configuredTool,
-		toolName:          toolName,
-		tools:             append([]provider.ToolDefinition(nil), config.Tools...),
-		beforeToolCall:    config.BeforeToolCall,
-		afterToolCall:     config.AfterToolCall,
-		prepareTurn:       config.PrepareTurn,
-		now:               now,
-		settlementTimeout: settlementTimeout,
-		toolExecution:     toolExecution,
-		transformContext:  config.TransformContext,
-		steeringMode:      steeringMode,
-		followUpMode:      followUpMode,
-		contextWindow:     config.ContextWindow,
-		contextReserve:    config.ContextReserve,
-		keepRecentTokens:  config.KeepRecentTokens,
-		summarizer:        config.Summarizer,
-		compactor:         compactor,
-		retry:             retry,
+		provider:              config.Provider,
+		transcript:            config.Transcript,
+		model:                 config.Model,
+		systemPrompt:          config.SystemPrompt,
+		tool:                  configuredTool,
+		toolName:              toolName,
+		tools:                 append([]provider.ToolDefinition(nil), config.Tools...),
+		beforeToolCall:        config.BeforeToolCall,
+		afterToolCall:         config.AfterToolCall,
+		messageEnd:            config.MessageEnd,
+		prepareTurn:           config.PrepareTurn,
+		now:                   now,
+		settlementTimeout:     settlementTimeout,
+		toolExecution:         toolExecution,
+		transformContext:      config.TransformContext,
+		transformAgentContext: config.TransformAgentContext,
+		steeringMode:          steeringMode,
+		followUpMode:          followUpMode,
+		contextWindow:         config.ContextWindow,
+		contextReserve:        config.ContextReserve,
+		keepRecentTokens:      config.KeepRecentTokens,
+		summarizer:            config.Summarizer,
+		compactor:             compactor,
+		retry:                 retry,
 	}, nil
 }
 
@@ -589,6 +607,7 @@ type Event struct {
 	RunID            uint64
 	Turn             uint32
 	Message          llm.ConversationMessage
+	AgentMessage     agentmsg.Message
 	ProviderSnapshot llm.StreamSnapshot
 	ProviderEvent    llm.StreamEvent
 	ToolCallID       string

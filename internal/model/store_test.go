@@ -11,11 +11,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/cat3399/pi-go/internal/provider"
 )
 
 func cached(providerID, id string) CachedCatalog {
-	return CachedCatalog{Models: []CachedModel{{Provider: providerID, ID: id, API: OpenAIResponsesAPI}}, CheckedAt: 1, ETag: "opaque"}
+	return CachedCatalog{Models: []CachedModel{{Provider: providerID, ID: id, API: OpenAIResponsesAPI}}, CheckedAt: int64Pointer(1), ETag: "opaque"}
 }
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestStoreProviderScopedMergeAndUnknownPreservation(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -50,6 +54,93 @@ func TestStoreProviderScopedMergeAndUnknownPreservation(t *testing.T) {
 	}
 	if !contains(string(b), `"future"`) {
 		t.Fatalf("unknown cache entry lost: %s", b)
+	}
+}
+
+func TestP0ModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows v0.1 fails closed for private durable configuration")
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "models-store.json")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	high := "high"
+	checkedAt := int64(0)
+	lastModified := int64(0)
+	compat := json.RawMessage(`{
+		"supportsStore":false,
+		"supportsDeveloperRole":false,
+		"supportsUsageInStreaming":true,
+		"maxTokensField":"max_tokens",
+		"thinkingFormat":"openrouter",
+		"sendSessionAffinityHeaders":true,
+		"sessionAffinityFormat":"openrouter",
+		"supportsToolSearch":false,
+		"deferredToolsMode":"kimi",
+		"chatTemplateKwargs":{"enable_thinking":false},
+		"openRouterRouting":{"only":["one"]},
+		"vercelGatewayRouting":{"order":["two"]}
+	}`)
+	entry := CachedCatalog{
+		Models: []CachedModel{{
+			Provider: "fixture", ID: "full", Name: "Full fixture", API: provider.OpenAICompletionsAPI,
+			BaseURL: "https://fixture.test/v1", Headers: map[string]string{"X-Model": "full"}, Reasoning: true,
+			ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingOff: nil, provider.ThinkingHigh: &high},
+			Input:            []provider.InputKind{provider.InputText, provider.InputImage},
+			Cost:             provider.CostRates{Input: 1, Output: 2, CacheRead: 0.25, CacheWrite: 3, Tiers: []provider.CostTier{{InputTokensAbove: 100_000, Input: 4, Output: 5, CacheRead: 0.5, CacheWrite: 6}}},
+			ContextWindow:    200_000, MaxTokens: 8_000, Compat: compat,
+		}},
+		ETag: `"opaque"`, LastModified: &lastModified, CheckedAt: &checkedAt,
+	}
+	if err := store.Write(context.Background(), "fixture", entry); err != nil {
+		t.Fatal(err)
+	}
+	restored, ok, err := store.Read(context.Background(), "fixture")
+	if err != nil || !ok || len(restored.Models) != 1 {
+		t.Fatalf("Read = (%#v, %t, %v)", restored, ok, err)
+	}
+	model := restored.Models[0]
+	if model.Provider != "fixture" || model.ID != "full" || model.Name != "Full fixture" || model.API != provider.OpenAICompletionsAPI || model.BaseURL != "https://fixture.test/v1" || !model.Reasoning || model.ContextWindow != 200_000 || model.MaxTokens != 8_000 {
+		t.Fatalf("model identity/capability fields = %#v", model)
+	}
+	if len(model.Input) != 2 || model.Input[1] != provider.InputImage || model.Headers["X-Model"] != "full" || len(model.Cost.Tiers) != 1 || model.Cost.Tiers[0].Output != 5 {
+		t.Fatalf("model collection/cost fields = %#v", model)
+	}
+	if value, present := model.ThinkingLevelMap[provider.ThinkingOff]; !present || value != nil {
+		t.Fatalf("explicit disabled thinking level = %#v", model.ThinkingLevelMap)
+	}
+	if value := model.ThinkingLevelMap[provider.ThinkingHigh]; value == nil || *value != "high" {
+		t.Fatalf("mapped thinking level = %#v", model.ThinkingLevelMap)
+	}
+	if restored.LastModified == nil || *restored.LastModified != 0 || restored.CheckedAt == nil || *restored.CheckedAt != 0 {
+		t.Fatalf("optional timestamp presence = %#v", restored)
+	}
+	var compatObject map[string]json.RawMessage
+	if err := json.Unmarshal(model.Compat, &compatObject); err != nil {
+		t.Fatal(err)
+	}
+	if raw, present := compatObject["supportsDeveloperRole"]; !present || string(raw) != "false" {
+		t.Fatalf("explicit false compat presence = %#v", compatObject)
+	}
+
+	runtimeModel, err := NewRuntime(Options{AgentDir: directory, ModelsStorePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := runtimeModel.Resolve(Selection{Provider: "fixture", Model: "full"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := resolved.Model.Ref()
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed := ref.Compat().OpenAICompletions
+	if typed == nil || typed.SupportsDeveloperRole == nil || *typed.SupportsDeveloperRole || typed.SupportsUsageInStreaming == nil || !*typed.SupportsUsageInStreaming || typed.ChatTemplateKwargs["enable_thinking"] != false {
+		t.Fatalf("typed compat = %#v", typed)
 	}
 }
 func TestStoreConcurrentWriters(t *testing.T) {
@@ -107,7 +198,7 @@ func TestStoreCanonicalProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	writeFile(t, path, `{"OpenAI":{"models":[{"provider":"OPENAI","id":"MODEL","name":"old","api":"openai-responses","baseUrl":"https://old.invalid/v1","reasoning":false,"headers":{"X-Old":"old"},"futureModel":{"keep":true}}],"checkedAt":1,"futureEntry":{"keep":true}}}`)
 	headers := map[string]string{"X-Secret": "header-secret"}
-	entry := CachedCatalog{Models: []CachedModel{{Provider: "OpenAI", ID: "model", Name: "New model", API: OpenAIResponsesAPI, BaseURL: "https://new.invalid/v1", Reasoning: true, Headers: headers}}, CheckedAt: 2, ETag: "new-etag", LastModified: "now"}
+	entry := CachedCatalog{Models: []CachedModel{{Provider: "OpenAI", ID: "model", Name: "New model", API: OpenAIResponsesAPI, BaseURL: "https://new.invalid/v1", Reasoning: true, Headers: headers}}, CheckedAt: int64Pointer(2), ETag: "new-etag", LastModified: int64Pointer(3)}
 	s, err := NewStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +211,7 @@ func TestStoreCanonicalProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 	if err != nil || !ok || len(first.Models) != 1 {
 		t.Fatalf("read = %#v, %t, %v", first, ok, err)
 	}
-	if first.CheckedAt != 2 || first.ETag != "new-etag" || first.LastModified != "now" {
+	if first.CheckedAt == nil || *first.CheckedAt != 2 || first.ETag != "new-etag" || first.LastModified == nil || *first.LastModified != 3 {
 		t.Fatalf("catalog metadata round trip = %#v", first)
 	}
 	model := first.Models[0]

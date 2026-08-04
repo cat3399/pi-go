@@ -14,7 +14,11 @@ func TestExtensionHookContractsCloneAndProjectContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := invokeContextHook(context.Background(), func(_ context.Context, event ContextHookEvent) (ContextHookResult, error) {
+	wrapper, err := agentmsg.NewLLM(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transform := contextHookTransform(func(_ context.Context, event ContextHookEvent) (ContextHookResult, error) {
 		if len(event.Messages) != 1 {
 			t.Fatalf("messages = %d", len(event.Messages))
 		}
@@ -22,18 +26,18 @@ func TestExtensionHookContractsCloneAndProjectContext(t *testing.T) {
 		if err != nil {
 			return ContextHookResult{}, err
 		}
-		return ContextHookResult{Messages: append(event.Messages, custom)}, nil
-	}, []llm.ConversationMessage{message})
+		replacement := append(event.Messages, custom)
+		return ContextHookResult{Messages: &replacement}, nil
+	})
+	result, err := transform(context.Background(), []agentmsg.Message{wrapper})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result) != 2 {
+	if result == nil || len(*result) != 2 {
 		t.Fatalf("projection = %#v", result)
 	}
-	if err := (HookCancel{Cancel: true}).Validate(); err == nil {
-		t.Fatal("cancel without reason accepted")
-	}
-	if err := (HookCancel{Cancel: true, Reason: "policy"}).Validate(); err != nil {
+	cancel := true
+	if err := (HookCancel{Cancel: &cancel}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -41,16 +45,14 @@ func TestExtensionHookContractsCloneAndProjectContext(t *testing.T) {
 func TestExtensionHookSurfaceIsTyped(t *testing.T) {
 	var hooks Hooks
 	hooks.BeforeAgentStart = func(context.Context, BeforeAgentStartEvent) (BeforeAgentStartResult, error) {
-		return BeforeAgentStartResult{Cancel: HookCancel{Cancel: true, Reason: "blocked"}}, nil
+		cancel := true
+		return BeforeAgentStartResult{Cancel: HookCancel{Cancel: &cancel}}, nil
 	}
 	hooks.SessionTree = func(context.Context, SessionTreeHookEvent) (SessionTreeHookResult, error) {
 		return SessionTreeHookResult{}, nil
 	}
-	hooks.SessionSwitch = func(context.Context, SessionSwitchHookEvent) (SessionSwitchHookResult, error) {
-		return SessionSwitchHookResult{}, nil
-	}
 	hooks.SessionShutdown = func(context.Context, SessionShutdownHookEvent) error { return nil }
-	if hooks.BeforeAgentStart == nil || hooks.SessionTree == nil || hooks.SessionSwitch == nil || hooks.SessionShutdown == nil {
+	if hooks.BeforeAgentStart == nil || hooks.SessionTree == nil || hooks.SessionShutdown == nil {
 		t.Fatal("typed hooks were not assignable")
 	}
 }

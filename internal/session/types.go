@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
@@ -101,6 +102,11 @@ type UsageCost struct {
 
 func ZeroUsageCost() UsageCost {
 	return UsageCost{Input: "0", Output: "0", CacheRead: "0", CacheWrite: "0", Total: "0"}
+}
+
+func UsageCostFromLLM(cost llm.Cost) UsageCost {
+	number := func(value float64) json.Number { return json.Number(strconv.FormatFloat(value, 'g', -1, 64)) }
+	return UsageCost{Input: number(cost.Input), Output: number(cost.Output), CacheRead: number(cost.CacheRead), CacheWrite: number(cost.CacheWrite), Total: number(cost.Total)}
 }
 
 type AppendOptions struct {
@@ -449,6 +455,12 @@ func NewContext(messages []llm.ConversationMessage) Context {
 		}
 	}
 	return Context{messages: append([]llm.ConversationMessage(nil), messages...), agentMessages: agentmsg.Clone(agentMessages)}
+}
+
+func NewAgentContext(messages []agentmsg.Message) Context {
+	cloned := agentmsg.Clone(messages)
+	projected, _ := agentmsg.ConvertToLLM(cloned)
+	return Context{messages: projected, agentMessages: cloned}
 }
 
 func (c Context) Messages() []llm.ConversationMessage {

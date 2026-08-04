@@ -150,6 +150,11 @@ func NewCustom(value Custom) (Custom, error) {
 				return Custom{}, err
 			}
 			value.Content = []llm.UserContentBlock{block}
+		} else {
+			text, ok := value.Content[0].(llm.TextBlock)
+			if len(value.Content) != 1 || !ok || text.Text() != copy {
+				return Custom{}, fmt.Errorf("custom string content conflicts with rich content")
+			}
 		}
 	}
 	if len(value.Details) != 0 && !jsonValid(value.Details) {
@@ -212,34 +217,39 @@ func (m CompactionSummary) Role() Role            { return RoleCompactionSummary
 func (m CompactionSummary) Timestamp() time.Time  { return m.At }
 func (m CompactionSummary) cloneMessage() Message { return m }
 
-// OpaqueMessage is the extension-neutral custom-message escape hatch.  The
-// optional Projection decides whether it enters LLM context; arbitrary custom
-// data is never silently stringified.
+// OpaqueMessage is the extension-neutral durable escape hatch for an unknown
+// AgentMessage union member. Data is the sole source of truth: Session writes
+// it byte-for-byte and reopens the same role. Unknown roles do not enter LLM
+// context until a context hook deliberately replaces them with a known value.
 type OpaqueMessage struct {
-	Type       string
-	Data       []byte
-	Projection []llm.ConversationMessage
-	At         time.Time
+	Type string
+	Data []byte
+	At   time.Time
 }
 
 func NewOpaque(value OpaqueMessage) (OpaqueMessage, error) {
-	if !validID(value.Type) || len(value.Data) != 0 && !jsonValid(value.Data) {
+	if !validID(value.Type) || len(value.Data) == 0 || !jsonValid(value.Data) {
 		return OpaqueMessage{}, fmt.Errorf("invalid opaque agent message")
 	}
-	for _, message := range value.Projection {
-		if err := llm.ValidateConversationMessage(message); err != nil {
-			return OpaqueMessage{}, err
-		}
+	var envelope struct {
+		Role      string `json:"role"`
+		Timestamp *int64 `json:"timestamp"`
 	}
+	if json.Unmarshal(value.Data, &envelope) != nil || envelope.Role != value.Type || envelope.Timestamp == nil {
+		return OpaqueMessage{}, fmt.Errorf("opaque role does not match message type")
+	}
+	fromData := time.UnixMilli(*envelope.Timestamp)
+	if !value.At.IsZero() && !value.At.Equal(fromData) {
+		return OpaqueMessage{}, fmt.Errorf("opaque timestamp does not match durable data")
+	}
+	value.At = fromData
 	value.Data = append([]byte(nil), value.Data...)
-	value.Projection = append([]llm.ConversationMessage(nil), value.Projection...)
 	return value, nil
 }
 func (m OpaqueMessage) Role() Role           { return Role(m.Type) }
 func (m OpaqueMessage) Timestamp() time.Time { return m.At }
 func (m OpaqueMessage) cloneMessage() Message {
 	m.Data = append([]byte(nil), m.Data...)
-	m.Projection = append([]llm.ConversationMessage(nil), m.Projection...)
 	return m
 }
 
@@ -294,7 +304,8 @@ func ConvertToLLM(messages []Message) ([]llm.ConversationMessage, error) {
 			}
 			out = append(out, converted)
 		case OpaqueMessage:
-			out = append(out, value.Projection...)
+			// Unknown union members are durable but provider-invisible by default.
+			// A ContextHook can replace one with a known custom/LLM message.
 		default:
 			return nil, fmt.Errorf("unsupported agent message %T", message)
 		}

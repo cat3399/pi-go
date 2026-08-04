@@ -7,7 +7,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
@@ -16,19 +15,17 @@ import (
 )
 
 type HookCancel struct {
-	Cancel bool
+	Cancel *bool
 	Reason string
 }
 
 func (r HookCancel) Validate() error {
-	if r.Cancel && r.Reason == "" {
-		return fmt.Errorf("cancelled hook result requires a reason")
-	}
 	return nil
 }
+func (r HookCancel) Cancelled() bool { return r.Cancel != nil && *r.Cancel }
 
 type ContextHookEvent struct{ Messages []agentmsg.Message }
-type ContextHookResult struct{ Messages []agentmsg.Message }
+type ContextHookResult struct{ Messages *[]agentmsg.Message }
 type ContextHook func(context.Context, ContextHookEvent) (ContextHookResult, error)
 
 type BeforeAgentStartEvent struct {
@@ -81,23 +78,25 @@ type MessageHookResult struct {
 }
 type MessageHook func(context.Context, MessageHookEvent) (MessageHookResult, error)
 
-type ToolHookEvent struct {
-	Type   ToolHookType
-	Call   llm.ToolCallBlock
-	Result *ToolOutput
+func (s *AgentSession) messageEndTransform(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
+	if s == nil || s.hooks.Message == nil {
+		return nil, nil
+	}
+	// Provider streaming already emitted assistant message_start. Initial user,
+	// injected custom, and tool-result messages reach their first observable
+	// boundary here, immediately before message_end and persistence.
+	if message.Role() != agentmsg.RoleAssistant || s.beginAssistantHookMessage() {
+		_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: MessageStartHookEvent, Message: agentmsg.CloneOne(message)})
+	}
+	result, err := s.hooks.Message(ctx, MessageHookEvent{Type: MessageEndHookEvent, Message: agentmsg.CloneOne(message)})
+	if err != nil {
+		return nil, err
+	}
+	if result.Cancel.Cancelled() {
+		return nil, ErrAgentAborted
+	}
+	return agentmsg.CloneOne(result.Message), nil
 }
-type ToolHookType string
-
-const (
-	ToolStartHookEvent  ToolHookType = "tool_call"
-	ToolResultHookEvent ToolHookType = "tool_result"
-)
-
-type ToolHookResult struct {
-	Result *ToolOutput
-	Cancel HookCancel
-}
-type ToolHook func(context.Context, ToolHookEvent) (ToolHookResult, error)
 
 type SessionStartHookEvent struct {
 	Reason       SessionStartReason
@@ -149,13 +148,6 @@ type SessionTreeHookEvent struct {
 }
 type SessionTreeHookResult struct{ Cancel HookCancel }
 type SessionTreeHook func(context.Context, SessionTreeHookEvent) (SessionTreeHookResult, error)
-type SessionSwitchHookEvent struct {
-	Before     bool
-	Reason     SessionStartReason
-	TargetPath string
-}
-type SessionSwitchHookResult struct{ Cancel HookCancel }
-type SessionSwitchHook func(context.Context, SessionSwitchHookEvent) (SessionSwitchHookResult, error)
 
 // Hooks is a typed, host-provided callback set. No generic maps or string
 // dispatch are used. Nil fields deliberately mean the corresponding runtime
@@ -165,45 +157,118 @@ type Hooks struct {
 	BeforeAgentStart BeforeAgentStartHook
 	Agent            AgentLifecycleHook
 	Message          MessageHook
-	Tool             ToolHook
+	ToolCall         BeforeToolCallHook
+	ToolResult       AfterToolCallHook
 	SessionStart     SessionStartHook
 	SessionShutdown  SessionShutdownHook
 	SessionCompact   SessionCompactHook
 	SessionTree      SessionTreeHook
-	SessionSwitch    SessionSwitchHook
 }
 
-func invokeContextHook(ctx context.Context, hook ContextHook, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
+func contextHookTransform(hook ContextHook) AgentContextTransform {
 	if hook == nil {
-		return append([]llm.ConversationMessage(nil), messages...), nil
+		return nil
 	}
-	wrapped := make([]agentmsg.Message, 0, len(messages))
-	for _, message := range messages {
-		value, err := agentmsg.NewLLM(message)
+	return func(ctx context.Context, messages []agentmsg.Message) (*[]agentmsg.Message, error) {
+		result, err := hook(ctx, ContextHookEvent{Messages: agentmsg.Clone(messages)})
 		if err != nil {
 			return nil, err
 		}
-		wrapped = append(wrapped, value)
+		if result.Messages == nil {
+			return nil, nil
+		}
+		clone := agentmsg.Clone(*result.Messages)
+		return &clone, nil
 	}
-	result, err := hook(ctx, ContextHookEvent{Messages: agentmsg.Clone(wrapped)})
-	if err != nil {
-		return nil, err
-	}
-	return agentmsg.ConvertToLLM(agentmsg.Clone(result.Messages))
 }
 
-func composeContextHooks(base ContextTransform, hook ContextHook) ContextTransform {
-	if base == nil && hook == nil {
-		return nil
+func composeBeforeToolHooks(first, second BeforeToolCallHook) BeforeToolCallHook {
+	if first == nil {
+		return second
 	}
-	return func(ctx context.Context, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
-		var err error
-		if base != nil {
-			messages, err = base(ctx, append([]llm.ConversationMessage(nil), messages...))
-			if err != nil {
-				return nil, err
+	if second == nil {
+		return first
+	}
+	return func(ctx context.Context, event BeforeToolCallContext) (BeforeToolCallResult, error) {
+		a, err := first(ctx, event)
+		if err != nil || a.Block {
+			return a, err
+		}
+		if a.Arguments != nil {
+			event.Arguments = append([]byte(nil), (*a.Arguments)...)
+			if call, e := llm.NewToolCallBlock(event.ToolCall.ID(), event.ToolCall.Name(), event.Arguments); e == nil {
+				event.ToolCall = call
 			}
 		}
-		return invokeContextHook(ctx, hook, messages)
+		b, err := second(ctx, event)
+		if err != nil {
+			return b, err
+		}
+		if b.Arguments == nil {
+			b.Arguments = a.Arguments
+		}
+		return b, nil
 	}
+}
+func composeAfterToolHooks(first, second AfterToolCallHook) AfterToolCallHook {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(ctx context.Context, event AfterToolCallContext) (AfterToolCallResult, error) {
+		a, err := first(ctx, event)
+		if err != nil {
+			return a, err
+		}
+		event = applyAfterToolPatch(event, a)
+		b, err := second(ctx, event)
+		if err != nil {
+			return b, err
+		}
+		if b.Content == nil {
+			b.Content = a.Content
+		}
+		if b.Details == nil {
+			b.Details = a.Details
+		}
+		if b.IsError == nil {
+			b.IsError = a.IsError
+		}
+		if b.Usage == nil {
+			b.Usage = a.Usage
+		}
+		if b.AddedToolNames == nil {
+			b.AddedToolNames = a.AddedToolNames
+		}
+		if b.Terminate == nil {
+			b.Terminate = a.Terminate
+		}
+		return b, nil
+	}
+}
+
+func applyAfterToolPatch(event AfterToolCallContext, patch AfterToolCallResult) AfterToolCallContext {
+	if patch.Content != nil {
+		event.Result.Content = append([]llm.ToolResultContentBlock(nil), (*patch.Content)...)
+		event.Result.Text = ""
+	}
+	if patch.Details != nil {
+		event.Result.Details = *patch.Details
+	}
+	if patch.Usage != nil {
+		usage := *patch.Usage
+		event.Result.Usage = &usage
+	}
+	if patch.AddedToolNames != nil {
+		event.Result.AddedToolNames = append([]string(nil), (*patch.AddedToolNames)...)
+	}
+	if patch.Terminate != nil {
+		event.Result.Terminate = *patch.Terminate
+	}
+	if patch.IsError != nil {
+		event.IsError = *patch.IsError
+	}
+	return event
 }

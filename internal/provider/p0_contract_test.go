@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -103,6 +104,62 @@ func TestP0RequestPreservesPortableOptionsAndDeferredToolPresence(t *testing.T) 
 	}
 }
 
+type p0TypedMap map[string]string
+type p0TypedSlice []p0TypedMap
+
+func TestP0JSONLikeValuesDeepCloneTypedContainersAndRejectInvalidValues(t *testing.T) {
+	typed := p0TypedSlice{{"value": "original"}}
+	model, err := provider.NewModel(provider.ModelSpec{
+		Provider: "generic", API: provider.OpenAICompletionsAPI, ID: "model",
+		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{ChatTemplateKwargs: map[string]any{"typed": typed}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequestWithOptions(model, "", nil, provider.RequestOptions{
+		Metadata: map[string]any{"typed": typed},
+		Stream:   provider.StreamOptions{Metadata: map[string]any{"typed": typed}, Extra: map[string]any{"typed": typed}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed[0]["value"] = "source-mutated"
+	for label, values := range map[string]map[string]any{
+		"request": request.Metadata(), "stream": request.StreamOptions().Metadata, "extra": request.StreamOptions().Extra,
+	} {
+		cloned, ok := values["typed"].(p0TypedSlice)
+		if !ok || cloned[0]["value"] != "original" {
+			t.Fatalf("%s typed clone = %#v", label, values["typed"])
+		}
+		cloned[0]["value"] = "copy-mutated"
+	}
+	if got := request.Metadata()["typed"].(p0TypedSlice)[0]["value"]; got != "original" {
+		t.Fatalf("request getter shared typed nested storage: %q", got)
+	}
+	compat := model.Compat()
+	compatTyped := compat.OpenAICompletions.ChatTemplateKwargs["typed"].(p0TypedSlice)
+	if compatTyped[0]["value"] != "original" {
+		t.Fatalf("compat clone = %#v", compatTyped)
+	}
+	compatTyped[0]["value"] = "compat-mutated"
+	if got := model.Compat().OpenAICompletions.ChatTemplateKwargs["typed"].(p0TypedSlice)[0]["value"]; got != "original" {
+		t.Fatalf("compat getter shared typed nested storage: %q", got)
+	}
+
+	badRequestModel, _ := provider.NewModelRef("generic", "generic", "model")
+	if _, err := provider.NewRequestWithOptions(badRequestModel, "", nil, provider.RequestOptions{Metadata: map[string]any{"bad": make(chan int)}}); !errors.Is(err, provider.ErrInvalidRequest) {
+		t.Fatalf("non-JSON request metadata error = %v", err)
+	}
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	if _, err := provider.NewModel(provider.ModelSpec{Provider: "generic", API: provider.OpenAICompletionsAPI, ID: "cycle", Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{OpenRouterRouting: cycle}}}); !errors.Is(err, provider.ErrInvalidModel) {
+		t.Fatalf("cyclic compat error = %v", err)
+	}
+	if _, err := provider.NewModel(provider.ModelSpec{Provider: "generic", API: "future", ID: "scalar", Compat: provider.ModelCompat{Additional: map[string]json.RawMessage{"future": json.RawMessage(`true`)}}}); !errors.Is(err, provider.ErrInvalidModel) {
+		t.Fatalf("scalar additional compat error = %v", err)
+	}
+}
+
 func TestP0DeferredToolsMapToResponsesAndKimiWireOnlyWhenEnabled(t *testing.T) {
 	called, err := provider.NewToolDefinition("called", "called", false, []byte(`{"type":"object"}`))
 	if err != nil {
@@ -186,6 +243,159 @@ func TestP0DeferredToolsMapToResponsesAndKimiWireOnlyWhenEnabled(t *testing.T) {
 	if hasWireType(plainPayload["input"].([]any), "tool_search_output") || len(plainPayload["tools"].([]any)) != 2 {
 		t.Fatalf("plain provider polluted: %#v", plainPayload)
 	}
+}
+
+func TestP0ProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing.T) {
+	tests := []struct {
+		name string
+		api  string
+		body string
+		new  func(provider.HTTPDoer) (provider.Provider, error)
+	}{
+		{
+			name: "responses", api: provider.OpenAIResponsesAPI,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+			new: func(client provider.HTTPDoer) (provider.Provider, error) {
+				return provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Headers: map[string]string{"X-Adapter": "adapter"}, Client: client})
+			},
+		},
+		{
+			name: "completions", api: provider.OpenAICompletionsAPI,
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+			new: func(client provider.HTTPDoer) (provider.Provider, error) {
+				return provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Headers: map[string]string{"X-Adapter": "adapter"}, Client: client})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model, err := provider.NewModel(provider.ModelSpec{Provider: "fixture", API: test.api, ID: "model", Headers: map[string]string{"X-Model": "model"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls int
+			implementation, err := test.new(responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
+				calls++
+				for name, want := range map[string]string{"Authorization": "Bearer secret", "X-Model": "model", "X-Hook": "hook", "X-Final": "final"} {
+					if got := request.Header.Get(name); got != want {
+						t.Errorf("%s = %q, want %q", name, got, want)
+					}
+				}
+				if got := request.Header.Get("X-Adapter"); got != "" {
+					t.Errorf("X-Adapter survived nil final override: %q", got)
+				}
+				if got := request.Header.Get("X-Request"); got != "" {
+					t.Errorf("X-Request survived nil header hook value: %q", got)
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || payload["hooked"] != true {
+					t.Errorf("payload = %#v, %v", payload, err)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}, "X-Response": []string{"seen"}}, Body: io.NopCloser(strings.NewReader(test.body))}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := "final"
+			hook := "hook"
+			responseCalled := false
+			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustProviderUser(t, "hi")}, provider.RequestOptions{Stream: provider.StreamOptions{
+				Headers: map[string]string{"X-Request": "request"}, HeaderOverrides: map[string]*string{"X-Adapter": nil, "X-Final": &final},
+				OnPayload: func(gotModel provider.ModelRef, payload []byte) ([]byte, error) {
+					if !gotModel.Equal(model) {
+						t.Errorf("payload model = %#v", gotModel)
+					}
+					var object map[string]any
+					if err := json.Unmarshal(payload, &object); err != nil {
+						return nil, err
+					}
+					object["hooked"] = true
+					return json.Marshal(object)
+				},
+				OnHeaders: func(gotModel provider.ModelRef, headers map[string]*string) error {
+					if !gotModel.Equal(model) || headerHookValue(headers, "Authorization") != "Bearer secret" || headerHookValue(headers, "Accept") != "text/event-stream" || headerHookValue(headers, "X-Model") != "model" || headerHookValue(headers, "X-Adapter") != "adapter" || headerHookValue(headers, "X-Request") != "request" {
+						t.Errorf("header hook model/values = %#v / %#v", gotModel, headers)
+					}
+					headers["X-Request"] = nil
+					headers["X-Hook"] = &hook
+					return nil
+				},
+				OnResponse: func(gotModel provider.ModelRef, response provider.ResponseInfo) error {
+					responseCalled = true
+					if !gotModel.Equal(model) || response.StatusCode != http.StatusOK || len(response.Headers["X-Response"]) != 1 || response.Headers["X-Response"][0] != "seen" {
+						t.Errorf("response hook = %#v / %#v", gotModel, response)
+					}
+					return nil
+				},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if calls != 1 || !responseCalled || terminal == nil {
+				t.Fatalf("calls/response/terminal = %d/%t/%T", calls, responseCalled, terminal)
+			}
+		})
+	}
+}
+
+func TestP0FinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T) {
+	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
+		t.Run(api, func(t *testing.T) {
+			calls := 0
+			doer := responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, errors.New("must not call HTTP")
+			})
+			var implementation provider.Provider
+			var err error
+			if api == provider.OpenAIResponsesAPI {
+				implementation, err = provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Client: doer})
+			} else {
+				implementation, err = provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: "https://fixture.test/v1", APIKey: "secret", Client: doer})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			model, _ := provider.NewModelRef("fixture", api, "model")
+			sawAuthorization := false
+			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustProviderUser(t, "hi")}, provider.RequestOptions{Stream: provider.StreamOptions{
+				OnHeaders: func(_ provider.ModelRef, headers map[string]*string) error {
+					sawAuthorization = headerHookValue(headers, "Authorization") == "Bearer secret"
+					return nil
+				},
+				HeaderOverrides: map[string]*string{"Authorization": nil},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if calls != 0 || !sawAuthorization {
+				t.Fatalf("HTTP calls/header preflight = %d/%t", calls, sawAuthorization)
+			}
+			if failure, ok := terminal.(llm.AssistantFailureMessage); !ok || failure.FinishReason() != llm.FinishError {
+				t.Fatalf("terminal = %T %#v", terminal, terminal)
+			}
+		})
+	}
+}
+
+func headerHookValue(headers map[string]*string, name string) string {
+	for key, value := range headers {
+		if strings.EqualFold(key, name) && value != nil {
+			return *value
+		}
+	}
+	return ""
+}
+
+func mustProviderUser(t *testing.T, text string) llm.UserTextMessage {
+	t.Helper()
+	message, err := llm.NewUserTextMessage(text, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return message
 }
 
 type captureDoer func(*http.Request)

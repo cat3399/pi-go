@@ -45,8 +45,8 @@ type CachedModel struct {
 type CachedCatalog struct {
 	Models        []CachedModel `json:"models"`
 	ETag          string        `json:"etag,omitempty"`
-	LastModified  string        `json:"lastModified,omitempty"`
-	CheckedAt     int64         `json:"checkedAt"`
+	LastModified  *int64        `json:"lastModified,omitempty"`
+	CheckedAt     *int64        `json:"checkedAt,omitempty"`
 	runtimeModels []Model
 }
 
@@ -273,9 +273,9 @@ func decodeCatalog(raw json.RawMessage, providerID string) (CachedCatalog, error
 		return entry, Diagnostic{"models-store.json", providerID, "etag must be a string"}
 	}
 	if rawLastModified, ok := object["lastModified"]; ok && json.Unmarshal(rawLastModified, &entry.LastModified) != nil {
-		return entry, Diagnostic{"models-store.json", providerID, "lastModified must be a string"}
+		return entry, Diagnostic{"models-store.json", providerID, "lastModified must be an integer"}
 	}
-	if rawCheckedAt, ok := object["checkedAt"]; !ok || json.Unmarshal(rawCheckedAt, &entry.CheckedAt) != nil {
+	if rawCheckedAt, ok := object["checkedAt"]; ok && json.Unmarshal(rawCheckedAt, &entry.CheckedAt) != nil {
 		return entry, Diagnostic{"models-store.json", providerID, "checkedAt must be an integer"}
 	}
 	if err := validateCatalog(entry, providerID); err != nil {
@@ -364,12 +364,14 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 	if err != nil {
 		return nil, err
 	}
-	checkedAt, err := json.Marshal(entry.CheckedAt)
-	if err != nil {
-		return nil, err
-	}
 	object["models"] = encodedModels
-	object["checkedAt"] = checkedAt
+	if entry.CheckedAt == nil {
+		delete(object, "checkedAt")
+	} else if value, err := json.Marshal(*entry.CheckedAt); err != nil {
+		return nil, err
+	} else {
+		object["checkedAt"] = value
+	}
 	if entry.ETag == "" {
 		delete(object, "etag")
 	} else if value, err := json.Marshal(entry.ETag); err != nil {
@@ -377,9 +379,9 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 	} else {
 		object["etag"] = value
 	}
-	if entry.LastModified == "" {
+	if entry.LastModified == nil {
 		delete(object, "lastModified")
-	} else if value, err := json.Marshal(entry.LastModified); err != nil {
+	} else if value, err := json.Marshal(*entry.LastModified); err != nil {
 		return nil, err
 	} else {
 		object["lastModified"] = value
@@ -387,8 +389,11 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 	return json.Marshal(object)
 }
 func validateCatalog(entry CachedCatalog, providerID string) error {
-	if entry.CheckedAt < 0 {
+	if entry.CheckedAt != nil && *entry.CheckedAt < 0 {
 		return Diagnostic{"models-store.json", providerID, "checkedAt cannot be negative"}
+	}
+	if entry.LastModified != nil && *entry.LastModified < 0 {
+		return Diagnostic{"models-store.json", providerID, "lastModified cannot be negative"}
 	}
 	seen := map[string]bool{}
 	for _, m := range entry.Models {

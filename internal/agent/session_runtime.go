@@ -94,9 +94,11 @@ type SessionEvent struct {
 	CompactionWillRetry    bool
 	CompactionErrorMessage string
 	Message                llm.ConversationMessage
+	AgentMessage           agentmsg.Message
 	Terminal               llm.AssistantTerminal
 	ToolResults            []llm.ConversationMessage
 	Messages               []llm.ConversationMessage
+	AgentMessages          []agentmsg.Message
 }
 type SessionObserver func(context.Context, SessionEvent)
 
@@ -149,29 +151,32 @@ type sessionRun struct {
 	retryError            string
 	overflowCompacted     bool
 	assistantStarted      bool
+	assistantHookStarted  bool
 	committed             []llm.ConversationMessage
+	committedAgent        []agentmsg.Message
 	toolResults           []llm.ConversationMessage
 	terminalModel         provider.ModelRef
 	started               bool
 	extensionSystemPrompt *string
 }
 type sessionTranscript struct {
-	mu           sync.RWMutex
-	durable      Transcript
-	messages     []llm.ConversationMessage
-	assistant    session.AssistantProvenance
-	hasAssistant bool
+	mu            sync.RWMutex
+	durable       Transcript
+	messages      []llm.ConversationMessage
+	agentMessages []agentmsg.Message
+	assistant     session.AssistantProvenance
+	hasAssistant  bool
 }
 
 func newSessionTranscript(durable Transcript) *sessionTranscript {
 	context := durable.Context()
 	assistant, hasAssistant := context.AssistantProvenance()
-	return &sessionTranscript{durable: durable, messages: context.Messages(), assistant: assistant, hasAssistant: hasAssistant}
+	return &sessionTranscript{durable: durable, messages: context.Messages(), agentMessages: context.AgentMessages(), assistant: assistant, hasAssistant: hasAssistant}
 }
 func (t *sessionTranscript) Context() session.Context {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return session.NewContext(t.messages)
+	return session.NewAgentContext(t.agentMessages)
 }
 func (t *sessionTranscript) BuildContext() session.Context { return t.Context() }
 func (t *sessionTranscript) Append(ctx context.Context, message llm.ConversationMessage, options session.AppendOptions) (session.Entry, error) {
@@ -181,8 +186,34 @@ func (t *sessionTranscript) Append(ctx context.Context, message llm.Conversation
 	}
 	t.mu.Lock()
 	t.messages = append(t.messages, message)
+	if wrapped, wrapErr := agentmsg.NewLLM(message); wrapErr == nil {
+		t.agentMessages = append(t.agentMessages, wrapped)
+	}
 	context := t.durable.Context()
 	t.assistant, t.hasAssistant = context.AssistantProvenance()
+	t.mu.Unlock()
+	return entry, nil
+}
+func (t *sessionTranscript) AppendAgentMessage(ctx context.Context, message agentmsg.Message, options session.AppendOptions) (session.Entry, error) {
+	durable, ok := t.durable.(interface {
+		AppendAgentMessage(context.Context, agentmsg.Message, session.AppendOptions) (session.Entry, error)
+	})
+	if !ok {
+		return session.Entry{}, fmt.Errorf("%w: transcript does not support agent messages", ErrInvalidConfig)
+	}
+	entry, err := durable.AppendAgentMessage(ctx, message, options)
+	if err != nil {
+		return session.Entry{}, err
+	}
+	converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{message})
+	if err != nil {
+		return session.Entry{}, err
+	}
+	t.mu.Lock()
+	t.agentMessages = append(t.agentMessages, agentmsg.CloneOne(message))
+	t.messages = append(t.messages, converted...)
+	current := t.durable.Context()
+	t.assistant, t.hasAssistant = current.AssistantProvenance()
 	t.mu.Unlock()
 	return entry, nil
 }
@@ -192,6 +223,9 @@ func (t *sessionTranscript) removeLastFailure() {
 	if len(t.messages) != 0 {
 		if _, ok := t.messages[len(t.messages)-1].(llm.AssistantFailureMessage); ok {
 			t.messages = t.messages[:len(t.messages)-1]
+			if len(t.agentMessages) > 0 {
+				t.agentMessages = t.agentMessages[:len(t.agentMessages)-1]
+			}
 		}
 	}
 }
@@ -213,6 +247,7 @@ func (t *sessionTranscript) Compact(ctx context.Context, request session.Compact
 	}
 	t.mu.Lock()
 	t.messages = refreshed.Messages()
+	t.agentMessages = refreshed.AgentMessages()
 	t.assistant, t.hasAssistant = refreshed.AssistantProvenance()
 	t.mu.Unlock()
 	return result, nil
@@ -265,7 +300,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	}
 	s := &AgentSession{
 		transcript: config.Transcript, model: config.Model, thinkingLevel: config.ThinkingLevel,
-		systemPrompt: config.SystemPrompt, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: config.BeforeToolCall, afterToolCall: config.AfterToolCall,
+		systemPrompt: config.SystemPrompt, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
 		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks,
 		retry:         retry,
@@ -275,8 +310,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	s.runtimeTranscript = newSessionTranscript(config.Transcript)
 	loop, err := New(Config{
 		Provider: config.Provider, Transcript: s.runtimeTranscript, Model: config.Model,
-		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: config.BeforeToolCall, AfterToolCall: config.AfterToolCall,
-		ToolExecution: config.ToolExecution, TransformContext: composeContextHooks(config.TransformContext, config.Hooks.Context),
+		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
+		ToolExecution: config.ToolExecution, TransformContext: config.TransformContext, TransformAgentContext: contextHookTransform(config.Hooks.Context),
+		MessageEnd:   s.messageEndTransform,
 		SteeringMode: config.SteeringMode, FollowUpMode: config.FollowUpMode,
 		ContextWindow: 0, ContextReserve: 0,
 		// Session owns retries and (eventually) automatic compaction.  Keep the
@@ -291,6 +327,12 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	}
 	s.loop = loop
 	s.loopUnsubscribe = loop.Subscribe(s.handleLoopEvent)
+	if s.hooks.SessionStart != nil {
+		if hookErr := s.hooks.SessionStart(context.Background(), SessionStartHookEvent{Reason: SessionStartup}); hookErr != nil {
+			s.loopUnsubscribe()
+			return nil, hookErr
+		}
+	}
 	return s, nil
 }
 
@@ -310,8 +352,10 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 	state.Active = s.activeState()
 	types := []string{}
 	var message llm.ConversationMessage
+	var agentMessage agentmsg.Message
 	var terminal llm.AssistantTerminal
 	var toolResults, messages []llm.ConversationMessage
+	var agentMessages []agentmsg.Message
 	switch event.Kind {
 	case EventRunStarted:
 		s.lifecycleMu.Lock()
@@ -323,7 +367,9 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		}
 		s.run.started = true
 		s.run.assistantStarted = false
+		s.run.assistantHookStarted = false
 		s.run.committed = nil
+		s.run.committedAgent = nil
 		s.run.toolResults = nil
 		s.lifecycleMu.Unlock()
 		// Every low-level continuation is a new upstream agent loop and therefore
@@ -346,12 +392,16 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		}
 	case EventMessageCommitted:
 		message = event.Message
-		if event.Message != nil && event.Message.Role() != llm.RoleAssistant {
+		agentMessage = agentmsg.CloneOne(event.AgentMessage)
+		if agentMessage == nil && event.Message != nil {
+			agentMessage, _ = agentmsg.NewLLM(event.Message)
+		}
+		if agentMessage != nil && agentMessage.Role() != agentmsg.RoleAssistant {
 			types = append(types, "message_start")
-		} else if event.Message != nil && s.beginAssistantMessage() {
+		} else if agentMessage != nil && s.beginAssistantMessage() {
 			types = append(types, "message_start")
 		}
-		s.recordCommitted(event.Message, event.Model)
+		s.recordCommitted(event.Message, agentMessage, event.Model)
 		types = append(types, "message_end")
 	case EventToolStarted:
 		types = []string{"tool_execution_start"}
@@ -367,14 +417,15 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 		types = []string{"agent_end"}
 		terminal = event.Terminal
 		messages = s.sessionCommittedMessages()
+		agentMessages = s.sessionCommittedAgentMessages()
 	case EventQueueUpdated:
 		types = []string{"queue_update"}
 	}
 	steering, follow := s.RichQueues()
 	willRetry := event.Kind == EventRunSettled && s.willRetry(event.Terminal)
 	for _, kind := range types {
-		s.dispatchExtensionHook(ctx, kind, message, terminal, event)
-		s.emitToObservers(ctx, observers, SessionEvent{Type: kind, Event: event, State: state, Steering: steering, FollowUp: follow, WillRetry: willRetry, Message: message, Terminal: terminal, ToolResults: toolResults, Messages: messages})
+		s.dispatchExtensionHook(ctx, kind, message, agentMessage, terminal, event)
+		s.emitToObservers(ctx, observers, SessionEvent{Type: kind, Event: event, State: state, Steering: steering, FollowUp: follow, WillRetry: willRetry, Message: message, AgentMessage: agentmsg.CloneOne(agentMessage), Terminal: terminal, ToolResults: toolResults, Messages: messages, AgentMessages: agentMessages})
 	}
 	// Upstream ends a successful retry immediately after the successful
 	// assistant message has been committed, before that low run emits
@@ -390,7 +441,7 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event Event) {
 // dispatchExtensionHook is observational for post-commit lifecycle events.
 // Mutation/cancellation hooks run at their safe pre-boundaries (context and
 // compaction); an error here cannot retroactively alter durable history.
-func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, message llm.ConversationMessage, terminal llm.AssistantTerminal, event Event) {
+func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, message llm.ConversationMessage, agentMessage agentmsg.Message, terminal llm.AssistantTerminal, event Event) {
 	if s == nil {
 		return
 	}
@@ -405,49 +456,21 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 			lifecycle = AgentSettledHookEvent
 		}
 		if lifecycle != "" {
-			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: lifecycle, Messages: wrapAgentMessages(s.sessionCommittedMessages()), Terminal: terminal})
+			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: lifecycle, Messages: s.sessionCommittedAgentMessages(), Terminal: terminal})
 		}
 	}
-	if s.hooks.Message != nil && message != nil {
+	if s.hooks.Message != nil && agentMessage != nil && event.Kind != EventMessageCommitted {
 		var messageType MessageHookType
 		switch kind {
 		case "message_start":
 			messageType = MessageStartHookEvent
 		case "message_update":
 			messageType = MessageUpdateHookEvent
-		case "message_end":
-			messageType = MessageEndHookEvent
 		}
 		if messageType != "" {
-			if wrapped, err := agentmsg.NewLLM(message); err == nil {
-				_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: wrapped})
-			}
+			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage)})
 		}
 	}
-	if s.hooks.Tool != nil {
-		var toolType ToolHookType
-		switch kind {
-		case "tool_execution_start":
-			toolType = ToolStartHookEvent
-		case "tool_execution_end":
-			toolType = ToolResultHookEvent
-		}
-		if toolType != "" {
-			if call, err := llm.NewToolCallBlock(event.ToolCallID, event.ToolName, event.ToolArguments); err == nil {
-				_, _ = s.hooks.Tool(ctx, ToolHookEvent{Type: toolType, Call: call})
-			}
-		}
-	}
-}
-
-func wrapAgentMessages(messages []llm.ConversationMessage) []agentmsg.Message {
-	out := make([]agentmsg.Message, 0, len(messages))
-	for _, message := range messages {
-		if wrapped, err := agentmsg.NewLLM(message); err == nil {
-			out = append(out, wrapped)
-		}
-	}
-	return out
 }
 
 func retrySucceededMessage(message llm.ConversationMessage) bool {
@@ -472,6 +495,7 @@ func (s *AgentSession) resetSessionTurn(_ Event) {
 	s.lifecycleMu.Lock()
 	if s.run != nil {
 		s.run.assistantStarted = false
+		s.run.assistantHookStarted = false
 		s.run.toolResults = nil
 	}
 	s.lifecycleMu.Unlock()
@@ -487,21 +511,45 @@ func (s *AgentSession) beginAssistantMessage() bool {
 	return true
 }
 
-func (s *AgentSession) recordCommitted(message llm.ConversationMessage, model provider.ModelRef) {
-	if message == nil {
+func (s *AgentSession) beginAssistantHookMessage() bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.run == nil || s.run.assistantHookStarted {
+		return false
+	}
+	s.run.assistantHookStarted = true
+	return true
+}
+
+func (s *AgentSession) recordCommitted(message llm.ConversationMessage, agentMessage agentmsg.Message, model provider.ModelRef) {
+	if message == nil && agentMessage == nil {
 		return
 	}
 	s.lifecycleMu.Lock()
 	if s.run != nil {
-		s.run.committed = append(s.run.committed, message)
-		if message.Role() == llm.RoleToolResult {
+		if agentMessage != nil {
+			s.run.committedAgent = append(s.run.committedAgent, agentmsg.CloneOne(agentMessage))
+		}
+		if message != nil {
+			s.run.committed = append(s.run.committed, message)
+		}
+		if message != nil && message.Role() == llm.RoleToolResult {
 			s.run.toolResults = append(s.run.toolResults, message)
 		}
-		if message.Role() == llm.RoleAssistant && model.ID() != "" {
+		if message != nil && message.Role() == llm.RoleAssistant && model.ID() != "" {
 			s.run.terminalModel = model
 		}
 	}
 	s.lifecycleMu.Unlock()
+}
+
+func (s *AgentSession) sessionCommittedAgentMessages() []agentmsg.Message {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.run == nil {
+		return nil
+	}
+	return agentmsg.Clone(s.run.committedAgent)
 }
 
 func (s *AgentSession) sessionTurnResults() []llm.ConversationMessage {
@@ -628,6 +676,9 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	state.Active = s.activeState()
 	if kind == "agent_settled" {
 		state.Active = State{phase: PhaseIdle}
+		if s.hooks.Agent != nil {
+			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: AgentSettledHookEvent, Messages: s.sessionCommittedAgentMessages()})
+		}
 	}
 	steering, follow := s.RichQueues()
 	var retryEvent retryControl
@@ -745,7 +796,9 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, true, func(run context.Context) (Result, error) { return s.loop.Run(run, prompt) })
+	return s.runSession(ctx, true, prompt, func(run context.Context, extra []agentmsg.Message) (Result, error) {
+		return s.loop.runWithAgentMessages(run, prompt, extra)
+	})
 }
 func (s *AgentSession) Prompt(ctx context.Context, prompt string) (Result, error) {
 	return s.Run(ctx, prompt)
@@ -761,13 +814,15 @@ func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContent
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, true, func(run context.Context) (Result, error) { return s.loop.RunContent(run, content) })
+	return s.runSession(ctx, true, "", func(run context.Context, extra []agentmsg.Message) (Result, error) {
+		return s.loop.runContentWithAgentMessages(run, content, extra)
+	})
 }
 func (s *AgentSession) PromptContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
 	return s.RunContent(ctx, content)
 }
 
-func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, begin func(context.Context) (Result, error)) (result Result, runErr error) {
+func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, prompt string, begin func(context.Context, []agentmsg.Message) (Result, error)) (result Result, runErr error) {
 	run, err := s.admitSessionRun(ctx)
 	if err != nil {
 		return Result{}, err
@@ -779,16 +834,20 @@ func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, begi
 		}
 		s.finishSessionRun(run)
 	}()
-	if hook := s.hooks.BeforeAgentStart; hook != nil {
+	var extra []agentmsg.Message
+	if hook := s.hooks.BeforeAgentStart; prePromptCheck && hook != nil {
 		state := s.State()
-		out, hookErr := hook(run.ctx, BeforeAgentStartEvent{SystemPrompt: state.SystemPrompt, Messages: wrapAgentMessages(s.runtimeTranscript.Context().Messages())})
+		out, hookErr := hook(run.ctx, BeforeAgentStartEvent{Prompt: prompt, SystemPrompt: state.SystemPrompt, Messages: s.runtimeTranscript.Context().AgentMessages()})
 		if hookErr != nil {
 			return Result{}, hookErr
 		}
 		if err := out.Cancel.Validate(); err != nil {
 			return Result{}, err
 		}
-		if out.Cancel.Cancel {
+		if out.Cancel.Cancelled() {
+			if out.Cancel.Reason == "" {
+				return Result{}, ErrAgentAborted
+			}
 			return Result{}, fmt.Errorf("%w: %s", ErrAgentAborted, out.Cancel.Reason)
 		}
 		if out.SystemPrompt != nil {
@@ -797,13 +856,14 @@ func (s *AgentSession) runSession(ctx context.Context, prePromptCheck bool, begi
 			run.extensionSystemPrompt = &value
 			s.lifecycleMu.Unlock()
 		}
+		extra = agentmsg.Clone(out.ExtraMessages)
 	}
 
 	if prePromptCheck {
 		s.checkPrePromptCompaction(run)
 		s.setSessionPhase(run, PhaseProvider)
 	}
-	result, runErr = begin(run.ctx)
+	result, runErr = begin(run.ctx, extra)
 	for runErr == nil {
 		if cause := context.Cause(run.ctx); cause != nil {
 			s.endRetrySeries(run.ctx, false, cause.Error())
@@ -1031,6 +1091,15 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 	if s == nil || s.runtimeTranscript == nil || s.summarizer == nil {
 		return false
 	}
+	var proceed bool
+	var hookErr error
+	instructions, proceed, hookErr = s.beforeCompaction(run.ctx, reason, willRetry, instructions)
+	if !proceed {
+		if hookErr != nil {
+			s.emitCompaction(run.ctx, "compaction_end", reason, nil, false, false, hookErr.Error())
+		}
+		return false
+	}
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", reason, nil, false, willRetry, "")
 	result, err := s.runtimeTranscript.Compact(run.ctx, session.CompactRequest{
@@ -1049,7 +1118,39 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 		s.runtimeTranscript.removeLastFailure()
 	}
 	s.emitCompaction(run.ctx, "compaction_end", reason, &result, false, willRetry, "")
+	s.afterCompaction(run.ctx, reason, willRetry)
 	return true
+}
+
+func (s *AgentSession) beforeCompaction(ctx context.Context, reason CompactionReason, willRetry bool, instructions string) (string, bool, error) {
+	hook := s.hooks.SessionCompact
+	if hook == nil {
+		return instructions, true, nil
+	}
+	branch := []session.Entry(nil)
+	if durable, ok := s.transcript.(*session.Session); ok {
+		branch = durable.BranchPath()
+	}
+	result, err := hook(ctx, SessionCompactHookEvent{Before: true, Reason: reason, WillRetry: willRetry, Branch: branch, Instructions: instructions})
+	if err != nil {
+		return instructions, false, err
+	}
+	if result.Cancel.Cancelled() {
+		return instructions, false, nil
+	}
+	if result.Instructions != nil {
+		return *result.Instructions, true, nil
+	}
+	return instructions, true, nil
+}
+func (s *AgentSession) afterCompaction(ctx context.Context, reason CompactionReason, willRetry bool) {
+	if hook := s.hooks.SessionCompact; hook != nil {
+		branch := []session.Entry(nil)
+		if durable, ok := s.transcript.(*session.Session); ok {
+			branch = durable.BranchPath()
+		}
+		_, _ = hook(ctx, SessionCompactHookEvent{Before: false, Reason: reason, WillRetry: willRetry, Branch: branch})
+	}
 }
 
 type sessionObservedSummarizer struct {
@@ -1146,6 +1247,9 @@ func cloneSessionEvent(event SessionEvent) SessionEvent {
 	event.FollowUp = append([]llm.ConversationMessage(nil), event.FollowUp...)
 	event.ToolResults = append([]llm.ConversationMessage(nil), event.ToolResults...)
 	event.Messages = append([]llm.ConversationMessage(nil), event.Messages...)
+	event.AgentMessage = agentmsg.CloneOne(event.AgentMessage)
+	event.AgentMessages = agentmsg.Clone(event.AgentMessages)
+	event.Event.AgentMessage = agentmsg.CloneOne(event.Event.AgentMessage)
 	event.Event.ToolArguments = bytes.Clone(event.Event.ToolArguments)
 	event.Event.ToolOutput.Content = append([]llm.ToolResultContentBlock(nil), event.Event.ToolOutput.Content...)
 	event.Event.ToolOutput.AddedToolNames = append([]string(nil), event.Event.ToolOutput.AddedToolNames...)
@@ -1247,7 +1351,9 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, false, s.loop.Continue)
+	return s.runSession(ctx, false, "", func(run context.Context, _ []agentmsg.Message) (Result, error) {
+		return s.loop.Continue(run)
+	})
 }
 func (s *AgentSession) Steer(prompt string) error {
 	return s.enqueueText(prompt, true)
@@ -1444,6 +1550,14 @@ func (s *AgentSession) Close(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if s.hooks.SessionShutdown != nil {
+		if hookErr := s.hooks.SessionShutdown(ctx, SessionShutdownHookEvent{Reason: ShutdownQuit}); hookErr != nil {
+			s.lifecycleMu.Lock()
+			s.closing = false
+			s.lifecycleMu.Unlock()
+			return hookErr
+		}
+	}
 	s.lifecycleMu.Lock()
 	s.closed = true
 	s.closing = false
@@ -1484,24 +1598,14 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 		return session.CompactResult{}, err
 	}
 	defer s.finishSessionRun(run)
-	if hook := s.hooks.SessionCompact; hook != nil {
-		branch := []session.Entry(nil)
-		if durable, ok := s.transcript.(*session.Session); ok {
-			branch = durable.BranchPath()
-		}
-		result, hookErr := hook(run.ctx, SessionCompactHookEvent{Before: true, Reason: CompactionManual, Branch: branch, Instructions: instructions})
-		if hookErr != nil {
-			return session.CompactResult{}, hookErr
-		}
-		if err := result.Cancel.Validate(); err != nil {
-			return session.CompactResult{}, err
-		}
-		if result.Cancel.Cancel {
-			return session.CompactResult{}, fmt.Errorf("%w: %s", ErrAgentAborted, result.Cancel.Reason)
-		}
-		if result.Instructions != nil {
-			instructions = *result.Instructions
-		}
+	var proceed bool
+	var hookErr error
+	instructions, proceed, hookErr = s.beforeCompaction(run.ctx, CompactionManual, false, instructions)
+	if hookErr != nil {
+		return session.CompactResult{}, hookErr
+	}
+	if !proceed {
+		return session.CompactResult{}, ErrAgentAborted
 	}
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
@@ -1515,5 +1619,51 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 		return session.CompactResult{}, err
 	}
 	s.emitCompaction(run.ctx, "compaction_end", CompactionManual, &result, false, false, "")
+	s.afterCompaction(run.ctx, CompactionManual, false)
 	return result, nil
+}
+
+// SelectLeaf exposes the current Session tree navigation boundary without
+// teaching Agent about JSONL. Extensions may cancel before selection and are
+// notified after the new branch becomes active.
+func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil tree context", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return err
+	}
+	durable, ok := s.transcript.(*session.Session)
+	if !ok {
+		return fmt.Errorf("%w: transcript has no session tree", ErrInvalidConfig)
+	}
+	run, err := s.admitSessionRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishSessionRun(run)
+	old, _ := durable.LeafID()
+	branch := durable.BranchPath()
+	if hook := s.hooks.SessionTree; hook != nil {
+		result, err := hook(run.ctx, SessionTreeHookEvent{Before: true, OldLeafID: old, NewLeafID: id, Branch: branch})
+		if err != nil {
+			return err
+		}
+		if result.Cancel.Cancelled() {
+			return ErrAgentAborted
+		}
+	}
+	if err := durable.SelectLeaf(id); err != nil {
+		return err
+	}
+	refreshed := durable.BuildContext()
+	s.runtimeTranscript.mu.Lock()
+	s.runtimeTranscript.messages = refreshed.Messages()
+	s.runtimeTranscript.agentMessages = refreshed.AgentMessages()
+	s.runtimeTranscript.assistant, s.runtimeTranscript.hasAssistant = refreshed.AssistantProvenance()
+	s.runtimeTranscript.mu.Unlock()
+	if hook := s.hooks.SessionTree; hook != nil {
+		_, _ = hook(run.ctx, SessionTreeHookEvent{Before: false, OldLeafID: old, NewLeafID: id, Branch: durable.BranchPath()})
+	}
+	return nil
 }

@@ -1180,7 +1180,24 @@ func decodeUsage(raw []byte) (llm.Usage, error) {
 	if err := validateUsageCost(cost); err != nil {
 		return llm.Usage{}, err
 	}
-	return usage, nil
+	llmCost, err := usageCostToLLM(cost)
+	if err != nil {
+		return llm.Usage{}, err
+	}
+	return usage.WithCost(llmCost)
+}
+
+func usageCostToLLM(cost UsageCost) (llm.Cost, error) {
+	var values [5]float64
+	numbers := []json.Number{cost.Input, cost.Output, cost.CacheRead, cost.CacheWrite, cost.Total}
+	for index, number := range numbers {
+		value, err := number.Float64()
+		if err != nil {
+			return llm.Cost{}, fmt.Errorf("invalid assistant usage cost")
+		}
+		values[index] = value
+	}
+	return llm.Cost{Input: values[0], Output: values[1], CacheRead: values[2], CacheWrite: values[3], Total: values[4]}, nil
 }
 
 func decodeMessageTimestamp(object map[string]json.RawMessage) (time.Time, error) {

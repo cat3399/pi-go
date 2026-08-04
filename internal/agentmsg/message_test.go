@@ -2,12 +2,52 @@ package agentmsg_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 )
+
+func TestP0CustomStringAndRichFormsCannotDiverge(t *testing.T) {
+	text := "string"
+	if _, err := agentmsg.NewCustom(agentmsg.Custom{CustomType: "fixture", StringContent: &text, Content: []llm.UserContentBlock{mustText(t, "different")}, At: time.UnixMilli(1)}); err == nil {
+		t.Fatal("conflicting custom content was accepted")
+	}
+	value, err := agentmsg.NewCustom(agentmsg.Custom{CustomType: "fixture", StringContent: &text, At: time.UnixMilli(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Content) != 1 || value.Content[0].(llm.TextBlock).Text() != text {
+		t.Fatalf("canonical custom content = %#v", value.Content)
+	}
+}
+
+func TestP0OpaqueMessageUsesDurableEnvelopeAsSoleIdentity(t *testing.T) {
+	raw := json.RawMessage(`{"role":"futureRole","timestamp":7,"value":{"kept":true}}`)
+	value, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "futureRole", Data: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[0] = '['
+	if value.Role() != agentmsg.Role("futureRole") || value.Timestamp() != time.UnixMilli(7) || !strings.HasPrefix(string(value.Data), `{"role"`) {
+		t.Fatalf("opaque identity/data = %#v", value)
+	}
+	projected, err := agentmsg.ConvertToLLM([]agentmsg.Message{value})
+	if err != nil || len(projected) != 0 {
+		t.Fatalf("opaque default projection = %#v, %v", projected, err)
+	}
+	if _, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "other", Data: json.RawMessage(`{"role":"futureRole","timestamp":7}`)}); err == nil {
+		t.Fatal("mismatched opaque type/role was accepted")
+	}
+	if _, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole"}`)}); err == nil {
+		t.Fatal("opaque message without durable timestamp was accepted")
+	}
+	if _, err := agentmsg.NewOpaque(agentmsg.OpaqueMessage{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole","timestamp":7}`), At: time.UnixMilli(8)}); err == nil {
+		t.Fatal("mismatched opaque timestamp was accepted")
+	}
+}
 
 func TestConvertToLLMPreservesPiCodingMessageSemantics(t *testing.T) {
 	at := time.UnixMilli(123)

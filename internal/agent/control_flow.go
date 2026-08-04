@@ -9,6 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
@@ -297,6 +298,10 @@ func discardQueuePrefix(queue *[]llm.ConversationMessage, count int) {
 }
 
 func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (result Result, runErr error) {
+	return a.runV2WithAgentMessages(active, initial, nil)
+}
+
+func (a *Agent) runV2WithAgentMessages(active *activeRun, initial []llm.ConversationMessage, extra []agentmsg.Message) (result Result, runErr error) {
 	result.runID = active.id
 	// Continue from an assistant tail may already have reserved one steering
 	// message as the run's prompt. Upstream skips only that one initial steering
@@ -315,6 +320,11 @@ func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (res
 		a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
 		if err := a.commitQueued(active, turn, initial); err != nil {
 			return result, err
+		}
+		for _, message := range extra {
+			if err := a.commitAgentMessage(active, turn, message); err != nil {
+				return result, err
+			}
 		}
 	}
 	if !skipInitialSteeringPoll {
@@ -343,11 +353,12 @@ func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (res
 		if err != nil {
 			return result, err
 		}
+		terminal, err = a.commitAssistantV2(active, turn, terminal)
+		if err != nil {
+			return result, err
+		}
 		toolUse, usesTools := terminal.(llm.AssistantToolUseMessage)
 		if !usesTools {
-			if err := a.commitAssistantV2(active, turn, terminal); err != nil {
-				return result, err
-			}
 			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: terminal})
 			if terminal.FinishReason() == llm.FinishError || terminal.FinishReason() == llm.FinishAborted {
 				return a.acceptFinalV2(active, result, terminal)
@@ -379,9 +390,6 @@ func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (res
 			return a.acceptFinalV2(active, result, terminal)
 		}
 
-		if err := a.commit(active, turn, toolUse); err != nil {
-			return result, err
-		}
 		batch, err := a.executeBatchV2(active, turn, toolUse)
 		if err != nil {
 			return result, err
@@ -405,11 +413,12 @@ func (a *Agent) runV2(active *activeRun, initial []llm.ConversationMessage) (res
 				return result, err
 			}
 			a.notify(active.ctx, Event{Kind: EventTurnStarted, RunID: active.id, Turn: turn})
-			if err := a.commitAssistantV2(active, turn, failure); err != nil {
+			committedFailure, err := a.commitAssistantV2(active, turn, failure)
+			if err != nil {
 				return result, err
 			}
-			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: failure})
-			return a.acceptFinalV2(active, result, failure)
+			a.notify(active.ctx, Event{Kind: EventTurnSettled, RunID: active.id, Turn: turn, Terminal: committedFailure})
+			return a.acceptFinalV2(active, result, committedFailure)
 		}
 		queued, err := a.reserveQueue(active, true)
 		if err != nil {
@@ -480,7 +489,7 @@ func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.Conv
 	a.mu.Unlock()
 	for _, message := range messages {
 		if queueBacked {
-			if err := a.commitAfterAppend(active, turn, message, func() error {
+			if _, err := a.commitAfterAppend(active, turn, message, nil, func() error {
 				if err := a.ackQueueReservation(active); err != nil {
 					return err
 				}
@@ -493,7 +502,7 @@ func (a *Agent) commitQueued(active *activeRun, turn uint32, messages []llm.Conv
 			}
 			continue
 		}
-		if err := a.commit(active, turn, message); err != nil {
+		if _, err := a.commit(active, turn, message); err != nil {
 			return err
 		}
 	}
@@ -542,11 +551,16 @@ func (a *Agent) queueStateLocked(steering bool) (*[]llm.ConversationMessage, *in
 	return &a.followUpQueue, &a.followUpReserved
 }
 
-func (a *Agent) commitAssistantV2(active *activeRun, turn uint32, terminal llm.AssistantTerminal) error {
-	if err := a.commit(active, turn, terminal); err != nil {
-		return err
+func (a *Agent) commitAssistantV2(active *activeRun, turn uint32, terminal llm.AssistantTerminal) (llm.AssistantTerminal, error) {
+	committed, err := a.commit(active, turn, terminal)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	final, ok := committed.(llm.AssistantTerminal)
+	if !ok {
+		return nil, fmt.Errorf("%w: message_end assistant replacement is not terminal", ErrInvariant)
+	}
+	return final, nil
 }
 
 func (a *Agent) acceptFinalV2(active *activeRun, result Result, terminal llm.AssistantTerminal) (Result, error) {
@@ -705,6 +719,18 @@ func (a *Agent) providerRequest(active *activeRun, turnSnapshot TurnSnapshot) (p
 		snapshot = a.config.transcript.Context()
 	}
 	messages := snapshot.Messages()
+	if a.config.transformAgentContext != nil {
+		replacement, err := a.transformAgentContextV2(active.ctx, snapshot.AgentMessages())
+		if err != nil {
+			return provider.Request{}, err
+		}
+		if replacement != nil {
+			messages, err = agentmsg.ConvertToLLM(*replacement)
+			if err != nil {
+				return provider.Request{}, fmt.Errorf("%w: project agent context: %w", ErrContextTransform, err)
+			}
+		}
+	}
 	if a.config.transformContext != nil {
 		transformed, err := a.transformV2(active.ctx, messages)
 		if err != nil {
@@ -722,6 +748,24 @@ func (a *Agent) providerRequest(active *activeRun, turnSnapshot TurnSnapshot) (p
 		return provider.Request{}, fmt.Errorf("%w: build provider request: %w", ErrInvariant, err)
 	}
 	return request, nil
+}
+
+func (a *Agent) transformAgentContextV2(ctx context.Context, messages []agentmsg.Message) (transformed *[]agentmsg.Message, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			transformed = nil
+			err = fmt.Errorf("%w: panic: %s\n%s", ErrContextTransform, safeValueText(recovered), debug.Stack())
+		}
+	}()
+	transformed, err = a.config.transformAgentContext(ctx, agentmsg.Clone(messages))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrContextTransform, err)
+	}
+	if transformed == nil {
+		return nil, nil
+	}
+	clone := agentmsg.Clone(*transformed)
+	return &clone, nil
 }
 
 func toolDefinitionNames(definitions []provider.ToolDefinition) []string {
@@ -1016,6 +1060,8 @@ func (a *Agent) executeBatchV2(active *activeRun, turn uint32, assistant llm.Ass
 				results[i] = immediate
 				a.emitToolSettled(active, turn, immediate)
 				continue
+			} else if immediate.call.ID() != "" {
+				call = immediate.call
 			}
 			prepared = append(prepared, preparedCall{index: i, call: call})
 		}
@@ -1086,7 +1132,14 @@ func (a *Agent) preflightToolCallV2(active *activeRun, snapshot TurnSnapshot, as
 		}
 		return batchOutcome{call: call, output: ToolOutput{Text: reason}, err: errors.New(reason)}, true
 	}
-	return batchOutcome{}, false
+	if before.Arguments != nil {
+		updated, updateErr := llm.NewToolCallBlock(call.ID(), call.Name(), *before.Arguments)
+		if updateErr != nil {
+			return batchOutcome{call: call, output: ToolOutput{Text: updateErr.Error()}, err: updateErr}, true
+		}
+		call = updated
+	}
+	return batchOutcome{call: call}, false
 }
 
 func (a *Agent) beginToolCallV2(active *activeRun, turn uint32, call llm.ToolCallBlock) error {
@@ -1146,6 +1199,15 @@ func (a *Agent) executeOneNoStartV2(active *activeRun, turn uint32, snapshot Tur
 				}
 				outcome.output, outcome.err = ToolOutput{Text: reason}, errors.New(reason)
 				return outcome
+			}
+			if before.Arguments != nil {
+				updated, updateErr := llm.NewToolCallBlock(call.ID(), call.Name(), *before.Arguments)
+				if updateErr != nil {
+					outcome.output, outcome.err = ToolOutput{Text: updateErr.Error()}, updateErr
+					return outcome
+				}
+				call = updated
+				outcome.call = updated
 			}
 		}
 	}
@@ -1303,19 +1365,22 @@ func (a *Agent) commitToolResultV2(active *activeRun, turn uint32, outcome batch
 	if err != nil {
 		return fmt.Errorf("%w: tool result: %w", ErrInvariant, err)
 	}
-	switch result := message.(type) {
-	case llm.ToolResultMessage:
-		if err := llm.ValidateToolResultAssociation(outcome.call, result); err != nil {
-			return fmt.Errorf("%w: %w", ErrInvariant, err)
+	validateAssociation := func(candidate llm.ConversationMessage) error {
+		switch result := candidate.(type) {
+		case llm.ToolResultMessage:
+			if err := llm.ValidateToolResultAssociation(outcome.call, result); err != nil {
+				return fmt.Errorf("%w: %w", ErrInvariant, err)
+			}
+		case llm.ToolResultContentMessage:
+			if err := llm.ValidateToolResultContentAssociation(outcome.call, result); err != nil {
+				return fmt.Errorf("%w: %w", ErrInvariant, err)
+			}
+		default:
+			return fmt.Errorf("%w: unexpected tool result %T", ErrInvariant, candidate)
 		}
-	case llm.ToolResultContentMessage:
-		if err := llm.ValidateToolResultContentAssociation(outcome.call, result); err != nil {
-			return fmt.Errorf("%w: %w", ErrInvariant, err)
-		}
-	default:
-		return fmt.Errorf("%w: unexpected tool result %T", ErrInvariant, message)
+		return nil
 	}
-	if err := a.commit(active, turn, message); err != nil {
+	if _, err := a.commitAfterAppend(active, turn, message, validateAssociation, nil); err != nil {
 		return err
 	}
 	return nil

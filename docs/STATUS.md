@@ -1,13 +1,15 @@
 # 当前状态
 
-本文是 2026-08-03 的实现快照，基于代码、测试和 production assembly 重新审查，不沿用
+本文是 2026-08-04 的实现快照，基于代码、测试和 production assembly 重新审查，不沿用
 旧迁移计划的完成度判断。
 
-实现审查基线：
+最初差距审查的代码起点（不是当前实现版本）：
 
 - pi-go：`3b39253e2b5547e05d206941fcc2feccc90f62ae`
 - 原版 pi：`a116523434806910336b9de3e38a41aa5860030b`
 - pi-web：`dfab5853b8d2f717df259e7ebc94f49a3c2e43e7`
+
+当前 P0 复审以本文件所在提交及其测试结果为准，不再用上述 pi-go 起点哈希代表进度。
 
 ## 总体结论
 
@@ -38,7 +40,10 @@ assembly 已经启用全部能力。
 
 ## 与目标架构的主要差距
 
-### P0：兼容数据模型已完成（复审闭环）
+### P0：兼容数据模型复审修正中（尚未验收）
+
+下面列出的是当前修正候选已经覆盖的实现事实，不代表 P0 已经关闭。必须在独立的高强度
+复审确认契约、真实调用边界和回归测试均符合原版后，才能把 P0 标记为完成。
 
 - AgentMessage 的 LLM、bash、custom（含 string-vs-blocks）、opaque extension 消息均可原样
   写入 v3 JSONL、重开和沿分支投影；`ConvertToLLM` 是唯一的 LLM 投影边界；
@@ -49,7 +54,7 @@ assembly 已经启用全部能力。
 - request-scoped stream options 已具备 typed fetch、payload/response hooks、header 三态删除和
   thinking budgets；终态 usage 由 Model 计算 cost；
 - extension-neutral typed hook contract 覆盖 context、before agent start、provider request/headers/
-  response、agent/message/tool，以及 session start/shutdown/compact/tree/switch；其中没有 JS loader、
+  response、agent/message/tool，以及 session start/shutdown/compact/tree selection；其中没有 JS loader、
   TUI 或 UI-only execution surface；
 - deferred tools 不再只在 Request 收集：Responses 写入 client tool-search input，Kimi-compatible
   Completions 写入对应 system tool schema，普通 compat 路径不受污染。
@@ -105,9 +110,10 @@ P0–P4，必须现在正确建模。
 不为保留旧 package 或减少 diff 调整顺序，也不以 CLI demo 或单一 Provider 成功作为阶段
 完成证据。
 
-## 当前验证基线
+## 当前验证状态
 
-P0 完成后的验证基线：
+P0 复审修正候选的本地验证目标如下；它们全部通过也只是进入独立复审的必要条件，不是
+阶段完成声明：
 
 - `go build ./...` 通过；
 - `go vet ./...` 通过；
@@ -115,4 +121,4 @@ P0 完成后的验证基线：
 - `go test -race ./internal/agent ./internal/session ./internal/provider ./internal/model ./internal/agentmsg` 通过。
 
 旧 reasoning replay 断言已按原版完整 reasoning item（包括 summary）修正，因此不再是
-常驻失败基线。P1 开始前，当前默认测试集没有已知豁免。
+常驻失败基线。P1 只能在 P0 独立复审通过、文档验收状态同步更新后开始。

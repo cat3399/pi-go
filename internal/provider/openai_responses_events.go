@@ -852,7 +852,9 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if event.Response.Usage != nil {
 		var costErr error
 		usage, costErr = usage.WithCost(s.model.CalculateCost(usage))
-		if costErr != nil { return invalidResponsesEventFailure(fmt.Errorf("calculate token cost: %w", costErr)) }
+		if costErr != nil {
+			return invalidResponsesEventFailure(fmt.Errorf("calculate token cost: %w", costErr))
+		}
 	}
 	// A completed function call always produces a tool-use terminal even when
 	// the server reports the generic completed status.

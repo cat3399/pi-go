@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
@@ -258,6 +259,14 @@ func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr e
 	return a.runV2(active, []llm.ConversationMessage{user})
 }
 
+func (a *Agent) runWithAgentMessages(ctx context.Context, prompt string, extra []agentmsg.Message) (Result, error) {
+	active, user, err := a.beginRun(ctx, prompt)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runV2WithAgentMessages(active, []llm.ConversationMessage{user}, agentmsg.Clone(extra))
+}
+
 // RunContent accepts one rich user message while idle.  It deliberately uses
 // the same admission and run seam as Run: the message is committed by runV2
 // and therefore has the same event, provenance, and cancellation behaviour
@@ -268,6 +277,14 @@ func (a *Agent) RunContent(ctx context.Context, content []llm.UserContentBlock) 
 		return Result{}, err
 	}
 	return a.runV2(active, []llm.ConversationMessage{user})
+}
+
+func (a *Agent) runContentWithAgentMessages(ctx context.Context, content []llm.UserContentBlock, extra []agentmsg.Message) (Result, error) {
+	active, user, err := a.beginRunContent(ctx, content)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runV2WithAgentMessages(active, []llm.ConversationMessage{user}, agentmsg.Clone(extra))
 }
 
 func (a *Agent) beginRun(
@@ -446,16 +463,35 @@ func (a *Agent) notify(ctx context.Context, event Event) {
 	}
 }
 
-func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) error {
-	return a.commitAfterAppend(active, turn, message, nil)
+func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) (llm.ConversationMessage, error) {
+	return a.commitAfterAppend(active, turn, message, nil, nil)
 }
 
 func (a *Agent) commitAfterAppend(
 	active *activeRun,
 	turn uint32,
 	message llm.ConversationMessage,
+	beforeAppend func(llm.ConversationMessage) error,
 	afterAppend func() error,
-) error {
+) (llm.ConversationMessage, error) {
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		return nil, err
+	}
+	final, err := a.applyMessageEnd(active.ctx, wrapped)
+	if err != nil {
+		return nil, err
+	}
+	converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{final})
+	if err != nil || len(converted) != 1 {
+		return nil, fmt.Errorf("%w: invalid message_end replacement", ErrInvariant)
+	}
+	message = converted[0]
+	if beforeAppend != nil {
+		if err := beforeAppend(message); err != nil {
+			return nil, err
+		}
+	}
 	options := session.AppendOptions{}
 	var eventModel provider.ModelRef
 	if message.Role() == llm.RoleAssistant {
@@ -466,7 +502,7 @@ func (a *Agent) commitAfterAppend(
 			// exists in that case; use the immutable loop defaults solely for
 			// failure provenance rather than fabricating a request snapshot.
 			if !errors.Is(snapshotErr, ErrInvariant) {
-				return snapshotErr
+				return nil, snapshotErr
 			}
 			snapshot = TurnSnapshot{Model: a.config.model}
 		}
@@ -474,8 +510,98 @@ func (a *Agent) commitAfterAppend(
 			API:      snapshot.Model.API(),
 			Provider: snapshot.Model.Provider(),
 			Model:    snapshot.Model.ID(),
-			Cost:     session.ZeroUsageCost(),
+			Cost:     assistantSessionCost(message),
 		}
+		eventModel = snapshot.Model
+	}
+	settlementBase := context.WithoutCancel(active.ctx)
+	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
+	_, err = a.config.transcript.Append(settlement, message, options)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
+	}
+	if afterAppend != nil {
+		if err := afterAppend(); err != nil {
+			return nil, err
+		}
+	}
+	a.notify(active.ctx, Event{
+		Kind:         EventMessageCommitted,
+		RunID:        active.id,
+		Turn:         turn,
+		Message:      message,
+		AgentMessage: agentmsg.CloneOne(final),
+		Model:        eventModel,
+	})
+	return message, nil
+}
+
+func (a *Agent) applyMessageEnd(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
+	if message == nil {
+		return nil, fmt.Errorf("%w: nil message", ErrInvariant)
+	}
+	if a.config.messageEnd == nil {
+		return agentmsg.CloneOne(message), nil
+	}
+	replacement, err := a.config.messageEnd(ctx, agentmsg.CloneOne(message))
+	if err != nil {
+		return nil, err
+	}
+	if replacement == nil {
+		return agentmsg.CloneOne(message), nil
+	}
+	if replacement.Role() != message.Role() {
+		return nil, fmt.Errorf("%w: message_end replacement changed role", ErrInvariant)
+	}
+	return agentmsg.CloneOne(replacement), nil
+}
+
+func (a *Agent) commitAgentMessage(active *activeRun, turn uint32, message agentmsg.Message) error {
+	final, err := a.applyMessageEnd(active.ctx, message)
+	if err != nil {
+		return err
+	}
+	if standard, ok := final.(agentmsg.LLM); ok {
+		return a.commitConversationAfterMessageEnd(active, turn, standard.Conversation(), final)
+	}
+	transcript, ok := a.config.transcript.(AgentMessageTranscript)
+	if !ok {
+		return fmt.Errorf("%w: transcript does not support AgentMessage persistence", ErrTranscriptCommit)
+	}
+	settlementBase := context.WithoutCancel(active.ctx)
+	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
+	_, appendErr := transcript.AppendAgentMessage(settlement, final, session.AppendOptions{})
+	cancel()
+	if appendErr != nil {
+		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, final.Role(), appendErr)
+	}
+	converted, convertErr := agentmsg.ConvertToLLM([]agentmsg.Message{final})
+	if convertErr != nil {
+		return fmt.Errorf("%w: project committed AgentMessage: %w", ErrInvariant, convertErr)
+	}
+	var projected llm.ConversationMessage
+	if len(converted) == 1 {
+		projected = converted[0]
+	} else if len(converted) > 1 {
+		return fmt.Errorf("%w: one AgentMessage projected to multiple LLM messages", ErrInvariant)
+	}
+	a.notify(active.ctx, Event{Kind: EventMessageCommitted, RunID: active.id, Turn: turn, Message: projected, AgentMessage: agentmsg.CloneOne(final)})
+	return nil
+}
+
+func (a *Agent) commitConversationAfterMessageEnd(active *activeRun, turn uint32, message llm.ConversationMessage, final agentmsg.Message) error {
+	options := session.AppendOptions{}
+	var eventModel provider.ModelRef
+	if message.Role() == llm.RoleAssistant {
+		snapshot, snapshotErr := a.activeSnapshot(active)
+		if snapshotErr != nil {
+			if !errors.Is(snapshotErr, ErrInvariant) {
+				return snapshotErr
+			}
+			snapshot = TurnSnapshot{Model: a.config.model}
+		}
+		options.Assistant = session.AssistantProvenance{API: snapshot.Model.API(), Provider: snapshot.Model.Provider(), Model: snapshot.Model.ID(), Cost: assistantSessionCost(message)}
 		eventModel = snapshot.Model
 	}
 	settlementBase := context.WithoutCancel(active.ctx)
@@ -485,19 +611,20 @@ func (a *Agent) commitAfterAppend(
 	if err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 	}
-	if afterAppend != nil {
-		if err := afterAppend(); err != nil {
-			return err
-		}
-	}
-	a.notify(active.ctx, Event{
-		Kind:    EventMessageCommitted,
-		RunID:   active.id,
-		Turn:    turn,
-		Message: message,
-		Model:   eventModel,
-	})
+	a.notify(active.ctx, Event{Kind: EventMessageCommitted, RunID: active.id, Turn: turn, Message: message, AgentMessage: agentmsg.CloneOne(final), Model: eventModel})
 	return nil
+}
+
+func assistantSessionCost(message llm.ConversationMessage) session.UsageCost {
+	terminal, ok := message.(llm.AssistantTerminal)
+	if !ok {
+		return session.ZeroUsageCost()
+	}
+	cost, known := terminal.Usage().Cost()
+	if !known {
+		return session.ZeroUsageCost()
+	}
+	return session.UsageCostFromLLM(cost)
 }
 
 func (a *Agent) collectProvider(
