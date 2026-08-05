@@ -131,6 +131,8 @@ func snapshotAgentEvent(event any) agentEventSnapshot {
 		result.RunID = value.RunID
 	case agent.AgentEndEvent:
 		result.RunID, result.Turn, result.Terminal, result.RunError = value.RunID, value.Turn, value.Terminal, value.Err
+	case agent.SessionAgentEndEvent:
+		result.Terminal = value.Terminal
 	case agent.TurnStartEvent:
 		result.RunID, result.Turn = value.RunID, value.Turn
 	case agent.TurnEndEvent:
@@ -192,22 +194,44 @@ func snapshotAgentEvent(event any) agentEventSnapshot {
 		result.RunID, result.Turn, result.RetryAttempt, result.CompactionReason = value.RunID, value.Turn, value.Attempt, value.Reason
 		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
 		result.RetrySucceeded, result.RetryFinishReason = value.Succeeded, value.FinishReason
+	case agent.AutoRetryStartEvent:
+		result.RetryAttempt, result.RetryDelay = value.Attempt, value.Delay
+	case agent.AutoRetryEndEvent:
+		result.RetryAttempt, result.RetrySucceeded = value.Attempt, value.Success
+	case agent.SessionSummarizationRetryScheduledEvent:
+		result.RetryAttempt, result.RetryDelay, result.CompactionReason = value.Attempt, value.Delay, value.Reason
+		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
+	case agent.SessionSummarizationRetryAttemptEvent:
+		result.CompactionReason = value.Reason
+	case agent.SessionSummarizationRetryFinishedEvent:
+		result.RetryAttempt, result.CompactionReason = value.Attempt, value.Reason
+		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus
+		result.RetrySucceeded, result.RetryFinishReason = value.Succeeded, value.FinishReason
 	}
 	return result
 }
 
 type observedAgentEvent interface{ Type() agent.AgentEventType }
 
-func subscribeAllAgentEvents(runtime *agent.Agent, observer func(context.Context, observedAgentEvent)) func() {
-	unsubscribeEvents := runtime.Subscribe(func(ctx context.Context, event agent.AgentEvent) {
-		observer(ctx, event)
-	})
-	unsubscribeControl := runtime.SubscribeControl(func(ctx context.Context, event agent.AgentControlEvent) {
-		observer(ctx, event)
-	})
-	return func() {
-		unsubscribeEvents()
-		unsubscribeControl()
+func subscribeAllAgentEvents(runtime any, observer func(context.Context, observedAgentEvent)) func() {
+	switch value := runtime.(type) {
+	case *agent.Agent:
+		unsubscribeEvents := value.Subscribe(func(ctx context.Context, event agent.AgentEvent) {
+			observer(ctx, event)
+		})
+		unsubscribeControl := value.SubscribeControl(func(ctx context.Context, event agent.AgentControlEvent) {
+			observer(ctx, event)
+		})
+		return func() {
+			unsubscribeEvents()
+			unsubscribeControl()
+		}
+	case *agent.AgentSession:
+		return value.Subscribe(func(ctx context.Context, event agent.SessionEvent) {
+			observer(ctx, event)
+		})
+	default:
+		return func() {}
 	}
 }
 
@@ -286,14 +310,33 @@ func newAgent(
 	if err != nil {
 		t.Fatal(err)
 	}
+	var definitions []provider.ToolDefinition
+	if tool != nil {
+		var names []string
+		if named, ok := tool.(agent.NamedToolExecutor); ok {
+			for _, candidate := range []string{tool.Name(), "bash", "echo", "slow", "fast", "terminate"} {
+				if named.Supports(candidate) {
+					names = append(names, candidate)
+				}
+			}
+		} else {
+			names = append(names, tool.Name())
+		}
+		for _, name := range names {
+			definition, definitionErr := provider.NewToolDefinition(name, name, false, []byte(`{"type":"object"}`))
+			if definitionErr != nil {
+				t.Fatal(definitionErr)
+			}
+			definitions = append(definitions, definition)
+		}
+	}
 	var tick atomic.Int64
 	runtime, err := agent.New(agent.Config{
-		Provider:          providerImpl,
-		Transcript:        transcript,
-		Model:             model,
-		SystemPrompt:      "You are deterministic.",
-		Tool:              tool,
-		SettlementTimeout: time.Second,
+		Provider:     providerImpl,
+		Model:        model,
+		SystemPrompt: "You are deterministic.",
+		Tool:         tool,
+		Tools:        definitions,
 		Now: func() time.Time {
 			return agentTestEpoch.Add(time.Duration(tick.Add(1)) * time.Millisecond)
 		},
@@ -301,7 +344,28 @@ func newAgent(
 	if err != nil {
 		t.Fatalf("agent.New() error = %v", err)
 	}
+	subscribeTestTranscript(t, runtime, transcript)
 	return runtime
+}
+
+func subscribeTestTranscript(t *testing.T, runtime *agent.Agent, transcript agent.Transcript) {
+	t.Helper()
+	runtime.Subscribe(func(ctx context.Context, event agent.AgentEvent) error {
+		ended, ok := event.(agent.MessageEndEvent)
+		if !ok {
+			return nil
+		}
+		if standard, ok := ended.Message.(agentmsg.LLM); ok {
+			_, err := transcript.Append(context.WithoutCancel(ctx), standard.Conversation(), session.AppendOptions{})
+			return err
+		}
+		durable, ok := transcript.(agent.AgentMessageTranscript)
+		if !ok {
+			return agent.ErrTranscriptCommit
+		}
+		_, err := durable.AppendAgentMessage(context.WithoutCancel(ctx), ended.Message, session.AppendOptions{})
+		return err
+	})
 }
 
 func mustUsage(t *testing.T, input, output uint64) llm.Usage {

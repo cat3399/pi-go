@@ -194,6 +194,41 @@ func TestNewAssistantTextMessageFinishReason(t *testing.T) {
 	}
 }
 
+func TestNewAssistantToolUseMessageFinishReason(t *testing.T) {
+	t.Parallel()
+	call := mustToolCall(t, "call-1", "echo", []byte(`{}`))
+	tests := []struct {
+		name    string
+		finish  llm.FinishReason
+		wantErr bool
+	}{
+		{name: "tool use", finish: llm.FinishToolUse},
+		{name: "stop", finish: llm.FinishStop},
+		{name: "length", finish: llm.FinishLength},
+		{name: "pending", finish: llm.FinishPending, wantErr: true},
+		{name: "error", finish: llm.FinishError, wantErr: true},
+		{name: "aborted", finish: llm.FinishAborted, wantErr: true},
+		{name: "unknown", finish: llm.FinishReason(255), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			message, err := llm.NewAssistantToolUseMessageWithFinishAndMetadata(
+				[]llm.AssistantBlock{call}, test.finish, llm.Usage{}, time.UnixMilli(1), testAssistantProvenance(), nil, nil,
+			)
+			if test.wantErr {
+				if !errors.Is(err, llm.ErrInvalidFinishReason) {
+					t.Fatalf("error = %v", err)
+				}
+				return
+			}
+			if err != nil || message.FinishReason() != test.finish {
+				t.Fatalf("message=%#v error=%v", message, err)
+			}
+		})
+	}
+}
+
 func mustTextBlock(t *testing.T, text string) llm.TextBlock {
 	t.Helper()
 

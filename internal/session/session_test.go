@@ -149,6 +149,60 @@ func TestRichContentSessionRoundTripCopiesImageAndReasoningReplay(t *testing.T) 
 	}
 }
 
+func TestUserContentWireShapeUsesArrayAndRoundTripsConcreteType(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "user-shapes.jsonl")
+	transcript, err := Create(path, CreateOptions{
+		ID: "user-shapes", WorkingDir: directory,
+		Now:        func() time.Time { return time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC) },
+		NewEntryID: sequenceIDs("content", "text"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := mustTextBlock(t, "content prompt")
+	content, err := llm.NewUserContentMessage([]llm.UserContentBlock{block}, time.UnixMilli(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), content, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	text, err := llm.NewUserTextMessage("legacy text", time.UnixMilli(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), text, AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"content":[{"type":"text","text":"content prompt"}]`)) ||
+		!bytes.Contains(data, []byte(`"content":"legacy text"`)) || bytes.Contains(data, []byte(`"contentType"`)) {
+		t.Fatalf("user wire shapes = %s", data)
+	}
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	messages := reopened.Context().Messages()
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if _, ok := messages[0].(llm.UserContentMessage); !ok {
+		t.Fatalf("array user decoded as %T", messages[0])
+	}
+	if _, ok := messages[1].(llm.UserTextMessage); !ok {
+		t.Fatalf("string user decoded as %T", messages[1])
+	}
+}
+
 func TestAppendDerivesAssistantProvenanceFromMessage(t *testing.T) {
 	directory := t.TempDir()
 	transcript, err := Create(filepath.Join(directory, "provenance.jsonl"), CreateOptions{

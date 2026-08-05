@@ -498,21 +498,11 @@ func decodeUserMessage(entryID string, object map[string]json.RawMessage) (llm.C
 	if err != nil {
 		return nil, nil, err
 	}
-	texts := make([]llm.TextBlock, 0, len(userBlocks))
-	for _, block := range userBlocks {
-		if text, ok := block.(llm.TextBlock); ok {
-			texts = append(texts, text)
-		}
-	}
 	if len(userBlocks) == 0 && len(diagnostics) > 0 {
 		diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnprojectableMessage, EntryID: entryID, ContentIndex: -1})
 		return nil, diagnostics, nil
 	}
-	if len(userBlocks) != len(texts) {
-		message, err := llm.NewUserContentMessage(userBlocks, timestamp)
-		return message, diagnostics, err
-	}
-	message, err := llm.NewUserTextBlocksMessage(texts, timestamp)
+	message, err := llm.NewUserContentMessage(userBlocks, timestamp)
 	return message, diagnostics, err
 }
 
@@ -557,16 +547,15 @@ func decodeAssistantMessage(entryID string, object map[string]json.RawMessage) (
 			finish = llm.FinishLength
 		}
 		var message llm.AssistantTerminal
-		if hasThinking(blocks) {
+		if hasToolCall(blocks) {
+			message, err = llm.NewAssistantToolUseMessageWithFinishAndMetadata(blocks, finish, usage, timestamp, provenance, response, assistantDiagnostics)
+		} else if hasThinking(blocks) {
 			message, err = llm.NewAssistantRichMessageWithMetadata(blocks, finish, usage, timestamp, provenance, response, assistantDiagnostics)
 		} else {
 			message, err = llm.NewAssistantTextMessageWithMetadata(textBlocks(blocks), finish, usage, timestamp, provenance, response, assistantDiagnostics)
 		}
 		if err != nil {
 			return nil, nil, err
-		}
-		if hasToolCall(blocks) {
-			return nil, nil, fmt.Errorf("successful text assistant contains a tool call")
 		}
 		return message, diagnostics, nil
 	case "toolUse":

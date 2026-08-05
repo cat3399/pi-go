@@ -29,6 +29,7 @@ var (
 	ErrInvariant             = errors.New("agent invariant failure")
 	ErrProviderStream        = errors.New("provider stream failed")
 	ErrToolNotFound          = errors.New("tool not found")
+	ErrTruncatedToolCall     = errors.New("tool call arguments may be truncated")
 	ErrToolUnsettled         = errors.New("tool returned an unsettled outcome")
 	ErrAgentAborted          = errors.New("agent run aborted")
 	ErrContextTransform      = errors.New("agent context transform failed")
@@ -125,18 +126,13 @@ type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCal
 // request after a tool batch. This is the Go equivalent of pi's
 // prepareNextTurn boundary: a long-lived AgentSession can change its model,
 // thinking level, system prompt, or enabled tools without replacing a run.
-//
-// Provider and Transcript deliberately remain loop dependencies. They are
-// resource-lifetime owners, not mutable product settings.
 type TurnSnapshot struct {
-	Model          provider.Model
-	ThinkingLevel  provider.ThinkingLevel
-	SystemPrompt   string
-	Tool           ToolExecutor
-	Tools          []provider.ToolDefinition
-	BeforeToolCall BeforeToolCallHook
-	AfterToolCall  AfterToolCallHook
-	Stream         provider.StreamOptions
+	Model         provider.Model
+	ThinkingLevel provider.ThinkingLevel
+	SystemPrompt  string
+	Tool          ToolExecutor
+	Tools         []provider.ToolDefinition
+	Stream        provider.StreamOptions
 }
 
 // PrepareTurn is called without the Agent mutex held. Implementations
@@ -191,19 +187,23 @@ type ToolExecutionOverride interface {
 // Config is immutable after New. Tool may be nil so a model request for an
 // unavailable tool can still become a normal error ToolResult.
 type Config struct {
-	Provider     provider.Provider
-	Transcript   Transcript
-	Model        provider.Model
-	SystemPrompt string
-	Tool         ToolExecutor
+	Provider        provider.Provider
+	InitialMessages []agentmsg.Message
+	Model           provider.Model
+	ThinkingLevel   provider.ThinkingLevel
+	SystemPrompt    string
+	Stream          provider.StreamOptions
+	Tool            ToolExecutor
 	// ToolExecution controls a batch unless any selected named tool requests
 	// sequential execution. The zero value is parallel, matching upstream.
 	ToolExecution ToolExecutionMode
 	// TransformContext is an immutable request seam. It receives a copied
-	// transcript projection immediately before every provider call and must
-	// return a replacement snapshot; it never mutates durable transcript data.
+	// context projection immediately before every provider call and must return
+	// a replacement snapshot; it never mutates Agent's retained messages.
 	TransformContext      ContextTransform
 	TransformAgentContext AgentContextTransform
+	ConvertToLLM          AgentLoopConvertToLLM
+	GetAPIKey             AgentLoopAPIKey
 	SteeringMode          QueueMode
 	FollowUpMode          QueueMode
 	// Tools is the immutable model-visible schema snapshot for this run. It is
@@ -214,26 +214,22 @@ type Config struct {
 	AfterToolCall  AfterToolCallHook
 	MessageEnd     MessageEndHook
 	// PrepareTurn optionally replaces the static Model/SystemPrompt/Tool/Tools
-	// fields for every provider request. It is the only mutable-settings seam
-	// in Agent; callers that do not need a session keep the legacy static
-	// fields and receive identical behavior.
+	// fields for every provider request. AgentSession uses this narrower legacy
+	// snapshot seam for its dynamic product configuration.
 	PrepareTurn PrepareTurn
-	// ContextWindow and ContextReserve enable pre-prompt automatic compaction.
-	// A configured threshold requires a real Session compactor and summarizer.
-	ContextWindow     uint64
-	ContextReserve    uint64
-	KeepRecentTokens  uint64
-	Summarizer        session.Summarizer
-	Retry             RetryPolicy
-	Now               func() time.Time
-	SettlementTimeout time.Duration
+	// PrepareNextTurn is the stateful Agent's full after-turn boundary. When
+	// combined with PrepareTurn, its non-nil fields override the legacy
+	// snapshot update for the same turn.
+	PrepareNextTurn AgentLoopPrepareNextTurn
+	Now             func() time.Time
 }
 
 type runtimeConfig struct {
 	provider              provider.Provider
-	transcript            Transcript
 	model                 provider.Model
+	thinkingLevel         provider.ThinkingLevel
 	systemPrompt          string
+	stream                provider.StreamOptions
 	tool                  ToolExecutor
 	toolName              string
 	tools                 []provider.ToolDefinition
@@ -241,19 +237,15 @@ type runtimeConfig struct {
 	afterToolCall         AfterToolCallHook
 	messageEnd            MessageEndHook
 	prepareTurn           PrepareTurn
+	prepareNextTurn       AgentLoopPrepareNextTurn
 	now                   func() time.Time
-	settlementTimeout     time.Duration
 	toolExecution         ToolExecutionMode
 	transformContext      ContextTransform
 	transformAgentContext AgentContextTransform
+	convertToLLM          AgentLoopConvertToLLM
+	getAPIKey             AgentLoopAPIKey
 	steeringMode          QueueMode
 	followUpMode          QueueMode
-	contextWindow         uint64
-	contextReserve        uint64
-	keepRecentTokens      uint64
-	summarizer            session.Summarizer
-	compactor             sessionCompactor
-	retry                 provider.RetryController
 }
 
 // ToolExecutionMode controls one assistant message's complete tool batch.
@@ -327,9 +319,6 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Provider) {
 		return runtimeConfig{}, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
 	}
-	if isNilInterface(config.Transcript) {
-		return runtimeConfig{}, fmt.Errorf("%w: transcript is required", ErrInvalidConfig)
-	}
 	if _, err := provider.NewRequestWithOptions(config.Model, config.SystemPrompt, nil, provider.RequestOptions{
 		Tools:                  config.Tools,
 		AllowParallelToolCalls: false,
@@ -352,13 +341,6 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		}
 	}
 
-	settlementTimeout := config.SettlementTimeout
-	if settlementTimeout < 0 {
-		return runtimeConfig{}, fmt.Errorf("%w: settlement timeout cannot be negative", ErrInvalidConfig)
-	}
-	if settlementTimeout == 0 {
-		settlementTimeout = defaultSettlementTimeout
-	}
 	toolExecution := config.ToolExecution
 	if toolExecution == 0 {
 		toolExecution = ToolExecutionParallel
@@ -378,22 +360,12 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		(followUpMode != QueueOneAtATime && followUpMode != QueueAll) {
 		return runtimeConfig{}, fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
 	}
-	if config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
-		return runtimeConfig{}, fmt.Errorf("%w: context reserve exceeds window", ErrInvalidConfig)
+	thinkingLevel := config.ThinkingLevel
+	if thinkingLevel == "" {
+		thinkingLevel = provider.ThinkingOff
 	}
-	if config.ContextWindow != 0 && config.Summarizer == nil {
-		return runtimeConfig{}, fmt.Errorf("%w: automatic compaction requires a summarizer", ErrInvalidConfig)
-	}
-	var compactor sessionCompactor
-	if candidate, ok := config.Transcript.(sessionCompactor); ok {
-		compactor = candidate
-	}
-	if config.ContextWindow != 0 && compactor == nil {
-		return runtimeConfig{}, fmt.Errorf("%w: automatic compaction requires Session", ErrInvalidConfig)
-	}
-	retry, err := provider.NewRetryController(config.Retry)
-	if err != nil {
-		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	if !thinkingLevel.Valid() {
+		return runtimeConfig{}, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, thinkingLevel)
 	}
 	now := config.Now
 	if now == nil {
@@ -402,9 +374,10 @@ func validateConfig(config Config) (runtimeConfig, error) {
 
 	return runtimeConfig{
 		provider:              config.Provider,
-		transcript:            config.Transcript,
 		model:                 config.Model,
+		thinkingLevel:         thinkingLevel,
 		systemPrompt:          config.SystemPrompt,
+		stream:                provider.CloneStreamOptions(config.Stream),
 		tool:                  configuredTool,
 		toolName:              toolName,
 		tools:                 append([]provider.ToolDefinition(nil), config.Tools...),
@@ -412,19 +385,15 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		afterToolCall:         config.AfterToolCall,
 		messageEnd:            config.MessageEnd,
 		prepareTurn:           config.PrepareTurn,
+		prepareNextTurn:       config.PrepareNextTurn,
 		now:                   now,
-		settlementTimeout:     settlementTimeout,
 		toolExecution:         toolExecution,
 		transformContext:      config.TransformContext,
 		transformAgentContext: config.TransformAgentContext,
+		convertToLLM:          config.ConvertToLLM,
+		getAPIKey:             config.GetAPIKey,
 		steeringMode:          steeringMode,
 		followUpMode:          followUpMode,
-		contextWindow:         config.ContextWindow,
-		contextReserve:        config.ContextReserve,
-		keepRecentTokens:      config.KeepRecentTokens,
-		summarizer:            config.Summarizer,
-		compactor:             compactor,
-		retry:                 retry,
 	}, nil
 }
 
@@ -436,36 +405,6 @@ func configuredToolName(tool ToolExecutor) (name string, err error) {
 		}
 	}()
 	return tool.Name(), nil
-}
-
-// effectiveToolExecutionMode is the shared request/execution admission rule.
-// A request may advertise parallel calls only when every advertised tool can
-// remain in the parallel lane. At execution time the same rule is applied to
-// the calls actually selected by the provider. Unknown overrides inherit the
-// global mode; malformed override values fail closed to sequential.
-func effectiveToolExecutionMode(global ToolExecutionMode, executor ToolExecutor, names []string) ToolExecutionMode {
-	if global != ToolExecutionParallel {
-		return ToolExecutionSequential
-	}
-	overrides, ok := executor.(ToolExecutionOverride)
-	if !ok {
-		return ToolExecutionParallel
-	}
-	for _, name := range names {
-		mode, set := overrides.ToolExecutionMode(name)
-		if set && mode != ToolExecutionParallel {
-			return ToolExecutionSequential
-		}
-	}
-	return ToolExecutionParallel
-}
-
-func (c runtimeConfig) allowParallelToolCalls() bool {
-	names := make([]string, len(c.tools))
-	for index, definition := range c.tools {
-		names[index] = definition.Name()
-	}
-	return effectiveToolExecutionMode(c.toolExecution, c.tool, names) == ToolExecutionParallel
 }
 
 // Phase is the externally inspectable coarse phase. Detailed transition state
@@ -506,13 +445,33 @@ type State struct {
 	runID            uint64
 	turn             uint32
 	pendingToolCalls []string
+	model            provider.Model
+	thinkingLevel    provider.ThinkingLevel
+	systemPrompt     string
+	tools            []provider.ToolDefinition
+	messages         []agentmsg.Message
+	isStreaming      bool
+	streamingMessage agentmsg.Message
+	errorMessage     string
 }
 
 func (s State) Phase() Phase { return s.phase }
 func (s State) RunID() (uint64, bool) {
 	return s.runID, s.phase != PhaseIdle
 }
-func (s State) Turn() uint32 { return s.turn }
+func (s State) Turn() uint32                          { return s.turn }
+func (s State) Model() provider.Model                 { return s.model }
+func (s State) ThinkingLevel() provider.ThinkingLevel { return s.thinkingLevel }
+func (s State) SystemPrompt() string                  { return s.systemPrompt }
+func (s State) Tools() []provider.ToolDefinition {
+	return append([]provider.ToolDefinition(nil), s.tools...)
+}
+func (s State) Messages() []agentmsg.Message { return append([]agentmsg.Message(nil), s.messages...) }
+func (s State) IsStreaming() bool            { return s.isStreaming }
+func (s State) StreamingMessage() (agentmsg.Message, bool) {
+	return agentmsg.CloneOne(s.streamingMessage), s.streamingMessage != nil
+}
+func (s State) ErrorMessage() (string, bool) { return s.errorMessage, s.errorMessage != "" }
 
 // PendingToolCalls returns an immutable snapshot of all calls active in the
 // current batch. Parallel batches expose every call that has started and not

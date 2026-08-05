@@ -204,8 +204,9 @@ func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "second"))
+	transcript := newSession(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: providerImpl, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -223,6 +224,12 @@ func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
 	}
 	if got := requests[1].Messages(); len(got) != 3 {
 		t.Fatalf("second request messages = %d, want prior user/assistant plus prompt", len(got))
+	}
+	for index, message := range []llm.ConversationMessage{requests[0].Messages()[0], requests[1].Messages()[2], transcript.Context().Messages()[0], transcript.Context().Messages()[2]} {
+		content, ok := message.(llm.UserContentMessage)
+		if !ok || len(content.Content()) != 1 {
+			t.Fatalf("string prompt %d normalized to %#v", index, message)
+		}
 	}
 	if state := runtime.State(); state.Active.Phase() != agent.PhaseIdle || state.Model.ID() != "model" {
 		t.Fatalf("state after settled prompts = %#v", state)
@@ -316,6 +323,12 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 	if _, err := runtime.Run(context.Background(), "must not append text"); !errors.Is(err, agent.ErrBusy) {
 		t.Fatalf("concurrent Run error = %v, want ErrBusy", err)
 	}
+	if _, err := runtime.RunMessages(context.Background(), nil); !errors.Is(err, agent.ErrBusy) {
+		t.Fatalf("concurrent empty RunMessages error = %v, want ErrBusy", err)
+	}
+	if _, err := runtime.RunMessages(context.Background(), []agentmsg.Message{nil}); !errors.Is(err, agent.ErrBusy) {
+		t.Fatalf("concurrent invalid RunMessages error = %v, want ErrBusy", err)
+	}
 	if _, err := runtime.Continue(context.Background()); !errors.Is(err, agent.ErrBusy) {
 		t.Fatalf("concurrent Continue error = %v, want ErrBusy", err)
 	}
@@ -332,6 +345,40 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 	}
 	if got := messageText(t, messages[0]); got != "first" {
 		t.Fatalf("durable user message = %#v", messages[0])
+	}
+}
+
+func TestAgentSessionRunMessagesAllowsEmptyBatchAgainstExistingContext(t *testing.T) {
+	transcript := newSession(t)
+	seed, err := llm.NewUserTextMessage("existing", agentTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), seed, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "continued"))
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: providerImpl, Transcript: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.RunMessages(context.Background(), nil)
+	if err != nil || !result.Succeeded() || len(providerImpl.Requests()) != 1 || len(providerImpl.Requests()[0].Messages()) != 1 {
+		t.Fatalf("empty RunMessages = (%#v, %v), requests=%#v", result, err, providerImpl.Requests())
+	}
+	if _, err := runtime.RunMessages(context.Background(), []agentmsg.Message{nil}); !errors.Is(err, agent.ErrInvalidRun) {
+		t.Fatalf("idle invalid RunMessages error = %v", err)
+	}
+	if _, err := runtime.RunMessages(context.Background(), []agentmsg.Message{agentmsg.AssistantPartial{}}); !errors.Is(err, agent.ErrInvalidRun) {
+		t.Fatalf("idle partial RunMessages error = %v", err)
+	}
+	if err := runtime.FollowUpAgentMessage(agentmsg.AssistantPartial{}); !errors.Is(err, agent.ErrInvalidQueueMessage) {
+		t.Fatalf("partial queue error = %v", err)
+	}
+	if runtime.State().Active.Phase() != agent.PhaseIdle {
+		t.Fatalf("invalid RunMessages left phase %s", runtime.State().Active.Phase())
 	}
 }
 
@@ -372,8 +419,9 @@ func TestAgentSessionQueuesRichContentInPriorityOrder(t *testing.T) {
 	if _, ok := requests[0].Messages()[1].(llm.UserContentMessage); !ok {
 		t.Fatalf("initial request did not include idle steering = %#v", requests[0].Messages())
 	}
-	if got := requests[1].Messages()[3].(llm.UserTextMessage).Content()[0].Text(); got != "after" {
-		t.Fatalf("follow request tail = %q", got)
+	followMessage, ok := requests[1].Messages()[3].(llm.UserContentMessage)
+	if !ok || len(followMessage.Content()) != 1 || followMessage.Content()[0].(llm.TextBlock).Text() != "after" {
+		t.Fatalf("follow request tail = %#v", requests[1].Messages()[3])
 	}
 }
 
@@ -446,6 +494,40 @@ func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 	}
 	if want := []string{"user:initial", "queue", "user:queued"}; !reflect.DeepEqual(lifecycle, want) {
 		t.Fatalf("queued message lifecycle = %v, want %v", lifecycle, want)
+	}
+}
+
+func TestAgentSessionContinuesForCustomAgentMessageQueuedAtLowAgentEnd(t *testing.T) {
+	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "after custom"))
+	transcript := newSession(t)
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: providerImpl, Transcript: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := false
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if _, ok := event.(agent.SessionAgentEndEvent); !ok || queued {
+			return
+		}
+		queued = true
+		custom, customErr := agentmsg.NewCustomText("review", "custom follow-up", false, nil, agentTestEpoch)
+		if customErr != nil {
+			t.Error(customErr)
+			return
+		}
+		if queueErr := runtime.FollowUpAgentMessage(custom); queueErr != nil {
+			t.Error(queueErr)
+		}
+	})
+	result, err := runtime.Run(context.Background(), "go")
+	if err != nil || !result.Succeeded() || providerImpl.CallCount() != 2 {
+		t.Fatalf("Run = (%#v, %v), calls=%d", result, err, providerImpl.CallCount())
+	}
+	messages := transcript.Context().AgentMessages()
+	if len(messages) != 4 || messages[2].Role() != agentmsg.RoleCustom {
+		t.Fatalf("custom continuation messages = %#v", messages)
 	}
 }
 
@@ -1447,6 +1529,11 @@ func TestNewSessionRejectsNilDependenciesAndInvalidRetry(t *testing.T) {
 		Retry: agent.RetryPolicy{InitialDelay: -time.Second},
 	}); !errors.Is(err, agent.ErrInvalidConfig) {
 		t.Fatalf("invalid retry error = %v", err)
+	}
+	if _, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: model, SettlementTimeout: -time.Second,
+	}); !errors.Is(err, agent.ErrInvalidConfig) {
+		t.Fatalf("negative settlement error = %v", err)
 	}
 }
 

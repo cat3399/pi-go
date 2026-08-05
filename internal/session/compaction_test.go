@@ -634,6 +634,14 @@ func messageTexts(messages []llm.ConversationMessage) []string {
 		switch message := message.(type) {
 		case llm.UserTextMessage:
 			result = append(result, joinTextBlocks(message.Content()))
+		case llm.UserContentMessage:
+			var blocks []llm.TextBlock
+			for _, content := range message.Content() {
+				if text, ok := content.(llm.TextBlock); ok {
+					blocks = append(blocks, text)
+				}
+			}
+			result = append(result, joinTextBlocks(blocks))
 		case llm.AssistantTextMessage:
 			result = append(result, joinTextBlocks(message.Content()))
 		default:

@@ -159,6 +159,53 @@ func TestStreamCollectorErrorRetainsThinkingAndCompleteToolCall(t *testing.T) {
 	}
 }
 
+func TestStreamCollectorAndAssistantRebuildersPreserveLengthToolUse(t *testing.T) {
+	t.Parallel()
+
+	collector := &llm.StreamCollector{}
+	call := mustToolCall(t, "call-1", "inspect", []byte(`{"path":"README.md"}`))
+	accept(t, collector, newStartEvent(t))
+	accept(t, collector, toolCallStart(t, 0, call.ID(), call.Name()))
+	accept(t, collector, toolCallDelta(t, 0, call.ArgumentsJSON()))
+	accept(t, collector, toolCallEnd(t, 0, call))
+	timestamp := time.Date(2026, time.August, 5, 1, 2, 3, 0, time.UTC)
+	accept(t, collector, done(t, llm.FinishLength, timestamp))
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := collector.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUse, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || toolUse.FinishReason() != llm.FinishLength || len(toolUse.Blocks()) != 1 {
+		t.Fatalf("collector terminal = %#v", terminal)
+	}
+
+	cost := llm.Cost{Input: 1, Output: 2, Total: 3}
+	usage, err := llm.NewUsage(llm.UsageSpec{Input: 4, Output: 5, Cost: &cost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repriced, err := llm.WithAssistantUsage(toolUse, usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reboundProvenance := llm.AssistantProvenance{Provider: "other", API: "other-api", Model: "other-model"}
+	rebound, err := llm.WithAssistantProvenance(repriced, reboundProvenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reboundToolUse, ok := rebound.(llm.AssistantToolUseMessage)
+	if !ok || reboundToolUse.FinishReason() != llm.FinishLength || reboundToolUse.Usage() != usage || reboundToolUse.AssistantProvenance() != reboundProvenance {
+		t.Fatalf("rebuilt terminal = %#v", rebound)
+	}
+	reboundCall := reboundToolUse.Blocks()[0].(llm.ToolCallBlock)
+	if reboundCall.ID() != call.ID() || reboundCall.Name() != call.Name() || !bytes.Equal(reboundCall.ArgumentsJSON(), call.ArgumentsJSON()) {
+		t.Fatalf("rebuilt call = %#v", reboundCall)
+	}
+}
+
 func TestStreamCollectorMixedTextAndToolCall(t *testing.T) {
 	t.Parallel()
 
@@ -292,12 +339,6 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 			},
 		},
 		{
-			name: "done before start",
-			events: func(t *testing.T) []llm.StreamEvent {
-				return []llm.StreamEvent{done(t, llm.FinishStop, time.Time{})}
-			},
-		},
-		{
 			name: "second start",
 			events: func(t *testing.T) []llm.StreamEvent {
 				return []llm.StreamEvent{newStartEvent(t), newStartEvent(t)}
@@ -367,19 +408,6 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "stop terminal contains tool call",
-			events: func(t *testing.T) []llm.StreamEvent {
-				call := mustToolCall(t, "call-1", "echo", []byte("{}"))
-				return []llm.StreamEvent{
-					newStartEvent(t),
-					toolCallStart(t, 0, "call-1", "echo"),
-					toolCallDelta(t, 0, []byte("{}")),
-					toolCallEnd(t, 0, call),
-					done(t, llm.FinishStop, time.Time{}),
-				}
-			},
-		},
 	}
 
 	for _, tt := range tests {
@@ -400,6 +428,35 @@ func TestStreamCollectorRejectsMalformedOrder(t *testing.T) {
 				t.Fatalf("Result() error = %v, want persisted protocol error", err)
 			}
 		})
+	}
+}
+
+func TestStreamCollectorPreservesStopWithToolCall(t *testing.T) {
+	t.Parallel()
+	collector := &llm.StreamCollector{}
+	call := mustToolCall(t, "call-1", "echo", []byte("{}"))
+	events := []llm.StreamEvent{
+		newStartEvent(t),
+		toolCallStart(t, 0, "call-1", "echo"),
+		toolCallDelta(t, 0, []byte("{}")),
+		toolCallEnd(t, 0, call),
+		done(t, llm.FinishStop, time.Time{}),
+	}
+	for _, event := range events {
+		if err := collector.Accept(event); err != nil {
+			t.Fatalf("Accept(%T): %v", event, err)
+		}
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := collector.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUse, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || toolUse.FinishReason() != llm.FinishStop {
+		t.Fatalf("terminal = %#v", terminal)
 	}
 }
 

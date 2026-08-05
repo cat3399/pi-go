@@ -173,8 +173,8 @@ func TestRunAcceptsLeadingDashPromptAndRelativeSessionPath(t *testing.T) {
 		_ uint64,
 	) (llm.AssistantTerminal, error) {
 		messages := request.Messages()
-		user, ok := messages[0].(llm.UserTextMessage)
-		if !ok || textBlocks(user.Content()) != "- explain" {
+		user, ok := messages[0].(llm.UserContentMessage)
+		if !ok || len(user.Content()) != 1 || user.Content()[0].(llm.TextBlock).Text() != "- explain" {
 			return nil, fmt.Errorf("user prompt = %T", messages[0])
 		}
 		return textTerminal(t, "accepted"), nil

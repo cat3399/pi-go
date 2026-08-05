@@ -332,7 +332,7 @@ func rebuildAssistantTerminal(message AssistantTerminal, usage Usage, provenance
 	case AssistantRichMessage:
 		return NewAssistantRichMessageWithMetadata(value.Blocks(), value.FinishReason(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
 	case AssistantToolUseMessage:
-		return NewAssistantToolUseMessageWithMetadata(value.Blocks(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
+		return NewAssistantToolUseMessageWithFinishAndMetadata(value.Blocks(), value.FinishReason(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
 	case AssistantFailureMessage:
 		return NewAssistantFailureMessageWithBlocksAndMetadata(value.Blocks(), value.FinishReason(), value.Failure(), usage, value.Timestamp(), provenance, responsePointer, diagnostics)
 	default:

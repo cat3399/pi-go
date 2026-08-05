@@ -1269,8 +1269,8 @@ func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *te
 	if len(messages) == 0 {
 		t.Fatalf("durable expanded prompt = %#v", messages)
 	}
-	stored, ok := messages[0].(llm.UserTextMessage)
-	if !ok || textBlocks(stored.Content()) != "review file.go all" {
+	stored, ok := messages[0].(llm.UserContentMessage)
+	if !ok || len(stored.Content()) != 1 || stored.Content()[0].(llm.TextBlock).Text() != "review file.go all" {
 		t.Fatalf("durable expanded prompt = %#v", messages)
 	}
 }

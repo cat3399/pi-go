@@ -22,9 +22,10 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-// This joins the legacy Session admission path to the production-shaped
+// This joins a migrated legacy session to AgentSession's production-shaped
 // Responses retry controller. Both attempts must rebuild the same migrated
-// context, while only the accepted turn is appended to durable v3 state.
+// context, while the failed attempt remains durable but is projected out of
+// the retry request.
 func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "legacy-retry.jsonl")
@@ -35,7 +36,7 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	if err := os.WriteFile(path, legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	entryIDs := []string{"retry-user", "retry-assistant"}
+	entryIDs := []string{"retry-user", "retry-failure", "retry-assistant"}
 	nextEntryID := 0
 	transcript, err := session.Open(path, session.OpenOptions{
 		Now: func() time.Time { return agentTestEpoch },
@@ -77,7 +78,7 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 		Now:   func() time.Time { return agentTestEpoch },
@@ -106,8 +107,8 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 			t.Fatalf("retry request %d rebuilt wrong migrated context: %s", index+1, wire)
 		}
 	}
-	if entries := transcript.Entries(); len(entries) != 3 {
-		t.Fatalf("legacy retry durable entries = %d, want 3", len(entries))
+	if entries := transcript.Entries(); len(entries) != 4 {
+		t.Fatalf("legacy retry durable entries = %d, want 4", len(entries))
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(data), `"version":3`) {
@@ -121,7 +122,7 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if messages := reopened.BuildContext().Messages(); len(messages) != 3 {
+	if messages := reopened.BuildContext().Messages(); len(messages) != 4 {
 		t.Fatalf("reopened legacy retry context = %#v", messages)
 	}
 }
@@ -203,7 +204,7 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 	}
 	transcript := newSession(t)
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model,
 		SystemPrompt: resourceSnapshot.SystemPrompt, Tool: toolRuntime, Tools: definitions,
 		Retry: agent.RetryPolicy{
@@ -257,7 +258,11 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 		t.Fatal("integrated run did not settle")
 	}
 	if outcome.err != nil || !outcome.result.Succeeded() || outcome.result.ProviderTurns() != 3 || outcome.result.ToolExecutions() != 2 {
-		t.Fatalf("Run() = success %t, turns %d, tools %d, error %v", outcome.result.Succeeded(), outcome.result.ProviderTurns(), outcome.result.ToolExecutions(), outcome.err)
+		terminal, _ := outcome.result.Terminal()
+		requestMu.Lock()
+		requestCount := len(payloads)
+		requestMu.Unlock()
+		t.Fatalf("Run() = success %t, turns %d, tools %d, terminal %T %#v, requests %d, error %v", outcome.result.Succeeded(), outcome.result.ProviderTurns(), outcome.result.ToolExecutions(), terminal, terminal, requestCount, outcome.err)
 	}
 	terminal, ok := outcome.result.Terminal()
 	final, finalOK := terminal.(llm.AssistantTextMessage)
@@ -401,10 +406,10 @@ func assertCoreIntegrationSession(t *testing.T, transcript *session.Session) {
 	t.Helper()
 	entries := transcript.Entries()
 	messages := transcript.BuildContext().Messages()
-	if len(entries) != 5 || len(messages) != 5 {
-		t.Fatalf("durable entries/messages = %d/%d, want 5/5", len(entries), len(messages))
+	if len(entries) != 6 || len(messages) != 6 {
+		t.Fatalf("durable entries/messages = %d/%d, want 6/6", len(entries), len(messages))
 	}
-	wantRoles := []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult, llm.RoleAssistant}
+	wantRoles := []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleToolResult, llm.RoleAssistant, llm.RoleAssistant}
 	for index, want := range wantRoles {
 		if messages[index].Role() != want {
 			t.Fatalf("message %d role = %s, want %s", index, messages[index].Role(), want)
@@ -441,21 +446,20 @@ func assertCoreIntegrationLifecycle(t *testing.T, events []agentEventSnapshot) {
 	var retries, settled []agentEventSnapshot
 	for _, event := range events {
 		switch event.Kind {
-		case agent.ProviderRetryScheduledEventType, agent.ProviderRetryAttemptEventType, agent.ProviderRetryFinishedEventType:
+		case agent.AutoRetryStartEventType, agent.AutoRetryEndEventType:
 			retries = append(retries, event)
 		case agent.AgentEndEventType:
 			settled = append(settled, event)
 		}
 	}
-	if len(retries) != 3 || retries[0].Kind != agent.ProviderRetryScheduledEventType || retries[1].Kind != agent.ProviderRetryAttemptEventType || retries[2].Kind != agent.ProviderRetryFinishedEventType {
+	if len(retries) != 2 || retries[0].Kind != agent.AutoRetryStartEventType || retries[1].Kind != agent.AutoRetryEndEventType {
 		t.Fatalf("retry lifecycle = %+v", retries)
 	}
-	if retries[0].Turn != 2 || retries[0].RetryAttempt != 2 || retries[0].RetryFailureKind != provider.FailureTransport ||
-		retries[1].RetryAttempt != 2 || retries[2].RetryAttempt != 2 || !retries[2].RetrySucceeded ||
-		retries[2].RetryFinishReason != provider.RetryFinishSucceeded {
+	if retries[0].RetryAttempt != 1 || retries[1].RetryAttempt != 1 || !retries[1].RetrySucceeded {
 		t.Fatalf("retry reason/settlement = %+v", retries)
 	}
-	if len(settled) != 1 || settled[0].RunError != nil || settled[0].Terminal == nil || settled[0].Terminal.FinishReason() != llm.FinishStop {
+	if len(settled) != 2 || settled[0].Terminal == nil || settled[0].Terminal.FinishReason() != llm.FinishError ||
+		settled[1].Terminal == nil || settled[1].Terminal.FinishReason() != llm.FinishStop {
 		t.Fatalf("run settlement = %+v", settled)
 	}
 }

@@ -949,20 +949,37 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		return nil
 
 	case DoneEvent:
-		if c.phase != streamActive {
-			return c.fail(nil, "done arrived before start")
+		if c.phase != streamNew && c.phase != streamActive {
+			return c.fail(nil, "done arrived in invalid stream phase")
 		}
 		if len(c.slots) != 0 {
 			return c.fail(nil, "done arrived before all content blocks ended")
 		}
 		blocks := c.orderedBlocks()
-		if !event.AssistantProvenance().Matches(c.start.provenance.Provider, c.start.provenance.API, c.start.provenance.Model) {
+		if c.phase == streamActive && !event.AssistantProvenance().Matches(c.start.provenance.Provider, c.start.provenance.API, c.start.provenance.Model) {
 			return c.fail(nil, "done provenance does not match start")
 		}
 		var message AssistantTerminal
 		var err error
 		switch event.reason {
 		case FinishStop, FinishLength:
+			hasToolCall := false
+			for _, block := range blocks {
+				if _, ok := block.(ToolCallBlock); ok {
+					hasToolCall = true
+					break
+				}
+			}
+			response, hasResponse := event.ResponseMetadata()
+			var responsePointer *AssistantResponseMetadata
+			if hasResponse {
+				responsePointer = &response
+			}
+			provenance := event.AssistantProvenance()
+			if hasToolCall {
+				message, err = NewAssistantToolUseMessageWithFinishAndMetadata(blocks, event.reason, event.usage, event.timestamp, provenance, responsePointer, event.Diagnostics())
+				break
+			}
 			text := make([]TextBlock, len(blocks))
 			hasThinking := false
 			for index, block := range blocks {
@@ -976,12 +993,6 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 					return c.fail(nil, "%s terminal contains a tool call", event.reason)
 				}
 			}
-			response, hasResponse := event.ResponseMetadata()
-			var responsePointer *AssistantResponseMetadata
-			if hasResponse {
-				responsePointer = &response
-			}
-			provenance := event.AssistantProvenance()
 			if hasThinking {
 				message, err = NewAssistantRichMessageWithMetadata(blocks, event.reason, event.usage, event.timestamp, provenance, responsePointer, event.Diagnostics())
 			} else {
@@ -1104,6 +1115,17 @@ func (c *StreamCollector) Result() (AssistantTerminal, error) {
 		return nil, ErrStreamNotClosed
 	}
 	return c.terminal, nil
+}
+
+// FailureBlocks returns the canonical terminal-safe projection of all content
+// observed so far. Active text and thinking are materialized, a syntactically
+// complete active tool call is preserved, and incomplete tool JSON is omitted.
+// It is shared by provider ErrorEvent handling and transport-failure adapters.
+func (c *StreamCollector) FailureBlocks() ([]AssistantBlock, error) {
+	if c.terminal != nil {
+		return c.terminal.Blocks(), nil
+	}
+	return c.failureBlocks()
 }
 
 func (c *StreamCollector) fail(cause error, format string, args ...any) error {

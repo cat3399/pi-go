@@ -375,10 +375,10 @@ func TestOpenUsesPhysicalTailAncestryForBranchedSession(t *testing.T) {
 	if len(messages) != 2 {
 		t.Fatalf("active context count = %d, want 2", len(messages))
 	}
-	if got := messages[0].(llm.UserTextMessage).Content()[0].Text(); got != "root" {
+	if got := messages[0].(llm.UserContentMessage).Content()[0].(llm.TextBlock).Text(); got != "root" {
 		t.Fatalf("root text = %q", got)
 	}
-	if got := messages[1].(llm.UserTextMessage).Content()[0].Text(); got != "active" {
+	if got := messages[1].(llm.UserContentMessage).Content()[0].(llm.TextBlock).Text(); got != "active" {
 		t.Fatalf("tail text = %q", got)
 	}
 	if _, ok := session.Context().AssistantProvenance(); ok {
@@ -479,7 +479,7 @@ func TestUnknownMessageRoleIsPreservedButNotProjected(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := session.Context()
-	if got := context.Messages(); len(got) != 1 || got[0].(llm.UserTextMessage).Content()[0].Text() != "known" {
+	if got := context.Messages(); len(got) != 1 || got[0].(llm.UserContentMessage).Content()[0].(llm.TextBlock).Text() != "known" {
 		t.Fatalf("context messages = %#v", got)
 	}
 	if got := context.Diagnostics(); len(got) != 1 || got[0].Code != DiagnosticUnknownMessageRole {

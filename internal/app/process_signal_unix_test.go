@@ -73,12 +73,12 @@ func TestProcessSignalsSettleCancellationBeforeExit(t *testing.T) {
 				t.Fatalf("signal durable roles = %v", roles)
 			}
 			result, ok := messages[2].(llm.ToolResultMessage)
-			if !ok || !result.IsError() || textBlocks(result.Content()) != "Tool execution cancelled" {
-				t.Fatalf("signal tool result = %T", messages[2])
+			if !ok || !result.IsError() || textBlocks(result.Content()) != "Command aborted" {
+				t.Fatalf("signal tool result = %#v", messages[2])
 			}
 			failure, ok := messages[3].(llm.AssistantFailureMessage)
-			if !ok || failure.FinishReason() != llm.FinishAborted || failure.ErrorMessage() != "Run cancelled during tool execution" {
-				t.Fatalf("signal final = %T", messages[3])
+			if !ok || failure.FinishReason() != llm.FinishAborted || failure.ErrorMessage() != "scripted provider request aborted" {
+				t.Fatalf("signal final = %#v", messages[3])
 			}
 		})
 	}
@@ -152,12 +152,12 @@ func TestProcessRepeatedSignalWaitsForFirstCancellationSettlement(t *testing.T) 
 		t.Fatalf("repeated signal durable roles = %v", roles)
 	}
 	result, ok := messages[2].(llm.ToolResultMessage)
-	if !ok || !result.IsError() || textBlocks(result.Content()) != "Tool execution cancelled" {
-		t.Fatalf("repeated signal tool result = %T", messages[2])
+	if !ok || !result.IsError() || textBlocks(result.Content()) != "Command aborted" {
+		t.Fatalf("repeated signal tool result = %#v", messages[2])
 	}
 	failure, ok := messages[3].(llm.AssistantFailureMessage)
-	if !ok || failure.FinishReason() != llm.FinishAborted || failure.ErrorMessage() != "Run cancelled during tool execution" {
-		t.Fatalf("repeated signal final = %T", messages[3])
+	if !ok || failure.FinishReason() != llm.FinishAborted || failure.ErrorMessage() != "scripted provider request aborted" {
+		t.Fatalf("repeated signal final = %#v", messages[3])
 	}
 }
 

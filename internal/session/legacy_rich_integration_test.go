@@ -228,7 +228,8 @@ func TestRecoverTrailingPartialKeepsRichSelectedBranch(t *testing.T) {
 		t.Fatalf("recovered rich parent = (%q, %t)", parent, ok)
 	}
 	messages := transcript.BuildContext().Messages()
-	if len(messages) != 2 || messages[0].(llm.UserTextMessage).Content()[0].Text() != "root message" {
+	user, ok := messages[0].(llm.UserContentMessage)
+	if len(messages) != 2 || !ok || user.Content()[0].(llm.TextBlock).Text() != "root message" {
 		t.Fatalf("recovered selected context = %#v", messages)
 	}
 	assistant := messages[1].(llm.AssistantRichMessage)

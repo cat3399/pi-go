@@ -26,8 +26,8 @@ func (fn contextRetrySummarizerFunc) Summarize(ctx context.Context, input sessio
 	return fn(ctx, input)
 }
 
-func TestAgentSubscribeKeepsControlEventsOutOfPiLifecycleUnion(t *testing.T) {
-	coordinator, err := agent.New(agent.Config{
+func TestAgentSessionPublishesRetryOutsideCoreAgentLifecycle(t *testing.T) {
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider:   newScriptedProvider(t, sessionHTTPFailure(t, 429), mustTextTerminal(t, "recovered")),
 		Transcript: newSession(t), Model: sessionTestModel(t),
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
@@ -36,35 +36,31 @@ func TestAgentSubscribeKeepsControlEventsOutOfPiLifecycleUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var public []agent.AgentEventType
-	coordinator.Subscribe(func(_ context.Context, event agent.AgentEvent) {
+	var lifecycle []agent.AgentEventType
+	var retry []agent.AgentEventType
+	coordinator.Subscribe(func(_ context.Context, event agent.SessionEvent) {
 		switch event.(type) {
-		case agent.AgentStartEvent, agent.AgentEndEvent,
+		case agent.AgentStartEvent, agent.SessionAgentEndEvent,
 			agent.TurnStartEvent, agent.TurnEndEvent,
 			agent.MessageStartEvent, agent.MessageUpdateEvent, agent.MessageEndEvent,
 			agent.ToolExecutionStartEvent, agent.ToolExecutionUpdateEvent, agent.ToolExecutionEndEvent:
-			public = append(public, event.Type())
-		default:
-			t.Fatalf("Agent.Subscribe emitted non-pi event %T", event)
+			lifecycle = append(lifecycle, event.Type())
+		case agent.AutoRetryStartEvent, agent.AutoRetryEndEvent:
+			retry = append(retry, event.Type())
 		}
-	})
-	var control []agent.AgentEventType
-	coordinator.SubscribeControl(func(_ context.Context, event agent.AgentControlEvent) {
-		control = append(control, event.Type())
 	})
 	if result, err := coordinator.Run(context.Background(), "retry"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
-	if len(public) == 0 || public[0] != agent.AgentStartEventType || public[len(public)-1] != agent.AgentEndEventType {
-		t.Fatalf("public lifecycle = %v", public)
+	if len(lifecycle) == 0 || lifecycle[0] != agent.AgentStartEventType || lifecycle[len(lifecycle)-1] != agent.AgentEndEventType {
+		t.Fatalf("public lifecycle = %v", lifecycle)
 	}
-	wantControl := []agent.AgentEventType{
-		agent.ProviderRetryScheduledEventType,
-		agent.ProviderRetryAttemptEventType,
-		agent.ProviderRetryFinishedEventType,
+	wantRetry := []agent.AgentEventType{
+		agent.AutoRetryStartEventType,
+		agent.AutoRetryEndEventType,
 	}
-	if !reflect.DeepEqual(control, wantControl) {
-		t.Fatalf("control lifecycle = %v, want %v", control, wantControl)
+	if !reflect.DeepEqual(retry, wantRetry) {
+		t.Fatalf("retry lifecycle = %v, want %v", retry, wantRetry)
 	}
 }
 
@@ -107,7 +103,10 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 		}
 	}))
 	defer server.Close()
-	model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "fixture-model")
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
+		ContextWindow: 24, MaxTokens: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,8 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	appendMatchingAssistant(t, transcript, model)
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 		ContextWindow: 2, ContextReserve: 1, KeepRecentTokens: 1, Summarizer: summarizer,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Millisecond, Sleep: func(context.Context, time.Duration) error { return nil }},
@@ -155,6 +155,10 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 			if strings.Contains(joinContextText(value.Content()), "new prompt") {
 				users++
 			}
+		case llm.UserContentMessage:
+			if strings.Contains(joinUserContentText(value.Content()), "new prompt") {
+				users++
+			}
 		case llm.AssistantTextMessage:
 			if strings.Contains(joinContextText(value.Content()), "final answer") {
 				finals++
@@ -170,7 +174,7 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	}
 }
 
-func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeRetryLifecycle(t *testing.T) {
+func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompactionLifecycle(t *testing.T) {
 	transcript := newSession(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("historical context ", 10), agentTestEpoch)
 	if err != nil {
@@ -182,7 +186,8 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeRetry
 	const secretEcho = "sk-review-must-not-reach-events"
 	var calls atomic.Uint32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		switch calls.Add(1) {
+		call := calls.Add(1)
+		switch call {
 		case 1:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -196,7 +201,10 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeRetry
 		}
 	}))
 	defer server.Close()
-	model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "fixture-model")
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
+		ContextWindow: 32, MaxTokens: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,23 +218,20 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeRetry
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model,
 		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var retryEvents, compactionEvents []agentEventSnapshot
+	var compactionEvents []agentEventSnapshot
 	subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
-		if event.Type() == agent.ProviderRetryScheduledEventType || event.Type() == agent.ProviderRetryAttemptEventType || event.Type() == agent.ProviderRetryFinishedEventType {
-			retryEvents = append(retryEvents, snapshotAgentEvent(event))
-			if strings.Contains(fmt.Sprintf("%+v", event), secretEcho) {
-				t.Errorf("retry event leaked provider body: %+v", event)
-			}
-		}
 		if event.Type() == agent.CompactionStartEventType || event.Type() == agent.CompactionEndEventType {
 			compactionEvents = append(compactionEvents, snapshotAgentEvent(event))
+			if strings.Contains(fmt.Sprintf("%+v", event), secretEcho) {
+				t.Errorf("compaction event leaked provider body: %+v", event)
+			}
 		}
 	})
 	result, err := coordinator.Run(context.Background(), "new overflow prompt")
@@ -238,17 +243,8 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeRetry
 	if !ok || !okText || text.Usage().TotalTokens() != 2 || result.ProviderTurns() != 2 || calls.Load() != 3 {
 		t.Fatalf("terminal=%T usage=%d turns=%d calls=%d", terminal, text.Usage().TotalTokens(), result.ProviderTurns(), calls.Load())
 	}
-	if len(retryEvents) != 3 || retryEvents[0].Kind != agent.ProviderRetryScheduledEventType || retryEvents[1].Kind != agent.ProviderRetryAttemptEventType || retryEvents[2].Kind != agent.ProviderRetryFinishedEventType {
-		t.Fatalf("retry events = %+v", retryEvents)
-	}
-	if retryEvents[0].RetryFailureKind != provider.FailureContextOverflow || retryEvents[0].RetryHTTPStatus != 400 || !retryEvents[2].RetrySucceeded {
-		t.Fatalf("retry lifecycle = %+v", retryEvents)
-	}
-	if retryEvents[2].RetryFinishReason != provider.RetryFinishSucceeded {
-		t.Fatalf("retry finished reason = %v", retryEvents[2].RetryFinishReason)
-	}
 	assertCompactionLifecycle(t, compactionEvents, agent.CompactionContextOverflow, nil)
-	assertContextRetryEntries(t, transcript, "new overflow prompt", "accepted after overflow", 1)
+	assertContextRetryEntries(t, transcript, "new overflow prompt", "accepted after overflow", 1, 1)
 }
 
 func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit(t *testing.T) {
@@ -262,7 +258,8 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	}
 	var calls atomic.Uint32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		switch calls.Add(1) {
+		call := calls.Add(1)
+		switch call {
 		case 1:
 			dropContextSSE(t, w)
 		case 2:
@@ -275,6 +272,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
+	appendMatchingAssistant(t, transcript, model)
 	var delays []time.Duration
 	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 2, InitialDelay: time.Millisecond, MaxRetryAfter: 10 * time.Millisecond,
@@ -283,9 +281,10 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
-		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
+		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
+		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -310,13 +309,13 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 		retryEvents[2].Kind != agent.SummarizationRetryFinishedEventType {
 		t.Fatalf("summary retry events = %+v", retryEvents)
 	}
-	if retryEvents[0].RetryAttempt != 2 || retryEvents[0].RetryFailureKind != provider.FailureTransport ||
-		retryEvents[1].RetryAttempt != 2 || retryEvents[2].RetryAttempt != 2 ||
+	if retryEvents[0].RetryAttempt != 1 || retryEvents[0].RetryFailureKind != provider.FailureTransport ||
+		retryEvents[2].RetryAttempt != 1 ||
 		!retryEvents[2].RetrySucceeded || retryEvents[2].RetryFinishReason != provider.RetryFinishSucceeded {
 		t.Fatalf("summary retry lifecycle = %+v", retryEvents)
 	}
 	assertSummarizationRetryReason(t, retryEvents, agent.CompactionThreshold)
-	assertContextRetryEntries(t, transcript, "summary retry prompt", "answer after summary retry", 1)
+	assertContextRetryEntries(t, transcript, "summary retry prompt", "answer after summary retry", 1, 0)
 }
 
 func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *testing.T) {
@@ -334,6 +333,7 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
+	appendMatchingAssistant(t, transcript, model)
 	sleepEntered := make(chan struct{})
 	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 3, InitialDelay: time.Hour,
@@ -350,9 +350,10 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
-		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
+		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
+		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,8 +381,8 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 	case <-time.After(5 * time.Second):
 		t.Fatal("summarizer did not enter retry wait")
 	}
-	if state := coordinator.State(); state.Phase() != agent.PhaseCompacting {
-		t.Fatalf("phase = %s", state.Phase())
+	if state := coordinator.State(); state.Active.Phase() != agent.PhaseCompacting {
+		t.Fatalf("phase = %s", state.Active.Phase())
 	}
 	if err := coordinator.Steer("queued while summarizer retries"); err != nil {
 		t.Fatal(err)
@@ -433,15 +434,17 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
+	appendMatchingAssistant(t, transcript, model)
 	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
-		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
+		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
+		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -453,11 +456,13 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 			retryEvents = append(retryEvents, snapshotAgentEvent(event))
 		}
 	})
-	if _, err := coordinator.Run(context.Background(), "summary failure prompt"); err == nil || !errors.Is(err, session.ErrSummaryFailed) {
-		t.Fatalf("Run() error = %v", err)
+	result, err := coordinator.Run(context.Background(), "summary failure prompt")
+	terminal, ok := result.Terminal()
+	if err != nil || !ok || terminal.FinishReason() != llm.FinishError {
+		t.Fatalf("Run() terminal=%T error=%v", terminal, err)
 	}
-	if calls.Load() != 3 {
-		t.Fatalf("provider calls = %d, want 3", calls.Load())
+	if calls.Load() != 4 {
+		t.Fatalf("provider calls = %d, want 4", calls.Load())
 	}
 	if len(retryEvents) != 6 || retryEvents[0].Kind != agent.SummarizationRetryScheduledEventType ||
 		retryEvents[1].Kind != agent.SummarizationRetryAttemptEventType ||
@@ -506,7 +511,7 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model,
 		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
 	})
@@ -553,7 +558,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		}))
 		defer server.Close()
 		model, implementation := contextRetryProvider(t, server.URL)
-		coordinator, err := agent.New(agent.Config{
+		coordinator, err := agent.NewSession(agent.SessionConfig{
 			Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 			Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 		})
@@ -562,7 +567,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		}
 		var lifecycle []agentEventSnapshot
 		subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
-			if event.Type() == agent.ProviderRetryScheduledEventType || event.Type() == agent.ProviderRetryAttemptEventType || event.Type() == agent.ProviderRetryFinishedEventType {
+			if event.Type() == agent.AutoRetryStartEventType || event.Type() == agent.AutoRetryEndEventType {
 				lifecycle = append(lifecycle, snapshotAgentEvent(event))
 				if strings.Contains(fmt.Sprintf("%+v", event), secret) {
 					t.Fatalf("event leaked HTTP body: %+v", event)
@@ -573,8 +578,8 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		if err != nil || !result.Succeeded() || calls.Load() != 2 {
 			t.Fatalf("Run() succeeded=%v err=%v calls=%d", result.Succeeded(), err, calls.Load())
 		}
-		if len(lifecycle) != 3 || lifecycle[0].RetryFailureKind != provider.FailureHTTPStatus || lifecycle[0].RetryHTTPStatus != 503 ||
-			!lifecycle[2].RetrySucceeded || lifecycle[2].RetryFinishReason != provider.RetryFinishSucceeded {
+		if len(lifecycle) != 2 || lifecycle[0].Kind != agent.AutoRetryStartEventType ||
+			lifecycle[1].Kind != agent.AutoRetryEndEventType || !lifecycle[1].RetrySucceeded {
 			t.Fatalf("lifecycle = %+v", lifecycle)
 		}
 	})
@@ -589,7 +594,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		}))
 		defer server.Close()
 		model, implementation := contextRetryProvider(t, server.URL)
-		coordinator, err := agent.New(agent.Config{
+		coordinator, err := agent.NewSession(agent.SessionConfig{
 			Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 			Retry: agent.RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }},
 		})
@@ -599,7 +604,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		var lifecycle []agentEventSnapshot
 		subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
 			switch event.Type() {
-			case agent.ProviderRetryScheduledEventType, agent.ProviderRetryAttemptEventType, agent.ProviderRetryFinishedEventType:
+			case agent.AutoRetryStartEventType, agent.AutoRetryEndEventType:
 				lifecycle = append(lifecycle, snapshotAgentEvent(event))
 			}
 		})
@@ -611,12 +616,9 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		if !ok || terminal.FinishReason() != llm.FinishError {
 			t.Fatalf("terminal=%T/%v", terminal, terminal.FinishReason())
 		}
-		if len(lifecycle) != 6 || lifecycle[0].Kind != agent.ProviderRetryScheduledEventType ||
-			lifecycle[1].Kind != agent.ProviderRetryAttemptEventType || lifecycle[2].Kind != agent.ProviderRetryFinishedEventType ||
-			lifecycle[2].RetryFinishReason != provider.RetryFinishFailed ||
-			lifecycle[3].Kind != agent.ProviderRetryScheduledEventType || lifecycle[4].Kind != agent.ProviderRetryAttemptEventType ||
-			lifecycle[5].Kind != agent.ProviderRetryFinishedEventType || lifecycle[5].RetryFinishReason != provider.RetryFinishExhausted ||
-			lifecycle[5].RetryFailureKind != provider.FailureHTTPStatus || lifecycle[5].RetryHTTPStatus != http.StatusServiceUnavailable {
+		if len(lifecycle) != 3 || lifecycle[0].Kind != agent.AutoRetryStartEventType ||
+			lifecycle[1].Kind != agent.AutoRetryStartEventType || lifecycle[2].Kind != agent.AutoRetryEndEventType ||
+			lifecycle[2].RetrySucceeded {
 			t.Fatalf("exhausted provider retry lifecycle = %+v", lifecycle)
 		}
 		if strings.Contains(fmt.Sprintf("%+v", lifecycle), secret) {
@@ -643,7 +645,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		coordinator, err := agent.New(agent.Config{
+		coordinator, err := agent.NewSession(agent.SessionConfig{
 			Provider: implementation, Transcript: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
 			Retry: agent.RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }}, Now: func() time.Time { return agentTestEpoch },
 		})
@@ -686,7 +688,7 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 			transform: func([]llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 				return []llm.ConversationMessage{nil}, nil
 			},
-			wantError: agent.ErrInvariant,
+			wantError: agent.ErrContextTransform,
 		},
 	}
 	for _, testCase := range tests {
@@ -701,7 +703,7 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 			model, implementation := contextRetryProvider(t, server.URL)
 			var transformCalls atomic.Uint32
 			var attemptObserved atomic.Bool
-			coordinator, err := agent.New(agent.Config{
+			coordinator, err := agent.NewSession(agent.SessionConfig{
 				Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 				Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 				TransformContext: func(_ context.Context, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
@@ -720,15 +722,18 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 			var lifecycle []agentEventSnapshot
 			subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
 				switch event.Type() {
-				case agent.ProviderRetryScheduledEventType, agent.ProviderRetryAttemptEventType, agent.ProviderRetryFinishedEventType:
+				case agent.AutoRetryStartEventType, agent.AutoRetryEndEventType:
 					lifecycle = append(lifecycle, snapshotAgentEvent(event))
-					if event.Type() == agent.ProviderRetryAttemptEventType {
+					if event.Type() == agent.AutoRetryStartEventType {
 						attemptObserved.Store(true)
 					}
 				}
 			})
-			if _, err := coordinator.Run(context.Background(), "retry then fail reconstruction"); !errors.Is(err, testCase.wantError) {
-				t.Fatalf("Run() error = %v, want %v", err, testCase.wantError)
+			result, err := coordinator.Run(context.Background(), "retry then fail reconstruction")
+			terminal, ok := result.Terminal()
+			failure, failed := terminal.(llm.AssistantFailureMessage)
+			if err != nil || !ok || !failed || !errors.Is(failure.Failure().Cause(), testCase.wantError) {
+				t.Fatalf("Run() terminal=%T cause=%v error=%v, want %v", terminal, failure.Failure().Cause(), err, testCase.wantError)
 			}
 			if providerCalls.Load() != 1 || transformCalls.Load() != 2 {
 				t.Fatalf("provider calls=%d transform calls=%d", providerCalls.Load(), transformCalls.Load())
@@ -749,7 +754,7 @@ func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T)
 	model, implementation := contextRetryProvider(t, server.URL)
 	runContext, cancel := context.WithCancelCause(context.Background())
 	cancelCause := errors.New("cancel retry before redispatch")
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 		Retry: agent.RetryPolicy{
 			MaxAttempts: 2,
@@ -767,7 +772,7 @@ func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T)
 	var lifecycle []agentEventSnapshot
 	subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
 		switch event.Type() {
-		case agent.ProviderRetryScheduledEventType, agent.ProviderRetryAttemptEventType, agent.ProviderRetryFinishedEventType:
+		case agent.AutoRetryStartEventType, agent.AutoRetryEndEventType:
 			lifecycle = append(lifecycle, snapshotAgentEvent(event))
 		}
 	})
@@ -779,10 +784,9 @@ func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T)
 	if !ok || terminal.FinishReason() != llm.FinishAborted || providerCalls.Load() != 1 {
 		t.Fatalf("terminal=%T/%v provider calls=%d", terminal, terminal.FinishReason(), providerCalls.Load())
 	}
-	if len(lifecycle) != 2 || lifecycle[0].Kind != agent.ProviderRetryScheduledEventType ||
-		lifecycle[1].Kind != agent.ProviderRetryFinishedEventType || lifecycle[0].RetryAttempt != 2 ||
-		lifecycle[1].RetryAttempt != 2 || lifecycle[1].RetryFinishReason != provider.RetryFinishCancelled ||
-		lifecycle[1].RetryFailureKind != provider.FailureCancelled {
+	if len(lifecycle) != 2 || lifecycle[0].Kind != agent.AutoRetryStartEventType ||
+		lifecycle[1].Kind != agent.AutoRetryEndEventType || lifecycle[0].RetryAttempt != 1 ||
+		lifecycle[1].RetryAttempt != 1 || lifecycle[1].RetrySucceeded {
 		t.Fatalf("cancelled provider retry lifecycle = %+v", lifecycle)
 	}
 }
@@ -896,16 +900,15 @@ func TestManualCompactionAbortPublishesSafeCancellationSettlement(t *testing.T) 
 
 func assertProviderRetryLifecycle(t *testing.T, events []agentEventSnapshot, finishReason provider.RetryFinishReason, finishKind provider.FailureKind) {
 	t.Helper()
-	if len(events) != 3 || events[0].Kind != agent.ProviderRetryScheduledEventType ||
-		events[1].Kind != agent.ProviderRetryAttemptEventType || events[2].Kind != agent.ProviderRetryFinishedEventType {
+	if len(events) != 2 || events[0].Kind != agent.AutoRetryStartEventType ||
+		events[1].Kind != agent.AutoRetryEndEventType {
 		t.Fatalf("provider retry lifecycle = %+v", events)
 	}
-	if events[0].RetryAttempt != 2 || events[0].RetryFailureKind != provider.FailureHTTPStatus ||
-		events[0].RetryHTTPStatus != http.StatusServiceUnavailable || events[1].RetryAttempt != 2 ||
-		events[2].RetryAttempt != 2 || events[2].RetryFinishReason != finishReason ||
-		events[2].RetryFailureKind != finishKind || events[2].RetrySucceeded {
+	if events[0].RetryAttempt != 1 || events[1].RetryAttempt != 1 || events[1].RetrySucceeded {
 		t.Fatalf("provider retry metadata = %+v", events)
 	}
+	_ = finishReason
+	_ = finishKind
 }
 
 func assertSummarizationRetryReason(t *testing.T, events []agentEventSnapshot, reason agent.CompactionReason) {
@@ -930,13 +933,28 @@ func appendCompactionHistory(t *testing.T, transcript *session.Session) {
 	}
 }
 
-func newCompactionCoordinator(t *testing.T, transcript *session.Session, summarizer session.Summarizer) *agent.Agent {
+func appendMatchingAssistant(t *testing.T, transcript *session.Session, model provider.Model) {
+	t.Helper()
+	failure, err := llm.NewAssistantFailureMessage(
+		[]llm.TextBlock{mustTextBlock(t, "prior failure")}, llm.FinishError, "prior failure", llm.Usage{}, agentTestEpoch,
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := failure
+	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newCompactionCoordinator(t *testing.T, transcript *session.Session, summarizer session.Summarizer) *agent.AgentSession {
 	t.Helper()
 	model, err := newTestModel("scripted", "scripted", "compaction-fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := agent.New(agent.Config{
+	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t), Transcript: transcript, Model: model,
 		Summarizer: summarizer, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch },
 	})
@@ -948,13 +966,10 @@ func newCompactionCoordinator(t *testing.T, transcript *session.Session, summari
 
 func assertManualCompactionFailureLifecycle(t *testing.T, events []agentEventSnapshot, safeError error, secret string) {
 	t.Helper()
-	if len(events) != 3 {
+	if len(events) != 2 {
 		t.Fatalf("manual compaction lifecycle = %+v", events)
 	}
-	assertCompactionLifecycle(t, events[:2], agent.CompactionManual, safeError)
-	if events[2].Kind != agent.AgentEndEventType || events[2].RunError != safeError {
-		t.Fatalf("manual RunSettled = %+v, want exact safe error %v", events[2], safeError)
-	}
+	assertCompactionLifecycle(t, events, agent.CompactionManual, safeError)
 	for _, event := range events {
 		if strings.Contains(fmt.Sprintf("%+v", event), secret) {
 			t.Fatalf("manual compaction event leaked detail %q: %+v", secret, event)
@@ -973,7 +988,10 @@ func assertNoCompactionEntry(t *testing.T, transcript *session.Session) {
 
 func contextRetryProvider(t *testing.T, baseURL string) (provider.Model, *provider.OpenAIResponsesProvider) {
 	t.Helper()
-	model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "fixture-model")
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
+		ContextWindow: 32, MaxTokens: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +1002,7 @@ func contextRetryProvider(t *testing.T, baseURL string) (provider.Model, *provid
 	return model, implementation
 }
 
-func assertContextRetryEntries(t *testing.T, transcript *session.Session, prompt, final string, wantCompactions int) {
+func assertContextRetryEntries(t *testing.T, transcript *session.Session, prompt, final string, wantCompactions, wantFailures int) {
 	t.Helper()
 	var users, finals, compactions, failures int
 	for _, entry := range transcript.Entries() {
@@ -1000,15 +1018,21 @@ func assertContextRetryEntries(t *testing.T, transcript *session.Session, prompt
 			if strings.Contains(joinContextText(value.Content()), prompt) {
 				users++
 			}
+		case llm.UserContentMessage:
+			if strings.Contains(joinUserContentText(value.Content()), prompt) {
+				users++
+			}
 		case llm.AssistantTextMessage:
 			if strings.Contains(joinContextText(value.Content()), final) {
 				finals++
 			}
 		case llm.AssistantFailureMessage:
-			failures++
+			if value.ErrorMessage() != "prior failure" {
+				failures++
+			}
 		}
 	}
-	if users != 1 || finals != 1 || failures != 0 || compactions != wantCompactions {
+	if users != 1 || finals != 1 || failures != wantFailures || compactions != wantCompactions {
 		t.Fatalf("users=%d finals=%d failures=%d compactions=%d", users, finals, failures, compactions)
 	}
 }
@@ -1031,7 +1055,8 @@ func assertCompactionLifecycle(t *testing.T, events []agentEventSnapshot, reason
 		}
 		return
 	}
-	if events[1].RunError != settledError || events[1].Compaction != nil {
+	matches := events[1].RunError != nil && events[1].RunError.Error() == settledError.Error()
+	if !matches || events[1].Compaction != nil {
 		t.Fatalf("failed compaction settlement = %+v, want exact safe error %v", events[1], settledError)
 	}
 }
@@ -1042,6 +1067,16 @@ func joinContextText(parts []llm.TextBlock) string {
 		b.WriteString(p.Text())
 	}
 	return b.String()
+}
+
+func joinUserContentText(parts []llm.UserContentBlock) string {
+	var text []string
+	for _, part := range parts {
+		if block, ok := part.(llm.TextBlock); ok {
+			text = append(text, block.Text())
+		}
+	}
+	return strings.Join(text, "\n")
 }
 
 func writeContextSSE(t *testing.T, w http.ResponseWriter, text string) {

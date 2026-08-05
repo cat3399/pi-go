@@ -111,14 +111,23 @@ func (c ToolCallBlock) ArgumentsJSON() []byte {
 // least one complete tool call. Text and tool blocks retain provider order.
 type AssistantToolUseMessage struct {
 	content   []AssistantBlock
+	finish    FinishReason
 	usage     Usage
 	timestamp time.Time
 	metadata  AssistantMetadata
 }
 
 func NewAssistantToolUseMessageWithMetadata(content []AssistantBlock, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (AssistantToolUseMessage, error) {
+	return NewAssistantToolUseMessageWithFinishAndMetadata(content, FinishToolUse, usage, timestamp, provenance, response, diagnostics)
+}
+
+// NewAssistantToolUseMessageWithFinishAndMetadata preserves the provider's
+// actual stop reason when a completed tool-call block is present. Providers
+// sometimes report stop rather than toolUse, and length is safety-critical:
+// arguments from a truncated message are never safe to execute.
+func NewAssistantToolUseMessageWithFinishAndMetadata(content []AssistantBlock, finish FinishReason, usage Usage, timestamp time.Time, provenance AssistantProvenance, response *AssistantResponseMetadata, diagnostics []AssistantDiagnostic) (AssistantToolUseMessage, error) {
 	message := AssistantToolUseMessage{
-		content: append([]AssistantBlock(nil), content...), usage: usage, timestamp: timestamp,
+		content: append([]AssistantBlock(nil), content...), finish: finish, usage: usage, timestamp: timestamp,
 		metadata: cloneAssistantMetadata(AssistantMetadata{Provenance: provenance, Response: response, Diagnostics: diagnostics}),
 	}
 	if err := message.validate(); err != nil {
@@ -292,7 +301,12 @@ func NewToolResultContentMessageWithMetadata(id, name string, content []ToolResu
 	if err := validateToolNames(metadata.AddedToolNames); err != nil {
 		return ToolResultContentMessage{}, err
 	}
-	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: append([]ToolResultContentBlock(nil), content...), isError: isError, timestamp: timestamp, details: bytes.Clone(metadata.Details), addedToolNames: cloneToolNames(metadata.AddedToolNames), hasAddedToolNames: metadata.HasAddedToolNames || metadata.AddedToolNames != nil}
+	var ownedContent []ToolResultContentBlock
+	if content != nil {
+		ownedContent = make([]ToolResultContentBlock, len(content))
+		copy(ownedContent, content)
+	}
+	m := ToolResultContentMessage{toolCallID: id, toolName: name, content: ownedContent, isError: isError, timestamp: timestamp, details: bytes.Clone(metadata.Details), addedToolNames: cloneToolNames(metadata.AddedToolNames), hasAddedToolNames: metadata.HasAddedToolNames || metadata.AddedToolNames != nil}
 	if metadata.Usage != nil {
 		usage := *metadata.Usage
 		m.usage = &usage
@@ -335,7 +349,12 @@ func (ToolResultContentMessage) Role() Role           { return RoleToolResult }
 func (m ToolResultContentMessage) ToolCallID() string { return m.toolCallID }
 func (m ToolResultContentMessage) ToolName() string   { return m.toolName }
 func (m ToolResultContentMessage) Content() []ToolResultContentBlock {
-	return append([]ToolResultContentBlock(nil), m.content...)
+	if m.content == nil {
+		return nil
+	}
+	content := make([]ToolResultContentBlock, len(m.content))
+	copy(content, m.content)
+	return content
 }
 func (m ToolResultContentMessage) IsError() bool            { return m.isError }
 func (m ToolResultContentMessage) Timestamp() time.Time     { return m.timestamp }
@@ -352,6 +371,9 @@ func (m ToolResultContentMessage) AddedToolNames() []string {
 func (m ToolResultContentMessage) HasAddedToolNames() bool { return m.hasAddedToolNames }
 
 func (m AssistantToolUseMessage) validate() error {
+	if m.finish != FinishToolUse && m.finish != FinishStop && m.finish != FinishLength {
+		return fmt.Errorf("%w: tool-use message cannot finish with %q", ErrInvalidFinishReason, m.finish)
+	}
 	if err := validateAssistantToolUseContent(m.content); err != nil {
 		return err
 	}
@@ -374,8 +396,8 @@ func (AssistantToolUseMessage) Role() Role {
 	return RoleAssistant
 }
 
-func (AssistantToolUseMessage) FinishReason() FinishReason {
-	return FinishToolUse
+func (m AssistantToolUseMessage) FinishReason() FinishReason {
+	return m.finish
 }
 
 func (m AssistantToolUseMessage) Content() []AssistantBlock {

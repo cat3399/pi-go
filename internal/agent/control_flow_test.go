@@ -13,7 +13,6 @@ import (
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
-	"github.com/cat3399/pi-go/internal/session"
 )
 
 type namedBatchTool struct {
@@ -25,133 +24,6 @@ type namedBatchTool struct {
 }
 
 type mixedTool struct{}
-
-type panickingLookupTool struct{}
-
-func (panickingLookupTool) Name() string { return "lookup" }
-func (panickingLookupTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
-	return agent.ToolOutput{}, errors.New("must not execute")
-}
-func (panickingLookupTool) Supports(string) bool { panic("lookup boom") }
-func (panickingLookupTool) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
-	return agent.ToolOutput{}, errors.New("must not execute")
-}
-
-type admissionTranscript struct {
-	base *session.Session
-
-	mu      sync.Mutex
-	armed   bool
-	blocked bool
-	entered chan struct{}
-	release chan struct{}
-	reenter func()
-}
-
-type queuedAppendFaultTranscript struct {
-	base *session.Session
-
-	mu      sync.Mutex
-	attempt int
-	blockAt int
-	failAt  int
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (t *queuedAppendFaultTranscript) Context() session.Context { return t.base.Context() }
-
-func (t *queuedAppendFaultTranscript) Append(
-	ctx context.Context,
-	message llm.ConversationMessage,
-	options session.AppendOptions,
-) (session.Entry, error) {
-	text, queued := queuedUserText(message)
-	if !queued {
-		return t.base.Append(ctx, message, options)
-	}
-	t.mu.Lock()
-	t.attempt++
-	attempt := t.attempt
-	block := attempt == t.blockAt
-	fail := attempt == t.failAt
-	t.mu.Unlock()
-	if block {
-		close(t.entered)
-		<-t.release
-	}
-	if fail {
-		return session.Entry{}, errors.New("injected queued append failure for " + text)
-	}
-	return t.base.Append(ctx, message, options)
-}
-
-func queuedUserText(message llm.ConversationMessage) (string, bool) {
-	user, ok := message.(llm.UserTextMessage)
-	if !ok {
-		return "", false
-	}
-	content := user.Content()
-	if len(content) != 1 {
-		return "", false
-	}
-	text := content[0].Text()
-	return text, strings.HasPrefix(text, "queue:")
-}
-
-func queuedTexts(messages []llm.ConversationMessage) []string {
-	texts := make([]string, 0)
-	for _, message := range messages {
-		if text, ok := queuedUserText(message); ok {
-			texts = append(texts, text)
-		}
-	}
-	return texts
-}
-
-func queueSnapshotTexts(messages []llm.UserTextMessage) []string {
-	texts := make([]string, len(messages))
-	for index, message := range messages {
-		content := message.Content()
-		if len(content) == 1 {
-			texts[index] = content[0].Text()
-		}
-	}
-	return texts
-}
-
-func (t *admissionTranscript) arm(reenter func()) {
-	t.mu.Lock()
-	t.armed = true
-	t.reenter = reenter
-	t.mu.Unlock()
-}
-
-func (t *admissionTranscript) Context() session.Context {
-	t.mu.Lock()
-	block := t.armed && !t.blocked
-	if block {
-		t.blocked = true
-	}
-	entered, release, reenter := t.entered, t.release, t.reenter
-	t.mu.Unlock()
-	if block {
-		close(entered)
-		if reenter != nil {
-			reenter()
-		}
-		<-release
-	}
-	return t.base.Context()
-}
-
-func (t *admissionTranscript) Append(
-	ctx context.Context,
-	message llm.ConversationMessage,
-	options session.AppendOptions,
-) (session.Entry, error) {
-	return t.base.Append(ctx, message, options)
-}
 
 func (mixedTool) Name() string              { return "mixed" }
 func (mixedTool) Supports(name string) bool { return name != "missing" }
@@ -191,297 +63,6 @@ func (t *namedBatchTool) ExecuteNamed(ctx context.Context, name string, _ []byte
 	}
 	report(agent.ToolUpdate{Text: name + " done"})
 	return agent.ToolOutput{Text: name}, nil
-}
-
-func newQueueAgent(
-	t *testing.T,
-	transcript agent.Transcript,
-	providerImpl provider.Provider,
-	steeringMode agent.QueueMode,
-	followUpMode agent.QueueMode,
-) *agent.Agent {
-	t.Helper()
-	model, err := newTestModel("scripted", "scripted", "scripted-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := agent.New(agent.Config{
-		Provider:          providerImpl,
-		Transcript:        transcript,
-		Model:             model,
-		SteeringMode:      steeringMode,
-		FollowUpMode:      followUpMode,
-		Now:               func() time.Time { return agentTestEpoch },
-		SettlementTimeout: time.Second,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return runtime
-}
-
-func TestContinueQueueAllAcknowledgesDurablePrefixAndPreservesFaultRemainder(t *testing.T) {
-	base := newSession(t)
-	transcript := &queuedAppendFaultTranscript{
-		base:    base,
-		blockAt: 1,
-		failAt:  2,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	scripted := newScriptedProvider(t,
-		mustTextTerminal(t, "first"),
-		mustTextTerminal(t, "prefix accepted"),
-		mustTextTerminal(t, "remainder accepted"),
-	)
-	runtime := newQueueAgent(t, transcript, scripted, agent.QueueAll, agent.QueueOneAtATime)
-	if _, err := runtime.Run(context.Background(), "initial"); err != nil {
-		t.Fatal(err)
-	}
-	for _, text := range []string{"queue:a", "queue:b"} {
-		if err := runtime.Steer(text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ackSnapshot := make(chan []string, 1)
-	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
-		observed := snapshotAgentEvent(event)
-		text, queued := queuedUserText(observed.Message)
-		if observed.Kind != agent.MessageEndEventType || !queued || text != "queue:a" {
-			return
-		}
-		steering, _ := runtime.Queues()
-		ackSnapshot <- queueSnapshotTexts(steering)
-	})
-	continueDone := make(chan error, 1)
-	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
-	waitClosed(t, transcript.entered, "first reserved queue append")
-	if err := runtime.Steer("queue:cleared"); err != nil {
-		t.Fatal(err)
-	}
-	runtime.ClearSteeringQueue()
-	if err := runtime.Steer("queue:after-clear"); err != nil {
-		t.Fatal(err)
-	}
-	steering, followUp := runtime.Queues()
-	if got := queueSnapshotTexts(steering); !reflect.DeepEqual(got, []string{"queue:a", "queue:b", "queue:after-clear"}) || len(followUp) != 0 {
-		t.Fatalf("queue during reservation/clear = %v / %d", got, len(followUp))
-	}
-	close(transcript.release)
-	if err := <-continueDone; !errors.Is(err, agent.ErrTranscriptCommit) {
-		t.Fatalf("Continue error = %v, want queued append fault", err)
-	}
-	if got := <-ackSnapshot; !reflect.DeepEqual(got, []string{"queue:b", "queue:after-clear"}) {
-		t.Fatalf("queue at durable commit event = %v", got)
-	}
-	steering, followUp = runtime.Queues()
-	if got := queueSnapshotTexts(steering); !reflect.DeepEqual(got, []string{"queue:b", "queue:after-clear"}) || len(followUp) != 0 {
-		t.Fatalf("queue after middle append fault = %v / %d", got, len(followUp))
-	}
-	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a"}) {
-		t.Fatalf("durable prefix after fault = %v", got)
-	}
-	if _, err := runtime.Continue(context.Background()); err != nil {
-		t.Fatalf("Continue retry error = %v", err)
-	}
-	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a", "queue:b", "queue:after-clear"}) {
-		t.Fatalf("durable queued messages after retry = %v", got)
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
-		t.Fatalf("queues after retry = %d/%d", len(steering), len(followUp))
-	}
-}
-
-func TestActiveFollowUpQueueOneFirstAppendFaultRetainsFIFOForContinue(t *testing.T) {
-	base := newSession(t)
-	transcript := &queuedAppendFaultTranscript{base: base, failAt: 1}
-	scripted := newScriptedProvider(t,
-		mustTextTerminal(t, "first"),
-		mustTextTerminal(t, "first follow-up"),
-		mustTextTerminal(t, "second follow-up"),
-	)
-	runtime := newQueueAgent(t, transcript, scripted, agent.QueueOneAtATime, agent.QueueOneAtATime)
-	for _, text := range []string{"queue:one", "queue:two"} {
-		if err := runtime.FollowUp(text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := runtime.Run(context.Background(), "initial"); !errors.Is(err, agent.ErrTranscriptCommit) {
-		t.Fatalf("Run error = %v, want first follow-up append fault", err)
-	}
-	steering, followUp := runtime.Queues()
-	if got := queueSnapshotTexts(followUp); len(steering) != 0 || !reflect.DeepEqual(got, []string{"queue:one", "queue:two"}) {
-		t.Fatalf("queues after first follow-up fault = %d / %v", len(steering), got)
-	}
-	if got := queuedTexts(base.Context().Messages()); len(got) != 0 {
-		t.Fatalf("failed first follow-up became durable: %v", got)
-	}
-	if _, err := runtime.Continue(context.Background()); err != nil {
-		t.Fatalf("Continue retry error = %v", err)
-	}
-	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:one", "queue:two"}) {
-		t.Fatalf("follow-up FIFO after retry = %v", got)
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
-		t.Fatalf("queues after follow-up retry = %d/%d", len(steering), len(followUp))
-	}
-}
-
-func TestAbortAndClearPreserveReservedQueueUntilDurableAcknowledgement(t *testing.T) {
-	base := newSession(t)
-	transcript := &queuedAppendFaultTranscript{
-		base:    base,
-		blockAt: 1,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "unused"))
-	runtime := newQueueAgent(t, transcript, scripted, agent.QueueAll, agent.QueueOneAtATime)
-	if _, err := runtime.Run(context.Background(), "initial"); err != nil {
-		t.Fatal(err)
-	}
-	for _, text := range []string{"queue:a", "queue:b"} {
-		if err := runtime.Steer(text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	continueDone := make(chan error, 1)
-	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
-	waitClosed(t, transcript.entered, "reserved queue append before abort")
-	runtime.ClearAllQueues()
-	waitCtx, cancelWait := context.WithCancel(context.Background())
-	cancelWait()
-	if err := runtime.Abort(waitCtx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Abort bounded wait error = %v", err)
-	}
-	if steering, followUp := runtime.Queues(); !reflect.DeepEqual(queueSnapshotTexts(steering), []string{"queue:a", "queue:b"}) || len(followUp) != 0 {
-		t.Fatalf("clear removed reserved queue: %v/%d", queueSnapshotTexts(steering), len(followUp))
-	}
-	close(transcript.release)
-	if err := <-continueDone; err != nil {
-		t.Fatalf("aborted Continue error = %v", err)
-	}
-	if got := queuedTexts(base.Context().Messages()); !reflect.DeepEqual(got, []string{"queue:a", "queue:b"}) {
-		t.Fatalf("aborted reserved queue durable messages = %v", got)
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
-		t.Fatalf("queues after aborted durable acknowledgement = %d/%d", len(steering), len(followUp))
-	}
-}
-
-func TestContinueAdmissionReservationLeavesTranscriptPortReentrant(t *testing.T) {
-	base := newSession(t)
-	transcript := &admissionTranscript{
-		base:    base,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	scripted := newScriptedProvider(t,
-		mustTextTerminal(t, "first"),
-		mustTextTerminal(t, "continued"),
-		mustTextTerminal(t, "drained"),
-	)
-	runtime := newAgent(t, transcript, scripted, nil)
-	if _, err := runtime.Run(context.Background(), "first"); err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.Steer("before snapshot"); err != nil {
-		t.Fatal(err)
-	}
-	reentered := make(chan struct{})
-	transcript.arm(func() {
-		if steering, followUp := runtime.Queues(); len(steering) != 1 || len(followUp) != 0 {
-			t.Errorf("reentrant queue snapshot = %d/%d", len(steering), len(followUp))
-		}
-		if err := runtime.Steer("during snapshot"); err != nil {
-			t.Errorf("reentrant Steer() error = %v", err)
-		}
-		close(reentered)
-	})
-	continueDone := make(chan error, 1)
-	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
-	waitClosed(t, transcript.entered, "continuation transcript snapshot")
-	waitClosed(t, reentered, "reentrant agent access")
-	if _, err := runtime.Run(context.Background(), "must not reserve over continuation"); !errors.Is(err, agent.ErrBusy) {
-		t.Fatalf("Run during continuation reservation error = %v, want busy", err)
-	}
-	if _, err := runtime.Continue(context.Background()); !errors.Is(err, agent.ErrBusy) {
-		t.Fatalf("Continue during continuation reservation error = %v, want busy", err)
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 2 || len(followUp) != 0 {
-		t.Fatalf("queues during continuation reservation = %d/%d", len(steering), len(followUp))
-	}
-	close(transcript.release)
-	if err := <-continueDone; err != nil {
-		t.Fatal(err)
-	}
-	if scripted.CallCount() != 3 {
-		t.Fatalf("provider calls = %d, want continuation plus queued drain", scripted.CallCount())
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 0 || len(followUp) != 0 {
-		t.Fatalf("queues after continuation = %d/%d", len(steering), len(followUp))
-	}
-}
-
-func TestContinueTailFailureReleasesAdmissionReservation(t *testing.T) {
-	base := newSession(t)
-	transcript := &admissionTranscript{
-		base:    base,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "next"))
-	runtime := newAgent(t, transcript, scripted, nil)
-	if _, err := runtime.Run(context.Background(), "first"); err != nil {
-		t.Fatal(err)
-	}
-	transcript.arm(nil)
-	continueDone := make(chan error, 1)
-	go func() { _, err := runtime.Continue(context.Background()); continueDone <- err }()
-	waitClosed(t, transcript.entered, "tail validation transcript snapshot")
-	if _, err := runtime.Run(context.Background(), "must wait for failed admission"); !errors.Is(err, agent.ErrBusy) {
-		t.Fatalf("Run during tail validation error = %v, want busy", err)
-	}
-	close(transcript.release)
-	if err := <-continueDone; !errors.Is(err, agent.ErrCannotContinue) {
-		t.Fatalf("Continue error = %v, want assistant-tail rejection", err)
-	}
-	if _, err := runtime.Run(context.Background(), "next"); err != nil {
-		t.Fatalf("Run after failed continuation admission error = %v", err)
-	}
-}
-
-func TestContinueCancellationDuringSnapshotReleasesReservationWithoutDraining(t *testing.T) {
-	base := newSession(t)
-	transcript := &admissionTranscript{
-		base:    base,
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	scripted := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "after cancellation"))
-	runtime := newAgent(t, transcript, scripted, nil)
-	if _, err := runtime.Run(context.Background(), "first"); err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.Steer("must remain queued"); err != nil {
-		t.Fatal(err)
-	}
-	transcript.arm(nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	continueDone := make(chan error, 1)
-	go func() { _, err := runtime.Continue(ctx); continueDone <- err }()
-	waitClosed(t, transcript.entered, "cancelled continuation transcript snapshot")
-	cancel()
-	close(transcript.release)
-	if err := <-continueDone; !errors.Is(err, agent.ErrInvalidRun) {
-		t.Fatalf("Continue error = %v, want cancelled-admission rejection", err)
-	}
-	if steering, followUp := runtime.Queues(); len(steering) != 1 || len(followUp) != 0 {
-		t.Fatalf("cancelled admission drained queues: %d/%d", len(steering), len(followUp))
-	}
-	if _, err := runtime.Continue(context.Background()); err != nil {
-		t.Fatalf("Continue after cancelled admission error = %v", err)
-	}
 }
 
 func TestStatePendingToolCallsTracksSequentialAndParallelBatches(t *testing.T) {
@@ -683,11 +264,19 @@ func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t 
 		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 	}
+	slowDefinition, err := provider.NewToolDefinition("slow", "slow", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastDefinition, err := provider.NewToolDefinition("fast", "fast", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var before, after, lifecycle []string
 	var lock sync.Mutex
 	runtime, err := agent.New(agent.Config{
-		Provider: newScriptedProvider(t, assistant, mustTextTerminal(t, "done")), Transcript: transcript, Model: model,
-		Tool: tool, ToolExecution: agent.ToolExecutionParallel, Now: func() time.Time { return agentTestEpoch },
+		Provider: newScriptedProvider(t, assistant, mustTextTerminal(t, "done")), Model: model,
+		Tool: tool, Tools: []provider.ToolDefinition{slowDefinition, fastDefinition}, ToolExecution: agent.ToolExecutionParallel, Now: func() time.Time { return agentTestEpoch },
 		BeforeToolCall: func(_ context.Context, input agent.BeforeToolCallContext) (agent.BeforeToolCallResult, error) {
 			lock.Lock()
 			before = append(before, input.ToolCall.Name())
@@ -708,6 +297,7 @@ func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	subscribeTestTranscript(t, runtime, transcript)
 	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
 		switch event := event.(type) {
 		case agent.ToolExecutionStartEvent:
@@ -764,42 +354,6 @@ func TestParallelToolPreflightIsSourceOrderedAndSettlesBlockedCallImmediately(t 
 	}
 }
 
-func TestParallelToolLookupPanicSettlesAsAssociatedResult(t *testing.T) {
-	call, err := llm.NewToolCallBlock("lookup-call", "missing", []byte(`{}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{call}, mustUsage(t, 2, 1), agentTestEpoch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	model, err := newTestModel("scripted", "scripted", "scripted-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := agent.New(agent.Config{
-		Provider: newScriptedProvider(t, assistant, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
-		Tool: panickingLookupTool{}, ToolExecution: agent.ToolExecutionParallel, Now: func() time.Time { return agentTestEpoch },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var events []agent.AgentEventType
-	runtime.Subscribe(func(_ context.Context, event agent.AgentEvent) {
-		switch event.(type) {
-		case agent.ToolExecutionStartEvent, agent.ToolExecutionEndEvent:
-			events = append(events, event.Type())
-		}
-	})
-	result, err := runtime.Run(context.Background(), "go")
-	if err != nil || !result.Succeeded() {
-		t.Fatalf("Run = (%#v, %v)", result, err)
-	}
-	if !reflect.DeepEqual(events, []agent.AgentEventType{agent.ToolExecutionStartEventType, agent.ToolExecutionEndEventType}) {
-		t.Fatalf("lookup panic events = %v", events)
-	}
-}
-
 func TestToolHookPanicsBecomeAssociatedErrorResults(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -830,14 +384,15 @@ func TestToolHookPanicsBecomeAssociatedErrorResults(t *testing.T) {
 				return agent.ToolOutput{Text: "ordinary result"}, nil
 			}}
 			runtime, err := agent.New(agent.Config{
-				Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "done")),
-				Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
+				Provider: newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "done")),
+				Model:    sessionTestModel(t), Tool: tool,
 				BeforeToolCall: test.before, AfterToolCall: test.after,
-				Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+				Now: func() time.Time { return agentTestEpoch },
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
+			subscribeTestTranscript(t, runtime, transcript)
 			if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 				t.Fatalf("Run = (%#v, %v)", result, err)
 			}
@@ -858,18 +413,22 @@ func TestUnmarshalableToolDetailsFailBeforeDurableResult(t *testing.T) {
 		return agent.ToolOutput{Text: "ordinary result", Details: func() {}}, nil
 	}}
 	runtime, err := agent.New(agent.Config{
-		Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`))),
-		Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
-		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		Provider: newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`))),
+		Model:    sessionTestModel(t), Tool: tool,
+		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.Run(context.Background(), "go"); !errors.Is(err, agent.ErrInvariant) {
-		t.Fatalf("Run error = %v, want ErrInvariant", err)
+	subscribeTestTranscript(t, runtime, transcript)
+	result, err := runtime.Run(context.Background(), "go")
+	terminal, ok := result.Terminal()
+	failure, failed := terminal.(llm.AssistantFailureMessage)
+	if err != nil || !ok || !failed || !strings.Contains(failure.Failure().Cause().Error(), "unsupported type") {
+		t.Fatalf("Run terminal=%T cause=%v error=%v, want synthetic encoding failure", terminal, failure.Failure().Cause(), err)
 	}
 	messages := transcript.Context().Messages()
-	if len(messages) != 2 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant {
+	if len(messages) != 3 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant || messages[2].Role() != llm.RoleAssistant {
 		t.Fatalf("messages after invalid details = %#v", messages)
 	}
 }
@@ -883,8 +442,8 @@ func TestToolDetailsAreIsolatedAcrossHookObserversAndDurability(t *testing.T) {
 		return agent.ToolOutput{Text: "done", Details: outputDetails}, nil
 	}}
 	runtime, err := agent.New(agent.Config{
-		Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "finished")),
-		Transcript: transcript, Model: sessionTestModel(t), Tool: tool,
+		Provider: newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`)), mustTextTerminal(t, "finished")),
+		Model:    sessionTestModel(t), Tool: tool,
 		AfterToolCall: func(_ context.Context, input agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
 			details := input.Result.Details.(map[string]any)
 			if got := details["nested"].(map[string]any)["value"]; got != "output" {
@@ -893,11 +452,12 @@ func TestToolDetailsAreIsolatedAcrossHookObserversAndDurability(t *testing.T) {
 			details["nested"].(map[string]any)["value"] = "hook-mutated"
 			return agent.AfterToolCallResult{}, nil
 		},
-		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	subscribeTestTranscript(t, runtime, transcript)
 
 	mutateDetails := func(value any, replacement string) {
 		value.(map[string]any)["nested"].(map[string]any)["value"] = replacement
@@ -992,7 +552,7 @@ func TestTransformContextIsProviderOnlyAndFailsBeforeProvider(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime, err := agent.New(agent.Config{Provider: scripted, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch }, TransformContext: func(_ context.Context, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
+		runtime, err := agent.New(agent.Config{Provider: scripted, Model: model, Now: func() time.Time { return agentTestEpoch }, TransformContext: func(_ context.Context, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 			if len(messages) != 1 {
 				t.Fatalf("transform input messages = %d", len(messages))
 			}
@@ -1001,6 +561,7 @@ func TestTransformContextIsProviderOnlyAndFailsBeforeProvider(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		subscribeTestTranscript(t, runtime, transcript)
 		if _, err := runtime.Run(context.Background(), "durable"); err != nil {
 			t.Fatal(err)
 		}
@@ -1018,61 +579,23 @@ func TestTransformContextIsProviderOnlyAndFailsBeforeProvider(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		runtime, err := agent.New(agent.Config{Provider: scripted, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch }, TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
+		runtime, err := agent.New(agent.Config{Provider: scripted, Model: model, Now: func() time.Time { return agentTestEpoch }, TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 			return nil, context.DeadlineExceeded
 		}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runtime.Run(context.Background(), "blocked"); !errors.Is(err, agent.ErrContextTransform) {
-			t.Fatalf("Run error = %v", err)
+		subscribeTestTranscript(t, runtime, transcript)
+		result, err := runtime.Run(context.Background(), "blocked")
+		terminal, ok := result.Terminal()
+		failure, failed := terminal.(llm.AssistantFailureMessage)
+		if err != nil || !ok || !failed || !errors.Is(failure.Failure().Cause(), agent.ErrContextTransform) {
+			t.Fatalf("Run terminal=%T cause=%v error=%v, want synthetic ErrContextTransform", terminal, failure.Failure().Cause(), err)
 		}
 		if scripted.CallCount() != 0 {
 			t.Fatalf("provider called after transform failure: %d", scripted.CallCount())
 		}
 	})
-}
-
-func TestAbortWaitsForParallelWorkersAndCommitsCancelledBatch(t *testing.T) {
-	transcript := newSession(t)
-	slow, err := llm.NewToolCallBlock("one", "slow", []byte(`{"x":1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fast, err := llm.NewToolCallBlock("two", "fast", []byte(`{"x":2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{slow, fast}, mustUsage(t, 3, 2), agentTestEpoch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "must not run"))
-	tool := &namedBatchTool{started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})}, release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})}}
-	runtime := newAgent(t, transcript, scripted, tool)
-	runDone := make(chan error, 1)
-	go func() { _, err := runtime.Run(context.Background(), "go"); runDone <- err }()
-	<-tool.started["slow"]
-	<-tool.started["fast"]
-	if err := runtime.Abort(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-runDone; err != nil {
-		t.Fatal(err)
-	}
-	if scripted.CallCount() != 1 {
-		t.Fatalf("provider calls after abort = %d", scripted.CallCount())
-	}
-	messages := transcript.Context().Messages()
-	if got := []string{toolResultAt(t, messages, 2).ToolCallID(), toolResultAt(t, messages, 3).ToolCallID()}; !reflect.DeepEqual(got, []string{"one", "two"}) {
-		t.Fatalf("cancel result order = %v", got)
-	}
-	if terminal := failureAt(t, messages, 4); terminal.FinishReason() != llm.FinishAborted {
-		t.Fatalf("abort terminal = %s", terminal.FinishReason())
-	}
-	if state := runtime.State(); state.Phase() != agent.PhaseIdle {
-		t.Fatalf("state after abort = %s", state.Phase())
-	}
 }
 
 func TestToolLevelSequentialOverrideDowngradesWholeBatch(t *testing.T) {
@@ -1172,135 +695,6 @@ func TestTerminatingBatchStillDrainsInitialSteeringAndFollowUp(t *testing.T) {
 		llm.RoleUser, llm.RoleAssistant,
 	}) {
 		t.Fatalf("terminating batch transcript roles = %v", got)
-	}
-}
-
-func TestSequentialCancellationAssociatesUnstartedCallsAndStopsProvider(t *testing.T) {
-	transcript := newSession(t)
-	first, err := llm.NewToolCallBlock("first", "slow", []byte(`{"x":1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := llm.NewToolCallBlock("second", "fast", []byte(`{"x":2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "must not run"))
-	tool := &namedBatchTool{
-		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
-		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
-	}
-	model, err := newTestModel("scripted", "scripted", "scripted-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := agent.New(agent.Config{
-		Provider:      scripted,
-		Transcript:    transcript,
-		Model:         model,
-		Tool:          tool,
-		ToolExecution: agent.ToolExecutionSequential,
-		Now:           func() time.Time { return agentTestEpoch },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runDone := make(chan error, 1)
-	go func() { _, err := runtime.Run(context.Background(), "go"); runDone <- err }()
-	waitClosed(t, tool.started["slow"], "first sequential tool start")
-	select {
-	case <-tool.started["fast"]:
-		t.Fatal("second sequential tool started before cancellation")
-	default:
-	}
-	if err := runtime.Abort(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-runDone; err != nil {
-		t.Fatal(err)
-	}
-	if scripted.CallCount() != 1 {
-		t.Fatalf("provider calls after sequential cancellation = %d", scripted.CallCount())
-	}
-	select {
-	case <-tool.started["fast"]:
-		t.Fatal("second sequential tool started after cancellation")
-	default:
-	}
-	messages := transcript.Context().Messages()
-	if got := []string{toolResultAt(t, messages, 2).ToolCallID(), toolResultAt(t, messages, 3).ToolCallID()}; !reflect.DeepEqual(got, []string{"first", "second"}) {
-		t.Fatalf("cancelled result associations = %v", got)
-	}
-	if !toolResultAt(t, messages, 2).IsError() || !toolResultAt(t, messages, 3).IsError() {
-		t.Fatalf("cancelled batch results must be durable errors")
-	}
-	if failure := failureAt(t, messages, 4); failure.FinishReason() != llm.FinishAborted {
-		t.Fatalf("terminal finish = %s, want aborted", failure.FinishReason())
-	}
-}
-
-func TestCancelledSequentialBatchCommitFaultStopsBeforeSuccessor(t *testing.T) {
-	base := newSession(t)
-	transcript := &selectiveFailingTranscript{
-		base: base,
-		fail: func(message llm.ConversationMessage) bool {
-			result, ok := message.(llm.ToolResultMessage)
-			return ok && result.ToolCallID() == "second"
-		},
-	}
-	first, err := llm.NewToolCallBlock("first", "slow", []byte(`{"x":1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := llm.NewToolCallBlock("second", "fast", []byte(`{"x":2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assistant, err := newAssistantToolUseMessage([]llm.AssistantBlock{first, second}, mustUsage(t, 3, 2), agentTestEpoch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scripted := newScriptedProvider(t, assistant, mustTextTerminal(t, "must not run"))
-	tool := &namedBatchTool{
-		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
-		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
-	}
-	model, err := newTestModel("scripted", "scripted", "scripted-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime, err := agent.New(agent.Config{
-		Provider:      scripted,
-		Transcript:    transcript,
-		Model:         model,
-		Tool:          tool,
-		ToolExecution: agent.ToolExecutionSequential,
-		Now:           func() time.Time { return agentTestEpoch },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	runDone := make(chan error, 1)
-	go func() { _, err := runtime.Run(context.Background(), "go"); runDone <- err }()
-	waitClosed(t, tool.started["slow"], "first sequential tool start")
-	if err := runtime.Abort(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-runDone; !errors.Is(err, agent.ErrTranscriptCommit) {
-		t.Fatalf("Run error = %v, want transcript commit fault", err)
-	}
-	if scripted.CallCount() != 1 {
-		t.Fatalf("provider calls after tool-result fault = %d", scripted.CallCount())
-	}
-	if got := messageRoles(base.Context().Messages()); !reflect.DeepEqual(got, []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult}) {
-		t.Fatalf("durable messages after second result fault = %v", got)
-	}
-	if result := toolResultAt(t, base.Context().Messages(), 2); result.ToolCallID() != "first" || !result.IsError() {
-		t.Fatalf("first durable cancellation result = id %q error %t", result.ToolCallID(), result.IsError())
 	}
 }
 

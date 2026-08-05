@@ -164,7 +164,7 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 	}
 }
 
-func TestMessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
+func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("identity", "fixture", false, []byte(`{"type":"object"}`))
 	transcript := newSession(t)
@@ -189,16 +189,121 @@ func TestMessageEndCannotPersistMismatchedToolResultIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.Run(context.Background(), "go"); !errors.Is(err, agent.ErrInvariant) {
-		t.Fatalf("Run error = %v, want ErrInvariant", err)
+	result, err := runtime.Run(context.Background(), "go")
+	terminal, ok := result.Terminal()
+	failure, failed := terminal.(llm.AssistantFailureMessage)
+	if err != nil || !ok || !failed || !errors.Is(failure.Failure().Cause(), provider.ErrInvalidRequest) {
+		t.Fatalf("Run terminal=%T cause=%v error=%v, want downstream invalid request", terminal, failure.Failure().Cause(), err)
 	}
 	if tool.CallCount() != 1 {
 		t.Fatalf("tool calls = %d", tool.CallCount())
 	}
 	messages := transcript.Context().Messages()
-	if len(messages) != 2 {
-		t.Fatalf("mismatched tool result reached durable history: %#v", messages)
+	toolResult, propagated := messages[2].(llm.ToolResultMessage)
+	if len(messages) != 4 || !propagated || toolResult.ToolCallID() != "different-call" || messages[3].Role() != llm.RoleAssistant {
+		t.Fatalf("same-role replacement did not propagate: %#v", messages)
 	}
+}
+
+func TestSessionMessageEndIgnoresRoleMismatch(t *testing.T) {
+	model := sessionTestModel(t)
+	transcript := newSession(t)
+	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "done"))
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: providerImpl, Transcript: transcript, Model: model,
+		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+			if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleUser {
+				return agent.MessageHookResult{}, nil
+			}
+			replacement, replaceErr := agentmsg.NewLLM(mustTextTerminal(t, "wrong role"))
+			return agent.MessageHookResult{Message: replacement}, replaceErr
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.Run(context.Background(), "original")
+	if err != nil || !result.Succeeded() {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	requestMessage := providerImpl.Requests()[0].Messages()[0]
+	durableMessage := transcript.Context().Messages()[0]
+	if requestMessage.Role() != llm.RoleUser || durableMessage.Role() != llm.RoleUser || messageText(t, durableMessage) != "original" {
+		t.Fatalf("role mismatch propagated request=%#v durable=%#v", requestMessage, durableMessage)
+	}
+}
+
+func TestSessionSyntheticFailureUsesMessageEndReplacementAndErrorBoundary(t *testing.T) {
+	transformErr := errors.New("transform failed")
+	t.Run("replacement", func(t *testing.T) {
+		transcript := newSession(t)
+		var sequence []string
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t), Transcript: transcript, Model: sessionTestModel(t),
+			TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
+				return nil, transformErr
+			},
+			Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+				sequence = append(sequence, string(event.Type)+":"+string(event.Message.Role()))
+				if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleAssistant {
+					return agent.MessageHookResult{}, nil
+				}
+				failure, ok := event.Message.(agentmsg.LLM).Conversation().(llm.AssistantFailureMessage)
+				if !ok || !errors.Is(failure.Failure().Cause(), agent.ErrContextTransform) {
+					t.Fatalf("synthetic hook message = %#v", event.Message)
+				}
+				replacement, replaceErr := llm.NewAssistantTextMessage(
+					[]llm.TextBlock{mustTextBlock(t, "recovered")}, llm.FinishStop, llm.Usage{}, failure.Timestamp(), failure.AssistantProvenance(),
+				)
+				if replaceErr != nil {
+					return agent.MessageHookResult{}, replaceErr
+				}
+				wrapped, replaceErr := agentmsg.NewLLM(replacement)
+				return agent.MessageHookResult{Message: wrapped}, replaceErr
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := runtime.Run(context.Background(), "go")
+		terminal, ok := result.Terminal()
+		text, textOK := terminal.(llm.AssistantTextMessage)
+		if err != nil || !ok || !textOK || text.Content()[0].Text() != "recovered" {
+			t.Fatalf("Run terminal = (%#v, %v)", terminal, err)
+		}
+		if got := transcript.Context().Messages(); len(got) != 2 || got[1].(llm.AssistantTextMessage).Content()[0].Text() != "recovered" {
+			t.Fatalf("durable replacement = %#v", got)
+		}
+		want := []string{"message_start:user", "message_end:user", "message_start:assistant", "message_end:assistant"}
+		if !reflect.DeepEqual(sequence, want) {
+			t.Fatalf("synthetic hook sequence = %v, want %v", sequence, want)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		hookErr := errors.New("synthetic message hook failed")
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t), Transcript: newSession(t), Model: sessionTestModel(t),
+			TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
+				return nil, transformErr
+			},
+			Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+				if event.Type == agent.MessageEndHookEvent && event.Message.Role() == agentmsg.RoleAssistant {
+					return agent.MessageHookResult{}, hookErr
+				}
+				return agent.MessageHookResult{}, nil
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runtime.Run(context.Background(), "go"); !errors.Is(err, hookErr) {
+			t.Fatalf("Run error = %v", err)
+		}
+		if runtime.State().Active.Phase() != agent.PhaseIdle {
+			t.Fatalf("hook error left phase %s", runtime.State().Active.Phase())
+		}
+	})
 }
 
 func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T) {

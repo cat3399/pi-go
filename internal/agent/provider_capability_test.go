@@ -52,20 +52,17 @@ func TestRegistryExecutorForwardsSequentialOverrideToProviderCapability(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	transcript := newSession(t)
 	scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
 	model, err := newTestModel("scripted", "scripted", "scripted-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := agent.New(agent.Config{
-		Provider:          scripted,
-		Transcript:        transcript,
-		Model:             model,
-		Tool:              executor,
-		Tools:             []provider.ToolDefinition{definition},
-		Now:               func() time.Time { return agentTestEpoch },
-		SettlementTimeout: time.Second,
+		Provider: scripted,
+		Model:    model,
+		Tool:     executor,
+		Tools:    []provider.ToolDefinition{definition},
+		Now:      func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,21 +104,18 @@ func TestProviderParallelToolCapabilityMatchesEffectiveExecutionMode(t *testing.
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			transcript := newSession(t)
 			scripted := newScriptedProvider(t, mustTextTerminal(t, "done"))
 			model, err := newTestModel("scripted", "scripted", "scripted-1")
 			if err != nil {
 				t.Fatal(err)
 			}
 			runtime, err := agent.New(agent.Config{
-				Provider:          scripted,
-				Transcript:        transcript,
-				Model:             model,
-				Tool:              &capabilityTool{overrideName: test.override, mode: test.mode},
-				Tools:             []provider.ToolDefinition{definition},
-				ToolExecution:     test.global,
-				Now:               func() time.Time { return agentTestEpoch },
-				SettlementTimeout: time.Second,
+				Provider:      scripted,
+				Model:         model,
+				Tool:          &capabilityTool{overrideName: test.override, mode: test.mode},
+				Tools:         []provider.ToolDefinition{definition},
+				ToolExecution: test.global,
+				Now:           func() time.Time { return agentTestEpoch },
 			})
 			if err != nil {
 				t.Fatal(err)

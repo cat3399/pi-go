@@ -18,6 +18,19 @@ import (
 func encodeMessage(message llm.ConversationMessage, _ AppendOptions) (json.RawMessage, error) {
 	switch message := message.(type) {
 	case llm.UserTextMessage:
+		if blocks := message.Content(); len(blocks) == 1 {
+			if _, signed := blocks[0].TextSignature(); !signed {
+				content, err := json.Marshal(blocks[0].Text())
+				if err != nil {
+					return nil, err
+				}
+				encoded := append([]byte(nil), `{"role":"user","content":`...)
+				encoded = append(encoded, content...)
+				encoded = append(encoded, `,"timestamp":`...)
+				encoded = strconv.AppendInt(encoded, message.Timestamp().UnixMilli(), 10)
+				return append(encoded, '}'), nil
+			}
+		}
 		content, err := encodeTextBlocks(message.Content())
 		if err != nil {
 			return nil, err

@@ -30,7 +30,8 @@ session entry 和 event 有对照测试；通用测试不导入 vendor wire type
 
 - 完整 streaming、tool scheduling、rich result 与 multi-turn loop；
 - `prepareNextTurn` 的完整 context、steering 注入和 `shouldStopAfterTurn`；
-- 精确 message/tool/event 顺序以及 usage/cost 聚合；
+- 精确 message/tool/event 顺序，并逐 turn 保留 provider 返回的 usage/cost；AgentLoop 不跨
+  turn 聚合 usage；
 - partial stream、provider/tool failure、abort 和 settlement；
 - 每个 provider turn 消费调用方提供的最新不可变 snapshot。
 

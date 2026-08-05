@@ -26,9 +26,13 @@ Provider 的数量也可以后置；完整 `Model` 结构和厂商无关的 Prov
 
 ## 当前状态
 
-仓库已有可复用的流式 tool loop、富消息、OpenAI Responses 与 Chat Completions adapter、
-session 存储、内置工具，以及 retry、compaction、queue 和动态 snapshot 等实现。不过，
-这些能力尚未按照原版的完整层次组装起来，内部 Runtime 也还没有达到首期验收条件。
+P1 AgentLoop 与 P2 stateful Agent 已收口：`AgentLoop` 是唯一的 Provider/Tool 执行核心；
+`Agent` 只持有内存状态、监听器、队列和 active run，并以 AgentLoop 完成 prompt、continue、
+streaming、工具链和 settlement。持久化、retry 与 compaction 位于 `AgentSession` 边界，不在
+Agent 内形成第二套执行路径。
+
+当前下一优先级是 P3 SessionManager 的完整产品语义，随后是 P4 AgentSession 的完整装配与
+组合场景。内部 Runtime 尚未达到首期总验收条件。
 
 现有 `cmd/pi-go -p` 是诊断入口，不代表产品 Runtime 已完成。更精确的实现盘点和已知测试
 基线见 [当前状态](docs/STATUS.md)。

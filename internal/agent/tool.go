@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/tool"
 )
 
@@ -184,7 +185,7 @@ func normalizeToolOutcome(output ToolOutput, err error) (ToolOutput, error) {
 	// Rich content is authoritative. A tool may deliberately have no text
 	// fallback (for example an image result), so validating/repairing the legacy
 	// Text field here would silently discard a valid rich result and its details.
-	if len(output.Content) != 0 {
+	if output.Content != nil {
 		return output, err
 	}
 	if utf8.ValidString(output.Text) {
@@ -235,4 +236,50 @@ func safeValueText(value any) string {
 		return "unknown panic"
 	}
 	return text
+}
+
+func validToolUpdate(update ToolUpdate) bool {
+	if !utf8.ValidString(update.Text) {
+		return false
+	}
+	for _, block := range update.Content {
+		switch block.(type) {
+		case llm.TextBlock, llm.ImageBlock:
+		default:
+			return false
+		}
+	}
+	if _, ok := cloneToolDetails(update.Details); !ok {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, name := range update.AddedToolNames {
+		if !utf8.ValidString(name) || name == "" {
+			return false
+		}
+		if _, ok := seen[name]; ok {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return true
+}
+
+func supportsToolCall(executor ToolExecutor, requestedName string) (supported bool, err error) {
+	if isNilInterface(executor) {
+		return false, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("tool lookup panicked: %s", safeValueText(recovered))
+		}
+	}()
+	if named, ok := executor.(NamedToolExecutor); ok {
+		return named.Supports(requestedName), nil
+	}
+	name, err := configuredToolName(executor)
+	if err != nil {
+		return false, err
+	}
+	return name == requestedName, nil
 }

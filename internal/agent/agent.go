@@ -2,24 +2,16 @@ package agent
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"reflect"
-	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
-	"github.com/cat3399/pi-go/internal/session"
-)
-
-const (
-	toolCancellationText = "Tool execution cancelled"
-	runToolCancelText    = "Run cancelled during tool execution"
 )
 
 type activeRun struct {
@@ -27,29 +19,23 @@ type activeRun struct {
 	ctx              context.Context
 	cancel           context.CancelCauseFunc
 	done             chan struct{}
-	phase            Phase
 	turn             uint32
+	phase            Phase
 	pendingToolCalls []string
-	providerTurns    uint32
-	toolExecutions   uint32
-	terminalAccepted bool
-	queueReservation *queueReservation
-	// snapshot is replaced only at the provider-turn boundary, before foreign
-	// provider code starts. It is then the immutable configuration that owns
-	// the resulting assistant/tool batch and its durable provenance.
-	snapshot *TurnSnapshot
-	// committed contains exactly the AgentMessages produced by this low-level
-	// run, matching pi's agent_end payload. turnToolResults is reset lazily when
-	// the first message of a new turn is recorded.
-	committed         []agentmsg.Message
-	turnToolResults   []agentmsg.Message
-	committedTurn     uint32
-	streamStartedTurn uint32
 }
+
+type agentRunMode uint8
+
+const (
+	agentRunPrompt agentRunMode = iota + 1
+	agentRunContinuation
+)
+
+type agentListener func(context.Context, AgentEvent) error
 
 type observerEntry struct {
 	id       uint64
-	observer Observer
+	listener agentListener
 }
 
 type controlObserverEntry struct {
@@ -57,32 +43,47 @@ type controlObserverEntry struct {
 	observer ControlObserver
 }
 
-// Agent is the existing stateful execution coordinator. Provider, tool, transcript
-// append, and observers are always called without holding mu. Continue reserves
-// its single-run slot under mu, reads its transcript snapshot without mu, then
-// validates the snapshot and consumes queues under mu.
+func validateAgentMessageBatch(messages []agentmsg.Message, label string) error {
+	for _, message := range messages {
+		if isNilInterface(message) {
+			return fmt.Errorf("%w: nil %s message", ErrInvalidRun, label)
+		}
+		if isAssistantPartialMessage(message) {
+			return fmt.Errorf("%w: partial %s message", ErrInvalidRun, label)
+		}
+	}
+	return nil
+}
+
+// Agent is the long-lived, in-memory stateful wrapper around AgentLoop. It
+// owns mutable AgentState, queues, listeners and one active run. Persistence,
+// retry, compaction and session policy belong to AgentSession or another host.
 type Agent struct {
-	mu sync.Mutex
-	// clockMu serializes an injected clock independently from coordinator state.
+	mu      sync.Mutex
 	clockMu sync.Mutex
 
 	config runtimeConfig
 	active *activeRun
-	// starting reserves the single-run slot while prompt preflight constructs
-	// immutable values. It prevents a busy loser from invoking the shared clock.
-	starting bool
-	nextID   uint64
+	nextID uint64
+
+	model         provider.Model
+	thinkingLevel provider.ThinkingLevel
+	systemPrompt  string
+	tool          ToolExecutor
+	tools         []provider.ToolDefinition
+	messages      []agentmsg.Message
+	isStreaming   bool
+	streaming     agentmsg.Message
+	errorMessage  string
 
 	observers        []observerEntry
 	controlObservers []controlObserverEntry
 	nextObserverID   uint64
 
-	steeringQueue []llm.ConversationMessage
-	followUpQueue []llm.ConversationMessage
-	// Reserved entries are always a prefix. Clear operations preserve this
-	// prefix; durable per-message acknowledgements remove it one entry at a time.
-	steeringReserved int
-	followUpReserved int
+	steeringQueue []agentmsg.Message
+	followUpQueue []agentmsg.Message
+	steeringMode  QueueMode
+	followUpMode  QueueMode
 }
 
 func New(config Config) (*Agent, error) {
@@ -90,22 +91,50 @@ func New(config Config) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{config: runtime}, nil
+	if err := validateAgentMessageBatch(config.InitialMessages, "initial"); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	// Match createMutableAgentState: isolate the array while retaining each
+	// immutable AgentMessage element as supplied.
+	messages := append([]agentmsg.Message(nil), config.InitialMessages...)
+	if len(runtime.tools) == 0 && !isNilInterface(runtime.tool) {
+		definition, err := provider.NewToolDefinition(runtime.toolName, runtime.toolName, false, []byte(`{"type":"object"}`))
+		if err != nil {
+			return nil, fmt.Errorf("%w: default tool definition: %w", ErrInvalidConfig, err)
+		}
+		runtime.tools = []provider.ToolDefinition{definition}
+	}
+	return &Agent{
+		config: runtime, model: runtime.model, thinkingLevel: runtime.thinkingLevel,
+		systemPrompt: runtime.systemPrompt, tool: runtime.tool,
+		tools:    append([]provider.ToolDefinition(nil), runtime.tools...),
+		messages: messages, steeringMode: runtime.steeringMode, followUpMode: runtime.followUpMode,
+	}, nil
 }
 
-// Subscribe adds an observer in deterministic subscription order. Unsubscribe
-// is idempotent; it affects subsequent notifications, not a callback snapshot
-// already in progress.
-func (a *Agent) Subscribe(observer Observer) func() {
+// Subscribe accepts both the legacy fire-and-forget Observer and an
+// error-returning listener. Error-returning listeners model an awaited JS
+// listener: the first error stops the remaining listeners for that event.
+func (a *Agent) Subscribe(observer any) func() {
 	if a == nil || observer == nil {
+		return func() {}
+	}
+	var listener agentListener
+	switch value := observer.(type) {
+	case Observer:
+		listener = func(ctx context.Context, event AgentEvent) error { value(ctx, event); return nil }
+	case func(context.Context, AgentEvent):
+		listener = func(ctx context.Context, event AgentEvent) error { value(ctx, event); return nil }
+	case func(context.Context, AgentEvent) error:
+		listener = value
+	default:
 		return func() {}
 	}
 	a.mu.Lock()
 	a.nextObserverID++
 	id := a.nextObserverID
-	a.observers = append(a.observers, observerEntry{id: id, observer: observer})
+	a.observers = append(a.observers, observerEntry{id: id, listener: listener})
 	a.mu.Unlock()
-
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -123,8 +152,9 @@ func (a *Agent) Subscribe(observer Observer) func() {
 	}
 }
 
-// SubscribeControl observes typed retry, compaction, and queue coordination
-// without widening the pi-compatible AgentEvent union delivered by Subscribe.
+// SubscribeControl remains as a compatibility boundary for AgentSession
+// control events. Stateful Agent itself emits only the canonical AgentEvent
+// lifecycle; retry and compaction live above it.
 func (a *Agent) SubscribeControl(observer ControlObserver) func() {
 	if a == nil || observer == nil {
 		return func() {}
@@ -134,7 +164,6 @@ func (a *Agent) SubscribeControl(observer ControlObserver) func() {
 	id := a.nextObserverID
 	a.controlObservers = append(a.controlObservers, controlObserverEntry{id: id, observer: observer})
 	a.mu.Unlock()
-
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -158,49 +187,170 @@ func (a *Agent) State() State {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.active == nil {
-		return State{phase: PhaseIdle}
+	state := State{
+		phase: a.phaseLocked(), model: a.model, thinkingLevel: a.thinkingLevel,
+		systemPrompt: a.systemPrompt, tools: append([]provider.ToolDefinition(nil), a.tools...),
+		messages: append([]agentmsg.Message(nil), a.messages...), isStreaming: a.isStreaming,
+		streamingMessage: agentmsg.CloneOne(a.streaming), errorMessage: a.errorMessage,
 	}
-	return State{
-		phase:            a.active.phase,
-		runID:            a.active.id,
-		turn:             a.active.turn,
-		pendingToolCalls: append([]string(nil), a.active.pendingToolCalls...),
+	if a.active != nil {
+		state.runID = a.active.id
+		state.turn = a.active.turn
+		state.pendingToolCalls = append([]string(nil), a.active.pendingToolCalls...)
 	}
+	return state
 }
 
-// Abort idempotently cancels the active generation and waits for its complete
-// settlement. A caller deadline only stops this wait; it does not make the run
-// idle or permit a second run. Because observers are part of settlement, an
-// observer must not synchronously call Abort for the run invoking it.
+func (a *Agent) phaseLocked() Phase {
+	if a.active == nil {
+		return PhaseIdle
+	}
+	return a.active.phase
+}
+
+func (a *Agent) SetSystemPrompt(prompt string) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	a.mu.Lock()
+	a.systemPrompt = prompt
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *Agent) SetModel(model provider.Model) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if _, err := provider.NewRequest(model, "", nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+	a.mu.Lock()
+	a.model = model
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *Agent) SetThinkingLevel(level provider.ThinkingLevel) error {
+	if a == nil || !level.Valid() {
+		return fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, level)
+	}
+	a.mu.Lock()
+	a.thinkingLevel = level
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *Agent) SetTools(executor ToolExecutor, tools []provider.ToolDefinition) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if len(tools) != 0 && isNilInterface(executor) {
+		return fmt.Errorf("%w: advertised tools require an executor", ErrInvalidConfig)
+	}
+	a.mu.Lock()
+	a.tool = executor
+	a.tools = append([]provider.ToolDefinition(nil), tools...)
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *Agent) SetMessages(messages []agentmsg.Message) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	for _, message := range messages {
+		if isNilInterface(message) {
+			return fmt.Errorf("%w: nil state message", ErrInvalidRun)
+		}
+		if isAssistantPartialMessage(message) {
+			return fmt.Errorf("%w: partial state message", ErrInvalidRun)
+		}
+	}
+	a.mu.Lock()
+	a.messages = append([]agentmsg.Message(nil), messages...)
+	a.mu.Unlock()
+	return nil
+}
+
+// Reset mirrors the original mutable wrapper: it neither aborts nor rejects
+// an active run and leaves model/system/thinking/tools/options unchanged.
+func (a *Agent) Reset() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.messages = nil
+	a.isStreaming = false
+	a.streaming = nil
+	a.errorMessage = ""
+	a.steeringQueue = nil
+	a.followUpQueue = nil
+	if a.active != nil {
+		a.active.pendingToolCalls = nil
+	}
+	a.mu.Unlock()
+}
+
+func (a *Agent) SetSteeringMode(mode QueueMode) error { return a.setQueueMode(mode, true) }
+func (a *Agent) SetFollowUpMode(mode QueueMode) error { return a.setQueueMode(mode, false) }
+func (a *Agent) SteeringMode() QueueMode {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.steeringMode
+}
+func (a *Agent) FollowUpMode() QueueMode {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.followUpMode
+}
+func (a *Agent) setQueueMode(mode QueueMode, steering bool) error {
+	if a == nil || (mode != QueueOneAtATime && mode != QueueAll) {
+		return fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
+	}
+	a.mu.Lock()
+	if steering {
+		a.steeringMode = mode
+	} else {
+		a.followUpMode = mode
+	}
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *Agent) Abort(ctx context.Context) error {
 	if a == nil {
 		return nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	a.mu.Lock()
 	active := a.active
-	if active == nil {
-		a.mu.Unlock()
-		return nil
+	if active != nil {
+		active.cancel(ErrAgentAborted)
 	}
-	active.cancel(ErrAgentAborted)
-	done := active.done
 	a.mu.Unlock()
-
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	}
+	return nil
 }
 
-// WaitForIdle waits for the generation active at call time. It never cancels
-// the run. If the Agent is already idle it returns immediately. An active-run
-// observer must not synchronously wait for its own settlement.
+// Signal returns the active run's cancellation context. The returned context
+// remains observable after Abort even though Abort itself is non-blocking.
+func (a *Agent) Signal() (context.Context, bool) {
+	if a == nil {
+		return nil, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active == nil {
+		return nil, false
+	}
+	return a.active.ctx, true
+}
+
 func (a *Agent) WaitForIdle(ctx context.Context) error {
 	if a == nil {
 		return nil
@@ -210,734 +360,793 @@ func (a *Agent) WaitForIdle(ctx context.Context) error {
 	}
 	a.mu.Lock()
 	active := a.active
+	a.mu.Unlock()
 	if active == nil {
-		a.mu.Unlock()
 		return nil
 	}
-	done := active.done
-	a.mu.Unlock()
-
 	select {
-	case <-done:
+	case <-active.done:
 		return nil
 	case <-ctx.Done():
 		return context.Cause(ctx)
 	}
 }
 
-// Compact performs an explicit manual compaction while the coordinator owns
-// the active slot. It is intentionally separate from Run: it does not append a
-// synthetic user message, and therefore cannot make a queued prompt appear to
-// have been processed. The real provider call happens inside Session.Compact
-// with no Agent or Session mutex held.
-func (a *Agent) Compact(ctx context.Context, instructions string) (result session.CompactResult, compactErr error) {
+func (a *Agent) Run(ctx context.Context, prompt string) (Result, error) {
+	active, err := a.beginRun(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.runTextPrompt(active, prompt)
+}
+
+func (a *Agent) runTextPrompt(active *activeRun, prompt string) (result Result, err error) {
+	timestamp, err := a.now()
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, fmt.Errorf("%w: %w", ErrInvalidRun, err)
+	}
+	text, err := llm.NewTextBlock(prompt)
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
+	}
+	message, err := llm.NewUserContentMessage([]llm.UserContentBlock{text}, timestamp)
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
+	}
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, err
+	}
+	return a.runLifecycle(active, []agentmsg.Message{wrapped}, false, agentRunPrompt)
+}
+
+func (a *Agent) RunContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
+	active, err := a.beginRun(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	timestamp, err := a.now()
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, fmt.Errorf("%w: %w", ErrInvalidRun, err)
+	}
+	message, err := llm.NewUserContentMessage(content, timestamp)
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, fmt.Errorf("%w: prompt content: %w", ErrInvalidRun, err)
+	}
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		a.finishRun(active)
+		return Result{}, err
+	}
+	return a.runLifecycle(active, []agentmsg.Message{wrapped}, false, agentRunPrompt)
+}
+
+func (a *Agent) RunAgentMessages(ctx context.Context, messages []agentmsg.Message) (Result, error) {
+	active, err := a.beginRun(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := validateAgentMessageBatch(messages, "prompt"); err != nil {
+		a.finishRun(active)
+		return Result{}, err
+	}
+	initial := agentmsg.Clone(messages)
+	return a.runLifecycle(active, initial, false, agentRunPrompt)
+}
+
+func (a *Agent) Continue(ctx context.Context) (Result, error) {
 	if a == nil {
-		return session.CompactResult{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+		return Result{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
 	}
 	if ctx == nil {
-		return session.CompactResult{}, fmt.Errorf("%w: context is nil", ErrInvalidRun)
-	}
-	if a.config.compactor == nil || a.config.summarizer == nil {
-		return session.CompactResult{}, ErrCompactionUnavailable
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return session.CompactResult{}, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
+		return Result{}, fmt.Errorf("%w: invalid continuation context", ErrInvalidRun)
 	}
 	a.mu.Lock()
-	if a.active != nil || a.starting {
+	if a.active != nil {
 		a.mu.Unlock()
-		return session.CompactResult{}, ErrBusy
+		return Result{}, ErrBusy
 	}
-	if a.nextID == math.MaxUint64 {
+	if len(a.messages) == 0 {
 		a.mu.Unlock()
-		return session.CompactResult{}, ErrRunIDExhausted
+		return Result{}, fmt.Errorf("%w: empty transcript", ErrCannotContinue)
 	}
-	a.nextID++
-	runCtx, cancel := context.WithCancelCause(ctx)
-	active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseCompacting, turn: 1}
-	a.active = active
+	lastRole := a.messages[len(a.messages)-1].Role()
+	var prompts []agentmsg.Message
+	skipInitialSteering := false
+	mode := agentRunContinuation
+	if lastRole == agentmsg.RoleAssistant {
+		mode = agentRunPrompt
+		prompts = a.drainQueueLocked(true)
+		if len(prompts) != 0 {
+			skipInitialSteering = true
+		} else {
+			prompts = a.drainQueueLocked(false)
+		}
+		if len(prompts) == 0 {
+			a.mu.Unlock()
+			return Result{}, fmt.Errorf("%w: assistant tail", ErrCannotContinue)
+		}
+	}
+	active, err := a.beginRunLocked(ctx)
 	a.mu.Unlock()
-	defer a.finishRun(active)
-	defer func() {
-		a.enterSettling(active)
-		var eventErr error
-		if compactErr != nil {
-			eventErr = safeCompactionEventError(compactErr)
-		}
-		a.notify(active.ctx, AgentEndEvent{RunID: active.id, Turn: 1, Messages: a.runMessages(active), Err: eventErr})
-	}()
-	a.notify(active.ctx, AgentStartEvent{RunID: active.id})
-	a.notify(active.ctx, CompactionStartEvent{RunID: active.id, Turn: 1, Reason: CompactionManual})
-	result, compactErr = a.config.compactor.Compact(active.ctx, session.CompactRequest{
-		KeepRecentTokens: a.config.keepRecentTokens,
-		Instructions:     instructions,
-		Summarizer:       a.observedSummarizer(active, 1, CompactionManual),
-	})
-	if compactErr != nil {
-		eventErr := safeCompactionEventError(compactErr)
-		a.notify(active.ctx, CompactionEndEvent{
-			RunID: active.id, Turn: 1, Reason: CompactionManual,
-			Aborted: context.Cause(active.ctx) != nil, Err: eventErr,
-		})
-		return session.CompactResult{}, compactErr
-	}
-	a.notify(active.ctx, CompactionEndEvent{RunID: active.id, Turn: 1, Reason: CompactionManual, Result: &result})
-	return result, nil
-}
-
-// Run accepts one text prompt while idle and synchronously settles its entire
-// provider/tool/transcript/observer lifecycle before returning.
-func (a *Agent) Run(ctx context.Context, prompt string) (result Result, runErr error) {
-	active, user, err := a.beginRun(ctx, prompt)
 	if err != nil {
 		return Result{}, err
 	}
-	return a.runV2(active, []llm.ConversationMessage{user})
+	return a.runLifecycle(active, prompts, skipInitialSteering, mode)
 }
 
-// RunAgentMessages starts one turn from the complete provider-neutral message
-// batch. It is the core equivalent of pi's AgentMessage | AgentMessage[] prompt
-// input and preserves custom/rich message order through commit and hooks.
-func (a *Agent) RunAgentMessages(ctx context.Context, messages []agentmsg.Message) (Result, error) {
-	initial := agentmsg.Clone(messages)
-	active, err := a.beginAgentMessageRun(ctx, initial)
-	if err != nil {
-		return Result{}, err
-	}
-	return a.runV2WithAgentMessages(active, nil, initial)
-}
-
-func (a *Agent) beginAgentMessageRun(ctx context.Context, messages []agentmsg.Message) (*activeRun, error) {
-	if a == nil {
-		return nil, fmt.Errorf("%w: nil agent", ErrInvalidRun)
-	}
-	if ctx == nil {
-		return nil, fmt.Errorf("%w: context is nil", ErrInvalidRun)
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return nil, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
-	}
-	if len(messages) == 0 {
-		return nil, fmt.Errorf("%w: empty agent message prompt", ErrInvalidRun)
-	}
-	for _, message := range messages {
-		if message == nil {
-			return nil, fmt.Errorf("%w: nil agent message prompt", ErrInvalidRun)
-		}
-		if _, partial := message.(agentmsg.AssistantPartial); partial {
-			return nil, fmt.Errorf("%w: partial assistant prompt", ErrInvalidRun)
-		}
+func (a *Agent) beginRun(ctx context.Context) (*activeRun, error) {
+	if a == nil || ctx == nil {
+		return nil, fmt.Errorf("%w: invalid run", ErrInvalidRun)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.active != nil || a.starting {
+	return a.beginRunLocked(ctx)
+}
+
+func (a *Agent) beginRunLocked(ctx context.Context) (*activeRun, error) {
+	if a.active != nil {
 		return nil, ErrBusy
 	}
 	if a.nextID == math.MaxUint64 {
 		return nil, ErrRunIDExhausted
 	}
 	a.nextID++
-	runContext, cancel := context.WithCancelCause(ctx)
-	active := &activeRun{id: a.nextID, ctx: runContext, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
+	runCtx, cancel := context.WithCancelCause(ctx)
+	active := &activeRun{id: a.nextID, ctx: runCtx, cancel: cancel, done: make(chan struct{}), turn: 1, phase: PhaseProvider}
 	a.active = active
+	a.isStreaming = true
+	a.streaming = nil
+	a.errorMessage = ""
 	return active, nil
 }
 
-func (a *Agent) runWithAgentMessages(ctx context.Context, prompt string, extra []agentmsg.Message) (Result, error) {
-	active, user, err := a.beginRun(ctx, prompt)
-	if err != nil {
-		return Result{}, err
+func (a *Agent) runLifecycle(active *activeRun, prompts []agentmsg.Message, skipInitialSteering bool, mode agentRunMode) (result Result, runErr error) {
+	defer a.finishRun(active)
+	result.runID = active.id
+	low, err := a.executeLowLoop(active, prompts, skipInitialSteering, mode)
+	result = resultFromLoop(active.id, low)
+	if err == nil {
+		return result, nil
 	}
-	return a.runV2WithAgentMessages(active, []llm.ConversationMessage{user}, agentmsg.Clone(extra))
+	failure, failureErr := a.handleRunFailure(active, err)
+	if failureErr != nil {
+		return result, failureErr
+	}
+	result.terminal = failure
+	return result, nil
 }
 
-// RunContent accepts one rich user message while idle.  It deliberately uses
-// the same admission and run seam as Run: the message is committed by runV2
-// and therefore has the same event, provenance, and cancellation behaviour
-// as a text prompt.
-func (a *Agent) RunContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
-	active, user, err := a.beginRunContent(ctx, content)
-	if err != nil {
-		return Result{}, err
-	}
-	return a.runV2(active, []llm.ConversationMessage{user})
-}
-
-func (a *Agent) runContentWithAgentMessages(ctx context.Context, content []llm.UserContentBlock, extra []agentmsg.Message) (Result, error) {
-	active, user, err := a.beginRunContent(ctx, content)
-	if err != nil {
-		return Result{}, err
-	}
-	return a.runV2WithAgentMessages(active, []llm.ConversationMessage{user}, agentmsg.Clone(extra))
-}
-
-func (a *Agent) beginRun(
-	ctx context.Context,
-	prompt string,
-) (*activeRun, llm.UserTextMessage, error) {
-	if a == nil {
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
-	}
-	if ctx == nil {
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: context is nil", ErrInvalidRun)
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
-	}
-
-	a.mu.Lock()
-	if a.active != nil || a.starting {
-		a.mu.Unlock()
-		return nil, llm.UserTextMessage{}, ErrBusy
-	}
-	if a.nextID == math.MaxUint64 {
-		a.mu.Unlock()
-		return nil, llm.UserTextMessage{}, ErrRunIDExhausted
-	}
-	a.starting = true
-	a.mu.Unlock()
-
-	reserved := true
+func (a *Agent) executeLowLoop(active *activeRun, prompts []agentmsg.Message, skipInitialSteering bool, mode agentRunMode) (result AgentLoopResult, err error) {
 	defer func() {
-		if reserved {
-			a.mu.Lock()
-			a.starting = false
-			a.mu.Unlock()
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("agent loop panicked: %s", safeValueText(recovered))
 		}
 	}()
-
-	timestamp, err := a.now()
+	loop, contextSnapshot, err := a.newLoop(active, skipInitialSteering)
 	if err != nil {
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: prompt timestamp: %w", ErrInvalidRun, err)
+		return AgentLoopResult{}, err
 	}
-	user, err := llm.NewUserTextMessage(prompt, timestamp)
-	if err != nil {
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
+	if mode == agentRunContinuation {
+		return loop.Continue(active.ctx, contextSnapshot)
 	}
-
-	a.mu.Lock()
-	if !a.starting || a.active != nil {
-		a.mu.Unlock()
-		return nil, llm.UserTextMessage{}, fmt.Errorf("%w: run reservation was lost", ErrInvariant)
-	}
-	a.nextID++
-	runContext, cancel := context.WithCancelCause(ctx)
-	active := &activeRun{
-		id:     a.nextID,
-		ctx:    runContext,
-		cancel: cancel,
-		done:   make(chan struct{}),
-		phase:  PhaseProvider,
-		turn:   1,
-	}
-	a.starting = false
-	a.active = active
-	reserved = false
-	a.mu.Unlock()
-	return active, user, nil
+	return loop.Run(active.ctx, append([]agentmsg.Message(nil), prompts...), contextSnapshot)
 }
 
-func (a *Agent) beginRunContent(ctx context.Context, content []llm.UserContentBlock) (*activeRun, llm.UserContentMessage, error) {
-	if a == nil {
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
-	}
-	if ctx == nil {
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: context is nil", ErrInvalidRun)
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: context already cancelled: %w", ErrInvalidRun, cause)
-	}
+func resultFromLoop(runID uint64, low AgentLoopResult) Result {
+	return Result{runID: runID, terminal: low.Terminal, providerTurns: low.ProviderTurns, toolExecutions: low.ToolExecutions}
+}
 
+func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop, AgentLoopContext, error) {
 	a.mu.Lock()
-	if a.active != nil || a.starting {
-		a.mu.Unlock()
-		return nil, llm.UserContentMessage{}, ErrBusy
-	}
-	if a.nextID == math.MaxUint64 {
-		a.mu.Unlock()
-		return nil, llm.UserContentMessage{}, ErrRunIDExhausted
-	}
-	a.starting = true
+	model := a.model
+	thinking := a.thinkingLevel
+	systemPrompt := a.systemPrompt
+	executor := a.tool
+	definitions := append([]provider.ToolDefinition(nil), a.tools...)
+	messages := append([]agentmsg.Message(nil), a.messages...)
+	stream := provider.CloneStreamOptions(a.config.stream)
 	a.mu.Unlock()
 
-	reserved := true
-	defer func() {
-		if reserved {
+	if a.config.prepareTurn != nil {
+		snapshot, err := a.config.prepareTurn(active.ctx, TurnContext{RunID: active.id, Turn: 1})
+		if err != nil {
+			return nil, AgentLoopContext{}, err
+		}
+		model, thinking, systemPrompt, executor = snapshot.Model, snapshot.ThinkingLevel, snapshot.SystemPrompt, snapshot.Tool
+		definitions = append([]provider.ToolDefinition(nil), snapshot.Tools...)
+		stream = provider.CloneStreamOptions(snapshot.Stream)
+	}
+	tools, err := adaptAgentLoopTools(definitions, executor)
+	if err != nil {
+		return nil, AgentLoopContext{}, err
+	}
+	contextSnapshot := AgentLoopContext{SystemPrompt: systemPrompt, Messages: messages, Tools: tools}
+	turn := uint32(1)
+	config := AgentLoopConfig{
+		RunID: active.id, Provider: a.config.provider, Model: model, ThinkingLevel: thinking,
+		Stream:        stream,
+		ToolExecution: a.config.toolExecution, BeforeToolCall: bridgeAgentLoopBeforeHook(a.config.beforeToolCall),
+		AfterToolCall: bridgeAgentLoopAfterHook(a.config.afterToolCall), Now: a.config.now,
+		ConvertToLLM: a.agentLoopConvertToLLM(), TransformContext: a.agentLoopTransformContext(), GetAPIKey: a.config.getAPIKey,
+		Emit: func(ctx context.Context, event AgentEvent) error { return a.processEvent(active, ctx, event) },
+	}
+	if a.config.messageEnd != nil {
+		config.ProcessMessage = func(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
+			replacement, err := a.config.messageEnd(ctx, agentmsg.CloneOne(message))
+			if err != nil {
+				return nil, err
+			}
+			if replacement == nil {
+				return message, nil
+			}
+			return agentmsg.CloneOne(replacement), nil
+		}
+	}
+	if a.config.prepareTurn != nil || a.config.prepareNextTurn != nil {
+		config.PrepareNextTurn = func(ctx context.Context, input AgentLoopTurnContext) (*AgentLoopTurnUpdate, error) {
+			turn++
+			update := AgentLoopTurnUpdate{}
+			changed := false
 			a.mu.Lock()
-			a.starting = false
+			hasQueued := len(a.steeringQueue) != 0 || len(a.followUpQueue) != 0
 			a.mu.Unlock()
+			_, toolTurn := input.Message.(llm.AssistantToolUseMessage)
+			if a.config.prepareTurn != nil && (toolTurn || hasQueued) {
+				snapshot, err := a.config.prepareTurn(ctx, TurnContext{RunID: active.id, Turn: turn})
+				if err != nil {
+					return nil, err
+				}
+				adapted, err := adaptAgentLoopTools(snapshot.Tools, snapshot.Tool)
+				if err != nil {
+					return nil, err
+				}
+				next := cloneAgentLoopContext(input.Context)
+				next.SystemPrompt = snapshot.SystemPrompt
+				next.Tools = adapted
+				stream := provider.CloneStreamOptions(snapshot.Stream)
+				update.Context, update.Model, update.ThinkingLevel, update.Stream = &next, &snapshot.Model, &snapshot.ThinkingLevel, &stream
+				changed = true
+			}
+			if a.config.prepareNextTurn != nil {
+				fullInput := cloneAgentLoopTurnContext(input.Message, input.ToolResults, input.Context, input.NewMessages)
+				full, err := a.config.prepareNextTurn(ctx, fullInput)
+				if err != nil {
+					return nil, err
+				}
+				if full != nil {
+					if full.Context != nil {
+						next := cloneAgentLoopContext(*full.Context)
+						update.Context = &next
+						changed = true
+					}
+					if full.Model != nil {
+						model := *full.Model
+						update.Model = &model
+						changed = true
+					}
+					if full.ThinkingLevel != nil {
+						thinking := *full.ThinkingLevel
+						update.ThinkingLevel = &thinking
+						changed = true
+					}
+					if full.Stream != nil {
+						stream := provider.CloneStreamOptions(*full.Stream)
+						update.Stream = &stream
+						changed = true
+					}
+				}
+			}
+			if !changed {
+				return nil, nil
+			}
+			return &update, nil
+		}
+	}
+	firstSteeringPoll := true
+	config.GetSteeringMessages = func(ctx context.Context) ([]agentmsg.Message, error) {
+		if context.Cause(ctx) != nil {
+			return nil, nil
+		}
+		a.mu.Lock()
+		if skipInitialSteering && firstSteeringPoll {
+			firstSteeringPoll = false
+			a.mu.Unlock()
+			return nil, nil
+		}
+		firstSteeringPoll = false
+		drained := a.drainQueueLocked(true)
+		a.mu.Unlock()
+		if len(drained) != 0 {
+			a.notifyControl(active.ctx, QueueUpdateEvent{RunID: active.id, Turn: active.turn})
+		}
+		return drained, nil
+	}
+	config.GetFollowUpMessages = func(ctx context.Context) ([]agentmsg.Message, error) {
+		if context.Cause(ctx) != nil {
+			return nil, nil
+		}
+		a.mu.Lock()
+		drained := a.drainQueueLocked(false)
+		a.mu.Unlock()
+		if len(drained) != 0 {
+			a.notifyControl(active.ctx, QueueUpdateEvent{RunID: active.id, Turn: active.turn})
+		}
+		return drained, nil
+	}
+	loop, err := NewAgentLoop(config)
+	return loop, contextSnapshot, err
+}
+
+func adaptAgentLoopTools(definitions []provider.ToolDefinition, executor ToolExecutor) ([]AgentLoopTool, error) {
+	if len(definitions) == 0 {
+		return nil, nil
+	}
+	if isNilInterface(executor) {
+		return nil, fmt.Errorf("%w: advertised tools require an executor", ErrInvalidConfig)
+	}
+	tools := make([]AgentLoopTool, 0, len(definitions))
+	for _, definition := range definitions {
+		tool, err := NewAgentLoopToolAdapter(definition, executor, nil)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, tool)
+	}
+	return tools, nil
+}
+
+func (a *Agent) agentLoopConvertToLLM() AgentLoopConvertToLLM {
+	return func(ctx context.Context, messages []agentmsg.Message) ([]llm.ConversationMessage, error) {
+		if a.config.transformAgentContext != nil {
+			transformed, err := a.config.transformAgentContext(ctx, append([]agentmsg.Message(nil), messages...))
+			if err != nil {
+				return nil, err
+			}
+			if transformed != nil {
+				messages = append([]agentmsg.Message(nil), (*transformed)...)
+			}
+		}
+		if a.config.convertToLLM != nil {
+			return a.config.convertToLLM(ctx, agentmsg.Clone(messages))
+		}
+		return agentmsg.ConvertToLLM(messages)
+	}
+}
+
+func (a *Agent) agentLoopTransformContext() AgentLoopTransformContext {
+	if a.config.transformContext == nil {
+		return nil
+	}
+	return func(ctx context.Context, messages []agentmsg.Message) ([]agentmsg.Message, error) {
+		converted, err := agentmsg.ConvertToLLM(messages)
+		if err != nil {
+			return nil, err
+		}
+		transformed, err := a.config.transformContext(ctx, converted)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]agentmsg.Message, 0, len(transformed))
+		for _, message := range transformed {
+			wrapped, err := agentmsg.NewLLM(message)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, wrapped)
+		}
+		return result, nil
+	}
+}
+
+func bridgeAgentLoopBeforeHook(hook BeforeToolCallHook) AgentLoopBeforeToolCallHook {
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context, input AgentLoopBeforeToolCallContext) (AgentLoopBeforeToolCallResult, error) {
+		arguments, err := jsonMarshal(input.Arguments)
+		if err != nil {
+			return AgentLoopBeforeToolCallResult{}, err
+		}
+		conversation, err := agentmsg.ConvertToLLM(input.Context.Messages)
+		if err != nil {
+			return AgentLoopBeforeToolCallResult{}, err
+		}
+		result, err := hook(ctx, BeforeToolCallContext{Assistant: input.Assistant, ToolCall: input.ToolCall, Arguments: arguments, Context: conversation})
+		converted := AgentLoopBeforeToolCallResult{Block: result.Block, Reason: result.Reason}
+		if result.Arguments != nil {
+			var value any
+			if decodeErr := json.Unmarshal(*result.Arguments, &value); decodeErr != nil {
+				return AgentLoopBeforeToolCallResult{}, decodeErr
+			}
+			converted.Arguments = &value
+		}
+		return converted, err
+	}
+}
+
+func bridgeAgentLoopAfterHook(hook AfterToolCallHook) AgentLoopAfterToolCallHook {
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context, input AgentLoopAfterToolCallContext) (AgentLoopAfterToolCallResult, error) {
+		arguments, err := jsonMarshal(input.Arguments)
+		if err != nil {
+			return AgentLoopAfterToolCallResult{}, err
+		}
+		conversation, err := agentmsg.ConvertToLLM(input.Context.Messages)
+		if err != nil {
+			return AgentLoopAfterToolCallResult{}, err
+		}
+		result, err := hook(ctx, AfterToolCallContext{Assistant: input.Assistant, ToolCall: input.ToolCall, Arguments: arguments, Context: conversation, Result: input.Result, IsError: input.IsError})
+		if err != nil {
+			return AgentLoopAfterToolCallResult{}, err
+		}
+		return AgentLoopAfterToolCallResult{Content: result.Content, Details: result.Details, IsError: result.IsError, Usage: result.Usage, Terminate: result.Terminate}, nil
+	}
+}
+
+func jsonMarshal(value any) ([]byte, error) {
+	return json.Marshal(value)
+}
+
+func (a *Agent) processEvent(active *activeRun, ctx context.Context, event AgentEvent) error {
+	if event == nil {
+		return nil
+	}
+	a.mu.Lock()
+	if a.active != active {
+		a.mu.Unlock()
+		return fmt.Errorf("%w: event for inactive run", ErrInvariant)
+	}
+	a.reduceEventLocked(event)
+	listeners := make([]agentListener, 0, len(a.observers))
+	for _, entry := range a.observers {
+		if entry.listener != nil {
+			listeners = append(listeners, entry.listener)
+		}
+	}
+	a.mu.Unlock()
+	for _, listener := range listeners {
+		if err := callAgentListener(listener, ctx, cloneAgentEvent(event)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func callAgentListener(listener agentListener, ctx context.Context, event AgentEvent) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("agent listener panicked: %s", safeValueText(recovered))
 		}
 	}()
-	timestamp, err := a.now()
-	if err != nil {
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: prompt timestamp: %w", ErrInvalidRun, err)
-	}
-	user, err := llm.NewUserContentMessage(content, timestamp)
-	if err != nil {
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: prompt content: %w", ErrInvalidRun, err)
-	}
+	return listener(ctx, event)
+}
 
+func (a *Agent) notifyControl(ctx context.Context, event AgentControlEvent) {
 	a.mu.Lock()
-	if !a.starting || a.active != nil {
-		a.mu.Unlock()
-		return nil, llm.UserContentMessage{}, fmt.Errorf("%w: run reservation was lost", ErrInvariant)
+	observers := make([]ControlObserver, 0, len(a.controlObservers))
+	for _, entry := range a.controlObservers {
+		if entry.observer != nil {
+			observers = append(observers, entry.observer)
+		}
 	}
-	a.nextID++
-	runContext, cancel := context.WithCancelCause(ctx)
-	active := &activeRun{id: a.nextID, ctx: runContext, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, turn: 1}
-	a.starting = false
-	a.active = active
-	reserved = false
 	a.mu.Unlock()
-	return active, user, nil
+	for _, observer := range observers {
+		observer(ctx, cloneAgentControlEvent(event))
+	}
+}
+
+func (a *Agent) reduceEventLocked(event AgentEvent) {
+	active := a.active
+	switch value := event.(type) {
+	case TurnStartEvent:
+		active.turn, active.phase = value.Turn, PhaseProvider
+	case MessageStartEvent:
+		a.streaming = agentmsg.CloneOne(value.Message)
+	case MessageUpdateEvent:
+		a.streaming = agentmsg.CloneOne(value.Message)
+	case MessageEndEvent:
+		a.streaming = nil
+		a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+	case ToolExecutionStartEvent:
+		active.phase = PhaseTool
+		active.pendingToolCalls = append(active.pendingToolCalls, value.ToolCallID)
+	case ToolExecutionEndEvent:
+		for index, id := range active.pendingToolCalls {
+			if id == value.ToolCallID {
+				active.pendingToolCalls = append(active.pendingToolCalls[:index], active.pendingToolCalls[index+1:]...)
+				break
+			}
+		}
+	case TurnEndEvent:
+		active.phase = PhaseProvider
+		if wrapped, ok := value.Message.(agentmsg.LLM); ok {
+			if failure, ok := wrapped.Conversation().(llm.AssistantFailureMessage); ok {
+				a.errorMessage = failure.ErrorMessage()
+			}
+		}
+	case AgentEndEvent:
+		a.streaming = nil
+		active.phase = PhaseSettling
+	}
+}
+
+func (a *Agent) handleRunFailure(active *activeRun, cause error) (llm.AssistantTerminal, error) {
+	a.mu.Lock()
+	model := a.model
+	turn := active.turn
+	aborted := context.Cause(active.ctx) != nil
+	a.mu.Unlock()
+	reason := llm.FinishError
+	if aborted {
+		reason = llm.FinishAborted
+	}
+	failure, err := llm.NewFailure(safeErrorText(cause), cause)
+	if err != nil {
+		return nil, err
+	}
+	text, err := llm.NewTextBlock("")
+	if err != nil {
+		return nil, err
+	}
+	failureTerminal, err := llm.NewAssistantFailureMessageWithBlocksAndMetadata(
+		[]llm.AssistantBlock{text}, reason, failure, llm.Usage{}, a.mustNow(),
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()}, nil, nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var terminal llm.AssistantTerminal = failureTerminal
+	wrappedLLM, err := agentmsg.NewLLM(terminal)
+	if err != nil {
+		return nil, err
+	}
+	var wrapped agentmsg.Message = wrappedLLM
+	if a.config.messageEnd != nil {
+		replacement, hookErr := a.config.messageEnd(active.ctx, agentmsg.CloneOne(wrapped))
+		if hookErr != nil {
+			return nil, hookErr
+		}
+		if replacement != nil {
+			standard, ok := replacement.(agentmsg.LLM)
+			if !ok {
+				return nil, fmt.Errorf("%w: processed synthetic failure is %T", ErrInvariant, replacement)
+			}
+			replacedTerminal, ok := standard.Conversation().(llm.AssistantTerminal)
+			if !ok {
+				return nil, fmt.Errorf("%w: processed synthetic failure is not terminal", ErrInvariant)
+			}
+			terminal = replacedTerminal
+			wrapped = agentmsg.CloneOne(replacement)
+		}
+	}
+	for _, event := range []AgentEvent{
+		MessageStartEvent{RunID: active.id, Turn: turn, Message: wrapped},
+		MessageEndEvent{RunID: active.id, Turn: turn, Message: wrapped, Model: model},
+		TurnEndEvent{RunID: active.id, Turn: turn, Message: wrapped},
+		AgentEndEvent{RunID: active.id, Turn: turn, Messages: []agentmsg.Message{wrapped}, Terminal: terminal},
+	} {
+		if err := a.processEvent(active, active.ctx, event); err != nil {
+			return nil, err
+		}
+	}
+	return terminal, nil
 }
 
 func (a *Agent) finishRun(active *activeRun) {
 	a.mu.Lock()
 	if a.active == active {
-		a.releaseQueueReservationLocked(active)
+		a.isStreaming = false
+		a.streaming = nil
+		active.pendingToolCalls = nil
 		a.active = nil
-		active.cancel(context.Canceled)
 		close(active.done)
 	}
 	a.mu.Unlock()
 }
 
-func (a *Agent) enterSettling(active *activeRun) {
+func (a *Agent) Steer(prompt string) error    { return a.enqueueText(prompt, true) }
+func (a *Agent) FollowUp(prompt string) error { return a.enqueueText(prompt, false) }
+func (a *Agent) SteerContent(content []llm.UserContentBlock) error {
+	return a.enqueueContent(content, true)
+}
+func (a *Agent) FollowUpContent(content []llm.UserContentBlock) error {
+	return a.enqueueContent(content, false)
+}
+func (a *Agent) SteerAgentMessage(message agentmsg.Message) error {
+	return a.enqueueAgentMessage(message, true)
+}
+func (a *Agent) FollowUpAgentMessage(message agentmsg.Message) error {
+	return a.enqueueAgentMessage(message, false)
+}
+
+func (a *Agent) enqueueText(prompt string, steering bool) error {
+	timestamp, err := a.now()
+	if err != nil {
+		return err
+	}
+	text, err := llm.NewTextBlock(prompt)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
+	}
+	message, err := llm.NewUserContentMessage([]llm.UserContentBlock{text}, timestamp)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
+	}
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		return err
+	}
+	return a.enqueueAgentMessage(wrapped, steering)
+}
+
+func (a *Agent) enqueueContent(content []llm.UserContentBlock, steering bool) error {
+	timestamp, err := a.now()
+	if err != nil {
+		return err
+	}
+	message, err := llm.NewUserContentMessage(content, timestamp)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
+	}
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		return err
+	}
+	return a.enqueueAgentMessage(wrapped, steering)
+}
+
+func (a *Agent) enqueueAgentMessage(message agentmsg.Message, steering bool) error {
+	if a == nil || isNilInterface(message) {
+		return fmt.Errorf("%w: invalid queued message", ErrInvalidQueueMessage)
+	}
+	if isAssistantPartialMessage(message) {
+		return fmt.Errorf("%w: partial queued message", ErrInvalidQueueMessage)
+	}
 	a.mu.Lock()
-	if a.active == active {
-		active.phase = PhaseSettling
-		active.pendingToolCalls = nil
+	if steering {
+		a.steeringQueue = append(a.steeringQueue, message)
+	} else {
+		a.followUpQueue = append(a.followUpQueue, message)
 	}
 	a.mu.Unlock()
+	return nil
 }
 
-func (a *Agent) runCounts(active *activeRun) (uint32, uint32) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return active.providerTurns, active.toolExecutions
+func (a *Agent) enqueueMessage(message llm.ConversationMessage, steering bool) error {
+	wrapped, err := agentmsg.NewLLM(message)
+	if err != nil {
+		return err
+	}
+	return a.enqueueAgentMessage(wrapped, steering)
 }
 
-func (a *Agent) runTurn(active *activeRun) uint32 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return active.turn
-}
-
-func (a *Agent) runCause(active *activeRun) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active != active || active.terminalAccepted {
+func (a *Agent) drainQueueLocked(steering bool) []agentmsg.Message {
+	queue, mode := &a.followUpQueue, a.followUpMode
+	if steering {
+		queue, mode = &a.steeringQueue, a.steeringMode
+	}
+	if len(*queue) == 0 {
 		return nil
 	}
-	return context.Cause(active.ctx)
+	count := 1
+	if mode == QueueAll {
+		count = len(*queue)
+	}
+	result := append([]agentmsg.Message(nil), (*queue)[:count]...)
+	copy(*queue, (*queue)[count:])
+	*queue = (*queue)[:len(*queue)-count]
+	return result
 }
 
-func (a *Agent) notify(ctx context.Context, event agentRuntimeEvent) {
-	if event == nil {
+func (a *Agent) RichQueues() (steering, followUp []llm.ConversationMessage) {
+	if a == nil {
+		return nil, nil
+	}
+	a.mu.Lock()
+	steeringMessages := append([]agentmsg.Message(nil), a.steeringQueue...)
+	followMessages := append([]agentmsg.Message(nil), a.followUpQueue...)
+	a.mu.Unlock()
+	steering, _ = agentmsg.ConvertToLLM(steeringMessages)
+	followUp, _ = agentmsg.ConvertToLLM(followMessages)
+	return
+}
+
+func (a *Agent) Queues() (steering, followUp []llm.UserTextMessage) {
+	richSteering, richFollow := a.RichQueues()
+	for _, message := range richSteering {
+		if text, ok := queuedUserTextSnapshot(message); ok {
+			steering = append(steering, text)
+		}
+	}
+	for _, message := range richFollow {
+		if text, ok := queuedUserTextSnapshot(message); ok {
+			followUp = append(followUp, text)
+		}
+	}
+	return
+}
+
+func queuedUserTextSnapshot(message llm.ConversationMessage) (llm.UserTextMessage, bool) {
+	if text, ok := message.(llm.UserTextMessage); ok {
+		return text, true
+	}
+	content, ok := message.(llm.UserContentMessage)
+	if !ok || len(content.Content()) != 1 {
+		return llm.UserTextMessage{}, false
+	}
+	block, ok := content.Content()[0].(llm.TextBlock)
+	if !ok {
+		return llm.UserTextMessage{}, false
+	}
+	text, err := llm.NewUserTextMessage(block.Text(), content.Timestamp())
+	return text, err == nil
+}
+
+func (a *Agent) HasQueuedMessages() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.steeringQueue) != 0 || len(a.followUpQueue) != 0
+}
+
+func (a *Agent) ClearSteeringQueue() { a.clearQueue(true) }
+func (a *Agent) ClearFollowUpQueue() { a.clearQueue(false) }
+func (a *Agent) ClearAllQueues() {
+	if a == nil {
 		return
 	}
 	a.mu.Lock()
-	observers := make([]Observer, 0, len(a.observers))
-	for _, entry := range a.observers {
-		if entry.observer != nil {
-			observers = append(observers, entry.observer)
-		}
+	a.steeringQueue, a.followUpQueue = nil, nil
+	a.mu.Unlock()
+}
+func (a *Agent) clearQueue(steering bool) {
+	if a == nil {
+		return
 	}
-	controlObservers := make([]ControlObserver, 0, len(a.controlObservers))
-	for _, entry := range a.controlObservers {
-		if entry.observer != nil {
-			controlObservers = append(controlObservers, entry.observer)
-		}
+	a.mu.Lock()
+	if steering {
+		a.steeringQueue = nil
+	} else {
+		a.followUpQueue = nil
 	}
 	a.mu.Unlock()
-	if publicEvent, ok := event.(AgentEvent); ok {
-		for _, observer := range observers {
-			observer(ctx, cloneAgentEvent(publicEvent))
-		}
-	}
-	if controlEvent, ok := event.(AgentControlEvent); ok {
-		for _, observer := range controlObservers {
-			observer(ctx, cloneAgentControlEvent(controlEvent))
-		}
-	}
-}
-
-func (a *Agent) markStreamStarted(active *activeRun, turn uint32) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active != active || active.terminalAccepted {
-		return fmt.Errorf("%w: inactive provider stream", ErrInvariant)
-	}
-	active.streamStartedTurn = turn
-	return nil
-}
-
-func (a *Agent) emitMessageStartIfNeeded(active *activeRun, turn uint32, message agentmsg.Message) error {
-	if message == nil {
-		return fmt.Errorf("%w: nil message start", ErrInvariant)
-	}
-	a.mu.Lock()
-	if a.active != active || active.terminalAccepted {
-		a.mu.Unlock()
-		return fmt.Errorf("%w: inactive message start", ErrInvariant)
-	}
-	streamStarted := message.Role() == agentmsg.RoleAssistant && active.streamStartedTurn == turn
-	a.mu.Unlock()
-	if !streamStarted {
-		a.notify(active.ctx, MessageStartEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(message)})
-	}
-	return nil
-}
-
-func (a *Agent) recordCommittedMessage(active *activeRun, turn uint32, message agentmsg.Message) error {
-	if message == nil {
-		return fmt.Errorf("%w: nil committed message", ErrInvariant)
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active != active {
-		return fmt.Errorf("%w: inactive committed message", ErrInvariant)
-	}
-	if active.committedTurn != turn {
-		active.committedTurn = turn
-		active.turnToolResults = nil
-	}
-	active.committed = append(active.committed, agentmsg.CloneOne(message))
-	if message.Role() == agentmsg.RoleToolResult {
-		active.turnToolResults = append(active.turnToolResults, agentmsg.CloneOne(message))
-	}
-	return nil
-}
-
-func (a *Agent) runMessages(active *activeRun) []agentmsg.Message {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active != active {
-		return nil
-	}
-	return agentmsg.Clone(active.committed)
-}
-
-func (a *Agent) turnEndEvent(active *activeRun, turn uint32, terminal llm.AssistantTerminal) (TurnEndEvent, error) {
-	message, err := agentmsg.NewLLM(terminal)
-	if err != nil {
-		return TurnEndEvent{}, err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active != active {
-		return TurnEndEvent{}, fmt.Errorf("%w: inactive turn end", ErrInvariant)
-	}
-	return TurnEndEvent{
-		RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(message),
-		ToolResults: agentmsg.Clone(active.turnToolResults),
-	}, nil
-}
-
-func (a *Agent) notifyTurnEnd(active *activeRun, turn uint32, terminal llm.AssistantTerminal) error {
-	event, err := a.turnEndEvent(active, turn, terminal)
-	if err != nil {
-		return err
-	}
-	a.notify(active.ctx, event)
-	return nil
-}
-
-func (a *Agent) commit(active *activeRun, turn uint32, message llm.ConversationMessage) (llm.ConversationMessage, error) {
-	return a.commitAfterAppend(active, turn, message, nil, nil)
-}
-
-func (a *Agent) commitAfterAppend(
-	active *activeRun,
-	turn uint32,
-	message llm.ConversationMessage,
-	beforeAppend func(llm.ConversationMessage) error,
-	afterAppend func() error,
-) (llm.ConversationMessage, error) {
-	wrapped, err := agentmsg.NewLLM(message)
-	if err != nil {
-		return nil, err
-	}
-	final, err := a.applyMessageEnd(active.ctx, wrapped)
-	if err != nil {
-		return nil, err
-	}
-	converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{final})
-	if err != nil || len(converted) != 1 {
-		return nil, fmt.Errorf("%w: invalid message_end replacement", ErrInvariant)
-	}
-	message = converted[0]
-	if beforeAppend != nil {
-		if err := beforeAppend(message); err != nil {
-			return nil, err
-		}
-	}
-	options := session.AppendOptions{}
-	var eventModel provider.Model
-	if message.Role() == llm.RoleAssistant {
-		snapshot, snapshotErr := a.activeSnapshot(active)
-		if snapshotErr != nil {
-			// A cancellation can be persisted before any provider attempt (for
-			// example while durable queued input is settling). No turn snapshot
-			// exists in that case; use the immutable loop defaults solely for
-			// failure provenance rather than fabricating a request snapshot.
-			if !errors.Is(snapshotErr, ErrInvariant) {
-				return nil, snapshotErr
-			}
-			snapshot = TurnSnapshot{Model: a.config.model}
-		}
-		eventModel = snapshot.Model
-	}
-	settlementBase := context.WithoutCancel(active.ctx)
-	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
-	_, err = a.config.transcript.Append(settlement, message, options)
-	cancel()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
-	}
-	if afterAppend != nil {
-		if err := afterAppend(); err != nil {
-			return nil, err
-		}
-	}
-	if err := a.emitMessageStartIfNeeded(active, turn, final); err != nil {
-		return nil, err
-	}
-	if err := a.recordCommittedMessage(active, turn, final); err != nil {
-		return nil, err
-	}
-	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final), Model: eventModel})
-	return message, nil
-}
-
-func (a *Agent) applyMessageEnd(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
-	if message == nil {
-		return nil, fmt.Errorf("%w: nil message", ErrInvariant)
-	}
-	if a.config.messageEnd == nil {
-		return agentmsg.CloneOne(message), nil
-	}
-	replacement, err := a.config.messageEnd(ctx, agentmsg.CloneOne(message))
-	if err != nil {
-		return nil, err
-	}
-	if replacement == nil {
-		return agentmsg.CloneOne(message), nil
-	}
-	if replacement.Role() != message.Role() {
-		return nil, fmt.Errorf("%w: message_end replacement changed role", ErrInvariant)
-	}
-	return agentmsg.CloneOne(replacement), nil
-}
-
-func (a *Agent) commitAgentMessage(active *activeRun, turn uint32, message agentmsg.Message) error {
-	final, err := a.applyMessageEnd(active.ctx, message)
-	if err != nil {
-		return err
-	}
-	if err := a.emitMessageStartIfNeeded(active, turn, final); err != nil {
-		return err
-	}
-	if standard, ok := final.(agentmsg.LLM); ok {
-		return a.commitConversationAfterMessageEnd(active, turn, standard.Conversation(), final)
-	}
-	transcript, ok := a.config.transcript.(AgentMessageTranscript)
-	if !ok {
-		return fmt.Errorf("%w: transcript does not support AgentMessage persistence", ErrTranscriptCommit)
-	}
-	settlementBase := context.WithoutCancel(active.ctx)
-	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
-	_, appendErr := transcript.AppendAgentMessage(settlement, final, session.AppendOptions{})
-	cancel()
-	if appendErr != nil {
-		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, final.Role(), appendErr)
-	}
-	converted, convertErr := agentmsg.ConvertToLLM([]agentmsg.Message{final})
-	if convertErr != nil {
-		return fmt.Errorf("%w: project committed AgentMessage: %w", ErrInvariant, convertErr)
-	}
-	if len(converted) > 1 {
-		return fmt.Errorf("%w: one AgentMessage projected to multiple LLM messages", ErrInvariant)
-	}
-	if err := a.recordCommittedMessage(active, turn, final); err != nil {
-		return err
-	}
-	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final)})
-	return nil
-}
-
-func (a *Agent) commitConversationAfterMessageEnd(active *activeRun, turn uint32, message llm.ConversationMessage, final agentmsg.Message) error {
-	options := session.AppendOptions{}
-	var eventModel provider.Model
-	if message.Role() == llm.RoleAssistant {
-		snapshot, snapshotErr := a.activeSnapshot(active)
-		if snapshotErr != nil {
-			if !errors.Is(snapshotErr, ErrInvariant) {
-				return snapshotErr
-			}
-			snapshot = TurnSnapshot{Model: a.config.model}
-		}
-		eventModel = snapshot.Model
-	}
-	settlementBase := context.WithoutCancel(active.ctx)
-	settlement, cancel := context.WithTimeout(settlementBase, a.config.settlementTimeout)
-	_, err := a.config.transcript.Append(settlement, message, options)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
-	}
-	if err := a.recordCommittedMessage(active, turn, final); err != nil {
-		return err
-	}
-	a.notify(active.ctx, MessageEndEvent{RunID: active.id, Turn: turn, Message: agentmsg.CloneOne(final), Model: eventModel})
-	return nil
-}
-
-func (a *Agent) collectProvider(
-	active *activeRun,
-	turn uint32,
-	request provider.Request,
-) (terminal llm.AssistantTerminal, err error) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			terminal = nil
-			err = fmt.Errorf("%w: panic: %s\n%s", ErrProviderStream, safeValueText(recovered), debug.Stack())
-		}
-	}()
-
-	stream := a.config.provider.Stream(active.ctx, request)
-	if isNilInterface(stream) {
-		return nil, fmt.Errorf("%w: provider returned a nil stream", ErrProviderStream)
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = stream.Close()
-		}
-	}()
-
-	collector := &llm.StreamCollector{}
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			return nil, fmt.Errorf("%w: next event: %w", ErrProviderStream, nextErr)
-		}
-		if acceptErr := collector.Accept(event); acceptErr != nil {
-			return nil, fmt.Errorf("%w: collect event: %w", ErrProviderStream, acceptErr)
-		}
-		switch event.(type) {
-		case llm.DoneEvent, llm.ErrorEvent:
-			// The durable MessageCommitted event is the terminal notification.
-			// Progress observers only see partial snapshots.
-			continue
-		}
-		snapshot, snapshotErr := collector.Snapshot()
-		if snapshotErr != nil {
-			return nil, fmt.Errorf("%w: snapshot: %w", ErrProviderStream, snapshotErr)
-		}
-		partial, partialErr := agentmsg.NewAssistantPartial(agentmsg.AssistantPartialSpec{
-			Snapshot: snapshot,
-			Event:    event,
-		})
-		if partialErr != nil {
-			return nil, fmt.Errorf("%w: partial message: %w", ErrProviderStream, partialErr)
-		}
-		if _, started := event.(llm.StartEvent); started {
-			if err := a.markStreamStarted(active, turn); err != nil {
-				return nil, err
-			}
-			a.notify(active.ctx, MessageStartEvent{
-				RunID: active.id, Turn: turn, Message: partial,
-			})
-		} else {
-			a.notify(active.ctx, MessageUpdateEvent{
-				RunID: active.id, Turn: turn, Message: partial,
-				AssistantMessageEvent: newAssistantMessageEvent(event, partial),
-			})
-		}
-	}
-
-	// Claim the one allowed close attempt before invoking foreign code. If
-	// Close panics, the recovery above must not retry a potentially non-idempotent
-	// operation while unwinding.
-	closed = true
-	closeErr := stream.Close()
-	if closeErr != nil {
-		return nil, fmt.Errorf("%w: close provider stream: %w", ErrProviderStream, closeErr)
-	}
-	if err := collector.Close(); err != nil {
-		return nil, fmt.Errorf("%w: close collector: %w", ErrProviderStream, err)
-	}
-	terminal, err = collector.Result()
-	if err != nil {
-		return nil, fmt.Errorf("%w: collect result: %w", ErrProviderStream, err)
-	}
-	provenance := terminal.AssistantProvenance()
-	model := request.Model()
-	if !provenance.Matches(model.Provider(), model.API(), model.ID()) {
-		return nil, fmt.Errorf("%w: terminal provenance does not match request model", ErrProviderStream)
-	}
-	pricedUsage, err := terminal.Usage().WithCost(model.CalculateCost(terminal.Usage()))
-	if err != nil {
-		return nil, fmt.Errorf("%w: price terminal usage: %w", ErrProviderStream, err)
-	}
-	terminal, err = llm.WithAssistantUsage(terminal, pricedUsage)
-	if err != nil {
-		return nil, fmt.Errorf("%w: canonicalize terminal usage: %w", ErrProviderStream, err)
-	}
-	return terminal, nil
-}
-
-func (a *Agent) contextCause(active *activeRun) error {
-	cause := context.Cause(active.ctx)
-	if cause == nil {
-		return ErrAgentAborted
-	}
-	return cause
-}
-
-func (a *Agent) failureTerminal(
-	content []llm.TextBlock,
-	reason llm.FinishReason,
-	message string,
-	cause error,
-	usage llm.Usage,
-) (llm.AssistantFailureMessage, error) {
-	failure, err := llm.NewFailure(message, cause)
-	if err != nil {
-		return llm.AssistantFailureMessage{}, fmt.Errorf("%w: failure value: %w", ErrInvariant, err)
-	}
-	timestamp, err := a.now()
-	if err != nil {
-		return llm.AssistantFailureMessage{}, err
-	}
-	terminal, err := llm.NewAssistantFailureMessageWithFailure(content, reason, failure, usage, timestamp, llm.AssistantProvenance{
-		Provider: a.config.model.Provider(), API: a.config.model.API(), Model: a.config.model.ID(),
-	})
-	if err != nil {
-		return llm.AssistantFailureMessage{}, fmt.Errorf("%w: failure terminal: %w", ErrInvariant, err)
-	}
-	return terminal, nil
 }
 
 func (a *Agent) now() (value time.Time, err error) {
+	if a == nil {
+		return time.Time{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
 	a.clockMu.Lock()
 	defer a.clockMu.Unlock()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			value = time.Time{}
 			err = fmt.Errorf("%w: clock panicked: %s", ErrInvariant, safeValueText(recovered))
 		}
 	}()
 	value = a.config.now().UTC().Truncate(time.Millisecond)
-	if value.IsZero() || !time.UnixMilli(value.UnixMilli()).Equal(value) {
-		return time.Time{}, fmt.Errorf("%w: clock returned an unsupported timestamp", ErrInvariant)
+	if value.IsZero() {
+		return time.Time{}, fmt.Errorf("%w: invalid clock value", ErrInvariant)
 	}
 	return value, nil
+}
+
+func (a *Agent) mustNow() time.Time {
+	value, err := a.now()
+	if err != nil {
+		return time.Now().UTC().Truncate(time.Millisecond)
+	}
+	return value
 }
 
 func toolCalls(message llm.AssistantToolUseMessage) []llm.ToolCallBlock {
@@ -958,6 +1167,15 @@ func isNilInterface(value any) bool {
 	switch reflected.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return reflected.IsNil()
+	default:
+		return false
+	}
+}
+
+func isAssistantPartialMessage(message agentmsg.Message) bool {
+	switch message.(type) {
+	case agentmsg.AssistantPartial, *agentmsg.AssistantPartial:
+		return true
 	default:
 		return false
 	}

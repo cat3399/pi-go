@@ -219,6 +219,9 @@ func (s *AgentSession) messageEndTransform(ctx context.Context, message agentmsg
 	if result.Cancel.Cancelled() {
 		return nil, ErrAgentAborted
 	}
+	if result.Message != nil && result.Message.Role() != message.Role() {
+		return agentmsg.CloneOne(message), nil
+	}
 	return agentmsg.CloneOne(result.Message), nil
 }
 
