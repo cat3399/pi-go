@@ -35,9 +35,13 @@ type ModelCycleResult struct {
 // value. Empty provider/model values are used only by compensating writes that
 // restore previously absent global defaults.
 type SettingsUpdate struct {
-	DefaultProvider      *string
-	DefaultModel         *string
-	DefaultThinkingLevel *provider.ThinkingLevel
+	DefaultProvider       *string
+	DefaultModel          *string
+	DefaultThinkingLevel  *provider.ThinkingLevel
+	SteeringMode          *QueueMode
+	FollowUpMode          *QueueMode
+	AutoCompactionEnabled *bool
+	AutoRetryEnabled      *bool
 }
 
 // SettingsUndo restores only fields still equal to the values written by its

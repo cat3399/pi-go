@@ -143,6 +143,22 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			}
 			coordinator := factoryResult.Session
 			t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+			if err := coordinator.SetSteeringMode(agent.QueueAll); err != nil {
+				t.Fatalf("SetSteeringMode(all) error: %v", err)
+			}
+			if err := coordinator.SetFollowUpMode(agent.QueueOneAtATime); err != nil {
+				t.Fatalf("SetFollowUpMode(one-at-a-time) error: %v", err)
+			}
+			if err := coordinator.SetAutoCompactionEnabled(false); err != nil {
+				t.Fatalf("SetAutoCompactionEnabled(false) error: %v", err)
+			}
+			if err := coordinator.SetAutoRetryEnabled(false); err != nil {
+				t.Fatalf("SetAutoRetryEnabled(false) error: %v", err)
+			}
+			if coordinator.SteeringMode() != agent.QueueAll || coordinator.FollowUpMode() != agent.QueueOneAtATime ||
+				coordinator.AutoCompactionEnabled() || coordinator.AutoRetryEnabled() {
+				t.Fatalf("pre-cycle controls = %s/%s compaction=%t retry=%t", coordinator.SteeringMode(), coordinator.FollowUpMode(), coordinator.AutoCompactionEnabled(), coordinator.AutoRetryEnabled())
+			}
 			cycled, err := coordinator.CycleModel(context.Background(), agent.CycleForward)
 			if err != nil {
 				t.Fatalf("CycleModel() error: %v", err)
@@ -175,6 +191,22 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			}
 			if !cycledChangeOK || cycledChange.Provider != catalogModel.Provider || cycledChange.ModelID != catalogModel.ID {
 				t.Fatalf("cycle metadata = %#v", initialEntries[2].Payload())
+			}
+			if err := coordinator.SetSteeringMode(agent.QueueOneAtATime); err != nil {
+				t.Fatalf("SetSteeringMode(one-at-a-time) error: %v", err)
+			}
+			if err := coordinator.SetFollowUpMode(agent.QueueAll); err != nil {
+				t.Fatalf("SetFollowUpMode(all) error: %v", err)
+			}
+			if err := coordinator.SetAutoCompactionEnabled(true); err != nil {
+				t.Fatalf("SetAutoCompactionEnabled(true) error: %v", err)
+			}
+			if err := coordinator.SetAutoRetryEnabled(true); err != nil {
+				t.Fatalf("SetAutoRetryEnabled(true) error: %v", err)
+			}
+			if coordinator.SteeringMode() != agent.QueueOneAtATime || coordinator.FollowUpMode() != agent.QueueAll ||
+				!coordinator.AutoCompactionEnabled() || !coordinator.AutoRetryEnabled() {
+				t.Fatalf("pre-run controls = %s/%s compaction=%t retry=%t", coordinator.SteeringMode(), coordinator.FollowUpMode(), coordinator.AutoCompactionEnabled(), coordinator.AutoRetryEnabled())
 			}
 
 			var events deepSeekLiveEvents

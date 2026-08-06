@@ -105,7 +105,13 @@ type SessionConfig struct {
 	// upstream default (enabled); a pointer is required so false remains a real
 	// configured value.
 	CompactionEnabled *bool
-	Summarizer        session.Summarizer
+	// AutoRetryEnabled gates retries without discarding the configured retry
+	// budget. Nil follows pi's default (enabled).
+	AutoRetryEnabled *bool
+	// ResolveRuntimeSettings reads current effective settings at each dynamic
+	// control boundary. Production backs it with ModelRuntime.Snapshot.
+	ResolveRuntimeSettings func() RuntimeControlSettings
+	Summarizer             session.Summarizer
 	// ResolveSummarizer is the production seam. It is invoked once per
 	// compaction after current model/thinking/stream auth have been snapshotted.
 	// Summarizer remains the static injection seam for deterministic tests and
@@ -136,6 +142,16 @@ type SummarizerResolveRequest struct {
 	ThinkingLevel provider.ThinkingLevel
 	Stream        provider.StreamOptions
 	Retry         RetryPolicy
+}
+
+// RuntimeControlSettings is the effective settings view used by controls that
+// original AgentSession reads dynamically from SettingsManager.
+type RuntimeControlSettings struct {
+	SteeringMode          QueueMode
+	FollowUpMode          QueueMode
+	AutoCompactionEnabled bool
+	AutoRetryEnabled      bool
+	Retry                 RetryPolicy
 }
 
 // SessionState is a copy-only view of the mutable product configuration.
@@ -273,8 +289,9 @@ type SessionObserver func(context.Context, SessionEvent)
 // request in that same run.
 type AgentSession struct {
 	mu sync.RWMutex
-	// controlMu serializes model/thinking read-modify-write operations after
-	// their asynchronous discovery phase. Lock order is controlMu,
+	// controlMu serializes every settings-backed persist+publish operation,
+	// including model/thinking and runtime controls, after any asynchronous
+	// discovery phase. Lock order is controlMu,
 	// lifecycleMu, selectionMu, then the Agent/AgentSession state mutexes.
 	controlMu sync.Mutex
 	// selectionMu makes the duplicated AgentSession/Agent model selection a
@@ -314,7 +331,9 @@ type AgentSession struct {
 	run                     *sessionRun
 	closing                 bool
 	closed                  bool
-	retry                   provider.RetryController
+	retryPolicy             RetryPolicy
+	retryEnabled            bool
+	resolveRuntimeSettings  func() RuntimeControlSettings
 	contextWindow           uint64
 	contextReserve          uint64
 	keepRecentTokens        uint64
@@ -325,7 +344,6 @@ type AgentSession struct {
 	branchSummarizer        session.BranchSummarizer
 	resolveBranchSummarizer func(context.Context, SummarizerResolveRequest) (session.BranchSummarizer, error)
 	branchSummaryReserve    uint64
-	summaryRetry            RetryPolicy
 	settlementTimeout       time.Duration
 	observers               []sessionObserverEntry
 	nextObserver            uint64
@@ -341,6 +359,8 @@ type sessionRun struct {
 	retrySeries                  bool
 	retryDelay                   time.Duration
 	retryError                   string
+	retryMax                     uint32
+	retryCancel                  context.CancelCauseFunc
 	overflowCompacted            bool
 	thresholdCompactionAttempted bool
 	assistantStarted             bool
@@ -404,8 +424,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	} else {
 		config.ThinkingLevel = provider.ThinkingOff
 	}
-	retry, err := provider.NewRetryController(config.Retry)
-	if err != nil {
+	if _, err := provider.NewRetryController(config.Retry); err != nil {
 		return nil, fmt.Errorf("%w: retry policy: %w", ErrInvalidConfig, err)
 	}
 	if config.ContextReserve == 0 && !config.ContextReserveSet {
@@ -420,6 +439,10 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	compactionEnabled := true
 	if config.CompactionEnabled != nil {
 		compactionEnabled = *config.CompactionEnabled
+	}
+	retryEnabled := true
+	if config.AutoRetryEnabled != nil {
+		retryEnabled = *config.AutoRetryEnabled
 	}
 	systemOptions := cloneBuildSystemPromptOptions(config.SystemPromptOptions)
 	if systemOptions.CWD == "" {
@@ -439,13 +462,12 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		allModels: cloneModels(config.AllModels), scopedModels: cloneScopedModels(config.ScopedModels), modelAvailable: config.ModelAvailable, resolveAvailableModels: config.ResolveAvailableModels,
 		defaultThinking: config.DefaultThinkingLevel, resolveDefaultThinking: config.ResolveDefaultThinkingLevel, persistSettings: config.PersistSettings,
 		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
-		retry:         retry,
+		retryPolicy: config.Retry, retryEnabled: retryEnabled, resolveRuntimeSettings: config.ResolveRuntimeSettings,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
 		keepRecentSet: config.KeepRecentTokensSet, compactionEnabled: compactionEnabled,
 		summarizer: config.Summarizer, resolveSummarizer: config.ResolveSummarizer,
 		branchSummarizer: config.BranchSummarizer, resolveBranchSummarizer: config.ResolveBranchSummarizer,
 		branchSummaryReserve: config.BranchSummaryReserveTokens,
-		summaryRetry:         config.Retry,
 	}
 	s.appendModelControl = config.SessionManager.AppendModelControlChange
 	s.appendThinkingControl = config.SessionManager.AppendThinkingLevelChange
@@ -1095,6 +1117,8 @@ type retryControl struct {
 	finalError   string
 }
 
+var errRetryCancelled = errors.New("retry cancelled")
+
 func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...retryControl) {
 	if s == nil {
 		return
@@ -1522,22 +1546,42 @@ func (s *AgentSession) runSession(
 			// result, never a Go-level lifecycle error.
 			return result, nil
 		}
-		if s.retryableResult(result) && run.retryAttempt+1 < s.retry.MaxAttempts() {
+		retryEnabled, retryController := s.currentRetrySettings()
+		if retryEnabled && s.retryableResult(result) && run.retryAttempt+1 < retryController.MaxAttempts() {
 			run.retryAttempt++
 			nextAttempt := run.retryAttempt + 1
 			failure := providerFailureFromTerminalForSession(result)
-			delay := s.retry.Delay(nextAttempt, failure)
+			delay := retryController.Delay(nextAttempt, failure)
 			errorMessage := retryErrorMessage(result)
-			s.beginRetrySeries(run, delay, errorMessage)
+			maxRetries := retryBudget(retryController.MaxAttempts())
+			s.beginRetrySeries(run, delay, errorMessage, maxRetries)
 			s.setSessionPhase(run, PhaseRetryWait)
 			s.emitControl(run.ctx, "auto_retry_start", retryControl{
-				attempt: run.retryAttempt, max: s.maxRetries(), delay: delay, errorMessage: errorMessage,
+				attempt: run.retryAttempt, max: maxRetries, delay: delay, errorMessage: errorMessage,
 			})
 			// The failed assistant turn is durable history but must not be sent
 			// back to the provider when resending this attempt.
 			s.removeLastFailureFromAgentState()
-			if waitErr := s.retry.Wait(run.ctx, delay); waitErr != nil {
-				s.endRetrySeries(run.ctx, false, waitErr.Error())
+			waitCtx, cancelRetry := context.WithCancelCause(run.ctx)
+			s.lifecycleMu.Lock()
+			if s.run == run {
+				run.retryCancel = cancelRetry
+			}
+			s.lifecycleMu.Unlock()
+			waitErr := retryController.Wait(waitCtx, delay)
+			waitCause := context.Cause(waitCtx)
+			s.lifecycleMu.Lock()
+			if s.run == run {
+				run.retryCancel = nil
+			}
+			s.lifecycleMu.Unlock()
+			cancelRetry(nil)
+			if waitErr != nil {
+				finalError := waitErr.Error()
+				if errors.Is(waitCause, errRetryCancelled) {
+					finalError = "Retry cancelled"
+				}
+				s.endRetrySeries(run.ctx, false, finalError)
 				return result, nil
 			}
 			s.setSessionPhase(run, PhaseProvider)
@@ -1586,12 +1630,13 @@ func retryErrorMessage(result Result) string {
 	return ""
 }
 
-func (s *AgentSession) beginRetrySeries(run *sessionRun, delay time.Duration, errorMessage string) {
+func (s *AgentSession) beginRetrySeries(run *sessionRun, delay time.Duration, errorMessage string, maxRetries uint32) {
 	s.lifecycleMu.Lock()
 	if s.run == run {
 		run.retrySeries = true
 		run.retryDelay = delay
 		run.retryError = errorMessage
+		run.retryMax = maxRetries
 	}
 	s.lifecycleMu.Unlock()
 }
@@ -1606,7 +1651,7 @@ func (s *AgentSession) endRetrySeries(ctx context.Context, succeeded bool, final
 		return
 	}
 	payload := retryControl{
-		attempt: run.retryAttempt, max: s.maxRetries(), delay: run.retryDelay,
+		attempt: run.retryAttempt, max: run.retryMax, delay: run.retryDelay,
 		succeeded: succeeded, errorMessage: run.retryError, finalError: finalError,
 	}
 	run.retrySeries = false
@@ -1620,6 +1665,8 @@ func (s *AgentSession) resetRetryState(run *sessionRun) {
 		run.retryAttempt = 0
 		run.retryDelay = 0
 		run.retryError = ""
+		run.retryMax = 0
+		run.retryCancel = nil
 	}
 	s.lifecycleMu.Unlock()
 }
@@ -1630,7 +1677,8 @@ func (s *AgentSession) maxRetries() uint32 {
 	if s == nil {
 		return 0
 	}
-	return retryBudget(s.retry.MaxAttempts())
+	_, controller := s.currentRetrySettings()
+	return retryBudget(controller.MaxAttempts())
 }
 
 func retryBudget(maxAttempts uint32) uint32 {
@@ -1675,7 +1723,7 @@ func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bo
 }
 
 func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTerminal, skipAborted bool) bool {
-	if s == nil || s.sessionManager == nil || !s.compactionAvailable() || !s.compactionEnabled || terminal == nil {
+	if s == nil || s.sessionManager == nil || !s.compactionAvailable() || !s.AutoCompactionEnabled() || terminal == nil {
 		return false
 	}
 	if skipAborted && terminal.FinishReason() == llm.FinishAborted {
@@ -1861,10 +1909,11 @@ func (s *AgentSession) prepareCompaction(ctx context.Context, instructions strin
 	if err != nil {
 		return session.SummaryInput{}, nil, err
 	}
+	compactionEnabled := s.AutoCompactionEnabled()
 	input, err := s.sessionManager.PrepareCompactionWithOptions(ctx, session.PrepareCompactionOptions{
 		KeepRecentTokens: s.keepRecentTokens, KeepRecentTokensSet: s.keepRecentSet,
 		ReserveTokens: s.contextReserve, ReserveTokensSet: true, Instructions: instructions,
-		Enabled: s.compactionEnabled, EnabledSet: true,
+		Enabled: compactionEnabled, EnabledSet: true,
 	})
 	if err != nil {
 		return session.SummaryInput{}, nil, err
@@ -1909,9 +1958,13 @@ func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session
 	resolveSummarizer := s.resolveSummarizer
 	static := s.summarizer
 	validate := s.validateAccess
-	retry := s.summaryRetry
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
+	runtimeSettings := s.resolvedRuntimeSettings()
+	retry := runtimeSettings.Retry
+	if !runtimeSettings.AutoRetryEnabled {
+		retry.MaxAttempts = 1
+	}
 	if !hasModel {
 		return nil, s.noModelSelectedError()
 	}
@@ -2357,9 +2410,10 @@ func (s *AgentSession) willRetry(terminal llm.AssistantTerminal) bool {
 		return false
 	}
 	result := Result{terminal: terminal}
+	enabled, retryController := s.currentRetrySettings()
 	s.lifecycleMu.Lock()
 	run := s.run
-	will := run != nil && run.retryAttempt+1 < s.retry.MaxAttempts() && s.retryableResult(result)
+	will := enabled && run != nil && run.retryAttempt+1 < retryController.MaxAttempts() && s.retryableResult(result)
 	s.lifecycleMu.Unlock()
 	return will
 }
@@ -2802,9 +2856,13 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 	resolveCompaction := s.resolveSummarizer
 	staticCompaction := s.summarizer
 	validate := s.validateAccess
-	retry := s.summaryRetry
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
+	runtimeSettings := s.resolvedRuntimeSettings()
+	retry := runtimeSettings.Retry
+	if !runtimeSettings.AutoRetryEnabled {
+		retry.MaxAttempts = 1
+	}
 	if resolve == nil && static != nil && !isNilInterface(static) {
 		if !hasModel {
 			return nil, provider.Model{}, s.noModelSelectedError()

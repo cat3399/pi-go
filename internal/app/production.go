@@ -324,9 +324,6 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 
 func productionRetryPolicy(settings modelcatalog.RetrySettings) (agent.RetryPolicy, error) {
 	maxRetries := settings.MaxRetriesOrDefault()
-	if !settings.EnabledOrDefault() {
-		maxRetries = 0
-	}
 	if maxRetries > uint64(^uint32(0)-1) {
 		return agent.RetryPolicy{}, fmt.Errorf("%w: retry.maxRetries is too large", ErrInvalidProductionConfig)
 	}

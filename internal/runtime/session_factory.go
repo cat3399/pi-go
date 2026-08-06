@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/model"
@@ -169,6 +170,34 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	if config.PersistSettings == nil && options.Services.ModelRuntime != nil {
 		config.PersistSettings = runtimeSettingsPersistence(options.Services.ModelRuntime)
 	}
+	steeringMode, err := queueModeFromSetting(options.Settings.SteeringModeOrDefault())
+	if err != nil {
+		return CreateResult{}, err
+	}
+	followUpMode, err := queueModeFromSetting(options.Settings.FollowUpModeOrDefault())
+	if err != nil {
+		return CreateResult{}, err
+	}
+	config.SteeringMode = steeringMode
+	config.FollowUpMode = followUpMode
+	compactionEnabled := options.Settings.Compaction.EnabledOrDefault()
+	retryEnabled := options.Settings.Retry.EnabledOrDefault()
+	config.CompactionEnabled = &compactionEnabled
+	config.AutoRetryEnabled = &retryEnabled
+	baseRetry := config.Retry
+	if options.Services.ModelRuntime != nil && config.ResolveRuntimeSettings == nil {
+		config.ResolveRuntimeSettings = func() agent.RuntimeControlSettings {
+			settings := options.Services.ModelRuntime.Snapshot().Settings
+			steering, _ := queueModeFromSetting(settings.SteeringModeOrDefault())
+			followUp, _ := queueModeFromSetting(settings.FollowUpModeOrDefault())
+			return agent.RuntimeControlSettings{
+				SteeringMode: steering, FollowUpMode: followUp,
+				AutoCompactionEnabled: settings.Compaction.EnabledOrDefault(),
+				AutoRetryEnabled:      settings.Retry.EnabledOrDefault(),
+				Retry:                 retryPolicyFromSettings(settings.Retry, baseRetry),
+			}
+		}
+	}
 
 	created, err := agent.NewSession(config)
 	if err != nil {
@@ -191,6 +220,10 @@ func runtimeSettingsPersistence(runtime *model.Runtime) agent.SettingsPersistenc
 			previous.DefaultProvider = settings.DefaultProvider
 			previous.DefaultModel = settings.DefaultModel
 			previous.DefaultThinkingLevel = settings.DefaultThinkingLevel
+			previous.SteeringMode = settings.SteeringMode
+			previous.FollowUpMode = settings.FollowUpMode
+			previous.Compaction.Enabled = cloneBool(settings.Compaction.Enabled)
+			previous.Retry.Enabled = cloneBool(settings.Retry.Enabled)
 			if update.DefaultProvider != nil {
 				settings.DefaultProvider = *update.DefaultProvider
 			}
@@ -199,6 +232,20 @@ func runtimeSettingsPersistence(runtime *model.Runtime) agent.SettingsPersistenc
 			}
 			if update.DefaultThinkingLevel != nil {
 				settings.DefaultThinkingLevel = *update.DefaultThinkingLevel
+			}
+			if update.SteeringMode != nil {
+				settings.SteeringMode = update.SteeringMode.String()
+			}
+			if update.FollowUpMode != nil {
+				settings.FollowUpMode = update.FollowUpMode.String()
+			}
+			if update.AutoCompactionEnabled != nil {
+				value := *update.AutoCompactionEnabled
+				settings.Compaction.Enabled = &value
+			}
+			if update.AutoRetryEnabled != nil {
+				value := *update.AutoRetryEnabled
+				settings.Retry.Enabled = &value
 			}
 			return nil
 		})
@@ -224,11 +271,52 @@ func runtimeSettingsPersistence(runtime *model.Runtime) agent.SettingsPersistenc
 				if update.DefaultThinkingLevel != nil && settings.DefaultThinkingLevel == *update.DefaultThinkingLevel {
 					settings.DefaultThinkingLevel = previous.DefaultThinkingLevel
 				}
+				if update.SteeringMode != nil && settings.SteeringMode == update.SteeringMode.String() {
+					settings.SteeringMode = previous.SteeringMode
+				}
+				if update.FollowUpMode != nil && settings.FollowUpMode == update.FollowUpMode.String() {
+					settings.FollowUpMode = previous.FollowUpMode
+				}
+				if update.AutoCompactionEnabled != nil && optionalBoolEqual(settings.Compaction.Enabled, update.AutoCompactionEnabled) {
+					settings.Compaction.Enabled = cloneBool(previous.Compaction.Enabled)
+				}
+				if update.AutoRetryEnabled != nil && optionalBoolEqual(settings.Retry.Enabled, update.AutoRetryEnabled) {
+					settings.Retry.Enabled = cloneBool(previous.Retry.Enabled)
+				}
 				return nil
 			})
 		}
 		return agent.SettingsWriteResult{Undo: undo, CommitUnknown: err != nil}, err
 	}
+}
+
+func queueModeFromSetting(value string) (agent.QueueMode, error) {
+	switch value {
+	case model.QueueModeAll:
+		return agent.QueueAll, nil
+	case model.QueueModeOneAtATime:
+		return agent.QueueOneAtATime, nil
+	default:
+		return 0, fmt.Errorf("invalid queue mode %q", value)
+	}
+}
+
+func retryPolicyFromSettings(settings model.RetrySettings, base agent.RetryPolicy) agent.RetryPolicy {
+	base.MaxAttempts = uint32(settings.MaxRetriesOrDefault()) + 1
+	base.InitialDelay = time.Duration(settings.BaseDelayMSOrDefault()) * time.Millisecond
+	return base
+}
+
+func optionalBoolEqual(value *bool, expected *bool) bool {
+	return value != nil && expected != nil && *value == *expected
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func catalogModelRefs(models []model.Model) ([]provider.Model, error) {

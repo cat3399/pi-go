@@ -55,6 +55,93 @@ func TestCompactionSettingsDefaultsAndExplicitFalseMatchPi(t *testing.T) {
 	}
 }
 
+func TestQueueModeSettingsDefaultsMergeLegacyMigrationAndLosslessWrite(t *testing.T) {
+	defaults := Settings{}
+	if defaults.SteeringModeOrDefault() != QueueModeOneAtATime || defaults.FollowUpModeOrDefault() != QueueModeOneAtATime {
+		t.Fatalf("queue defaults = %q/%q", defaults.SteeringModeOrDefault(), defaults.FollowUpModeOrDefault())
+	}
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"queueMode":"all","followUpMode":"one-at-a-time","future":{"keep":true}}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"steeringMode":"one-at-a-time","followUpMode":"all"}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := runtime.Snapshot().Settings
+	if effective.SteeringModeOrDefault() != QueueModeOneAtATime || effective.FollowUpModeOrDefault() != QueueModeAll {
+		t.Fatalf("effective queue modes = %q/%q", effective.SteeringMode, effective.FollowUpMode)
+	}
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.FollowUpMode = QueueModeAll
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := root["queueMode"]; exists {
+		t.Fatal("legacy queueMode survived migration write")
+	}
+	var steering, follow string
+	if err := json.Unmarshal(root["steeringMode"], &steering); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(root["followUpMode"], &follow); err != nil {
+		t.Fatal(err)
+	}
+	var future map[string]bool
+	if err := json.Unmarshal(root["future"], &future); err != nil {
+		t.Fatal(err)
+	}
+	if steering != QueueModeAll || follow != QueueModeAll || !future["keep"] {
+		t.Fatalf("lossless migrated root = %s", data)
+	}
+}
+
+func TestQueueModeMigrationDoesNotReplaceExplicitSteeringOrUnknownLegacyField(t *testing.T) {
+	runtime, agentDir, _ := newTestRuntime(t, "", `{"queueMode":"all","steeringMode":"one-at-a-time","future":7}`, false)
+	if got := runtime.Snapshot().Settings.SteeringModeOrDefault(); got != QueueModeOneAtATime {
+		t.Fatalf("explicit steering = %q", got)
+	}
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.FollowUpMode = QueueModeAll
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if string(root["queueMode"]) != `"all"` || string(root["future"]) != "7" {
+		t.Fatalf("explicit steering lossless root = %s", data)
+	}
+}
+
+func TestQueueModeSettingsRejectInvalidValues(t *testing.T) {
+	for _, input := range []string{
+		`{"steeringMode":"batch"}`,
+		`{"followUpMode":"batch"}`,
+		`{"queueMode":"batch"}`,
+	} {
+		agentDir := t.TempDir()
+		writeFile(t, filepath.Join(agentDir, "settings.json"), input)
+		if _, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()}); err == nil {
+			t.Fatalf("NewRuntime(%s) error = %v", input, err)
+		}
+	}
+}
+
 func TestBranchSummarySettingsDefaultMergeAndPersistence(t *testing.T) {
 	if got := (BranchSummarySettings{}).ReserveTokensOrDefault(); got != 16_384 {
 		t.Fatalf("default reserve=%d", got)

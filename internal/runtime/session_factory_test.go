@@ -127,6 +127,120 @@ func TestCreateAgentSessionWiresModelCycleAndLosslessGlobalDefaults(t *testing.T
 	}
 }
 
+func TestCreateAgentSessionRuntimeControlsUseEffectiveProjectSettingsAndWriteOnlyGlobal(t *testing.T) {
+	manager := factoryManager(t)
+	agentDir := t.TempDir()
+	globalPath := filepath.Join(agentDir, "settings.json")
+	if err := os.WriteFile(globalPath, []byte(`{"queueMode":"all","followUpMode":"one-at-a-time","compaction":{"enabled":false,"future":"keep"},"retry":{"enabled":false,"maxRetries":2,"future":"keep"},"unknown":{"keep":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(manager.Cwd(), ".pi")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.json"), []byte(`{"steeringMode":"one-at-a-time","followUpMode":"all","compaction":{"enabled":true},"retry":{"enabled":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: manager.Cwd(), ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := factoryCatalogModel("scripted", "runtime-controls")
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: manager.Cwd(), AgentDir: agentDir, ModelRuntime: catalog},
+		Provider: factoryProvider(t), SessionManager: manager, AllModels: []model.Model{selected}, ExplicitModel: &selected,
+		Availability: availableFactoryModels(map[string]bool{"scripted": true}), Settings: catalog.Snapshot().Settings,
+		BaseConfig: agent.SessionConfig{Retry: agent.RetryPolicy{MaxAttempts: 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	if created.Session.SteeringMode() != agent.QueueOneAtATime || created.Session.FollowUpMode() != agent.QueueAll ||
+		!created.Session.AutoCompactionEnabled() || !created.Session.AutoRetryEnabled() {
+		t.Fatalf("effective controls = %s/%s compact=%t retry=%t", created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
+	}
+	if err := created.Session.SetSteeringMode(agent.QueueAll); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetFollowUpMode(agent.QueueOneAtATime); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetAutoCompactionEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetAutoRetryEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	// Queue setters mirror pi's AgentSession by publishing the requested mode
+	// to the live Agent while only updating the global settings layer. Settings-
+	// backed compaction/retry getters continue to reflect trusted project values.
+	if created.Session.SteeringMode() != agent.QueueAll || created.Session.FollowUpMode() != agent.QueueOneAtATime ||
+		!created.Session.AutoCompactionEnabled() || !created.Session.AutoRetryEnabled() {
+		t.Fatalf("controls after setters = %s/%s compact=%t retry=%t", created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
+	}
+	data, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := root["queueMode"]; exists {
+		t.Fatal("legacy global queueMode was not migrated")
+	}
+	var steering, follow string
+	var compaction, retry map[string]json.RawMessage
+	_ = json.Unmarshal(root["steeringMode"], &steering)
+	_ = json.Unmarshal(root["followUpMode"], &follow)
+	_ = json.Unmarshal(root["compaction"], &compaction)
+	_ = json.Unmarshal(root["retry"], &retry)
+	var compactionEnabled, retryEnabled bool
+	var maxRetries uint64
+	_ = json.Unmarshal(compaction["enabled"], &compactionEnabled)
+	_ = json.Unmarshal(retry["enabled"], &retryEnabled)
+	_ = json.Unmarshal(retry["maxRetries"], &maxRetries)
+	if steering != model.QueueModeAll || follow != model.QueueModeOneAtATime || compactionEnabled || retryEnabled || maxRetries != 2 ||
+		string(compaction["future"]) != `"keep"` || string(retry["future"]) != `"keep"` || root["unknown"] == nil {
+		t.Fatalf("global controls write = %s", data)
+	}
+}
+
+func TestRuntimeControlDefiniteSettingsFailureDoesNotPublishState(t *testing.T) {
+	manager := factoryManager(t)
+	selected := factoryCatalogModel("scripted", "settings-failure")
+	wantErr := errors.New("settings unavailable")
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: manager.Cwd()}, Provider: factoryProvider(t), SessionManager: manager,
+		AllModels: []model.Model{selected}, ExplicitModel: &selected,
+		Availability: availableFactoryModels(map[string]bool{"scripted": true}), Settings: model.Settings{},
+		PersistSettings: func(context.Context, agent.SettingsUpdate) (agent.SettingsWriteResult, error) {
+			return agent.SettingsWriteResult{}, wantErr
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	if err := created.Session.SetSteeringMode(agent.QueueAll); !errors.Is(err, wantErr) {
+		t.Fatalf("SetSteeringMode error = %v", err)
+	}
+	if err := created.Session.SetFollowUpMode(agent.QueueAll); !errors.Is(err, wantErr) {
+		t.Fatalf("SetFollowUpMode error = %v", err)
+	}
+	if err := created.Session.SetAutoCompactionEnabled(false); !errors.Is(err, wantErr) {
+		t.Fatalf("SetAutoCompactionEnabled error = %v", err)
+	}
+	if err := created.Session.SetAutoRetryEnabled(false); !errors.Is(err, wantErr) {
+		t.Fatalf("SetAutoRetryEnabled error = %v", err)
+	}
+	if created.Session.SteeringMode() != agent.QueueOneAtATime || created.Session.FollowUpMode() != agent.QueueOneAtATime ||
+		!created.Session.AutoCompactionEnabled() || !created.Session.AutoRetryEnabled() {
+		t.Fatalf("definite failure leaked controls = %s/%s compact=%t retry=%t", created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
+	}
+}
+
 func TestCreateAgentSessionReadsEffectiveProjectThinkingOnEveryModelSwitch(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"defaultProvider":"scripted","defaultModel":"plain","defaultThinkingLevel":"medium"}`), 0o600); err != nil {

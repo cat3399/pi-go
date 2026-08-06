@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
 )
@@ -45,6 +46,293 @@ func internalControlSession(t *testing.T, model provider.Model, thinking provide
 	}
 	t.Cleanup(func() { _ = runtime.Close(context.Background()) })
 	return runtime
+}
+
+type internalRuntimeControlSummarizer struct{}
+
+func (internalRuntimeControlSummarizer) Summarize(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+	return session.SummaryOutput{Text: "summary"}, nil
+}
+
+func (internalRuntimeControlSummarizer) SummarizeBranch(context.Context, session.BranchSummaryInput) (session.BranchSummaryOutput, error) {
+	return session.BranchSummaryOutput{Text: "branch summary"}, nil
+}
+
+func TestSummaryResolversReadCurrentRetrySettingsAtInvocation(t *testing.T) {
+	selected := internalControlModel(t, "summary")
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	retry := RetryPolicy{MaxAttempts: 4, InitialDelay: 17 * time.Millisecond, MaxDelay: 2 * time.Second}
+	var compactionRequests, branchRequests []SummarizerResolveRequest
+	coordinator, err := NewSession(SessionConfig{
+		Provider: implementation, SessionManager: manager, Model: selected, ContextWindow: 64_000,
+		ResolveRuntimeSettings: func() RuntimeControlSettings {
+			return RuntimeControlSettings{
+				SteeringMode: QueueOneAtATime, FollowUpMode: QueueOneAtATime,
+				AutoCompactionEnabled: true, AutoRetryEnabled: enabled, Retry: retry,
+			}
+		},
+		ResolveSummarizer: func(_ context.Context, request SummarizerResolveRequest) (session.Summarizer, error) {
+			compactionRequests = append(compactionRequests, request)
+			return internalRuntimeControlSummarizer{}, nil
+		},
+		ResolveBranchSummarizer: func(_ context.Context, request SummarizerResolveRequest) (session.BranchSummarizer, error) {
+			branchRequests = append(branchRequests, request)
+			return internalRuntimeControlSummarizer{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	if _, err := coordinator.resolveCompactionSummarizer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := coordinator.resolveTreeSummarizer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	enabled = true
+	if _, err := coordinator.resolveCompactionSummarizer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := coordinator.resolveTreeSummarizer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for name, requests := range map[string][]SummarizerResolveRequest{"compaction": compactionRequests, "branch": branchRequests} {
+		if len(requests) != 2 {
+			t.Fatalf("%s requests = %d", name, len(requests))
+		}
+		if requests[0].Retry.MaxAttempts != 1 || requests[0].Retry.InitialDelay != retry.InitialDelay || requests[0].Retry.MaxDelay != retry.MaxDelay {
+			t.Fatalf("%s disabled retry = %#v", name, requests[0].Retry)
+		}
+		if requests[1].Retry.MaxAttempts != retry.MaxAttempts || requests[1].Retry.InitialDelay != retry.InitialDelay ||
+			requests[1].Retry.MaxDelay != retry.MaxDelay {
+			t.Fatalf("%s enabled retry = %#v, want %#v", name, requests[1].Retry, retry)
+		}
+	}
+}
+
+func TestRuntimeControlPersistenceCallbacksAreGetterReentrant(t *testing.T) {
+	selected := internalControlModel(t, "reentrant")
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var coordinator *AgentSession
+	coordinator, err = NewSession(SessionConfig{
+		Provider: implementation, SessionManager: manager, Model: selected,
+		PersistSettings: func(context.Context, SettingsUpdate) (SettingsWriteResult, error) {
+			_ = coordinator.SteeringMode()
+			_ = coordinator.FollowUpMode()
+			_ = coordinator.AutoCompactionEnabled()
+			_ = coordinator.AutoRetryEnabled()
+			return SettingsWriteResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	done := make(chan error, 4)
+	go func() { done <- coordinator.SetSteeringMode(QueueAll) }()
+	go func() { done <- coordinator.SetFollowUpMode(QueueAll) }()
+	go func() { done <- coordinator.SetAutoCompactionEnabled(false) }()
+	go func() { done <- coordinator.SetAutoRetryEnabled(false) }()
+	for range 4 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("runtime control setter deadlocked in reentrant persistence callback")
+		}
+	}
+}
+
+func TestRuntimeControlSettersUseSharedControlLinearization(t *testing.T) {
+	selected := internalControlModel(t, "linearized-controls")
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persistMu sync.Mutex
+	var persisted QueueMode
+	call := 0
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{})
+	coordinator, err := NewSession(SessionConfig{
+		Provider: implementation, SessionManager: manager, Model: selected,
+		PersistSettings: func(_ context.Context, update SettingsUpdate) (SettingsWriteResult, error) {
+			persistMu.Lock()
+			call++
+			currentCall := call
+			if update.SteeringMode != nil {
+				persisted = *update.SteeringMode
+			}
+			persistMu.Unlock()
+			switch currentCall {
+			case 1:
+				close(firstEntered)
+				<-releaseFirst
+			case 2:
+				close(secondEntered)
+			}
+			return SettingsWriteResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- coordinator.SetSteeringMode(QueueAll) }()
+	<-firstEntered
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondDone <- coordinator.SetSteeringMode(QueueOneAtATime)
+	}()
+	<-secondStarted
+	for range 100 {
+		runtime.Gosched()
+	}
+	select {
+	case <-secondEntered:
+		close(releaseFirst)
+		t.Fatal("second settings write entered before the first persist+publish operation completed")
+	default:
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	<-secondEntered
+	persistMu.Lock()
+	persistedFinal := persisted
+	persistMu.Unlock()
+	if persistedFinal != QueueOneAtATime || coordinator.SteeringMode() != QueueOneAtATime {
+		t.Fatalf("linearized final state = persisted %s, runtime %s", persistedFinal, coordinator.SteeringMode())
+	}
+}
+
+func TestEveryRuntimeControlSetterOwnsControlMuDuringPersistence(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*AgentSession) error
+	}{
+		{name: "steering", set: func(s *AgentSession) error { return s.SetSteeringMode(QueueAll) }},
+		{name: "follow-up", set: func(s *AgentSession) error { return s.SetFollowUpMode(QueueAll) }},
+		{name: "compaction", set: func(s *AgentSession) error { return s.SetAutoCompactionEnabled(false) }},
+		{name: "retry", set: func(s *AgentSession) error { return s.SetAutoRetryEnabled(false) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			selected := internalControlModel(t, test.name)
+			implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var coordinator *AgentSession
+			coordinator, err = NewSession(SessionConfig{
+				Provider: implementation, SessionManager: manager, Model: selected,
+				PersistSettings: func(context.Context, SettingsUpdate) (SettingsWriteResult, error) {
+					if coordinator.controlMu.TryLock() {
+						coordinator.controlMu.Unlock()
+						t.Error("persistence ran outside controlMu")
+					}
+					return SettingsWriteResult{}, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+			if err := test.set(coordinator); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPrepareCompactionSnapshotsCurrentAutoCompactionSetting(t *testing.T) {
+	selected := internalControlModel(t, "dynamic-compaction")
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"old", "recent"} {
+		message, messageErr := llm.NewUserTextMessage(text, time.UnixMilli(1))
+		if messageErr != nil {
+			t.Fatal(messageErr)
+		}
+		if _, appendErr := manager.AppendLLMMessage(context.Background(), message); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	enabled := true
+	coordinator, err := NewSession(SessionConfig{
+		Provider: implementation, SessionManager: manager, Model: selected,
+		KeepRecentTokens: 1, KeepRecentTokensSet: true,
+		Summarizer: internalRuntimeControlSummarizer{},
+		ResolveRuntimeSettings: func() RuntimeControlSettings {
+			return RuntimeControlSettings{
+				SteeringMode: QueueOneAtATime, FollowUpMode: QueueOneAtATime,
+				AutoCompactionEnabled: enabled, AutoRetryEnabled: true,
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	input, _, err := coordinator.prepareCompaction(context.Background(), "enabled snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !input.Settings.Enabled {
+		t.Fatal("prepared compaction did not capture enabled runtime setting")
+	}
+	enabled = false
+	input, _, err = coordinator.prepareCompaction(context.Background(), "disabled snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Settings.Enabled {
+		t.Fatal("prepared compaction retained construction-time enabled value")
+	}
 }
 
 func waitForSelectionWriter(t *testing.T, coordinator *AgentSession) {

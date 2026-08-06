@@ -81,6 +81,63 @@ func TestSettingsCommitUnknownThenDefiniteTranscriptFailureCompensatesForward(t 
 	}
 }
 
+func TestRuntimeControlSettingsCommitUnknownPublishesForward(t *testing.T) {
+	runtime, agentDir := unknownSettingsRuntime(t)
+	runtime.faults.afterRename = func() error { return errors.New("directory sync acknowledgement lost") }
+	selected := unknownAgentModel(t, "a")
+	manager := unknownAgentManager(t)
+	enabled := true
+	coordinator, err := agent.NewSession(agent.SessionConfig{
+		Provider: unknownAgentProvider(t), SessionManager: manager, Model: selected,
+		SteeringMode: agent.QueueOneAtATime, FollowUpMode: agent.QueueOneAtATime,
+		CompactionEnabled: &enabled, AutoRetryEnabled: &enabled,
+		Retry:           agent.RetryPolicy{MaxAttempts: 4},
+		PersistSettings: unknownSettingsPersistence(runtime),
+		ResolveRuntimeSettings: func() agent.RuntimeControlSettings {
+			settings := runtime.Snapshot().Settings
+			return agent.RuntimeControlSettings{
+				SteeringMode:          queueModeForAgentTest(settings.SteeringModeOrDefault()),
+				FollowUpMode:          queueModeForAgentTest(settings.FollowUpModeOrDefault()),
+				AutoCompactionEnabled: settings.Compaction.EnabledOrDefault(),
+				AutoRetryEnabled:      settings.Retry.EnabledOrDefault(),
+				Retry: agent.RetryPolicy{
+					MaxAttempts: uint32(settings.Retry.MaxRetriesOrDefault()) + 1,
+				},
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+
+	for name, change := range map[string]func() error{
+		"steering":   func() error { return coordinator.SetSteeringMode(agent.QueueAll) },
+		"follow-up":  func() error { return coordinator.SetFollowUpMode(agent.QueueAll) },
+		"compaction": func() error { return coordinator.SetAutoCompactionEnabled(false) },
+		"retry":      func() error { return coordinator.SetAutoRetryEnabled(false) },
+	} {
+		if err := change(); !errors.Is(err, ErrCommitUnknown) {
+			t.Fatalf("%s error = %v", name, err)
+		}
+	}
+	if coordinator.SteeringMode() != agent.QueueAll || coordinator.FollowUpMode() != agent.QueueAll ||
+		coordinator.AutoCompactionEnabled() || coordinator.AutoRetryEnabled() {
+		t.Fatalf("forward controls = %s/%s compaction=%t retry=%t", coordinator.SteeringMode(), coordinator.FollowUpMode(), coordinator.AutoCompactionEnabled(), coordinator.AutoRetryEnabled())
+	}
+	settings := runtime.Snapshot().Settings
+	if settings.SteeringMode != QueueModeAll || settings.FollowUpMode != QueueModeAll ||
+		settings.Compaction.Enabled == nil || *settings.Compaction.Enabled ||
+		settings.Retry.Enabled == nil || *settings.Retry.Enabled {
+		t.Fatalf("runtime settings = %#v", settings)
+	}
+	data, readErr := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if readErr != nil || !strings.Contains(string(data), `"steeringMode": "all"`) ||
+		!strings.Contains(string(data), `"followUpMode": "all"`) {
+		t.Fatalf("settings file = %s, %v", data, readErr)
+	}
+}
+
 func unknownSettingsRuntime(t *testing.T) (*Runtime, string) {
 	t.Helper()
 	agentDir := t.TempDir()
@@ -101,6 +158,10 @@ func unknownSettingsPersistence(runtime *Runtime) agent.SettingsPersistence {
 			previous.DefaultProvider = settings.DefaultProvider
 			previous.DefaultModel = settings.DefaultModel
 			previous.DefaultThinkingLevel = settings.DefaultThinkingLevel
+			previous.SteeringMode = settings.SteeringMode
+			previous.FollowUpMode = settings.FollowUpMode
+			previous.Compaction.Enabled = cloneBoolPointer(settings.Compaction.Enabled)
+			previous.Retry.Enabled = cloneBoolPointer(settings.Retry.Enabled)
 			if update.DefaultProvider != nil {
 				settings.DefaultProvider = *update.DefaultProvider
 			}
@@ -109,6 +170,18 @@ func unknownSettingsPersistence(runtime *Runtime) agent.SettingsPersistence {
 			}
 			if update.DefaultThinkingLevel != nil {
 				settings.DefaultThinkingLevel = *update.DefaultThinkingLevel
+			}
+			if update.SteeringMode != nil {
+				settings.SteeringMode = update.SteeringMode.String()
+			}
+			if update.FollowUpMode != nil {
+				settings.FollowUpMode = update.FollowUpMode.String()
+			}
+			if update.AutoCompactionEnabled != nil {
+				settings.Compaction.Enabled = cloneBoolPointer(update.AutoCompactionEnabled)
+			}
+			if update.AutoRetryEnabled != nil {
+				settings.Retry.Enabled = cloneBoolPointer(update.AutoRetryEnabled)
 			}
 			return nil
 		})
@@ -127,11 +200,30 @@ func unknownSettingsPersistence(runtime *Runtime) agent.SettingsPersistence {
 				if update.DefaultThinkingLevel != nil {
 					settings.DefaultThinkingLevel = previous.DefaultThinkingLevel
 				}
+				if update.SteeringMode != nil {
+					settings.SteeringMode = previous.SteeringMode
+				}
+				if update.FollowUpMode != nil {
+					settings.FollowUpMode = previous.FollowUpMode
+				}
+				if update.AutoCompactionEnabled != nil {
+					settings.Compaction.Enabled = cloneBoolPointer(previous.Compaction.Enabled)
+				}
+				if update.AutoRetryEnabled != nil {
+					settings.Retry.Enabled = cloneBoolPointer(previous.Retry.Enabled)
+				}
 				return nil
 			})
 		}
 		return agent.SettingsWriteResult{Undo: undo, CommitUnknown: unknown}, err
 	}
+}
+
+func queueModeForAgentTest(value string) agent.QueueMode {
+	if value == QueueModeAll {
+		return agent.QueueAll
+	}
+	return agent.QueueOneAtATime
 }
 
 func unknownAgentModel(t *testing.T, id string) provider.Model {

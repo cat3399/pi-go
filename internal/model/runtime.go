@@ -103,10 +103,31 @@ type Settings struct {
 	DefaultProvider      string
 	DefaultModel         string
 	DefaultThinkingLevel provider.ThinkingLevel
+	SteeringMode         string
+	FollowUpMode         string
 	EnabledModels        []string
 	Compaction           CompactionSettings
 	BranchSummary        BranchSummarySettings
 	Retry                RetrySettings
+}
+
+const (
+	QueueModeAll        = "all"
+	QueueModeOneAtATime = "one-at-a-time"
+)
+
+func (s Settings) SteeringModeOrDefault() string {
+	if s.SteeringMode == "" {
+		return QueueModeOneAtATime
+	}
+	return s.SteeringMode
+}
+
+func (s Settings) FollowUpModeOrDefault() string {
+	if s.FollowUpMode == "" {
+		return QueueModeOneAtATime
+	}
+	return s.FollowUpMode
 }
 
 // BranchSummarySettings mirrors pi's settings.branchSummary. SkipPrompt is
@@ -335,6 +356,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if !exists {
 		root = map[string]json.RawMessage{}
 	}
+	migratedQueueMode := migrateLegacyQueueMode(root)
 	current, err := settingsFromRaw(root, "global settings.json")
 	if err != nil {
 		return err
@@ -360,6 +382,11 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	putString(root, "defaultProvider", current.DefaultProvider)
 	putString(root, "defaultModel", current.DefaultModel)
 	putString(root, "defaultThinkingLevel", string(current.DefaultThinkingLevel))
+	putString(root, "steeringMode", current.SteeringMode)
+	putString(root, "followUpMode", current.FollowUpMode)
+	if migratedQueueMode {
+		delete(root, "queueMode")
+	}
 	if current.EnabledModels == nil {
 		delete(root, "enabledModels")
 	} else {
@@ -871,9 +898,24 @@ func loadSettings(path, label string) (Settings, error) {
 	if err != nil || !exists {
 		return Settings{}, err
 	}
+	migrateLegacyQueueMode(root)
 	return settingsFromRaw(root, label)
 }
+
+func migrateLegacyQueueMode(root map[string]json.RawMessage) bool {
+	if _, exists := root["steeringMode"]; exists {
+		return false
+	}
+	if legacy, exists := root["queueMode"]; exists {
+		root["steeringMode"] = legacy
+		delete(root, "queueMode")
+		return true
+	}
+	return false
+}
+
 func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, error) {
+	migrateLegacyQueueMode(root)
 	s := Settings{}
 	var err error
 	if s.DefaultProvider, err = optionalString(root, "defaultProvider", ""); err != nil {
@@ -892,6 +934,12 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 			return s, Diagnostic{label, "defaultThinkingLevel", "must be a valid thinking level"}
 		}
 		s.DefaultThinkingLevel = provider.ThinkingLevel(value)
+	}
+	if s.SteeringMode, err = optionalString(root, "steeringMode", ""); err != nil {
+		return s, Diagnostic{label, "steeringMode", "must be all or one-at-a-time"}
+	}
+	if s.FollowUpMode, err = optionalString(root, "followUpMode", ""); err != nil {
+		return s, Diagnostic{label, "followUpMode", "must be all or one-at-a-time"}
 	}
 	if raw, ok := root["enabledModels"]; ok {
 		if err := json.Unmarshal(raw, &s.EnabledModels); err != nil {
@@ -933,6 +981,12 @@ func validateSettings(s Settings, label string) error {
 	if s.DefaultThinkingLevel != "" && !s.DefaultThinkingLevel.Valid() {
 		return Diagnostic{label, "defaultThinkingLevel", "must be one of off, minimal, low, medium, high, xhigh, max"}
 	}
+	if s.SteeringMode != "" && s.SteeringMode != QueueModeAll && s.SteeringMode != QueueModeOneAtATime {
+		return Diagnostic{label, "steeringMode", "must be all or one-at-a-time"}
+	}
+	if s.FollowUpMode != "" && s.FollowUpMode != QueueModeAll && s.FollowUpMode != QueueModeOneAtATime {
+		return Diagnostic{label, "followUpMode", "must be all or one-at-a-time"}
+	}
 	if s.Retry.MaxRetries != nil && *s.Retry.MaxRetries > uint64(math.MaxUint32-1) {
 		return Diagnostic{label, "retry.maxRetries", "is too large"}
 	}
@@ -951,6 +1005,12 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.DefaultThinkingLevel != "" {
 		out.DefaultThinkingLevel = override.DefaultThinkingLevel
+	}
+	if override.SteeringMode != "" {
+		out.SteeringMode = override.SteeringMode
+	}
+	if override.FollowUpMode != "" {
+		out.FollowUpMode = override.FollowUpMode
 	}
 	if override.EnabledModels != nil {
 		out.EnabledModels = append([]string(nil), override.EnabledModels...)
