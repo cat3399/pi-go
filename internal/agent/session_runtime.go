@@ -45,6 +45,16 @@ type SessionConfig struct {
 	// SessionStartEvent selects the lifecycle reason emitted after construction.
 	// Nil preserves the ordinary process-start behavior.
 	SessionStartEvent *SessionStartHookEvent
+	// NoModelSelectedMessage is the product-facing guidance returned by prompt
+	// and continue while no model is selected. Empty uses ErrNoModelSelected's
+	// low-level text; factories may inject installation-specific docs paths.
+	NoModelSelectedMessage string
+	// InitializeSessionState performs createAgentSession's initial durable
+	// model/thinking metadata writes as part of real AgentSession construction,
+	// before session_start is observed. The zero value keeps direct low-level
+	// constructors source-compatible; the transport-neutral session factory
+	// enables it for product sessions.
+	InitializeSessionState bool
 
 	ToolExecution     ToolExecutionMode
 	TransformContext  ContextTransform
@@ -64,6 +74,7 @@ type SessionConfig struct {
 // entries and BuildContext own its durable form and resume reconstruction.
 type SessionState struct {
 	Model         provider.Model
+	HasModel      bool
 	ThinkingLevel provider.ThinkingLevel
 	SystemPrompt  string
 	Tools         []provider.ToolDefinition
@@ -196,6 +207,7 @@ type AgentSession struct {
 	loop           *Agent
 	sessionManager *session.SessionManager
 	model          provider.Model
+	hasModel       bool
 	thinkingLevel  provider.ThinkingLevel
 	systemPrompt   string
 	systemOptions  BuildSystemPromptOptions
@@ -206,6 +218,7 @@ type AgentSession struct {
 	stream         provider.StreamOptions
 	resolveStream  func(context.Context, provider.Model) (provider.StreamOptions, error)
 	hooks          Hooks
+	noModelMessage string
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
 	// and post-run continuations remain active too.
@@ -275,9 +288,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.SettlementTimeout < 0 {
 		return nil, fmt.Errorf("%w: settlement timeout cannot be negative", ErrInvalidConfig)
 	}
+	initialContext := config.SessionManager.BuildContext()
 	if config.ThinkingLevel == "" {
-		context := config.SessionManager.BuildContext()
-		if stored, ok := context.ThinkingLevel(); ok && provider.ThinkingLevel(stored).Valid() {
+		if stored, ok := initialContext.ThinkingLevel(); ok && provider.ThinkingLevel(stored).Valid() {
 			config.ThinkingLevel = provider.ThinkingLevel(stored)
 		} else {
 			config.ThinkingLevel = provider.ThinkingOff
@@ -286,7 +299,12 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if !config.ThinkingLevel.Valid() {
 		return nil, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, config.ThinkingLevel)
 	}
-	config.ThinkingLevel = config.Model.ClampThinkingLevel(config.ThinkingLevel)
+	hasModel := modelPresent(config.Model)
+	if hasModel {
+		config.ThinkingLevel = config.Model.ClampThinkingLevel(config.ThinkingLevel)
+	} else {
+		config.ThinkingLevel = provider.ThinkingOff
+	}
 	retry, err := provider.NewRetryController(config.Retry)
 	if err != nil {
 		return nil, fmt.Errorf("%w: retry policy: %w", ErrInvalidConfig, err)
@@ -302,10 +320,10 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		}
 	}
 	s := &AgentSession{
-		sessionManager: config.SessionManager, model: config.Model, thinkingLevel: config.ThinkingLevel,
+		sessionManager: config.SessionManager, model: config.Model, hasModel: hasModel, thinkingLevel: config.ThinkingLevel,
 		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
-		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks,
+		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
 		summarizer: config.Summarizer,
@@ -314,7 +332,6 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if s.settlementTimeout <= 0 {
 		s.settlementTimeout = defaultSettlementTimeout
 	}
-	initialContext := config.SessionManager.BuildContext()
 	loop, err := New(Config{
 		Provider: config.Provider, InitialMessages: initialContext.AgentMessages(), Model: config.Model, ThinkingLevel: config.ThinkingLevel, Stream: config.Stream,
 		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
@@ -336,6 +353,28 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		unsubscribeEvents()
 		unsubscribeControl()
 	}
+	if config.InitializeSessionState {
+		hasExistingSession := len(initialContext.AgentMessages()) > 0
+		hasThinkingEntry, err := sessionBranchHasThinkingEntry(config.SessionManager)
+		if err != nil {
+			s.loopUnsubscribe()
+			return nil, fmt.Errorf("%w: inspect thinking level state: %w", ErrTranscriptCommit, err)
+		}
+		settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
+		defer cancel()
+		if !hasExistingSession && hasModel {
+			if _, err := config.SessionManager.AppendModelChange(settlement, config.Model.Provider(), config.Model.ID()); err != nil {
+				s.loopUnsubscribe()
+				return nil, fmt.Errorf("%w: initial model change: %w", ErrTranscriptCommit, err)
+			}
+		}
+		if !hasExistingSession || !hasThinkingEntry {
+			if _, err := config.SessionManager.AppendThinkingLevelChange(settlement, string(config.ThinkingLevel)); err != nil {
+				s.loopUnsubscribe()
+				return nil, fmt.Errorf("%w: initial thinking level change: %w", ErrTranscriptCommit, err)
+			}
+		}
+	}
 	if s.hooks.SessionStart != nil {
 		startEvent := SessionStartHookEvent{Reason: SessionStartup}
 		if config.SessionStartEvent != nil {
@@ -347,6 +386,31 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		}
 	}
 	return s, nil
+}
+
+func sessionBranchHasThinkingEntry(manager *session.SessionManager) (bool, error) {
+	entries, err := manager.BranchPath("")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if _, ok := entry.Payload().(session.ThinkingLevelChangePayload); ok {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type noModelSelectedGuidanceError struct{ message string }
+
+func (e noModelSelectedGuidanceError) Error() string { return e.message }
+func (noModelSelectedGuidanceError) Unwrap() error   { return ErrNoModelSelected }
+
+func (s *AgentSession) noModelSelectedError() error {
+	if s == nil || s.noModelMessage == "" || s.noModelMessage == ErrNoModelSelected.Error() {
+		return ErrNoModelSelected
+	}
+	return noModelSelectedGuidanceError{message: s.noModelMessage}
 }
 
 func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) error {
@@ -789,6 +853,10 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 		return TurnSnapshot{}, err
 	}
 	s.mu.RLock()
+	if !s.hasModel {
+		s.mu.RUnlock()
+		return TurnSnapshot{}, ErrNoModelSelected
+	}
 	snapshot := TurnSnapshot{
 		Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt,
 		Tool: s.tool, Tools: append([]provider.ToolDefinition(nil), s.tools...), Stream: provider.CloneStreamOptions(s.stream),
@@ -824,7 +892,7 @@ func (s *AgentSession) State() SessionState {
 		return SessionState{Active: State{phase: PhaseIdle}}
 	}
 	s.mu.RLock()
-	state := SessionState{Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
+	state := SessionState{Model: s.model, HasModel: s.hasModel, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
 	s.mu.RUnlock()
 	state.Active = s.activeState()
 	return state
@@ -916,7 +984,12 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	}
 }
 
-func (s *AgentSession) Model() provider.Model                 { return s.State().Model }
+func (s *AgentSession) Model() provider.Model { return s.State().Model }
+func (s *AgentSession) HasModel() bool        { return s.State().HasModel }
+func (s *AgentSession) SelectedModel() (provider.Model, bool) {
+	state := s.State()
+	return state.Model, state.HasModel
+}
 func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel { return s.State().ThinkingLevel }
 func (s *AgentSession) SystemPrompt() string                  { return s.State().SystemPrompt }
 func (s *AgentSession) Tools() []provider.ToolDefinition      { return s.State().Tools }
@@ -986,8 +1059,10 @@ func (s *AgentSession) SetModel(model provider.Model) error {
 	}
 	s.mu.Lock()
 	previous := s.model
+	hadPrevious := s.hasModel
 	previousThinking := s.thinkingLevel
 	s.model = model
+	s.hasModel = true
 	s.thinkingLevel = model.ClampThinkingLevel(s.thinkingLevel)
 	selectedThinking := s.thinkingLevel
 	s.mu.Unlock()
@@ -1018,9 +1093,13 @@ func (s *AgentSession) SetModel(model provider.Model) error {
 			_ = s.hooks.ThinkingLevelSelect(context.Background(), ThinkingLevelSelectEvent{Level: selectedThinking, PreviousLevel: previousThinking})
 		}
 	}
-	if hook := s.hooks.ModelSelect; hook != nil && !previous.Equal(model) {
+	if hook := s.hooks.ModelSelect; hook != nil && (!hadPrevious || !previous.Equal(model)) {
 		previousCopy := previous
-		_ = hook(context.Background(), ModelSelectEvent{Model: model, PreviousModel: &previousCopy, Source: ModelSelectSet})
+		var previousModel *provider.Model
+		if hadPrevious {
+			previousModel = &previousCopy
+		}
+		_ = hook(context.Background(), ModelSelectEvent{Model: model, PreviousModel: previousModel, Source: ModelSelectSet})
 	}
 	return nil
 }
@@ -1039,7 +1118,11 @@ func (s *AgentSession) SetThinkingLevel(level provider.ThinkingLevel) error {
 	}
 	s.mu.Lock()
 	previous := s.thinkingLevel
-	s.thinkingLevel = s.model.ClampThinkingLevel(level)
+	if s.hasModel {
+		s.thinkingLevel = s.model.ClampThinkingLevel(level)
+	} else {
+		s.thinkingLevel = provider.ThinkingOff
+	}
 	selected := s.thinkingLevel
 	s.mu.Unlock()
 	if err := s.loop.SetThinkingLevel(selected); err != nil {
@@ -1093,8 +1176,10 @@ func (s *AgentSession) SetTools(executor ToolExecutor, tools []provider.ToolDefi
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
 	state := s.State()
-	if _, err := provider.NewRequestWithOptions(state.Model, state.SystemPrompt, nil, provider.RequestOptions{Tools: tools, ThinkingLevel: state.ThinkingLevel}); err != nil {
-		return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
+	if state.HasModel {
+		if _, err := provider.NewRequestWithOptions(state.Model, state.SystemPrompt, nil, provider.RequestOptions{Tools: tools, ThinkingLevel: state.ThinkingLevel}); err != nil {
+			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
+		}
 	}
 	if len(tools) != 0 && isNilInterface(executor) {
 		return fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
@@ -1126,6 +1211,9 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if !s.HasModel() {
+		return Result{}, s.noModelSelectedError()
 	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		timestamp, err := s.loop.now()
@@ -1162,6 +1250,9 @@ func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContent
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	if !s.HasModel() {
+		return Result{}, s.noModelSelectedError()
+	}
 	input := append([]llm.UserContentBlock(nil), content...)
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		timestamp, err := s.loop.now()
@@ -1197,6 +1288,9 @@ func (s *AgentSession) RunMessages(ctx context.Context, messages []agentmsg.Mess
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if !s.HasModel() {
+		return Result{}, s.noModelSelectedError()
 	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		if err := validateAgentMessageBatch(messages, "agent message prompt"); err != nil {
@@ -1848,6 +1942,8 @@ func safeCompactionEventError(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, ErrNoModelSelected):
+		return err.Error()
 	case errors.Is(err, session.ErrAppendCanceled):
 		return session.ErrAppendCanceled.Error()
 	case errors.Is(err, session.ErrCompactionConflict):
@@ -1878,7 +1974,12 @@ func (s *AgentSession) emitCompaction(ctx context.Context, kind string, reason C
 	case "compaction_end":
 		var eventErr error
 		if errorMessage != "" {
-			eventErr = errors.New(errorMessage)
+			if errorMessage == ErrNoModelSelected.Error() || errorMessage == s.noModelMessage ||
+				errorMessage == "Compaction failed: "+ErrNoModelSelected.Error() || errorMessage == "Compaction failed: "+s.noModelMessage {
+				eventErr = noModelSelectedGuidanceError{message: errorMessage}
+			} else {
+				eventErr = errors.New(errorMessage)
+			}
 		}
 		event = CompactionEndEvent{
 			Reason: reason, Result: result, Aborted: aborted,
@@ -2066,6 +2167,9 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if !s.HasModel() {
+		return Result{}, s.noModelSelectedError()
 	}
 	return s.runSession(ctx, false, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.Continue(run)
@@ -2434,7 +2538,22 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	if err := s.rejectIfClosed(); err != nil {
 		return session.CompactResult{}, err
 	}
-	if s.summarizer == nil || s.sessionManager == nil {
+	if s.sessionManager == nil {
+		return session.CompactResult{}, ErrCompactionUnavailable
+	}
+	if !s.HasModel() {
+		run, err := s.admitSessionRun(ctx)
+		if err != nil {
+			return session.CompactResult{}, err
+		}
+		defer s.finishSessionRun(run)
+		s.setSessionPhase(run, PhaseCompacting)
+		s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
+		err = s.noModelSelectedError()
+		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(err))
+		return session.CompactResult{}, err
+	}
+	if s.summarizer == nil {
 		return session.CompactResult{}, ErrCompactionUnavailable
 	}
 	run, err := s.admitSessionRun(ctx)

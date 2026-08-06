@@ -35,6 +35,7 @@ var (
 	ErrContextTransform      = errors.New("agent context transform failed")
 	ErrInvalidQueueMessage   = errors.New("invalid queued message")
 	ErrCannotContinue        = errors.New("agent cannot continue from current transcript")
+	ErrNoModelSelected       = errors.New("No model selected.")
 	ErrCompactionUnavailable = errors.New("agent compaction is not configured")
 	ErrRetryPolicy           = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
@@ -219,6 +220,7 @@ type Config struct {
 type runtimeConfig struct {
 	provider              provider.Provider
 	model                 provider.Model
+	hasModel              bool
 	thinkingLevel         provider.ThinkingLevel
 	systemPrompt          string
 	stream                provider.StreamOptions
@@ -307,15 +309,22 @@ type ContextTransform func(context.Context, []llm.ConversationMessage) ([]llm.Co
 type AgentContextTransform func(context.Context, []agentmsg.Message) (*[]agentmsg.Message, error)
 type MessageEndHook func(context.Context, agentmsg.Message) (agentmsg.Message, error)
 
+func modelPresent(value provider.Model) bool {
+	return value.Provider() != "" || value.API() != "" || value.ID() != ""
+}
+
 func validateConfig(config Config) (runtimeConfig, error) {
 	if isNilInterface(config.Provider) {
 		return runtimeConfig{}, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
 	}
-	if _, err := provider.NewRequestWithOptions(config.Model, config.SystemPrompt, nil, provider.RequestOptions{
-		Tools:                  config.Tools,
-		AllowParallelToolCalls: false,
-	}); err != nil {
-		return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	hasModel := modelPresent(config.Model)
+	if hasModel {
+		if _, err := provider.NewRequestWithOptions(config.Model, config.SystemPrompt, nil, provider.RequestOptions{
+			Tools:                  config.Tools,
+			AllowParallelToolCalls: false,
+		}); err != nil {
+			return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+		}
 	}
 
 	configuredTool := config.Tool
@@ -359,6 +368,9 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	if !thinkingLevel.Valid() {
 		return runtimeConfig{}, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, thinkingLevel)
 	}
+	if !hasModel {
+		thinkingLevel = provider.ThinkingOff
+	}
 	now := config.Now
 	if now == nil {
 		now = time.Now
@@ -367,6 +379,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	return runtimeConfig{
 		provider:              config.Provider,
 		model:                 config.Model,
+		hasModel:              hasModel,
 		thinkingLevel:         thinkingLevel,
 		systemPrompt:          config.SystemPrompt,
 		stream:                provider.CloneStreamOptions(config.Stream),
@@ -438,6 +451,7 @@ type State struct {
 	turn             uint32
 	pendingToolCalls []string
 	model            provider.Model
+	hasModel         bool
 	thinkingLevel    provider.ThinkingLevel
 	systemPrompt     string
 	tools            []provider.ToolDefinition
@@ -453,6 +467,8 @@ func (s State) RunID() (uint64, bool) {
 }
 func (s State) Turn() uint32                          { return s.turn }
 func (s State) Model() provider.Model                 { return s.model }
+func (s State) HasModel() bool                        { return s.hasModel }
+func (s State) SelectedModel() (provider.Model, bool) { return s.model, s.hasModel }
 func (s State) ThinkingLevel() provider.ThinkingLevel { return s.thinkingLevel }
 func (s State) SystemPrompt() string                  { return s.systemPrompt }
 func (s State) Tools() []provider.ToolDefinition {

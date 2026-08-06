@@ -67,6 +67,7 @@ type Agent struct {
 	nextID uint64
 
 	model         provider.Model
+	hasModel      bool
 	thinkingLevel provider.ThinkingLevel
 	systemPrompt  string
 	tool          ToolExecutor
@@ -105,7 +106,7 @@ func New(config Config) (*Agent, error) {
 		runtime.tools = []provider.ToolDefinition{definition}
 	}
 	return &Agent{
-		config: runtime, model: runtime.model, thinkingLevel: runtime.thinkingLevel,
+		config: runtime, model: runtime.model, hasModel: runtime.hasModel, thinkingLevel: runtime.thinkingLevel,
 		systemPrompt: runtime.systemPrompt, tool: runtime.tool,
 		tools:    append([]provider.ToolDefinition(nil), runtime.tools...),
 		messages: messages, steeringMode: runtime.steeringMode, followUpMode: runtime.followUpMode,
@@ -188,7 +189,7 @@ func (a *Agent) State() State {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := State{
-		phase: a.phaseLocked(), model: a.model, thinkingLevel: a.thinkingLevel,
+		phase: a.phaseLocked(), model: a.model, hasModel: a.hasModel, thinkingLevel: a.thinkingLevel,
 		systemPrompt: a.systemPrompt, tools: append([]provider.ToolDefinition(nil), a.tools...),
 		messages: append([]agentmsg.Message(nil), a.messages...), isStreaming: a.isStreaming,
 		streamingMessage: agentmsg.CloneOne(a.streaming), errorMessage: a.errorMessage,
@@ -227,6 +228,7 @@ func (a *Agent) SetModel(model provider.Model) error {
 	}
 	a.mu.Lock()
 	a.model = model
+	a.hasModel = true
 	a.mu.Unlock()
 	return nil
 }
@@ -236,7 +238,11 @@ func (a *Agent) SetThinkingLevel(level provider.ThinkingLevel) error {
 		return fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, level)
 	}
 	a.mu.Lock()
-	a.thinkingLevel = level
+	if a.hasModel {
+		a.thinkingLevel = level
+	} else {
+		a.thinkingLevel = provider.ThinkingOff
+	}
 	a.mu.Unlock()
 	return nil
 }
@@ -448,6 +454,10 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 		return Result{}, fmt.Errorf("%w: invalid continuation context", ErrInvalidRun)
 	}
 	a.mu.Lock()
+	if !a.hasModel {
+		a.mu.Unlock()
+		return Result{}, ErrNoModelSelected
+	}
 	if a.active != nil {
 		a.mu.Unlock()
 		return Result{}, ErrBusy
@@ -491,6 +501,9 @@ func (a *Agent) beginRun(ctx context.Context) (*activeRun, error) {
 }
 
 func (a *Agent) beginRunLocked(ctx context.Context) (*activeRun, error) {
+	if !a.hasModel {
+		return nil, ErrNoModelSelected
+	}
 	if a.active != nil {
 		return nil, ErrBusy
 	}

@@ -212,7 +212,6 @@ func TestNewAndRunRejectInvalidPreflightWithoutState(t *testing.T) {
 
 	for name, config := range map[string]agent.Config{
 		"nil provider":        {Model: model},
-		"zero model":          {Provider: scripted},
 		"invalid system":      {Provider: scripted, Model: model, SystemPrompt: string([]byte{0xff})},
 		"blank tool":          {Provider: scripted, Model: model, Tool: blankTool},
 		"panicking tool name": {Provider: scripted, Model: model, Tool: panickingNameTool{}},
@@ -257,6 +256,48 @@ func TestNewAndRunRejectInvalidPreflightWithoutState(t *testing.T) {
 	}
 	if result, err := badClock.Run(context.Background(), "recovered"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run after panicking preflight = success %t, error %v", result.Succeeded(), err)
+	}
+}
+
+func TestModelLessAgentRejectsRunsWithoutSideEffectsAndSetModelRevives(t *testing.T) {
+	scripted := newScriptedProvider(t, mustTextTerminal(t, "ready"))
+	runtime, err := agent.New(agent.Config{Provider: scripted, ThinkingLevel: provider.ThinkingHigh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := runtime.State()
+	if state.HasModel() || state.ThinkingLevel() != provider.ThinkingOff {
+		t.Fatalf("model-less state = hasModel %t thinking %q", state.HasModel(), state.ThinkingLevel())
+	}
+	if _, ok := state.SelectedModel(); ok {
+		t.Fatal("SelectedModel reports a zero model as selected")
+	}
+	events := 0
+	runtime.Subscribe(func(context.Context, agent.AgentEvent) { events++ })
+	if _, err := runtime.Run(context.Background(), "not persisted"); !errors.Is(err, agent.ErrNoModelSelected) {
+		t.Fatalf("Run error = %v", err)
+	}
+	if _, err := runtime.Continue(context.Background()); !errors.Is(err, agent.ErrNoModelSelected) {
+		t.Fatalf("Continue error = %v", err)
+	}
+	if got := runtime.State(); len(got.Messages()) != 0 || got.Phase() != agent.PhaseIdle || events != 0 || scripted.CallCount() != 0 {
+		t.Fatalf("model-less preflight changed state: messages=%d phase=%s events=%d calls=%d", len(got.Messages()), got.Phase(), events, scripted.CallCount())
+	}
+	model, err := newTestModel("scripted", "scripted", "scripted-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.SetModel(model); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.State().HasModel() {
+		t.Fatal("SetModel did not make the model present")
+	}
+	if _, err := runtime.Run(context.Background(), "now run"); err != nil {
+		t.Fatal(err)
+	}
+	if scripted.CallCount() != 1 {
+		t.Fatalf("provider calls = %d, want 1", scripted.CallCount())
 	}
 }
 

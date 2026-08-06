@@ -14,7 +14,9 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -71,7 +73,11 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			model := deepSeekLiveModel(t, test.api)
+			catalogModel := deepSeekLiveModel(test.api)
+			routeValidator, ok := implementation.(provider.RouteValidator)
+			if !ok {
+				t.Fatalf("concrete provider %T does not implement RouteValidator", implementation)
+			}
 			definition, err := provider.NewToolDefinition(
 				"pi_go_live_echo",
 				"Return the supplied value unchanged. Use this tool when explicitly requested.",
@@ -90,21 +96,58 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			modelRuntime, err := model.NewRuntime(model.Options{AgentDir: directory, WorkingDir: directory})
+			if err != nil {
+				_ = manager.Close()
+				t.Fatal(err)
+			}
 
 			echo := &deepSeekLiveEchoTool{}
-			coordinator, err := agent.NewSession(agent.SessionConfig{
+			factoryResult, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+				Services:       &agentruntime.Services{CWD: directory, AgentDir: directory, ModelRuntime: modelRuntime},
 				Provider:       implementation,
 				SessionManager: manager,
-				Model:          model,
-				ThinkingLevel:  test.thinkingLevel,
-				Tool:           echo,
-				Tools:          []provider.ToolDefinition{definition},
-				Stream:         provider.StreamOptions{MaxTokens: &test.maxTokens},
-				Retry:          agent.RetryPolicy{MaxAttempts: 1},
+				AllModels:      []model.Model{catalogModel},
+				Availability: model.Availability{
+					HasConfiguredAuth: func(providerID string) bool { return providerID == "deepseek" && apiKey != "" },
+					SupportsRoute: func(candidate model.Model) bool {
+						ref, refErr := candidate.Ref()
+						return refErr == nil && routeValidator.SupportsModel(ref)
+					},
+				},
+				ExplicitModel:         &catalogModel,
+				ExplicitThinkingLevel: &test.thinkingLevel,
+				BaseConfig: agent.SessionConfig{
+					Tool: echo, Tools: []provider.ToolDefinition{definition},
+					Stream: provider.StreamOptions{MaxTokens: &test.maxTokens},
+					Retry:  agent.RetryPolicy{MaxAttempts: 1},
+				},
 			})
 			if err != nil {
 				_ = manager.Close()
 				t.Fatal(err)
+			}
+			coordinator := factoryResult.Session
+			selected, selectedOK := coordinator.SelectedModel()
+			if !selectedOK || selected.Provider() != catalogModel.Provider || selected.ID() != catalogModel.ID || selected.API() != catalogModel.API {
+				_ = coordinator.Close(context.Background())
+				t.Fatalf("factory selected model = %s/%s api=%s present=%t", selected.Provider(), selected.ID(), selected.API(), selectedOK)
+			}
+			if coordinator.ThinkingLevel() != test.thinkingLevel || factoryResult.ModelFallbackMessage != nil {
+				_ = coordinator.Close(context.Background())
+				t.Fatalf("factory thinking/fallback = %q / %#v", coordinator.ThinkingLevel(), factoryResult.ModelFallbackMessage)
+			}
+			initialEntries := manager.Entries()
+			if len(initialEntries) != 2 {
+				_ = coordinator.Close(context.Background())
+				t.Fatalf("factory initial entries = %d, want model_change + thinking_level_change", len(initialEntries))
+			}
+			modelChange, modelChangeOK := initialEntries[0].Payload().(session.ModelChangePayload)
+			thinkingChange, thinkingChangeOK := initialEntries[1].Payload().(session.ThinkingLevelChangePayload)
+			if !modelChangeOK || modelChange.Provider != catalogModel.Provider || modelChange.ModelID != catalogModel.ID ||
+				!thinkingChangeOK || thinkingChange.ThinkingLevel != string(test.thinkingLevel) {
+				_ = coordinator.Close(context.Background())
+				t.Fatalf("factory initial metadata = %#v / %#v", initialEntries[0].Payload(), initialEntries[1].Payload())
 			}
 
 			var events deepSeekLiveEvents
@@ -163,9 +206,8 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 	}
 }
 
-func deepSeekLiveModel(t *testing.T, api string) provider.Model {
-	t.Helper()
-	modelSpec := provider.ModelSpec{
+func deepSeekLiveModel(api string) model.Model {
+	catalogModel := model.Model{
 		Provider:      "deepseek",
 		API:           api,
 		ID:            deepSeekLiveModelID,
@@ -178,7 +220,7 @@ func deepSeekLiveModel(t *testing.T, api string) provider.Model {
 	}
 	if api == provider.OpenAIResponsesAPI {
 		supportsDeveloperRole := false
-		modelSpec.Compat.OpenAIResponses = &provider.OpenAIResponsesCompat{
+		catalogModel.Compat.OpenAIResponses = &provider.OpenAIResponsesCompat{
 			SupportsDeveloperRole: &supportsDeveloperRole,
 		}
 	} else {
@@ -186,18 +228,14 @@ func deepSeekLiveModel(t *testing.T, api string) provider.Model {
 		supportsDeveloperRole := false
 		requiresReasoningContent := true
 		thinkingFormat := "deepseek"
-		modelSpec.Compat.OpenAICompletions = &provider.OpenAICompletionsCompat{
+		catalogModel.Compat.OpenAICompletions = &provider.OpenAICompletionsCompat{
 			SupportsStore:         &supportsStore,
 			SupportsDeveloperRole: &supportsDeveloperRole,
 			RequiresReasoningContentOnAssistantMessages: &requiresReasoningContent,
 			ThinkingFormat: &thinkingFormat,
 		}
 	}
-	model, err := provider.NewModel(modelSpec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return model
+	return catalogModel
 }
 
 type deepSeekLiveEchoTool struct{ calls atomic.Uint32 }
