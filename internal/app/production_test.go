@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -95,7 +96,7 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 		&stdout,
 		&stderr,
 	)
-	if exitCode != app.ExitSuccess || stdout.String() != "assembled answer\n" || stderr.Len() != 0 {
+	if exitCode != app.ExitSuccess || stdout.String() != "assembled answer\n" || stderr.String() != customModelWarning("gpt-production") {
 		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
 	}
 
@@ -186,7 +187,7 @@ func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing
 		settings string
 	}{
 		{name: "explicit", args: []string{"--model", "OPENAI/custom", "-p", "hello"}},
-		{name: "settings default", args: []string{"-p", "hello"}, settings: `{"defaultProvider":"OpEnAi","defaultModel":"custom"}`},
+		{name: "settings default", args: []string{"-p", "hello"}, settings: `{"defaultProvider":"openai","defaultModel":"custom"}`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			workingDir, agentDir := t.TempDir(), t.TempDir()
@@ -202,9 +203,11 @@ func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing
 			}))
 			defer poisonServer.Close()
 			key := "provider-key"
-			writeModelsJSON(t, agentDir, providerServer.URL+"/v1", &key, map[string]any{
-				"models": []any{map[string]any{"id": "aaa", "api": "openai-responses", "baseUrl": poisonServer.URL + "/v1"}},
-			})
+			models := []any{map[string]any{"id": "aaa", "api": "openai-responses", "baseUrl": poisonServer.URL + "/v1"}}
+			if testCase.settings != "" {
+				models = append(models, map[string]any{"id": "custom", "api": "openai-responses", "baseUrl": providerServer.URL + "/v1"})
+			}
+			writeModelsJSON(t, agentDir, providerServer.URL+"/v1", &key, map[string]any{"models": models})
 			if testCase.settings != "" {
 				if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(testCase.settings), 0o600); err != nil {
 					t.Fatal(err)
@@ -214,7 +217,11 @@ func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing
 			config := productionTestConfig(workingDir, agentDir, []string{})
 			var stdout, stderr bytes.Buffer
 			exitCode := app.RunProduction(context.Background(), config, args, &stdout, &stderr)
-			if exitCode != app.ExitSuccess || stdout.String() != "safe\n" || stderr.Len() != 0 {
+			wantStderr := ""
+			if testCase.name == "explicit" {
+				wantStderr = customModelWarning("custom")
+			}
+			if exitCode != app.ExitSuccess || stdout.String() != "safe\n" || stderr.String() != wantStderr {
 				t.Fatalf("RunProduction = %d, %q, %q", exitCode, stdout.String(), stderr.String())
 			}
 			request := capture.snapshot()
@@ -358,7 +365,7 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	exitCode := app.RunProduction(ctx, config, []string{"--model", "openai/gpt-tool", "--session", sessionPath, "-p", "use bash twice"}, &stdout, &stderr)
-	if exitCode != app.ExitSuccess || stdout.String() != "tools completed\n" || stderr.Len() != 0 {
+	if exitCode != app.ExitSuccess || stdout.String() != "tools completed\n" || stderr.String() != customModelWarning("gpt-tool") {
 		t.Fatalf("RunProduction() = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
 	}
 	if got := strings.Join(runner.completionOrder(), ","); got != "fast,slow" {
@@ -553,7 +560,7 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai/gpt-rich-tools", "--session", sessionPath, "-p", "continue after restart",
-	}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "rich tools resumed\n" || stderr.Len() != 0 {
+	}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "rich tools resumed\n" || stderr.String() != customModelWarning("gpt-rich-tools") {
 		t.Fatalf("RunProduction() = code %d stdout %q stderr %q", code, stdout.String(), stderr.String())
 	}
 
@@ -699,7 +706,7 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 	config := productionTestConfig(workingDir, agentDir, nil)
 	for _, prompt := range []string{"first prompt", "continue"} {
 		var stdout, stderr bytes.Buffer
-		if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-reason", "--session", sessionPath, "-p", prompt}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+		if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-reason", "--session", sessionPath, "-p", prompt}, &stdout, &stderr); code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-reason") {
 			t.Fatalf("run %q: code=%d stdout=%q stderr=%q", prompt, code, stdout.String(), stderr.String())
 		}
 	}
@@ -744,7 +751,7 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 func TestRunProductionReplaysDurableImageAfterRestart(t *testing.T) {
 	workingDir, agentDir := t.TempDir(), t.TempDir()
 	sessionPath := filepath.Join(workingDir, "image-restart.jsonl")
-	entryIDs := []string{"seed-image", "new-user", "assistant"}
+	entryIDs := []string{"seed-image", "bootstrap-thinking", "new-user", "assistant"}
 	transcript, err := session.Create(sessionPath, session.CreateOptions{
 		ID:         "image-restart",
 		WorkingDir: workingDir,
@@ -793,7 +800,7 @@ func TestRunProductionReplaysDurableImageAfterRestart(t *testing.T) {
 		return id, nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-image", "--session", sessionPath, "-p", "continue"}, &stdout, &stderr); code != app.ExitSuccess || stderr.Len() != 0 {
+	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-image", "--session", sessionPath, "-p", "continue"}, &stdout, &stderr); code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-image") {
 		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
 	input := capture.snapshot().payload["input"].([]any)
@@ -889,7 +896,11 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := app.RunProduction(context.Background(), config, args, &stdout, &stderr)
-			if exitCode != app.ExitSuccess || stdout.String() != "ok\n" || stderr.Len() != 0 {
+			wantStderr := ""
+			if strings.HasPrefix(testCase.wantModel, "custom-") {
+				wantStderr = customModelWarning(testCase.wantModel)
+			}
+			if exitCode != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != wantStderr {
 				t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
 			}
 			request := capture.snapshot()
@@ -946,7 +957,7 @@ func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *t
 	config.OpenAIOAuthBaseURL = server.URL
 	var stdout, stderr bytes.Buffer
 	code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-oauth", "--session", filepath.Join(workingDir, "oauth.jsonl"), "-p", "hello"}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "oauth answer\n" || stderr.Len() != 0 || tokenCalls.Load() != 1 || responseAuthorization != "Bearer "+access {
+	if code != app.ExitSuccess || stdout.String() != "oauth answer\n" || stderr.String() != customModelWarning("gpt-oauth") || tokenCalls.Load() != 1 || responseAuthorization != "Bearer "+access {
 		t.Fatalf("RunProduction OAuth = code %d stdout %q stderr %q tokens %d authorization %q", code, stdout.String(), stderr.String(), tokenCalls.Load(), responseAuthorization)
 	}
 	data, err := os.ReadFile(filepath.Join(agentDir, "auth.json"))
@@ -971,15 +982,18 @@ func (d *countingProductionDoer) Do(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("network must not be reached")
 }
 
-func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
+func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t *testing.T) {
 	testCases := []struct {
 		name        string
 		args        []string
 		environment []string
 		prepare     func(*testing.T, string)
 		want        string
+		wantCalls   uint32
 		secrets     []string
 		storedFile  bool
+		modelAccess bool
+		exactStderr string
 	}{
 		{
 			name:        "stored OAuth owns provider",
@@ -1037,7 +1051,7 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 					"futureRequestOption": map[string]any{"X-Secret": "models-secret"},
 				})
 			},
-			want:    "selected model configuration is not migrated",
+			want:    "selected provider/API is not supported",
 			secrets: []string{"ambient-secret", "models-secret"},
 		},
 		{
@@ -1049,20 +1063,20 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 					"futureRequestOption": "future-secret",
 				})
 			},
-			want:    "selected model configuration is not migrated",
+			want:    "selected provider/API is not supported",
 			secrets: []string{"ambient-secret", "future-secret"},
 		},
 		{
 			name:        "mixed-case selected custom override is not ignored",
-			args:        []string{"--model", "OPENAI/gpt-test", "-p", "hello"},
+			args:        []string{"--model", "OPENAI/gpt-5.5", "-p", "hello"},
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare: func(t *testing.T, agentDir string) {
-				content := `{"providers":{"OpEnAi":{"baseUrl":"https://fixture.invalid/v1","modelOverrides":{"GPT-TEST":{"compat":{"token":"case-secret"}}}}}}`
+				content := `{"providers":{"OpEnAi":{"baseUrl":"https://fixture.invalid/v1","modelOverrides":{"GPT-5.5":{"compat":{"token":"case-secret"}}}}}}`
 				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
-			want:    "selected model configuration is not migrated",
+			want:    "selected provider/API is not supported",
 			secrets: []string{"ambient-secret", "case-secret"},
 		},
 		{
@@ -1071,14 +1085,15 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 			prepare: func(t *testing.T, agentDir string) {
 				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, nil)
 			},
-			want: "OpenAI API key is not configured",
+			want:        "No API key found for openai.",
+			modelAccess: true,
 		},
 		{
 			name:        "unknown provider route",
 			args:        []string{"--model", "unknown/model", "-p", "hello"},
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare:     func(*testing.T, string) {},
-			want:        "selects an unknown provider",
+			want:        `Model "unknown/model" not found`,
 			secrets:     []string{"ambient-secret"},
 		},
 		{
@@ -1086,8 +1101,9 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 			args:        []string{"--api-key", "cli-secret", "-p", "hello"},
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare:     func(*testing.T, string) {},
-			want:        "--api-key requires an explicit --model",
+			want:        "--api-key requires a model to be specified",
 			secrets:     []string{"cli-secret", "ambient-secret"},
+			exactStderr: "Error: --api-key requires a model to be specified via --model, --provider/--model, or --models\n",
 		},
 	}
 
@@ -1105,6 +1121,24 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 			doer := &countingProductionDoer{}
 			config := productionTestConfig(workingDir, agentDir, testCase.environment)
 			config.OpenAIHTTPClient = doer
+			var beforeAgentCalls atomic.Uint32
+			var sessionStartCalls atomic.Uint32
+			var sessionShutdownCalls atomic.Uint32
+			config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+				beforeAgentCalls.Add(1)
+				return agent.BeforeAgentStartResult{}, nil
+			}
+			config.Hooks.SessionStart = func(context.Context, agent.SessionStartHookEvent) error {
+				sessionStartCalls.Add(1)
+				return nil
+			}
+			config.Hooks.SessionShutdown = func(context.Context, agent.SessionShutdownHookEvent) error {
+				sessionShutdownCalls.Add(1)
+				return nil
+			}
+			if testCase.modelAccess {
+				config.DocsDir = filepath.Join(workingDir, "installed-docs")
+			}
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			exitCode := app.RunProduction(context.Background(), config, args, &stdout, &stderr)
@@ -1116,17 +1150,39 @@ func TestRunProductionPreflightIsSecretSafeAndSideEffectFree(t *testing.T) {
 					t.Fatalf("stderr leaked secret %q: %q", secret, stderr.String())
 				}
 			}
-			if doer.calls.Load() != 0 {
-				t.Fatalf("preflight made %d HTTP calls", doer.calls.Load())
+			if testCase.exactStderr != "" && stderr.String() != testCase.exactStderr {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), testCase.exactStderr)
 			}
-			if _, err := os.Stat(sessionParent); !os.IsNotExist(err) {
-				t.Fatalf("preflight changed session tree: %v", err)
+			if doer.calls.Load() != testCase.wantCalls {
+				t.Fatalf("provider calls = %d, want %d", doer.calls.Load(), testCase.wantCalls)
+			}
+			if beforeAgentCalls.Load() != 0 {
+				t.Fatalf("before_agent_start calls = %d", beforeAgentCalls.Load())
+			}
+			if testCase.exactStderr != "" && (sessionStartCalls.Load() != 0 || sessionShutdownCalls.Load() != 0) {
+				t.Fatalf(
+					"blocking diagnostic lifecycle calls: start=%d shutdown=%d",
+					sessionStartCalls.Load(), sessionShutdownCalls.Load(),
+				)
+			}
+			if testCase.modelAccess {
+				want := customModelWarning("gpt-test") + "No API key found for openai.\n\nUse /login to log into a provider via OAuth or API key. See:\n  " +
+					filepath.Join(config.DocsDir, "providers.md") + "\n  " + filepath.Join(config.DocsDir, "models.md") + "\n"
+				if stderr.String() != want {
+					t.Fatalf("model access stderr = %q, want %q", stderr.String(), want)
+				}
+			}
+			if _, err := os.Stat(sessionPath); !os.IsNotExist(err) {
+				t.Fatalf("failed startup persisted prompt/provider result: %v", err)
+			}
+			if _, statErr := os.Stat(sessionParent); statErr != nil {
+				t.Fatalf("session-first startup did not prepare session tree: %v", statErr)
 			}
 		})
 	}
 }
 
-func TestRunProductionResourceFailurePrecedesSessionAndNetwork(t *testing.T) {
+func TestRunProductionResourceFailureOccursAfterSessionSelectionWithoutNetwork(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()
 	// Invalid global data is a configuration error. A project copy would be
@@ -1147,10 +1203,10 @@ func TestRunProductionResourceFailurePrecedesSessionAndNetwork(t *testing.T) {
 		t.Fatalf("RunProduction() = %d, %q, %q", code, stdout.String(), stderr.String())
 	}
 	if doer.calls.Load() != 0 {
-		t.Fatalf("resource preflight reached network")
+		t.Fatalf("resource service failure reached network")
 	}
-	if _, err := os.Stat(sessionParent); !os.IsNotExist(err) {
-		t.Fatalf("resource preflight created session tree: %v", err)
+	if _, err := os.Stat(sessionParent); err != nil {
+		t.Fatalf("session-first startup did not prepare session tree: %v", err)
 	}
 }
 
@@ -1181,7 +1237,7 @@ func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
 	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
 		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(workingDir, "result.jsonl"),
 	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.Len() != 0 {
+	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
 		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
 	}
 	input := capture.snapshot().payload["input"].([]any)
@@ -1219,7 +1275,7 @@ func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
 	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
 		"--model", "openai/gpt-test", "-p", "ordinary prompt", "--session", filepath.Join(workingDir, "result.jsonl"),
 	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.Len() != 0 {
+	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
 		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
 	}
 	input := capture.snapshot().payload["input"].([]any)
@@ -1233,7 +1289,7 @@ func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
 	}
 }
 
-func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *testing.T) {
+func TestRunProductionExpandsAdmittedPromptTemplateForRequest(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(agentDir, "prompts"), 0o700); err != nil {
@@ -1251,7 +1307,7 @@ func TestRunProductionExpandsAdmittedPromptTemplateBeforeSessionAndRequest(t *te
 	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
 		"--model", "openai/gpt-test", "-p", "/review file.go", "--session", path,
 	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.Len() != 0 {
+	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
 		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
 	}
 	input := capture.snapshot().payload["input"].([]any)
@@ -1342,7 +1398,7 @@ func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 	exitCode := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai/gpt-resume", "-p", "continue", "--session", sessionPath,
 	}, &stdout, &stderr)
-	if exitCode != app.ExitSuccess || stdout.String() != "resumed\n" || stderr.Len() != 0 {
+	if exitCode != app.ExitSuccess || stdout.String() != "resumed\n" || stderr.String() != customModelWarning("gpt-resume") {
 		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
 	}
 
@@ -1352,12 +1408,14 @@ func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 	}
 	defer transcript.Close()
 	entries := transcript.Entries()
-	if len(entries) != 2 {
-		t.Fatalf("resumed entries = %d, want 2", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("resumed entries = %d, want 4", len(entries))
 	}
-	if entries[0].Timestamp() != productionTestTime.Add(time.Millisecond) ||
-		entries[1].Timestamp() != productionTestTime.Add(2*time.Millisecond) {
-		t.Fatalf("resumed entry timestamps = %v, %v", entries[0].Timestamp(), entries[1].Timestamp())
+	for index, entry := range entries {
+		want := productionTestTime.Add(time.Duration(index+1) * time.Millisecond)
+		if entry.Timestamp() != want {
+			t.Fatalf("resumed entry %d timestamp = %v, want %v", index, entry.Timestamp(), want)
+		}
 	}
 }
 
@@ -1408,7 +1466,7 @@ func TestRunProductionOpensLegacySessionIntoCurrentContext(t *testing.T) {
 		&stdout,
 		&stderr,
 	)
-	if exitCode != app.ExitSuccess || stdout.String() != "legacy production answer\n" || stderr.Len() != 0 {
+	if exitCode != app.ExitSuccess || stdout.String() != "legacy production answer\n" || stderr.String() != customModelWarning("gpt-legacy") {
 		t.Fatalf("RunProduction legacy = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
 	}
 	payload, err := json.Marshal(capture.snapshot().payload)
@@ -1611,4 +1669,8 @@ func expectedProductionSessionPath(agentDir, workingDir, sessionID string) strin
 
 func stringPointer(value string) *string {
 	return &value
+}
+
+func customModelWarning(modelID string) string {
+	return `Warning: Model "` + modelID + `" not found for provider "openai". Using custom model id.` + "\n"
 }

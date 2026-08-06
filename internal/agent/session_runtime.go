@@ -41,7 +41,16 @@ type SessionConfig struct {
 	// ResolveStreamOptions resolves credentials and request headers for the
 	// model selected by a concrete turn. It is invoked outside session locks.
 	ResolveStreamOptions func(context.Context, provider.Model) (provider.StreamOptions, error)
-	Hooks                Hooks
+	// ValidateModelAccess performs transport-neutral credential/admission checks
+	// for the selected model. Product factories use it to reject inaccessible
+	// models before prompt construction, hooks, compaction, persistence, or a
+	// provider request. Nil preserves the low-level constructor's behavior.
+	ValidateModelAccess func(context.Context, provider.Model) error
+	// ValidateModelSelection is the corresponding model-selection boundary.
+	// It is separate because the original setModel surface has distinct
+	// user-facing authentication errors from prompt and compaction.
+	ValidateModelSelection func(context.Context, provider.Model) error
+	Hooks                  Hooks
 	// SessionStartEvent selects the lifecycle reason emitted after construction.
 	// Nil preserves the ordinary process-start behavior.
 	SessionStartEvent *SessionStartHookEvent
@@ -217,6 +226,8 @@ type AgentSession struct {
 	afterToolCall  AfterToolCallHook
 	stream         provider.StreamOptions
 	resolveStream  func(context.Context, provider.Model) (provider.StreamOptions, error)
+	validateAccess func(context.Context, provider.Model) error
+	validateSelect func(context.Context, provider.Model) error
 	hooks          Hooks
 	noModelMessage string
 	// lifecycleMu owns admission, close state, and the complete top-level
@@ -323,7 +334,8 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		sessionManager: config.SessionManager, model: config.Model, hasModel: hasModel, thinkingLevel: config.ThinkingLevel,
 		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
-		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
+		resolveStream: config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
+		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
 		summarizer: config.Summarizer,
@@ -411,6 +423,30 @@ func (s *AgentSession) noModelSelectedError() error {
 		return ErrNoModelSelected
 	}
 	return noModelSelectedGuidanceError{message: s.noModelMessage}
+}
+
+// requireModelAccess snapshots the selected model after top-level session-run
+// admission. Product factories pair this check with ValidateModelSelection so
+// replacements are validated before publication; every provider turn still
+// resolves its current credentials independently in prepareTurn.
+func (s *AgentSession) requireModelAccess(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	s.mu.RLock()
+	hasModel := s.hasModel
+	selected := s.model
+	validate := s.validateAccess
+	s.mu.RUnlock()
+	if !hasModel {
+		return s.noModelSelectedError()
+	}
+	if validate != nil {
+		if err := validate(ctx, selected); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) error {
@@ -1043,14 +1079,31 @@ func (s *AgentSession) SetSessionName(ctx context.Context, name string) error {
 	return nil
 }
 func (s *AgentSession) SetModel(model provider.Model) error {
+	return s.SetModelContext(context.Background(), model)
+}
+
+// SetModelContext validates access before publishing any state, durable entry,
+// or selection hook. SetModel remains the source-compatible synchronous form.
+func (s *AgentSession) SetModelContext(ctx context.Context, model provider.Model) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if ctx == nil {
+		return fmt.Errorf("%w: nil model access context", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return err
 	}
 	if _, err := provider.NewRequest(model, "", nil); err != nil {
 		return fmt.Errorf("%w: model: %w", ErrInvalidConfig, err)
 	}
 	if routes, ok := s.loop.config.provider.(provider.RouteValidator); ok && !routes.SupportsModel(model) {
 		return fmt.Errorf("%w: no provider adapter for %s/%s", ErrInvalidConfig, model.Provider(), model.API())
+	}
+	if s.validateSelect != nil {
+		if err := s.validateSelect(ctx, model); err != nil {
+			return err
+		}
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
@@ -1212,9 +1265,6 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	if !s.HasModel() {
-		return Result{}, s.noModelSelectedError()
-	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		timestamp, err := s.loop.now()
 		if err != nil {
@@ -1249,9 +1299,6 @@ func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContent
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	if !s.HasModel() {
-		return Result{}, s.noModelSelectedError()
 	}
 	input := append([]llm.UserContentBlock(nil), content...)
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
@@ -1288,9 +1335,6 @@ func (s *AgentSession) RunMessages(ctx context.Context, messages []agentmsg.Mess
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	if !s.HasModel() {
-		return Result{}, s.noModelSelectedError()
 	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		if err := validateAgentMessageBatch(messages, "agent message prompt"); err != nil {
@@ -1382,6 +1426,9 @@ func (s *AgentSession) runSession(
 		}
 		s.finishSessionRun(run)
 	}()
+	if err := s.requireModelAccess(run.ctx); err != nil {
+		return Result{}, err
+	}
 	var input sessionPromptInput
 	if prepare != nil {
 		input, err = prepare()
@@ -1944,6 +1991,8 @@ func safeCompactionEventError(err error) string {
 		return ""
 	case errors.Is(err, ErrNoModelSelected):
 		return err.Error()
+	case errors.Is(err, ErrModelAccess), errors.Is(err, ErrCompactionUnavailable):
+		return err.Error()
 	case errors.Is(err, session.ErrAppendCanceled):
 		return session.ErrAppendCanceled.Error()
 	case errors.Is(err, session.ErrCompactionConflict):
@@ -2167,9 +2216,6 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	}
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	if !s.HasModel() {
-		return Result{}, s.noModelSelectedError()
 	}
 	return s.runSession(ctx, false, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.Continue(run)
@@ -2541,21 +2587,6 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	if s.sessionManager == nil {
 		return session.CompactResult{}, ErrCompactionUnavailable
 	}
-	if !s.HasModel() {
-		run, err := s.admitSessionRun(ctx)
-		if err != nil {
-			return session.CompactResult{}, err
-		}
-		defer s.finishSessionRun(run)
-		s.setSessionPhase(run, PhaseCompacting)
-		s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
-		err = s.noModelSelectedError()
-		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(err))
-		return session.CompactResult{}, err
-	}
-	if s.summarizer == nil {
-		return session.CompactResult{}, ErrCompactionUnavailable
-	}
 	run, err := s.admitSessionRun(ctx)
 	if err != nil {
 		return session.CompactResult{}, err
@@ -2563,6 +2594,14 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	defer s.finishSessionRun(run)
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
+	if err := s.requireModelAccess(run.ctx); err != nil {
+		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(err))
+		return session.CompactResult{}, err
+	}
+	if s.summarizer == nil {
+		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(ErrCompactionUnavailable))
+		return session.CompactResult{}, ErrCompactionUnavailable
+	}
 	result, err := s.compactTranscript(run, CompactionManual, false, instructions)
 	if err != nil {
 		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)

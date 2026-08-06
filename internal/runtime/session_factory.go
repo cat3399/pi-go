@@ -219,6 +219,16 @@ func formatNoModelSelectedMessage(docsDir string) string {
 	return "No model selected.\n\n" + formatProviderLoginHelp(docsDir) + "\n\nThen use /model to select a model."
 }
 
+// FormatNoAPIKeyFoundMessage is shared by product model-access validators and
+// the session factory guidance so both use the same installation docs paths.
+func FormatNoAPIKeyFoundMessage(providerID, docsDir string) string {
+	providerDisplay := providerID
+	if providerDisplay == "unknown" {
+		providerDisplay = "the selected model"
+	}
+	return "No API key found for " + providerDisplay + ".\n\n" + formatProviderLoginHelp(docsDir)
+}
+
 func formatProviderLoginHelp(docsDir string) string {
 	if docsDir == "" {
 		docsDir = "docs"

@@ -36,12 +36,26 @@ var (
 	ErrInvalidQueueMessage   = errors.New("invalid queued message")
 	ErrCannotContinue        = errors.New("agent cannot continue from current transcript")
 	ErrNoModelSelected       = errors.New("No model selected.")
+	ErrModelAccess           = errors.New("model access unavailable")
 	ErrCompactionUnavailable = errors.New("agent compaction is not configured")
 	ErrRetryPolicy           = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
 	// v0.1 internal implementation; v0.2 no longer returns it for batches.
 	ErrUnsupportedToolTurn = errors.New("unsupported tool turn")
 )
+
+// ModelAccessError preserves product-facing authentication guidance while
+// allowing hosts to distinguish admission failures from internal run errors.
+type ModelAccessError struct{ Message string }
+
+func (e *ModelAccessError) Error() string {
+	if e == nil || e.Message == "" {
+		return ErrModelAccess.Error()
+	}
+	return e.Message
+}
+
+func (*ModelAccessError) Is(target error) bool { return target == ErrModelAccess }
 
 // Transcript is the narrow persistence seam used by Agent-core integrations.
 // Product AgentSession does not accept this seam; it requires and owns a real

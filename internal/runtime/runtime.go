@@ -16,8 +16,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/auth"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/model"
+	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
 )
@@ -43,6 +45,10 @@ type Services struct {
 	AgentDir        string
 	ModelRuntime    *model.Runtime
 	ResourceService *resource.Service
+	AuthRuntime     *auth.Runtime
+	Provider        provider.Provider
+	Tool            agent.ToolExecutor
+	Tools           []provider.ToolDefinition
 }
 
 type CreateOptions struct {

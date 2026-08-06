@@ -61,7 +61,8 @@ func TestRunProductionWindowsMissingAuthAllowsEphemeralConfiguredAndAmbientSourc
 				&stdout,
 				&stderr,
 			)
-			if exitCode != app.ExitSuccess || stdout.String() != "ok\n" || stderr.Len() != 0 {
+			modelID := strings.TrimPrefix(testCase.args[1], "openai/")
+			if exitCode != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != customModelWarning(modelID) {
 				t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
 			}
 			request := capture.snapshot()
@@ -72,7 +73,7 @@ func TestRunProductionWindowsMissingAuthAllowsEphemeralConfiguredAndAmbientSourc
 	}
 }
 
-func TestRunProductionWindowsExistingAuthFailsBeforeSessionOrNetwork(t *testing.T) {
+func TestRunProductionWindowsExistingAuthFailsAfterSessionSelectionWithoutNetwork(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()
 	writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("configured-lower"), nil)
@@ -96,9 +97,12 @@ func TestRunProductionWindowsExistingAuthFailsBeforeSessionOrNetwork(t *testing.
 		}
 	}
 	if doer.calls.Load() != 0 {
-		t.Fatalf("preflight made %d HTTP calls", doer.calls.Load())
+		t.Fatalf("auth service failure made %d HTTP calls", doer.calls.Load())
 	}
-	if _, err := os.Stat(sessionParent); !os.IsNotExist(err) {
-		t.Fatalf("preflight changed session tree: %v", err)
+	if _, err := os.Stat(sessionParent); err != nil {
+		t.Fatalf("session-first startup did not prepare session tree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sessionParent, "session.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("failed auth persisted prompt/provider result: %v", err)
 	}
 }

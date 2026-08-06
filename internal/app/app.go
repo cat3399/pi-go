@@ -12,6 +12,8 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/resource"
+	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -71,13 +73,6 @@ func runApplication(
 		flushOne(stderr)
 		return ExitFailure
 	}
-	prompt := parsed.prompt
-	if runtime.expandPrompt != nil {
-		// This is an admitted, pure transform. It must occur before the session
-		// path is resolved or a provider request can be started.
-		prompt = runtime.expandPrompt(prompt)
-	}
-
 	runContext, signals := startSignalController(ctx)
 	defer func() {
 		if signalCode, caught := signals.stopAndExitCode(); caught {
@@ -127,35 +122,48 @@ func runApplication(
 			}
 		}
 	}()
-	executor, toolDefinitions, err := runtime.executorFor(sessionManager.Cwd())
-	if err != nil {
-		writeDiagnostic(stderr, fmt.Errorf("initialize session tool runtime: %w", err))
+	if err := agentruntime.AssertSessionCwdExists(sessionManager, runtime.workingDir); err != nil {
+		writeDiagnostic(stderr, err)
 		return ExitFailure
 	}
 
-	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider:          runtime.provider,
-		SessionManager:    sessionManager,
-		Model:             runtime.model,
-		SystemPrompt:      runtime.systemPrompt,
-		Tool:              executor,
-		Tools:             toolDefinitions,
-		Stream:            runtime.stream,
-		Hooks:             runtime.hooks,
-		Now:               runtime.agentNow,
-		SettlementTimeout: runtime.settlementTimeout,
+	productRuntime, err := agentruntime.Create(runContext, runtime.factory, agentruntime.InitialOptions{
+		CWD: sessionManager.Cwd(), AgentDir: runtime.agentDir, SessionManager: sessionManager,
 	})
 	if err != nil {
-		writeDiagnostic(stderr, fmt.Errorf("initialize agent: %w", err))
+		writeDiagnostic(stderr, fmt.Errorf("initialize agent runtime: %w", err))
 		return ExitFailure
 	}
 	managerOwnedByCoordinator = true
 	defer func() {
-		if err := coordinator.Close(context.Background()); err != nil && exitCode == ExitSuccess {
-			writeDiagnostic(stderr, fmt.Errorf("close agent: %w", err))
+		if err := productRuntime.Dispose(context.Background()); err != nil && exitCode == ExitSuccess {
+			writeDiagnostic(stderr, fmt.Errorf("close agent runtime: %w", err))
 			exitCode = ExitFailure
 		}
 	}()
+	coordinator := productRuntime.Session()
+	if reportRuntimeDiagnostics(stderr, productRuntime.Diagnostics()) {
+		return ExitFailure
+	}
+	if !coordinator.HasModel() {
+		if guidance := productRuntime.ModelFallbackMessage(); guidance != nil {
+			writeTextLine(stderr, *guidance)
+		} else {
+			writeDiagnostic(stderr, agent.ErrNoModelSelected)
+		}
+		return ExitFailure
+	}
+	prompt := parsed.prompt
+	if services := productRuntime.Services(); services != nil && services.ResourceService != nil {
+		snapshot, snapshotErr := services.ResourceService.Snapshot()
+		if snapshotErr != nil {
+			writeDiagnostic(stderr, fmt.Errorf("runtime resources unavailable: %w", snapshotErr))
+			return ExitFailure
+		}
+		prompt = resource.ExpandTemplate(prompt, snapshot.Templates)
+	} else if runtime.expandPrompt != nil {
+		prompt = runtime.expandPrompt(prompt)
+	}
 
 	result, runErr := coordinator.Run(runContext, prompt)
 	if signalCode, caught := signals.exitCode(); caught {
@@ -165,7 +173,16 @@ func runApplication(
 		return signalCode
 	}
 	if runErr != nil {
-		writeDiagnostic(stderr, runErr)
+		if errors.Is(runErr, agent.ErrModelAccess) {
+			var accessErr *agent.ModelAccessError
+			if errors.As(runErr, &accessErr) {
+				writeTextLine(stderr, safeErrorText(accessErr))
+			} else {
+				writeTextLine(stderr, safeErrorText(runErr))
+			}
+		} else {
+			writeDiagnostic(stderr, runErr)
+		}
 		return ExitFailure
 	}
 	terminal, ok := result.Terminal()
@@ -292,6 +309,24 @@ func writeDiagnostic(writer io.Writer, err error) {
 func writeTextLine(writer io.Writer, text string) {
 	text = strings.ToValidUTF8(text, "�")
 	_, _ = fmt.Fprintln(writer, text)
+}
+
+// reportRuntimeDiagnostics mirrors main.ts reportDiagnostics. Error
+// diagnostics are blocking; informational and warning diagnostics are emitted
+// without changing prompt admission.
+func reportRuntimeDiagnostics(writer io.Writer, diagnostics []agentruntime.Diagnostic) (hasError bool) {
+	for _, diagnostic := range diagnostics {
+		switch diagnostic.Kind {
+		case agentruntime.DiagnosticWarning:
+			writeTextLine(writer, "Warning: "+diagnostic.Message)
+		case agentruntime.DiagnosticError:
+			writeTextLine(writer, "Error: "+diagnostic.Message)
+			hasError = true
+		default:
+			writeTextLine(writer, diagnostic.Message)
+		}
+	}
+	return hasError
 }
 
 func safeErrorText(err error) (text string) {

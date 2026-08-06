@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
 )
@@ -43,6 +46,8 @@ type Dependencies struct {
 	Hooks              agent.Hooks
 	SystemPrompt       string
 	WorkingDir         string
+	AgentDir           string
+	DocsDir            string
 	DefaultSessionPath SessionPathFactory
 
 	SessionID         string
@@ -58,29 +63,22 @@ type Dependencies struct {
 	BashArtifactDirectory string
 	BashMaxOutputLines    int
 	BashMaxOutputBytes    int
-	// ExpandPrompt is an already-admitted, pure input transform. It exists for
-	// trusted local prompt templates and runs before any session/network work.
+	// ExpandPrompt is an already-admitted, pure input transform for injected
+	// front ends. It runs after session/runtime construction and before prompt
+	// admission or any provider call.
 	ExpandPrompt func(string) string
 }
 
 type runtimeDependencies struct {
-	provider           provider.Provider
-	model              provider.Model
-	stream             provider.StreamOptions
-	hooks              agent.Hooks
-	systemPrompt       string
 	workingDir         string
+	agentDir           string
 	defaultSessionPath SessionPathFactory
 	sessionID          string
 	sessionNow         session.Clock
 	sessionCreateTime  time.Time
 	newSessionEntryID  session.IDGenerator
-	agentNow           func() time.Time
-	settlementTimeout  time.Duration
-	executor           agent.ToolExecutor
-	toolDefinitions    []provider.ToolDefinition
-	bashOptions        tool.BashOptions
 	expandPrompt       func(string) string
+	factory            agentruntime.Factory
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
@@ -132,30 +130,71 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		MaxOutputLines:    deps.BashMaxOutputLines,
 		MaxOutputBytes:    deps.BashMaxOutputBytes,
 	}
-	executor, definitions, err := buildProductionToolRuntime(bashOptions)
+	agentDir := deps.AgentDir
+	if agentDir == "" {
+		agentDir = workingDir
+	}
+	resolvedAgentDir, err := filepath.Abs(agentDir)
 	if err != nil {
-		return runtimeDependencies{}, fmt.Errorf("%w: %w", ErrInvalidDependencies, err)
+		return runtimeDependencies{}, fmt.Errorf("%w: resolve agent directory: %w", ErrInvalidDependencies, err)
+	}
+	catalogModel := catalogModelFromProvider(deps.Model)
+	factory := func(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
+		toolOptions := bashOptions
+		toolOptions.WorkingDir = options.SessionManager.Cwd()
+		executor, definitions, err := buildProductionToolRuntime(toolOptions)
+		if err != nil {
+			return agentruntime.CreateResult{}, fmt.Errorf("initialize session tool runtime: %w", err)
+		}
+		supportsRoute := func(candidate model.Model) bool {
+			ref, refErr := candidate.Ref()
+			if refErr != nil {
+				return false
+			}
+			if routes, ok := deps.Provider.(provider.RouteValidator); ok {
+				return routes.SupportsModel(ref)
+			}
+			return ref.Equal(deps.Model)
+		}
+		services := &agentruntime.Services{
+			CWD: options.SessionManager.Cwd(), AgentDir: resolvedAgentDir,
+			Provider: deps.Provider, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...),
+		}
+		stream := provider.CloneStreamOptions(deps.Stream)
+		stream.SessionID = options.SessionManager.SessionID()
+		return agentruntime.CreateAgentSession(ctx, agentruntime.SessionFactoryOptions{
+			Services: services, Provider: deps.Provider, SessionManager: options.SessionManager,
+			AllModels: []model.Model{catalogModel}, Availability: model.Availability{
+				HasConfiguredAuth: func(string) bool { return true }, SupportsRoute: supportsRoute,
+			},
+			ExplicitModel: &catalogModel,
+			BaseConfig: agent.SessionConfig{
+				SystemPrompt: deps.SystemPrompt, Tool: executor, Tools: definitions,
+				Stream: stream, Hooks: deps.Hooks, Now: deps.AgentNow, SettlementTimeout: deps.SettlementTimeout,
+			},
+			SessionStartEvent: options.SessionStartEvent, DocsDir: deps.DocsDir,
+		})
 	}
 
 	return runtimeDependencies{
-		provider:           deps.Provider,
-		model:              deps.Model,
-		stream:             provider.CloneStreamOptions(deps.Stream),
-		hooks:              deps.Hooks,
-		systemPrompt:       deps.SystemPrompt,
 		workingDir:         filepath.Clean(workingDir),
+		agentDir:           filepath.Clean(resolvedAgentDir),
 		defaultSessionPath: deps.DefaultSessionPath,
 		sessionID:          deps.SessionID,
 		sessionNow:         deps.SessionNow,
 		sessionCreateTime:  deps.SessionCreateTime,
 		newSessionEntryID:  deps.NewSessionEntryID,
-		agentNow:           deps.AgentNow,
-		settlementTimeout:  deps.SettlementTimeout,
-		executor:           executor,
-		toolDefinitions:    definitions,
-		bashOptions:        bashOptions,
 		expandPrompt:       deps.ExpandPrompt,
+		factory:            factory,
 	}, nil
+}
+
+func catalogModelFromProvider(value provider.Model) model.Model {
+	return model.Model{
+		Provider: value.Provider(), API: value.API(), ID: value.ID(), Name: value.Name(), BaseURL: value.BaseURL(),
+		Headers: value.Headers(), Reasoning: value.Reasoning(), ThinkingLevelMap: value.ThinkingLevelMap(),
+		Input: value.Input(), Cost: value.Cost(), ContextWindow: value.ContextWindow(), MaxTokens: value.MaxTokens(), Compat: value.Compat(),
+	}
 }
 
 func resolveWorkingDirectory(path string) (string, error) {
@@ -175,15 +214,6 @@ func resolveWorkingDirectory(path string) (string, error) {
 		return "", errors.New("working directory is not a directory")
 	}
 	return resolved, nil
-}
-
-func (r runtimeDependencies) executorFor(workingDir string) (agent.ToolExecutor, []provider.ToolDefinition, error) {
-	if filepath.Clean(workingDir) == r.workingDir {
-		return r.executor, append([]provider.ToolDefinition(nil), r.toolDefinitions...), nil
-	}
-	options := r.bashOptions
-	options.WorkingDir = workingDir
-	return buildProductionToolRuntime(options)
 }
 
 func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, []provider.ToolDefinition, error) {

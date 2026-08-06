@@ -1,0 +1,591 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/resource"
+	agentruntime "github.com/cat3399/pi-go/internal/runtime"
+	"github.com/cat3399/pi-go/internal/session"
+)
+
+type rejectingHTTPDoer struct{ calls atomic.Uint32 }
+
+func (d *rejectingHTTPDoer) Do(*http.Request) (*http.Response, error) {
+	d.calls.Add(1)
+	return nil, errors.New("unexpected provider request")
+}
+
+type dynamicAuthDoer struct {
+	mu             sync.Mutex
+	authorizations []string
+	nextID         uint64
+}
+
+func (d *dynamicAuthDoer) Do(request *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.authorizations = append(d.authorizations, request.Header.Get("Authorization"))
+	d.nextID++
+	id := d.nextID
+	d.mu.Unlock()
+	item := fmt.Sprintf(`{"type":"message","id":"msg-%d","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}`, id)
+	body := "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + item + "}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[" + item + "],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(body)), Request: request,
+	}, nil
+}
+
+func (d *dynamicAuthDoer) snapshot() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.authorizations...)
+}
+
+func writeProductionCatalog(t *testing.T, agentDir string, withAuth bool) {
+	t.Helper()
+	configured := map[string]any{"baseUrl": "https://fixture.invalid/v1"}
+	if withAuth {
+		configured["apiKey"] = "fixture-key"
+	}
+	data, err := json.Marshal(map[string]any{"providers": map[string]any{"openai": configured}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func fixedProductionConfig(cwd, agentDir, docsDir string) ProductionConfig {
+	return ProductionConfig{
+		WorkingDir: cwd, AgentDir: agentDir, DocsDir: docsDir, Environment: []string{},
+		SessionID: "runtime-integration", SessionNow: func() time.Time { return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC) },
+		AgentNow: func() time.Time { return time.Date(2026, 8, 6, 12, 0, 1, 0, time.UTC) },
+	}
+}
+
+func TestProductionRuntimeRestoresSavedModelAndThinking(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	sessionPath := filepath.Join(t.TempDir(), "saved.jsonl")
+	stored, err := session.Create(sessionPath, session.CreateOptions{ID: "saved", WorkingDir: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := llm.NewUserTextMessage("saved prompt", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stored.Append(context.Background(), user, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := llm.NewTextBlock("saved answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{answer}, llm.FinishStop, usage, time.Now(),
+		llm.AssistantProvenance{Provider: "openai", API: "openai-responses", Model: "gpt-5.5"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stored.Append(context.Background(), assistant, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stored.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.OpenSessionManager(sessionPath, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendModelChange(context.Background(), "openai", "gpt-5.5"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendThinkingLevelChange(context.Background(), string(provider.ThinkingHigh)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err = session.OpenSessionManager(sessionPath, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := runtimeDeps.factory(context.Background(), agentruntime.CreateOptions{CWD: manager.Cwd(), AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := created.Session.Close(context.Background()); err != nil {
+			t.Errorf("close restored session: %v", err)
+		}
+	}()
+	selected, ok := created.Session.SelectedModel()
+	if !ok || selected.Provider() != "openai" || selected.ID() != "gpt-5.5" {
+		t.Fatalf("restored model = %#v, %t", selected, ok)
+	}
+	if got := created.Session.ThinkingLevel(); got != provider.ThinkingHigh {
+		t.Fatalf("restored thinking = %q, want %q", got, provider.ThinkingHigh)
+	}
+}
+
+func TestProductionRuntimeResolvesCurrentAuthForEveryTurn(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	doer := &dynamicAuthDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	if _, err := productRuntime.Session().Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", "replacement-key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productRuntime.Session().Run(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	if got := doer.snapshot(); len(got) != 2 || got[0] != "Bearer fixture-key" || got[1] != "Bearer replacement-key" {
+		t.Fatalf("authorization sequence = %#v", got)
+	}
+}
+
+func TestProductionExplicitModelCanRunAfterRuntimeCredentialAdded(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, false)
+	doer := &dynamicAuthDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	baseline := len(manager.Entries())
+	if err := productRuntime.Session().SetModel(productRuntime.Session().Model()); err == nil || err.Error() != "No API key for openai/gpt-5.5" {
+		t.Fatalf("SetModel error = %v", err)
+	}
+	if got := len(manager.Entries()); got != baseline {
+		t.Fatalf("failed SetModel changed entries from %d to %d", baseline, got)
+	}
+	if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", "late-key"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productRuntime.Session().Run(context.Background(), "after login"); err != nil {
+		t.Fatal(err)
+	}
+	if got := doer.snapshot(); len(got) != 1 || got[0] != "Bearer late-key" {
+		t.Fatalf("authorization sequence = %#v", got)
+	}
+}
+
+func TestProductionAPIKeyWithoutModelRemainsDiagnosticOnly(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{
+		hasAPIKey: true,
+		apiKey:    "diagnostic-only-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := runtimeDeps.factory(context.Background(), agentruntime.CreateOptions{
+		CWD: cwd, AgentDir: agentDir, SessionManager: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Session.Close(context.Background())
+	if created.Session.HasModel() {
+		t.Fatal("diagnostic-only CLI key made an automatic model available")
+	}
+	credential, exists, err := created.Services.AuthRuntime.Read(context.Background(), "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists || credential.Key != "" {
+		t.Fatal("diagnostic-only CLI key was installed in the auth runtime")
+	}
+	if len(created.Diagnostics) != 1 || created.Diagnostics[0].Kind != agentruntime.DiagnosticError {
+		t.Fatalf("diagnostics = %#v", created.Diagnostics)
+	}
+}
+
+func TestProductionRuntimeReplacementRebuildsCwdBoundServices(t *testing.T) {
+	firstCWD, secondCWD := t.TempDir(), t.TempDir()
+	agentDir, docsDir := t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	for _, fixture := range []struct{ cwd, prompt, marker string }{
+		{firstCWD, "first project prompt", "first marker"},
+		{secondCWD, "second project prompt", "second marker"},
+	} {
+		if err := os.MkdirAll(filepath.Join(fixture.cwd, ".pi"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.cwd, ".pi", "SYSTEM.md"), []byte(fixture.prompt), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.cwd, "marker.txt"), []byte(fixture.marker), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		service, err := resource.New(resource.Config{CWD: fixture.cwd, AgentDir: agentDir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Trust().Set(context.Background(), fixture.cwd, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(firstCWD, agentDir, docsDir), options{providerID: "openai", modelID: "gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialManager, err := session.InMemorySessionManager(firstCWD, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: firstCWD, AgentDir: agentDir, SessionManager: initialManager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := productRuntime.Dispose(context.Background()); err != nil {
+			t.Errorf("dispose runtime: %v", err)
+		}
+	}()
+	firstServices := productRuntime.Services()
+	assertCwdBoundServices(t, firstServices, firstCWD, "first project prompt", "first marker")
+	entries := productRuntime.Session().SessionManager().Entries()
+	if len(entries) != 2 {
+		t.Fatalf("new session initialization entries = %d, want model and thinking", len(entries))
+	}
+	if _, ok := entries[0].Payload().(session.ModelChangePayload); !ok {
+		t.Fatalf("initial entry 0 = %T, want model change", entries[0].Payload())
+	}
+	if _, ok := entries[1].Payload().(session.ThinkingLevelChangePayload); !ok {
+		t.Fatalf("initial entry 1 = %T, want thinking change", entries[1].Payload())
+	}
+
+	targetPath := filepath.Join(t.TempDir(), "target.jsonl")
+	target, err := session.Create(targetPath, session.CreateOptions{ID: "target", WorkingDir: secondCWD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productRuntime.SwitchSession(context.Background(), targetPath, agentruntime.SwitchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	secondServices := productRuntime.Services()
+	if secondServices == firstServices || secondServices.ResourceService == firstServices.ResourceService ||
+		secondServices.ModelRuntime == firstServices.ModelRuntime || secondServices.AuthRuntime == firstServices.AuthRuntime ||
+		secondServices.Provider == firstServices.Provider || secondServices.Tool == firstServices.Tool {
+		t.Fatal("session replacement retained a cwd-bound service instance")
+	}
+	if len(secondServices.Tools) == 0 || len(secondServices.Tools) != len(firstServices.Tools) {
+		t.Fatalf("replacement tools = %d, initial tools = %d", len(secondServices.Tools), len(firstServices.Tools))
+	}
+	for index := range firstServices.Tools {
+		if firstServices.Tools[index].Name() != secondServices.Tools[index].Name() {
+			t.Fatalf("replacement tool %d = %q, want %q", index, secondServices.Tools[index].Name(), firstServices.Tools[index].Name())
+		}
+	}
+	assertCwdBoundServices(t, secondServices, secondCWD, "second project prompt", "second marker")
+}
+
+func assertCwdBoundServices(t *testing.T, services *agentruntime.Services, cwd, prompt, marker string) {
+	t.Helper()
+	if services == nil || services.CWD != filepath.Clean(cwd) {
+		t.Fatalf("services cwd = %#v, want %q", services, cwd)
+	}
+	snapshot, err := services.ResourceService.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot.SystemPrompt, prompt) || !strings.Contains(snapshot.SystemPrompt, filepath.Clean(cwd)) {
+		t.Fatalf("system prompt = %q, want project prompt %q and cwd %q", snapshot.SystemPrompt, prompt, cwd)
+	}
+	named, ok := services.Tool.(agent.NamedToolExecutor)
+	if !ok {
+		t.Fatalf("tool executor = %T, want named executor", services.Tool)
+	}
+	output, err := named.ExecuteNamed(context.Background(), "read", []byte(`{"path":"marker.txt"}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.Text, marker) {
+		t.Fatalf("read output = %q, want marker %q", output.Text, marker)
+	}
+}
+
+func TestRunProductionMissingStoredCwdPrecedesServiceConstruction(t *testing.T) {
+	storedCWD, startupCWD := t.TempDir(), t.TempDir()
+	agentDir, docsDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(t.TempDir(), "missing-cwd.jsonl")
+	stored, err := session.Create(sessionPath, session.CreateOptions{ID: "missing-cwd", WorkingDir: storedCWD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stored.Close(); err != nil {
+		t.Fatal(err)
+	}
+	movedParent, err := os.MkdirTemp("/tmp", "pi-go-missing-cwd-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedCWD := filepath.Join(movedParent, "stored")
+	if err := os.Rename(storedCWD, movedCWD); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Rename(movedCWD, storedCWD); err != nil {
+			t.Errorf("restore test cwd: %v", err)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doer := &rejectingHTTPDoer{}
+	config := fixedProductionConfig(startupCWD, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	var stdout, stderr bytes.Buffer
+	code := RunProduction(context.Background(), config, []string{"--session", sessionPath, "--model", "openai/gpt-5.5", "-p", "hello"}, &stdout, &stderr)
+	if code != ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "Stored session working directory does not exist") {
+		t.Fatalf("RunProduction = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), "models.json") {
+		t.Fatalf("service construction ran before cwd admission: %q", stderr.String())
+	}
+	if doer.calls.Load() != 0 {
+		t.Fatalf("provider calls = %d", doer.calls.Load())
+	}
+}
+
+func TestRunProductionModelLessDoesNotInvokeProvider(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	doer := &rejectingHTTPDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	sessionPath := filepath.Join(t.TempDir(), "no-model.jsonl")
+	var stdout, stderr bytes.Buffer
+	code := RunProduction(context.Background(), config, []string{"--session", sessionPath, "-p", "hello"}, &stdout, &stderr)
+	if code != ExitFailure || stdout.Len() != 0 {
+		t.Fatalf("RunProduction = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	for _, expected := range []string{"No models available", filepath.Join(docsDir, "providers.md"), filepath.Join(docsDir, "models.md")} {
+		if !strings.Contains(stderr.String(), expected) {
+			t.Fatalf("stderr = %q, missing %q", stderr.String(), expected)
+		}
+	}
+	if doer.calls.Load() != 0 {
+		t.Fatalf("provider calls = %d", doer.calls.Load())
+	}
+	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("model-less metadata-only session unexpectedly persisted: %v", err)
+	}
+}
+
+func TestResolveProductionDocsDirUsesExecutableSibling(t *testing.T) {
+	got, err := resolveProductionDocsDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(filepath.Join(filepath.Dir(executable), "docs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(want) {
+		t.Fatalf("docs dir = %q, want %q", got, want)
+	}
+}
+
+func TestRunApplicationReportsDiagnosticsAndBlocksOnError(t *testing.T) {
+	cwd, agentDir := t.TempDir(), t.TempDir()
+	sessionPath := filepath.Join(t.TempDir(), "diagnostics.jsonl")
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := provider.NewModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "diagnostic-model", Name: "Diagnostic Model",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 16_000, MaxTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beforeAgentCalls atomic.Uint32
+	build := func(context.Context, options) (runtimeDependencies, error) {
+		return runtimeDependencies{
+			workingDir: cwd, agentDir: agentDir, sessionID: "diagnostics", sessionNow: time.Now,
+			defaultSessionPath: func(string) (string, error) { return sessionPath, nil },
+			factory: func(_ context.Context, create agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
+				created, err := agent.NewSession(agent.SessionConfig{
+					Provider: implementation, SessionManager: create.SessionManager, Model: selected,
+					Hooks: agent.Hooks{BeforeAgentStart: func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+						beforeAgentCalls.Add(1)
+						return agent.BeforeAgentStartResult{}, nil
+					}},
+				})
+				return agentruntime.CreateResult{
+					Session: created, Services: &agentruntime.Services{CWD: create.SessionManager.Cwd(), AgentDir: agentDir},
+					Diagnostics: []agentruntime.Diagnostic{
+						{Kind: agentruntime.DiagnosticInfo, Message: "catalog info"},
+						{Kind: agentruntime.DiagnosticWarning, Message: "catalog warning"},
+						{Kind: agentruntime.DiagnosticError, Message: "catalog error"},
+					},
+				}, err
+			},
+		}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runApplication(context.Background(), []string{"-p", "must not run"}, &stdout, &stderr, build)
+	if code != ExitFailure || stdout.Len() != 0 || stderr.String() != "catalog info\nWarning: catalog warning\nError: catalog error\n" {
+		t.Fatalf("runApplication = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if beforeAgentCalls.Load() != 0 || len(implementation.Requests()) != 0 {
+		t.Fatalf("diagnostic error reached prompt: hooks=%d requests=%d", beforeAgentCalls.Load(), len(implementation.Requests()))
+	}
+	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("diagnostic-only session persisted: %v", err)
+	}
+}
+
+func TestInjectedFactoryRebindsStreamSessionIDAfterReplacement(t *testing.T) {
+	cwd := t.TempDir()
+	var observed []string
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, answer := range []string{"first", "second"} {
+		answer := answer
+		step, err := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
+			observed = append(observed, request.StreamOptions().SessionID)
+			return integrationTextTerminal(answer)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := implementation.AppendResponses([]provider.ScriptStep{step}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, err := provider.NewModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "session-id", Name: "Session ID",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 16_000, MaxTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps, err := validateDependencies(Dependencies{
+		Provider: implementation, Model: selected, WorkingDir: cwd,
+		SessionID: "static-dependency-id", SessionNow: time.Now,
+		Stream: provider.StreamOptions{SessionID: "stale-stream-id"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{ID: "first-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), deps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: deps.agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	firstID := productRuntime.Session().SessionManager().SessionID()
+	if _, err := productRuntime.Session().Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productRuntime.NewSession(context.Background(), agentruntime.NewOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	secondID := productRuntime.Session().SessionManager().SessionID()
+	if firstID == secondID {
+		t.Fatalf("replacement session id did not change: %q", firstID)
+	}
+	if _, err := productRuntime.Session().Run(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	if len(observed) != 2 || observed[0] != firstID || observed[1] != secondID {
+		t.Fatalf("request session ids = %#v, want [%q %q]", observed, firstID, secondID)
+	}
+}
+
+func integrationTextTerminal(text string) (llm.AssistantTerminal, error) {
+	block, err := llm.NewTextBlock(text)
+	if err != nil {
+		return nil, err
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{})
+	if err != nil {
+		return nil, err
+	}
+	message, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{block}, llm.FinishStop, usage, time.Now(),
+		llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "session-id"},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return message, nil
+}
