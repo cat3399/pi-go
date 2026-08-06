@@ -128,6 +128,7 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				t.Fatal(err)
 			}
 			coordinator := factoryResult.Session
+			t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
 			selected, selectedOK := coordinator.SelectedModel()
 			if !selectedOK || selected.Provider() != catalogModel.Provider || selected.ID() != catalogModel.ID || selected.API() != catalogModel.API {
 				_ = coordinator.Close(context.Background())
@@ -158,15 +159,8 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			)
 			cancel()
 			unsubscribe()
-
-			closeContext, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			closeErr := coordinator.Close(closeContext)
-			closeCancel()
 			if runErr != nil {
 				t.Fatalf("AgentSession.Run() error: %v", runErr)
-			}
-			if closeErr != nil {
-				t.Fatalf("AgentSession.Close() error: %v", closeErr)
 			}
 			if !result.Succeeded() {
 				terminal, _ := result.Terminal()
@@ -180,6 +174,34 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				t.Fatalf("live terminal text = %q (%T)", deepSeekLiveAssistantText(terminal), terminal)
 			}
 			events.assertClosed(t, result.ProviderTurns())
+			stats, err := coordinator.GetSessionStats()
+			if err != nil {
+				t.Fatalf("GetSessionStats() error after live run: %v", err)
+			}
+			if stats.SessionID != manager.SessionID() || stats.SessionFile == nil || *stats.SessionFile != path ||
+				stats.UserMessages != 1 || stats.AssistantMessages != 2 || stats.ToolCalls != 1 ||
+				stats.ToolResults != 1 || stats.TotalMessages != 4 || stats.Tokens.Total == 0 {
+				t.Fatalf("live session stats = %#v", stats)
+			}
+			if stats.ContextUsage == nil || stats.ContextUsage.Tokens == nil || stats.ContextUsage.Percent == nil ||
+				*stats.ContextUsage.Tokens == 0 || stats.ContextUsage.ContextWindow != catalogModel.ContextWindow {
+				t.Fatalf("live context usage = %#v", stats.ContextUsage)
+			}
+			forkMessages := coordinator.GetUserMessagesForForking()
+			if len(forkMessages) != 1 || forkMessages[0].Text !=
+				`Call pi_go_live_echo exactly once with {"value":"ping"}. After receiving its result, reply with exactly: PI_GO_LIVE_OK` {
+				t.Fatalf("live fork messages = %#v", forkMessages)
+			}
+			if text, ok := coordinator.GetLastAssistantText(); !ok || !strings.Contains(text, "PI_GO_LIVE_OK") {
+				t.Fatalf("live last assistant text = %q, present=%t", text, ok)
+			}
+
+			closeContext, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			closeErr := coordinator.Close(closeContext)
+			closeCancel()
+			if closeErr != nil {
+				t.Fatalf("AgentSession.Close() error: %v", closeErr)
+			}
 
 			reopened, err := session.OpenSessionManager(path, directory, "")
 			if err != nil {
