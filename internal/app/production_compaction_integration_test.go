@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -122,14 +123,12 @@ func writeCompactionProductionConfig(t *testing.T, agentDir, baseURL, api, key s
 
 func appendProductionCompactionHistory(t *testing.T, manager *session.SessionManager, prefix string) {
 	t.Helper()
-	for _, text := range []string{prefix + " old context", prefix + " retained context"} {
-		message, err := llm.NewUserTextMessage(text, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := manager.AppendLLMMessage(context.Background(), message); err != nil {
-			t.Fatal(err)
-		}
+	old, err := llm.NewUserTextMessage(prefix+" old context", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), old); err != nil {
+		t.Fatal(err)
 	}
 	block, err := llm.NewTextBlock(prefix + " assistant context")
 	if err != nil {
@@ -147,6 +146,13 @@ func appendProductionCompactionHistory(t *testing.T, manager *session.SessionMan
 		t.Fatal(err)
 	}
 	if _, err := manager.AppendLLMMessage(context.Background(), assistant); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := llm.NewUserTextMessage(prefix+" retained context", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), retained); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -206,8 +212,8 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 			if requests[0].path != wantPath {
 				t.Fatalf("summary path = %q, want %q", requests[0].path, wantPath)
 			}
-			if requests[0].payload[maxField] != float64(16_384) {
-				t.Fatalf("summary %s = %#v, want 16384", maxField, requests[0].payload[maxField])
+			if requests[0].payload[maxField] != float64(8_000) {
+				t.Fatalf("summary %s = %#v, want model cap 8000", maxField, requests[0].payload[maxField])
 			}
 			reloaded, err := session.OpenSessionManager(path, "", "")
 			if err != nil {
@@ -224,6 +230,121 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 				t.Fatalf("reloaded compactions = %d", compactions)
 			}
 		})
+	}
+}
+
+func TestProductionSplitCompactionRunsOrderedDualSummaryAndReloads(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	var capture productionSummaryServer
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		defer request.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("decode split summary request: %v", err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		capture.record(request, payload)
+		encoded, _ := json.Marshal(payload)
+		switch {
+		case bytes.Contains(encoded, []byte("history-old")):
+			writeProductionResponsesSSE(writer, "history summary")
+		case bytes.Contains(encoded, []byte("turn-prefix")):
+			writeProductionResponsesSSE(writer, "prefix summary")
+		default:
+			t.Errorf("unexpected split summary payload: %s", encoded)
+			writer.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	writeCompactionProductionConfig(t, agentDir, server.URL+"/v1", provider.OpenAIResponsesAPI, "split-key", "split-model")
+	settings, err := json.Marshal(map[string]any{
+		"defaultProvider": "openai", "defaultModel": "split-model", "defaultThinkingLevel": "off",
+		"compaction": map[string]any{"enabled": true, "reserveTokens": 100, "keepRecentTokens": 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.CreateSessionManager(cwd, t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"history-old", "turn-prefix"} {
+		message, err := llm.NewUserTextMessage(text, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := manager.AppendLLMMessage(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	block, err := llm.NewTextBlock("retained-assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{block}, llm.FinishStop, llm.Usage{}, time.Now(),
+		llm.AssistantProvenance{Provider: "openai", API: provider.OpenAIResponsesAPI, Model: "split-model"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), assistant); err != nil {
+		t.Fatal(err)
+	}
+	path, ok := manager.SessionFile()
+	if !ok {
+		t.Fatal("split session is not persistent")
+	}
+	deps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), options{modelID: "openai/split-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), deps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := productRuntime.Session().Compact(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSummary := "history summary\n\n---\n\n**Turn Context (split turn):**\n\nprefix summary"
+	if !result.Committed || !result.Input.IsSplitTurn || result.Output.Text != wantSummary || result.Output.Usage == nil ||
+		result.Output.Usage.Usage.Input() != 6 || result.Output.Usage.Usage.Output() != 4 || result.Output.Usage.Usage.TotalTokens() != 10 {
+		t.Fatalf("split compaction result = %#v", result)
+	}
+	requests := capture.snapshot()
+	if len(requests) != 2 {
+		t.Fatalf("split summary requests = %#v", requests)
+	}
+	for index, wantBudget := range []float64{80, 50} {
+		if _, tools := requests[index].payload["tools"]; tools || requests[index].payload["max_output_tokens"] != wantBudget || requests[index].sessionID != "" {
+			t.Fatalf("split request %d = %#v", index, requests[index])
+		}
+	}
+	if err := productRuntime.Dispose(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := session.OpenSessionManager(path, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Close()
+	var compactions int
+	for _, entry := range reloaded.Entries() {
+		if entry.Type() == "compaction" {
+			compactions++
+			record, ok := entry.Compaction()
+			if !ok || record.Summary != wantSummary || record.Usage == nil || record.Usage.Usage.TotalTokens() != 10 {
+				t.Fatalf("reloaded split compaction = %#v", entry)
+			}
+		}
+	}
+	if compactions != 1 {
+		t.Fatalf("reloaded split compactions = %d", compactions)
 	}
 }
 
@@ -310,14 +431,17 @@ func TestProductionThresholdCompactionRunsRealSummaryChain(t *testing.T) {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
 	requests := capture.snapshot()
-	if len(requests) != 2 {
-		t.Fatalf("provider/summary request count = %d, want 2", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("provider/summary request count = %d, want 3", len(requests))
 	}
 	if _, agentTools := requests[0].payload["tools"]; !agentTools {
 		t.Fatalf("agent request did not advertise production tools: %#v", requests[0].payload)
 	}
 	if _, summaryTools := requests[1].payload["tools"]; summaryTools {
 		t.Fatalf("summary request advertised production tools: %#v", requests[1].payload)
+	}
+	if _, summaryTools := requests[2].payload["tools"]; summaryTools {
+		t.Fatalf("turn-prefix summary request advertised production tools: %#v", requests[2].payload)
 	}
 	if strings.Join(lifecycle, ",") != "start:threshold,end:threshold" {
 		t.Fatalf("threshold compaction lifecycle = %#v", lifecycle)
@@ -347,12 +471,11 @@ func TestProductionRetryPolicyUsesSettingsPresenceAndPiDefaults(t *testing.T) {
 
 func TestProductionCompactionPreservesExplicitZeroReserveAndKeep(t *testing.T) {
 	for _, test := range []struct {
-		api       string
-		maxField  string
-		wantLimit float64
+		api      string
+		maxField string
 	}{
-		{api: provider.OpenAIResponsesAPI, maxField: "max_output_tokens", wantLimit: 16},
-		{api: provider.OpenAICompletionsAPI, maxField: "max_completion_tokens", wantLimit: 1},
+		{api: provider.OpenAIResponsesAPI, maxField: "max_output_tokens"},
+		{api: provider.OpenAICompletionsAPI, maxField: "max_completion_tokens"},
 	} {
 		t.Run(test.api, func(t *testing.T) {
 			cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
@@ -377,8 +500,11 @@ func TestProductionCompactionPreservesExplicitZeroReserveAndKeep(t *testing.T) {
 				t.Fatal(err)
 			}
 			requests := capture.snapshot()
-			if len(requests) != 1 || requests[0].payload[test.maxField] != test.wantLimit {
+			if len(requests) != 1 {
 				t.Fatalf("explicit-zero summary request = %#v", requests)
+			}
+			if _, exists := requests[0].payload[test.maxField]; exists {
+				t.Fatalf("explicit-zero summary request sent %s: %#v", test.maxField, requests[0].payload)
 			}
 			if result, err := productRuntime.Session().Run(context.Background(), "below full context window"); err != nil || !result.Succeeded() {
 				t.Fatalf("Run() = %#v, %v", result, err)
@@ -452,6 +578,8 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 		case 2:
 			writeProductionResponsesSSE(writer, "overflow checkpoint")
 		case 3:
+			writeProductionResponsesSSE(writer, "overflow turn prefix")
+		case 4:
 			writeProductionResponsesSSE(writer, "recovered answer")
 		default:
 			t.Errorf("unexpected overflow request %d", calls.Load())
@@ -474,7 +602,7 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
 	requests := capture.snapshot()
-	if len(requests) != 3 || calls.Load() != 3 {
+	if len(requests) != 4 || calls.Load() != 4 {
 		t.Fatalf("overflow request count = %d/%d", len(requests), calls.Load())
 	}
 	if _, hasTools := requests[0].payload["tools"]; !hasTools {
@@ -483,11 +611,14 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 	if _, hasTools := requests[1].payload["tools"]; hasTools {
 		t.Fatalf("overflow summary advertised tools: %#v", requests[1].payload)
 	}
-	if _, hasTools := requests[2].payload["tools"]; !hasTools {
-		t.Fatalf("continued agent request omitted tools: %#v", requests[2].payload)
+	if _, hasTools := requests[2].payload["tools"]; hasTools {
+		t.Fatalf("overflow turn-prefix summary advertised tools: %#v", requests[2].payload)
 	}
-	if requests[0].sessionID != durableSessionID || requests[2].sessionID != durableSessionID || requests[1].sessionID != "" {
-		t.Fatalf("overflow session affinity = %q / %q / %q, durable %q", requests[0].sessionID, requests[1].sessionID, requests[2].sessionID, durableSessionID)
+	if _, hasTools := requests[3].payload["tools"]; !hasTools {
+		t.Fatalf("continued agent request omitted tools: %#v", requests[3].payload)
+	}
+	if requests[0].sessionID != durableSessionID || requests[3].sessionID != durableSessionID || requests[1].sessionID != "" || requests[2].sessionID != "" {
+		t.Fatalf("overflow session affinity = %q / %q / %q / %q, durable %q", requests[0].sessionID, requests[1].sessionID, requests[2].sessionID, requests[3].sessionID, durableSessionID)
 	}
 	if len(lifecycle) != 2 {
 		t.Fatalf("overflow compaction lifecycle = %#v", lifecycle)

@@ -91,15 +91,23 @@ func TestLiveProductionDeepSeekCompaction(t *testing.T) {
 			if first.ProviderTurns() != 1 || first.ToolExecutions() != 0 {
 				t.Fatalf("first live run counts = turns %d tools %d, want 1/0", first.ProviderTurns(), first.ToolExecutions())
 			}
+			preCompact := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),
+				"Reply with exactly PRECOMPACT_OK. Do not call any tool.", "PRECOMPACT_OK")
+			if preCompact.ProviderTurns() != 1 || preCompact.ToolExecutions() != 0 {
+				t.Fatalf("second pre-compaction live run counts = turns %d tools %d, want 1/0", preCompact.ProviderTurns(), preCompact.ToolExecutions())
+			}
 
 			compactContext, compactCancel := context.WithTimeout(context.Background(), 120*time.Second)
-			compactResult, compactErr := productRuntime.Session().Compact(compactContext, "Preserve the exact FIRST_OK result and the fact that the first request completed.")
+			compactResult, compactErr := productRuntime.Session().Compact(compactContext,
+				"Preserve the exact FIRST_OK and PRECOMPACT_OK results and that both requests completed.")
 			compactCancel()
 			if compactErr != nil {
 				t.Fatalf("remote manual compaction failed (%T)", compactErr)
 			}
-			if !compactResult.Committed || strings.TrimSpace(compactResult.Output.Text) == "" {
-				t.Fatalf("remote manual compaction was not committed with a nonempty summary")
+			if !compactResult.Committed || !compactResult.Input.IsSplitTurn ||
+				len(compactResult.Input.MessagesToSummarize) == 0 || len(compactResult.Input.TurnPrefixMessages) == 0 ||
+				!strings.Contains(compactResult.Output.Text, "**Turn Context (split turn):**") || compactResult.Output.Usage == nil {
+				t.Fatalf("remote manual compaction did not execute the real ordered dual-summary path")
 			}
 
 			second := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),

@@ -562,15 +562,15 @@ func TestSerializeConversationAndEstimateRichMessagesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	serialized := SerializeConversation([]llm.ConversationMessage{user, assistant, tool})
-	for _, want := range []string{"[User]: hello[image]", "[Assistant]: reasoninganswer", "[Tool result]: output[image]"} {
+	for _, want := range []string{"[User]: hello", "[Assistant thinking]: reasoning", "[Assistant]: answer", "[Tool result]: output"} {
 		if !bytes.Contains([]byte(serialized), []byte(want)) {
 			t.Fatalf("SerializeConversation() = %q, missing %q", serialized, want)
 		}
 	}
-	// Images use the production 4,800-char estimate (1,200 tokens); ID/name
-	// are each counted once alongside the text content.
-	if tokens, err := estimateMessageTokens(tool); err != nil || tokens != 1203 {
-		t.Fatalf("rich tool estimate = (%d, %v), want 1203", tokens, err)
+	// Images use the production 4,800-char estimate; tool-result ID and name do
+	// not contribute to pi's content-only estimate.
+	if tokens, err := estimateMessageTokens(tool); err != nil || tokens != 1202 {
+		t.Fatalf("rich tool estimate = (%d, %v), want 1202", tokens, err)
 	}
 }
 
@@ -594,19 +594,8 @@ func TestTokenEstimateOverflowFailsPolicyCutAndCompactWithoutWrite(t *testing.T)
 		t.Fatalf("ShouldCompact() = (%t, %v), want false ErrTokenEstimateOverflow", compact, err)
 	}
 
-	entries := []Entry{
-		{id: "old", typeName: "message", message: mustUserMessage(t, "old", time.UnixMilli(3))},
-		{id: "new", typeName: "message", message: mustUserMessage(t, "new", time.UnixMilli(4))},
-	}
-	estimator := func(message llm.ConversationMessage) (uint64, error) {
-		text := joinTextBlocks(message.(llm.UserTextMessage).Content())
-		if text == "new" {
-			return math.MaxUint64 - 1, nil
-		}
-		return 2, nil
-	}
-	if cut, err := findCompactionCutWithEstimator(entries, 0, len(entries), math.MaxUint64, estimator); cut != -1 || !errors.Is(err, ErrTokenEstimateOverflow) {
-		t.Fatalf("findCompactionCutWithEstimator() = (%d, %v)", cut, err)
+	if _, err := checkedAddTokens(math.MaxUint64-1, 2); !errors.Is(err, ErrTokenEstimateOverflow) {
+		t.Fatalf("checkedAddTokens() = %v, want ErrTokenEstimateOverflow", err)
 	}
 
 	directory := t.TempDir()

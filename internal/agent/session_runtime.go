@@ -1727,11 +1727,8 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 	directContextTokens := terminal.Usage().TotalTokens()
 	contextTokens := directContextTokens
 	if terminal.FinishReason() == llm.FinishError || directContextTokens == 0 {
-		messages, err := s.agentStateLLMMessages()
-		if err != nil {
-			return false
-		}
-		estimate, err := session.EstimateContextTokens(messages)
+		messages := s.loop.State().Messages()
+		estimate, err := session.EstimateAgentContextTokens(messages)
 		if err != nil || estimate.LastUsageIndex < 0 {
 			return false
 		}
@@ -1866,7 +1863,9 @@ func (s *AgentSession) prepareCompaction(ctx context.Context, instructions strin
 		return session.SummaryInput{}, nil, err
 	}
 	input, err := s.sessionManager.PrepareCompactionWithOptions(ctx, session.PrepareCompactionOptions{
-		KeepRecentTokens: s.keepRecentTokens, KeepRecentTokensSet: s.keepRecentSet, Instructions: instructions,
+		KeepRecentTokens: s.keepRecentTokens, KeepRecentTokensSet: s.keepRecentSet,
+		ReserveTokens: s.contextReserve, ReserveTokensSet: true, Instructions: instructions,
+		Enabled: s.compactionEnabled, EnabledSet: true,
 	})
 	if err != nil {
 		return session.SummaryInput{}, nil, err
@@ -2041,13 +2040,21 @@ func (s extensionCompactionSummarizer) Summarize(ctx context.Context, input sess
 	}
 	eventInput := input
 	eventInput.Messages = append([]llm.ConversationMessage(nil), input.Messages...)
+	eventInput.MessagesToSummarize = agentmsg.Clone(input.MessagesToSummarize)
+	eventInput.TurnPrefixMessages = agentmsg.Clone(input.TurnPrefixMessages)
 	eventInput.RetainedTail = append([]llm.ConversationMessage(nil), input.RetainedTail...)
+	eventInput.FileOperations.Read = append([]string(nil), input.FileOperations.Read...)
+	eventInput.FileOperations.Written = append([]string(nil), input.FileOperations.Written...)
+	eventInput.FileOperations.Edited = append([]string(nil), input.FileOperations.Edited...)
 	result, err := hook(ctx, SessionBeforeCompactEvent{
 		Preparation: eventInput, BranchEntries: append([]session.Entry(nil), branch...),
 		CustomInstructions: optionalString(s.instructions), Reason: s.reason, WillRetry: s.willRetry,
 	})
 	if err != nil {
-		return session.SummaryOutput{}, err
+		// pi's extension runner reports handler errors and continues with the
+		// default compactor. Hooks are the transport-neutral extension boundary
+		// here, so a failing handler must not settle or mutate compaction state.
+		return s.base.Summarize(ctx, input)
 	}
 	if err := result.Cancel.Validate(); err != nil {
 		return session.SummaryOutput{}, err

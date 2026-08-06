@@ -517,7 +517,9 @@ func (m *SessionManager) PrepareCompactionWithOptions(ctx context.Context, optio
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.store.compactionSnapshot(ctx, CompactRequest{
-		KeepRecentTokens: options.KeepRecentTokens, KeepRecentTokensSet: options.KeepRecentTokensSet, Instructions: options.Instructions,
+		KeepRecentTokens: options.KeepRecentTokens, KeepRecentTokensSet: options.KeepRecentTokensSet,
+		ReserveTokens: options.ReserveTokens, ReserveTokensSet: options.ReserveTokensSet, Instructions: options.Instructions,
+		Enabled: options.Enabled, EnabledSet: options.EnabledSet,
 	})
 }
 
@@ -533,6 +535,11 @@ func (m *SessionManager) CommitCompaction(ctx context.Context, input SummaryInpu
 	if cause := context.Cause(ctx); cause != nil {
 		return CompactResult{}, fmt.Errorf("%w: %w", ErrAppendCanceled, cause)
 	}
+	var err error
+	output, err = finalizeCompactionOutput(input, output)
+	if err != nil {
+		return CompactResult{}, fmt.Errorf("%w: %w", ErrSummaryFailed, err)
+	}
 	if err := validateSummaryOutput(output); err != nil {
 		return CompactResult{}, err
 	}
@@ -541,7 +548,7 @@ func (m *SessionManager) CommitCompaction(ctx context.Context, input SummaryInpu
 		return CompactResult{}, err
 	}
 	var estimatedTokensAfter uint64
-	if estimate, estimateErr := EstimateContextTokens(m.store.BuildContext().Messages()); estimateErr == nil {
+	if estimate, estimateErr := EstimateAgentContextTokens(m.store.BuildContext().AgentMessages()); estimateErr == nil {
 		estimatedTokensAfter = estimate.Tokens
 	}
 	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil

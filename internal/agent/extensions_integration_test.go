@@ -584,14 +584,19 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 			summaryInput = input
 			return session.SummaryOutput{Text: "summary"}, nil
 		})
+		disabled := false
 		runtime, err := agent.NewSession(agent.SessionConfig{
 			Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
+			CompactionEnabled: &disabled,
 			Hooks: agent.Hooks{SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 				if event.Reason != agent.CompactionManual {
 					t.Fatalf("manual reason = %q", event.Reason)
 				}
 				phases = append(phases, "before")
-				if event.CustomInstructions == nil || *event.CustomInstructions != "caller instructions" || event.Preparation.FirstKeptEntryID == "" {
+				if event.CustomInstructions == nil || *event.CustomInstructions != "caller instructions" || event.Preparation.FirstKeptEntryID == "" ||
+					event.Preparation.Settings.Enabled || event.Preparation.Settings.ReserveTokens != agent.DefaultCompactionReserveTokens ||
+					event.Preparation.Settings.KeepRecentTokens != 1 || len(event.Preparation.MessagesToSummarize) != 2 ||
+					len(event.Preparation.TurnPrefixMessages) != 0 || event.Preparation.IsSplitTurn || len(event.Preparation.RetainedTail) != 1 {
 					t.Fatalf("manual preparation = %#v", event)
 				}
 				return agent.SessionBeforeCompactResult{}, nil
@@ -716,11 +721,9 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 	for _, test := range []struct {
 		name        string
 		result      agent.SessionBeforeCompactResult
-		hookErr     error
 		wantAborted bool
 	}{
 		{name: "cancel", result: agent.SessionBeforeCompactResult{Cancel: agent.HookCancel{Cancel: boolPtr(true)}}, wantAborted: true},
-		{name: "error", hookErr: errors.New("extension failed")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			transcript := newTranscript(t)
@@ -736,7 +739,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 				}),
 				Hooks: agent.Hooks{SessionBeforeCompact: func(context.Context, agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 					sequence = append(sequence, "hook-before")
-					return test.result, test.hookErr
+					return test.result, nil
 				}, SessionCompact: func(context.Context, agent.SessionCompactEvent) error {
 					t.Fatal("after hook ran without a committed compaction")
 					return nil
@@ -758,14 +761,53 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			if test.wantAborted && !errors.Is(compactErr, agent.ErrAgentAborted) {
 				t.Fatalf("cancel error = %v", compactErr)
 			}
-			if !test.wantAborted && (compactErr == nil || !errors.Is(compactErr, test.hookErr)) {
-				t.Fatalf("hook error = %v", compactErr)
-			}
 			if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settled || settlement.Aborted != test.wantAborted || len(transcript.Entries()) != beforeEntries {
 				t.Fatalf("settlement = sequence=%v event=%#v entries=%d", sequence, settlement, len(transcript.Entries()))
 			}
 		})
 	}
+
+	t.Run("error continues with default compaction", func(t *testing.T) {
+		transcript := newTranscript(t)
+		beforeEntries := len(transcript.Entries())
+		var sequence []string
+		var summarizerCalls int
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, KeepRecentTokens: 1,
+			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+				summarizerCalls++
+				return session.SummaryOutput{Text: "default summary"}, nil
+			}),
+			Hooks: agent.Hooks{
+				SessionBeforeCompact: func(context.Context, agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
+					sequence = append(sequence, "hook-before")
+					return agent.SessionBeforeCompactResult{}, errors.New("extension failed")
+				},
+				SessionCompact: func(context.Context, agent.SessionCompactEvent) error {
+					sequence = append(sequence, "hook-after")
+					return nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+			if event.Type() == agent.CompactionStartEventType {
+				sequence = append(sequence, "observer-start")
+			}
+			if event.Type() == agent.CompactionEndEventType {
+				sequence = append(sequence, "observer-end")
+			}
+		})
+		result, compactErr := runtime.Compact(context.Background(), "")
+		if compactErr != nil || !result.Committed || result.Output.Text != "default summary" || summarizerCalls != 1 || len(transcript.Entries()) != beforeEntries+1 {
+			t.Fatalf("fallback compaction = %#v, %v; calls=%d entries=%d", result, compactErr, summarizerCalls, len(transcript.Entries()))
+		}
+		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "hook-after", "observer-end"}) {
+			t.Fatalf("fallback sequence = %v", sequence)
+		}
+	})
 
 	t.Run("automatic cancel pairs observer settlement", func(t *testing.T) {
 		var sequence []string

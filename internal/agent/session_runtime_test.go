@@ -1523,6 +1523,13 @@ func boundaryCompactionModel(t *testing.T) provider.Model {
 func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testing.T) {
 	model := sessionTestModel(t)
 	transcript := newSessionManager(t)
+	history, err := llm.NewUserTextMessage("historical context", agentTestEpoch.Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.AppendLLMMessage(context.Background(), history); err != nil {
+		t.Fatal(err)
+	}
 	contextFailure, err := provider.NewProviderFailure(provider.ProviderFailureSpec{Kind: provider.FailureContextOverflow, Message: "overflow", Cause: errors.New("overflow")})
 	if err != nil {
 		t.Fatal(err)

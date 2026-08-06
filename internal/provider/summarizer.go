@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"strings"
 	"time"
 
@@ -14,7 +15,8 @@ import (
 
 // ContextSummarizer is the production request seam used by Agent context
 // resilience. It turns Session's already-serialized summary input into one
-// ordinary provider request; it never owns a Session lock or durable state.
+// ordinary provider request, or the original's ordered history/prefix pair when
+// a cut splits a turn. It never owns a Session lock or durable state.
 type ContextSummarizer struct {
 	provider Provider
 	model    Model
@@ -87,12 +89,54 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Direct low-level callers predating the complete preparation model still
+	// provide one already-built prompt. Production inputs always carry Settings.
+	if !input.Settings.Enabled && len(input.MessagesToSummarize) == 0 && len(input.TurnPrefixMessages) == 0 {
+		return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, s.request.Stream.MaxTokens, observer)
+	}
+	historyBudget := fractionBudget(input.Settings.ReserveTokens, 4, 5)
+	prefixBudget := fractionBudget(input.Settings.ReserveTokens, 1, 2)
+	if input.IsSplitTurn && len(input.TurnPrefixMessages) > 0 {
+		historyText := "No prior history."
+		var historyUsage *session.CompactionUsage
+		if len(input.MessagesToSummarize) > 0 {
+			history, err := s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer)
+			if err != nil {
+				return session.SummaryOutput{}, err
+			}
+			historyText, historyUsage = history.Text, history.Usage
+		}
+		prefix, err := s.summarizeCall(ctx, input.SystemPrompt, input.TurnPrefixPrompt, &prefixBudget, observer)
+		if err != nil {
+			return session.SummaryOutput{}, fmt.Errorf("turn prefix summarization: %w", err)
+		}
+		usage := prefix.Usage
+		if historyUsage != nil {
+			usage, err = combineCompactionUsage(historyUsage, prefix.Usage)
+			if err != nil {
+				return session.SummaryOutput{}, fmt.Errorf("combine summary usage: %w", err)
+			}
+		}
+		return session.SummaryOutput{
+			Text:  historyText + "\n\n---\n\n**Turn Context (split turn):**\n\n" + prefix.Text,
+			Usage: usage,
+		}, nil
+	}
+	return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer)
+}
+
+func fractionBudget(reserve, numerator, denominator uint64) uint64 {
+	budget := reserve/denominator*numerator + reserve%denominator*numerator/denominator
+	return budget
+}
+
+func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, prompt string, maxTokens *uint64, observer RetryObserver) (session.SummaryOutput, error) {
 	timestamp := s.now().UTC()
 	summarySessionID, generationErr := session.NewSessionID(timestamp)
 	if generationErr != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary session id: %w", generationErr)
 	}
-	user, err := llm.NewUserTextMessage(input.Prompt, timestamp)
+	user, err := llm.NewUserTextMessage(prompt, timestamp)
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary prompt: %w", err)
 	}
@@ -100,11 +144,14 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 	requestOptions.Stream = CloneStreamOptions(requestOptions.Stream)
 	requestOptions.Stream.CacheRetention = CacheRetentionNone
 	requestOptions.Stream.SessionID = summarySessionID
-	if requestOptions.Stream.MaxTokens != nil && *requestOptions.Stream.MaxTokens == 0 {
-		minimum := uint64(1)
-		requestOptions.Stream.MaxTokens = &minimum
+	if maxTokens != nil {
+		value := *maxTokens
+		if modelMaximum := s.model.MaxTokens(); modelMaximum > 0 && value > modelMaximum {
+			value = modelMaximum
+		}
+		requestOptions.Stream.MaxTokens = &value
 	}
-	request, err := NewRequestWithOptions(s.model, input.SystemPrompt, []llm.ConversationMessage{user}, requestOptions)
+	request, err := NewRequestWithOptions(s.model, systemPrompt, []llm.ConversationMessage{user}, requestOptions)
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary request: %w", err)
 	}
@@ -178,6 +225,69 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		finishRetry(0, 0, true, RetryFinishSucceeded, "")
 		return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.UsageCostFromLLM(usage.Cost())}}, nil
 	}
+}
+
+func combineCompactionUsage(first, second *session.CompactionUsage) (*session.CompactionUsage, error) {
+	if first == nil {
+		return second, nil
+	}
+	if second == nil {
+		return first, nil
+	}
+	add := func(left, right uint64) (uint64, error) {
+		value, carry := bits.Add64(left, right, 0)
+		if carry != 0 {
+			return 0, llm.ErrUsageOverflow
+		}
+		return value, nil
+	}
+	input, err := add(first.Usage.Input(), second.Usage.Input())
+	if err != nil {
+		return nil, err
+	}
+	output, err := add(first.Usage.Output(), second.Usage.Output())
+	if err != nil {
+		return nil, err
+	}
+	cacheRead, err := add(first.Usage.CacheRead(), second.Usage.CacheRead())
+	if err != nil {
+		return nil, err
+	}
+	cacheWrite, err := add(first.Usage.CacheWrite(), second.Usage.CacheWrite())
+	if err != nil {
+		return nil, err
+	}
+	spec := llm.UsageSpec{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	firstReasoning, firstHasReasoning := first.Usage.Reasoning()
+	secondReasoning, secondHasReasoning := second.Usage.Reasoning()
+	if firstHasReasoning || secondHasReasoning {
+		value, addErr := add(firstReasoning, secondReasoning)
+		if addErr != nil {
+			return nil, addErr
+		}
+		spec.Reasoning = &value
+	}
+	firstCache1h, firstHasCache1h := first.Usage.CacheWrite1h()
+	secondCache1h, secondHasCache1h := second.Usage.CacheWrite1h()
+	if firstHasCache1h || secondHasCache1h {
+		value, addErr := add(firstCache1h, secondCache1h)
+		if addErr != nil {
+			return nil, addErr
+		}
+		spec.CacheWrite1h = &value
+	}
+	firstCost, secondCost := first.Usage.Cost(), second.Usage.Cost()
+	cost := llm.Cost{
+		Input: firstCost.Input + secondCost.Input, Output: firstCost.Output + secondCost.Output,
+		CacheRead: firstCost.CacheRead + secondCost.CacheRead, CacheWrite: firstCost.CacheWrite + secondCost.CacheWrite,
+		Total: firstCost.Total + secondCost.Total,
+	}
+	spec.Cost = &cost
+	usage, err := llm.NewUsage(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &session.CompactionUsage{Usage: usage, Cost: session.UsageCostFromLLM(cost)}, nil
 }
 
 func summaryRetryError(terminal llm.AssistantTerminal, streamErr error) string {
@@ -256,17 +366,34 @@ func (s *ContextSummarizer) collectAttempt(ctx context.Context, request Request)
 }
 
 func summaryTerminal(terminal llm.AssistantTerminal) (string, llm.Usage, error) {
+	textFromBlocks := func(blocks []llm.AssistantBlock) string {
+		text := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if value, ok := block.(llm.TextBlock); ok {
+				text = append(text, value.Text())
+			}
+		}
+		return strings.Join(text, "\n")
+	}
 	switch value := terminal.(type) {
 	case llm.AssistantTextMessage:
-		parts := value.Content()
-		var text strings.Builder
-		for _, part := range parts {
-			text.WriteString(part.Text())
-		}
-		if strings.TrimSpace(text.String()) == "" {
+		text := textFromBlocks(value.Blocks())
+		if strings.TrimSpace(text) == "" {
 			return "", llm.Usage{}, errors.New("summary response was empty")
 		}
-		return text.String(), value.Usage(), nil
+		return text, value.Usage(), nil
+	case llm.AssistantRichMessage:
+		text := textFromBlocks(value.Blocks())
+		if strings.TrimSpace(text) == "" {
+			return "", llm.Usage{}, errors.New("summary response was empty")
+		}
+		return text, value.Usage(), nil
+	case llm.AssistantToolUseMessage:
+		text := textFromBlocks(value.Blocks())
+		if strings.TrimSpace(text) == "" {
+			return "", llm.Usage{}, errors.New("summary response was empty")
+		}
+		return text, value.Usage(), nil
 	case llm.AssistantFailureMessage:
 		return "", llm.Usage{}, fmt.Errorf("summary provider failed: %w", value.Failure().Cause())
 	default:

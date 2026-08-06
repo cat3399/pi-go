@@ -137,20 +137,50 @@ type CompactionUsage struct {
 	Cost  UsageCost
 }
 
+// CompactionSettings is the immutable settings snapshot used to choose the
+// cut and to budget every summarization call in one compaction operation.
+type CompactionSettings struct {
+	Enabled          bool
+	ReserveTokens    uint64
+	KeepRecentTokens uint64
+}
+
+// FileOperations preserves the insertion-ordered operation classes collected
+// from supported read/write/edit tool calls, matching pi's Set-backed values.
+type FileOperations struct {
+	Read    []string
+	Written []string
+	Edited  []string
+}
+
+// CompactionDetails is the typed pi-generated details payload persisted in a
+// compaction entry. Extension-owned details remain opaque JSON.
+type CompactionDetails struct {
+	ReadFiles     []string `json:"readFiles"`
+	ModifiedFiles []string `json:"modifiedFiles"`
+}
+
 // SummaryInput is an immutable, selected-branch snapshot delivered to the
-// injected summarizer. The conversation is already serialized so a provider
-// cannot mistake it for a continuation request.
+// injected summarizer. Prompt and TurnPrefixPrompt are already serialized so a
+// provider cannot mistake either summarization call for a continuation request;
+// the typed message snapshots are retained for extensions and parity checks.
 type SummaryInput struct {
-	SystemPrompt     string
-	Prompt           string
-	Instructions     string
-	PreviousSummary  string
-	Messages         []llm.ConversationMessage
-	RetainedTail     []llm.ConversationMessage
-	FirstKeptEntryID string
-	TokensBefore     uint64
-	Generation       uint64
-	SelectedLeafID   string
+	SystemPrompt        string
+	Prompt              string
+	TurnPrefixPrompt    string
+	Instructions        string
+	PreviousSummary     string
+	Messages            []llm.ConversationMessage
+	MessagesToSummarize []agentmsg.Message
+	TurnPrefixMessages  []agentmsg.Message
+	RetainedTail        []llm.ConversationMessage
+	IsSplitTurn         bool
+	FileOperations      FileOperations
+	Settings            CompactionSettings
+	FirstKeptEntryID    string
+	TokensBefore        uint64
+	Generation          uint64
+	SelectedLeafID      string
 }
 
 // SummaryOutput is the only data a summarizer may contribute to durable
@@ -176,9 +206,13 @@ type Summarizer interface {
 // smaller explicit value for deterministic/manual control.
 type CompactRequest struct {
 	KeepRecentTokens uint64
+	ReserveTokens    uint64
+	Enabled          bool
 	// KeepRecentTokensSet distinguishes an explicit zero from the legacy zero
 	// value, which remains the 20k default for source compatibility.
 	KeepRecentTokensSet bool
+	ReserveTokensSet    bool
+	EnabledSet          bool
 	Instructions        string
 	Summarizer          Summarizer
 }
@@ -189,6 +223,10 @@ type CompactRequest struct {
 type PrepareCompactionOptions struct {
 	KeepRecentTokens    uint64
 	KeepRecentTokensSet bool
+	ReserveTokens       uint64
+	ReserveTokensSet    bool
+	Enabled             bool
+	EnabledSet          bool
 	Instructions        string
 }
 
@@ -206,7 +244,10 @@ type CompactResult struct {
 func CloneCompactResult(value CompactResult) CompactResult {
 	value.Entry = value.Entry.clone()
 	value.Input.Messages = append([]llm.ConversationMessage(nil), value.Input.Messages...)
+	value.Input.MessagesToSummarize = agentmsg.Clone(value.Input.MessagesToSummarize)
+	value.Input.TurnPrefixMessages = agentmsg.Clone(value.Input.TurnPrefixMessages)
 	value.Input.RetainedTail = append([]llm.ConversationMessage(nil), value.Input.RetainedTail...)
+	value.Input.FileOperations = cloneFileOperations(value.Input.FileOperations)
 	value.Output.Details = bytes.Clone(value.Output.Details)
 	if value.Output.Usage != nil {
 		usage := *value.Output.Usage
@@ -216,6 +257,13 @@ func CloneCompactResult(value CompactResult) CompactResult {
 		estimated := *value.Output.EstimatedTokensAfter
 		value.Output.EstimatedTokensAfter = &estimated
 	}
+	return value
+}
+
+func cloneFileOperations(value FileOperations) FileOperations {
+	value.Read = append([]string(nil), value.Read...)
+	value.Written = append([]string(nil), value.Written...)
+	value.Edited = append([]string(nil), value.Edited...)
 	return value
 }
 
