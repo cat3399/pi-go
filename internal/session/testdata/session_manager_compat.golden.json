@@ -1,0 +1,964 @@
+{
+  "formatVersion": 1,
+  "optionalAndPersistence": {
+    "delayedPersistence": {
+      "existsAfterCreate": false,
+      "existsAfterUser": false,
+      "existsAfterMetadata": false,
+      "existsAfterAssistant": true
+    },
+    "optionalFields": [
+      {
+        "case": "header.timestamp",
+        "field": {
+          "present": true,
+          "isoMilliseconds": true
+        }
+      },
+      {
+        "case": "header.parentSession",
+        "field": {
+          "present": false
+        }
+      },
+      {
+        "case": "custom.undefined.data",
+        "field": {
+          "present": false
+        }
+      },
+      {
+        "case": "custom.null.data",
+        "field": {
+          "present": true,
+          "value": null
+        }
+      },
+      {
+        "case": "custom.false.data",
+        "field": {
+          "present": true,
+          "value": false
+        }
+      },
+      {
+        "case": "label.undefined",
+        "field": {
+          "present": false
+        }
+      },
+      {
+        "case": "label.",
+        "field": {
+          "present": true,
+          "value": ""
+        }
+      },
+      {
+        "case": "compaction.details",
+        "field": {
+          "present": true,
+          "value": null
+        }
+      },
+      {
+        "case": "compaction.fromHook",
+        "field": {
+          "present": true,
+          "value": false
+        }
+      },
+      {
+        "case": "compaction.usage",
+        "field": {
+          "present": false
+        }
+      },
+      {
+        "case": "branch_summary.details",
+        "field": {
+          "present": false
+        }
+      },
+      {
+        "case": "branch_summary.fromHook",
+        "field": {
+          "present": true,
+          "value": false
+        }
+      },
+      {
+        "case": "branch_summary.usage",
+        "field": {
+          "present": false
+        }
+      }
+    ],
+    "entries": [
+      {
+        "type": "message",
+        "id": "root",
+        "parentId": null,
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "optional root",
+          "timestamp": 1000
+        }
+      },
+      {
+        "type": "custom",
+        "id": "auto-1",
+        "parentId": "root",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "customType": "undefined"
+      },
+      {
+        "type": "custom",
+        "id": "auto-2",
+        "parentId": "auto-1",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "customType": "null"
+      },
+      {
+        "type": "custom",
+        "id": "auto-3",
+        "parentId": "auto-2",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "customType": "false"
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "auto-4",
+        "parentId": "auto-3",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "thinkingLevel": "high"
+      },
+      {
+        "type": "model_change",
+        "id": "auto-5",
+        "parentId": "auto-4",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "provider": "selected-provider",
+        "modelId": "selected-model"
+      },
+      {
+        "type": "session_info",
+        "id": "auto-6",
+        "parentId": "auto-5",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "name": "Golden Session"
+      },
+      {
+        "type": "label",
+        "id": "auto-7",
+        "parentId": "auto-6",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "targetId": "root",
+        "label": {
+          "present": false
+        }
+      },
+      {
+        "type": "label",
+        "id": "auto-8",
+        "parentId": "auto-7",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "targetId": "root",
+        "label": {
+          "present": true,
+          "value": ""
+        }
+      },
+      {
+        "type": "compaction",
+        "id": "compaction",
+        "parentId": "auto-8",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "summary": "optional summary",
+        "firstKeptEntryId": "root",
+        "tokensBefore": 77
+      },
+      {
+        "type": "branch_summary",
+        "id": "branch-summary",
+        "parentId": "root",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "fromId": "root",
+        "summary": "returned branch"
+      },
+      {
+        "type": "message",
+        "id": "assistant",
+        "parentId": "branch-summary",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "assistant",
+          "text": "optional final",
+          "timestamp": 2000,
+          "provider": "compat-provider",
+          "model": "compat-model"
+        }
+      }
+    ],
+    "sessionName": "Golden Session",
+    "activeContext": {
+      "entryPath": [
+        "root",
+        "branch-summary",
+        "assistant"
+      ],
+      "entryTypes": [
+        "message",
+        "branch_summary",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "optional root"
+        },
+        {
+          "role": "branchSummary",
+          "summary": "returned branch",
+          "fromId": "root"
+        },
+        {
+          "role": "assistant",
+          "text": "optional final"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": {
+        "provider": "compat-provider",
+        "modelId": "compat-model"
+      }
+    },
+    "listProgressFinal": [
+      1,
+      1
+    ],
+    "list": [
+      {
+        "path": "$OPTIONAL_FILE",
+        "id": "compat-optional",
+        "cwd": "$OPTIONAL_CWD",
+        "name": "Golden Session",
+        "parentSessionPath": null,
+        "createdValid": true,
+        "modifiedMs": 2000,
+        "messageCount": 2,
+        "firstMessage": "optional root",
+        "allMessagesText": "optional root optional final"
+      }
+    ]
+  },
+  "treeAndSelection": {
+    "selected": {
+      "entryPath": [
+        "root",
+        "thinking",
+        "model",
+        "selected-branch"
+      ],
+      "entryTypes": [
+        "message",
+        "thinking_level_change",
+        "model_change",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "tree root"
+        },
+        {
+          "role": "user",
+          "text": "selected branch"
+        }
+      ],
+      "thinkingLevel": "high",
+      "model": {
+        "provider": "selected-provider",
+        "modelId": "selected-model"
+      }
+    },
+    "selectedBranch": [
+      "root",
+      "thinking",
+      "model",
+      "selected-branch"
+    ],
+    "reset": {
+      "entryPath": [
+        "reset-root"
+      ],
+      "entryTypes": [
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "new root"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": null
+    },
+    "summary": {
+      "entryPath": [
+        "root",
+        "thinking",
+        "model",
+        "branch-summary"
+      ],
+      "entryTypes": [
+        "message",
+        "thinking_level_change",
+        "model_change",
+        "branch_summary"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "tree root"
+        },
+        {
+          "role": "branchSummary",
+          "summary": "abandoned summary",
+          "fromId": "model"
+        }
+      ],
+      "thinkingLevel": "high",
+      "model": {
+        "provider": "selected-provider",
+        "modelId": "selected-model"
+      }
+    },
+    "resolvedLabel": "checkpoint",
+    "entries": [
+      {
+        "type": "message",
+        "id": "root",
+        "parentId": null,
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "tree root",
+          "timestamp": 10000
+        }
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "thinking",
+        "parentId": "root",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "thinkingLevel": "high"
+      },
+      {
+        "type": "model_change",
+        "id": "model",
+        "parentId": "thinking",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "provider": "selected-provider",
+        "modelId": "selected-model"
+      },
+      {
+        "type": "message",
+        "id": "assistant",
+        "parentId": "model",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "assistant",
+          "text": "tree answer",
+          "timestamp": 11000,
+          "provider": "compat-provider",
+          "model": "compat-model"
+        }
+      },
+      {
+        "type": "message",
+        "id": "abandoned",
+        "parentId": "assistant",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "abandoned",
+          "timestamp": 12000
+        }
+      },
+      {
+        "type": "message",
+        "id": "selected-branch",
+        "parentId": "model",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "selected branch",
+          "timestamp": 13000
+        }
+      },
+      {
+        "type": "label",
+        "id": "label",
+        "parentId": "selected-branch",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "targetId": "root",
+        "label": {
+          "present": true,
+          "value": "checkpoint"
+        }
+      },
+      {
+        "type": "message",
+        "id": "reset-root",
+        "parentId": null,
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "new root",
+          "timestamp": 14000
+        }
+      },
+      {
+        "type": "branch_summary",
+        "id": "branch-summary",
+        "parentId": "model",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "fromId": "model",
+        "summary": "abandoned summary"
+      }
+    ],
+    "tree": [
+      {
+        "id": "root",
+        "type": "message",
+        "label": "checkpoint",
+        "hasLabelTimestamp": true,
+        "children": [
+          {
+            "id": "thinking",
+            "type": "thinking_level_change",
+            "label": null,
+            "hasLabelTimestamp": false,
+            "children": [
+              {
+                "id": "model",
+                "type": "model_change",
+                "label": null,
+                "hasLabelTimestamp": false,
+                "children": [
+                  {
+                    "id": "assistant",
+                    "type": "message",
+                    "label": null,
+                    "hasLabelTimestamp": false,
+                    "children": [
+                      {
+                        "id": "abandoned",
+                        "type": "message",
+                        "label": null,
+                        "hasLabelTimestamp": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "selected-branch",
+                    "type": "message",
+                    "label": null,
+                    "hasLabelTimestamp": false,
+                    "children": [
+                      {
+                        "id": "label",
+                        "type": "label",
+                        "label": null,
+                        "hasLabelTimestamp": false,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "id": "branch-summary",
+                    "type": "branch_summary",
+                    "label": null,
+                    "hasLabelTimestamp": false,
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "reset-root",
+        "type": "message",
+        "label": null,
+        "hasLabelTimestamp": false,
+        "children": []
+      }
+    ]
+  },
+  "branchedAndFork": {
+    "source": {
+      "entries": [
+        {
+          "type": "message",
+          "id": "root",
+          "parentId": null,
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "forest root",
+            "timestamp": 100
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "root",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "assistant",
+            "text": "forest answer",
+            "timestamp": 200,
+            "provider": "compat-provider",
+            "model": "compat-model"
+          }
+        },
+        {
+          "type": "message",
+          "id": "main",
+          "parentId": "assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "main branch",
+            "timestamp": 300
+          }
+        },
+        {
+          "type": "label",
+          "id": "source-label",
+          "parentId": "main",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "targetId": "root",
+          "label": {
+            "present": true,
+            "value": "forest-checkpoint"
+          }
+        },
+        {
+          "type": "message",
+          "id": "selected",
+          "parentId": "assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "selected branch",
+            "timestamp": 400
+          }
+        }
+      ],
+      "tree": [
+        {
+          "id": "root",
+          "type": "message",
+          "label": "forest-checkpoint",
+          "hasLabelTimestamp": true,
+          "children": [
+            {
+              "id": "assistant",
+              "type": "message",
+              "label": null,
+              "hasLabelTimestamp": false,
+              "children": [
+                {
+                  "id": "main",
+                  "type": "message",
+                  "label": null,
+                  "hasLabelTimestamp": false,
+                  "children": [
+                    {
+                      "id": "source-label",
+                      "type": "label",
+                      "label": null,
+                      "hasLabelTimestamp": false,
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "id": "selected",
+                  "type": "message",
+                  "label": null,
+                  "hasLabelTimestamp": false,
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "branched": {
+      "fileExists": true,
+      "headerParent": "$SOURCE_FILE",
+      "entries": [
+        {
+          "type": "message",
+          "id": "root",
+          "parentId": null,
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "forest root",
+            "timestamp": 100
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "root",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "assistant",
+            "text": "forest answer",
+            "timestamp": 200,
+            "provider": "compat-provider",
+            "model": "compat-model"
+          }
+        },
+        {
+          "type": "message",
+          "id": "selected",
+          "parentId": "assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "selected branch",
+            "timestamp": 400
+          }
+        },
+        {
+          "type": "label",
+          "id": "auto-1",
+          "parentId": "selected",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "targetId": "root",
+          "label": {
+            "present": true,
+            "value": "forest-checkpoint"
+          }
+        }
+      ],
+      "tree": [
+        {
+          "id": "root",
+          "type": "message",
+          "label": "forest-checkpoint",
+          "hasLabelTimestamp": true,
+          "children": [
+            {
+              "id": "assistant",
+              "type": "message",
+              "label": null,
+              "hasLabelTimestamp": false,
+              "children": [
+                {
+                  "id": "selected",
+                  "type": "message",
+                  "label": null,
+                  "hasLabelTimestamp": false,
+                  "children": [
+                    {
+                      "id": "auto-1",
+                      "type": "label",
+                      "label": null,
+                      "hasLabelTimestamp": false,
+                      "children": []
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "resolvedLabel": "forest-checkpoint"
+    },
+    "fork": {
+      "fileExists": true,
+      "headerParent": "$SOURCE_FILE",
+      "entries": [
+        {
+          "type": "message",
+          "id": "root",
+          "parentId": null,
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "forest root",
+            "timestamp": 100
+          }
+        },
+        {
+          "type": "message",
+          "id": "assistant",
+          "parentId": "root",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "assistant",
+            "text": "forest answer",
+            "timestamp": 200,
+            "provider": "compat-provider",
+            "model": "compat-model"
+          }
+        },
+        {
+          "type": "message",
+          "id": "main",
+          "parentId": "assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "main branch",
+            "timestamp": 300
+          }
+        },
+        {
+          "type": "label",
+          "id": "source-label",
+          "parentId": "main",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "targetId": "root",
+          "label": {
+            "present": true,
+            "value": "forest-checkpoint"
+          }
+        },
+        {
+          "type": "message",
+          "id": "selected",
+          "parentId": "assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "selected branch",
+            "timestamp": 400
+          }
+        }
+      ],
+      "tree": [
+        {
+          "id": "root",
+          "type": "message",
+          "label": "forest-checkpoint",
+          "hasLabelTimestamp": true,
+          "children": [
+            {
+              "id": "assistant",
+              "type": "message",
+              "label": null,
+              "hasLabelTimestamp": false,
+              "children": [
+                {
+                  "id": "main",
+                  "type": "message",
+                  "label": null,
+                  "hasLabelTimestamp": false,
+                  "children": [
+                    {
+                      "id": "source-label",
+                      "type": "label",
+                      "label": null,
+                      "hasLabelTimestamp": false,
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "id": "selected",
+                  "type": "message",
+                  "label": null,
+                  "hasLabelTimestamp": false,
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "projectList": [
+      {
+        "path": "$BRANCHED_FILE",
+        "id": "compat-branched",
+        "cwd": "$SOURCE_CWD",
+        "name": null,
+        "parentSessionPath": "$SOURCE_FILE",
+        "createdValid": true,
+        "modifiedMs": 400,
+        "messageCount": 3,
+        "firstMessage": "forest root",
+        "allMessagesText": "forest root forest answer selected branch"
+      },
+      {
+        "path": "$SOURCE_FILE",
+        "id": "compat-source",
+        "cwd": "$SOURCE_CWD",
+        "name": null,
+        "parentSessionPath": null,
+        "createdValid": true,
+        "modifiedMs": 400,
+        "messageCount": 4,
+        "firstMessage": "forest root",
+        "allMessagesText": "forest root forest answer main branch selected branch"
+      }
+    ],
+    "allList": [
+      {
+        "path": "$BRANCHED_FILE",
+        "id": "compat-branched",
+        "cwd": "$SOURCE_CWD",
+        "name": null,
+        "parentSessionPath": "$SOURCE_FILE",
+        "createdValid": true,
+        "modifiedMs": 400,
+        "messageCount": 3,
+        "firstMessage": "forest root",
+        "allMessagesText": "forest root forest answer selected branch"
+      },
+      {
+        "path": "$FORK_FILE",
+        "id": "compat-fork",
+        "cwd": "$TARGET_CWD",
+        "name": null,
+        "parentSessionPath": "$SOURCE_FILE",
+        "createdValid": true,
+        "modifiedMs": 400,
+        "messageCount": 4,
+        "firstMessage": "forest root",
+        "allMessagesText": "forest root forest answer main branch selected branch"
+      },
+      {
+        "path": "$SOURCE_FILE",
+        "id": "compat-source",
+        "cwd": "$SOURCE_CWD",
+        "name": null,
+        "parentSessionPath": null,
+        "createdValid": true,
+        "modifiedMs": 400,
+        "messageCount": 4,
+        "firstMessage": "forest root",
+        "allMessagesText": "forest root forest answer main branch selected branch"
+      }
+    ]
+  }
+}
