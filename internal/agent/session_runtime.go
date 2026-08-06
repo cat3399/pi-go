@@ -86,9 +86,16 @@ type SessionConfig struct {
 	// Summarizer remains the static injection seam for deterministic tests and
 	// embedders.
 	ResolveSummarizer func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
-	Retry             RetryPolicy
-	Now               func() time.Time
-	SettlementTimeout time.Duration
+	// BranchSummarizer and ResolveBranchSummarizer are the corresponding seams
+	// for navigateTree branch summaries. Production normally resolves the same
+	// ContextSummarizer implementation used by compaction.
+	BranchSummarizer           session.BranchSummarizer
+	ResolveBranchSummarizer    func(context.Context, SummarizerResolveRequest) (session.BranchSummarizer, error)
+	BranchSummaryReserveTokens uint64
+	BranchSummaryReserveSet    bool
+	Retry                      RetryPolicy
+	Now                        func() time.Time
+	SettlementTimeout          time.Duration
 }
 
 const (
@@ -261,23 +268,26 @@ type AgentSession struct {
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
 	// and post-run continuations remain active too.
-	lifecycleMu       sync.Mutex
-	run               *sessionRun
-	closing           bool
-	closed            bool
-	retry             provider.RetryController
-	contextWindow     uint64
-	contextReserve    uint64
-	keepRecentTokens  uint64
-	keepRecentSet     bool
-	compactionEnabled bool
-	summarizer        session.Summarizer
-	resolveSummarizer func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
-	summaryRetry      RetryPolicy
-	settlementTimeout time.Duration
-	observers         []sessionObserverEntry
-	nextObserver      uint64
-	loopUnsubscribe   func()
+	lifecycleMu             sync.Mutex
+	run                     *sessionRun
+	closing                 bool
+	closed                  bool
+	retry                   provider.RetryController
+	contextWindow           uint64
+	contextReserve          uint64
+	keepRecentTokens        uint64
+	keepRecentSet           bool
+	compactionEnabled       bool
+	summarizer              session.Summarizer
+	resolveSummarizer       func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
+	branchSummarizer        session.BranchSummarizer
+	resolveBranchSummarizer func(context.Context, SummarizerResolveRequest) (session.BranchSummarizer, error)
+	branchSummaryReserve    uint64
+	summaryRetry            RetryPolicy
+	settlementTimeout       time.Duration
+	observers               []sessionObserverEntry
+	nextObserver            uint64
+	loopUnsubscribe         func()
 }
 
 type sessionRun struct {
@@ -299,6 +309,7 @@ type sessionRun struct {
 	terminalModel                provider.Model
 	started                      bool
 	extensionSystemPrompt        *string
+	branchSummary                bool
 }
 type sessionObserverEntry struct {
 	id       uint64
@@ -358,6 +369,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.KeepRecentTokens == 0 && !config.KeepRecentTokensSet {
 		config.KeepRecentTokens = DefaultCompactionKeepRecentTokens
 	}
+	if config.BranchSummaryReserveTokens == 0 && !config.BranchSummaryReserveSet {
+		config.BranchSummaryReserveTokens = session.BranchSummaryDefaultReserveTokens
+	}
 	compactionEnabled := true
 	if config.CompactionEnabled != nil {
 		compactionEnabled = *config.CompactionEnabled
@@ -382,7 +396,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
 		keepRecentSet: config.KeepRecentTokensSet, compactionEnabled: compactionEnabled,
 		summarizer: config.Summarizer, resolveSummarizer: config.ResolveSummarizer,
-		summaryRetry: config.Retry,
+		branchSummarizer: config.BranchSummarizer, resolveBranchSummarizer: config.ResolveBranchSummarizer,
+		branchSummaryReserve: config.BranchSummaryReserveTokens,
+		summaryRetry:         config.Retry,
 	}
 	s.settlementTimeout = config.SettlementTimeout
 	if s.settlementTimeout <= 0 {
@@ -2119,6 +2135,10 @@ func (s sessionObservedSummarizer) Summarize(ctx context.Context, input session.
 }
 
 func (s *AgentSession) emitSummarizationRetry(ctx context.Context, reason CompactionReason, retry provider.RetryEvent) {
+	s.emitSummarizationRetryFrom(ctx, reason, "compaction", retry)
+}
+
+func (s *AgentSession) emitSummarizationRetryFrom(ctx context.Context, reason CompactionReason, source string, retry provider.RetryEvent) {
 	kind := "summarization_retry_scheduled"
 	switch retry.Kind {
 	case provider.RetryAttempt:
@@ -2126,7 +2146,7 @@ func (s *AgentSession) emitSummarizationRetry(ctx context.Context, reason Compac
 	case provider.RetryFinished:
 		kind = "summarization_retry_finished"
 	}
-	s.emitCompactionRetry(ctx, kind, reason, retry)
+	s.emitCompactionRetry(ctx, kind, reason, source, retry)
 }
 
 func safeCompactionEventError(err error) string {
@@ -2188,7 +2208,7 @@ func (s *AgentSession) emitCompaction(ctx context.Context, kind string, reason C
 	}
 }
 
-func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, reason CompactionReason, retry provider.RetryEvent) {
+func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, reason CompactionReason, source string, retry provider.RetryEvent) {
 	if s == nil {
 		return
 	}
@@ -2213,7 +2233,7 @@ func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, rea
 			FailureKind: retry.FailureKind, HTTPStatus: retry.HTTPStatus,
 		}
 	case "summarization_retry_attempt_start":
-		event = SessionSummarizationRetryAttemptEvent{Source: "compaction", Reason: reason}
+		event = SessionSummarizationRetryAttemptEvent{Source: source, Reason: reason}
 	case "summarization_retry_finished":
 		event = SessionSummarizationRetryFinishedEvent{
 			Reason: reason, Attempt: retryBudget(retry.Attempt), FailureKind: retry.FailureKind,
@@ -2758,6 +2778,353 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	s.afterCompaction(run.ctx, result, CompactionManual, false)
 	s.emitCompaction(run.ctx, "compaction_end", CompactionManual, &result, false, false, "")
 	return result, nil
+}
+
+// NavigateTreeOptions mirrors pi's AgentSession.navigateTree options. Pointer
+// fields preserve the distinction between an omitted extension override and
+// an explicitly empty value.
+type NavigateTreeOptions struct {
+	Summarize           bool
+	CustomInstructions  *string
+	ReplaceInstructions *bool
+	Label               *string
+}
+
+type NavigateTreeResult struct {
+	EditorText   *string
+	Cancelled    bool
+	Aborted      bool
+	SummaryEntry *session.Entry
+}
+
+type branchSummarizerWithRetryObserver interface {
+	SummarizeBranchWithRetryObserver(context.Context, session.BranchSummaryInput, provider.RetryObserver) (session.BranchSummaryOutput, error)
+}
+
+func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.BranchSummarizer, provider.Model, error) {
+	if s == nil {
+		return nil, provider.Model{}, ErrBranchSummaryUnavailable
+	}
+	s.mu.RLock()
+	hasModel := s.hasModel
+	selected := s.model
+	thinking := s.thinkingLevel
+	stream := provider.CloneStreamOptions(s.stream)
+	resolveStream := s.resolveStream
+	resolve := s.resolveBranchSummarizer
+	static := s.branchSummarizer
+	resolveCompaction := s.resolveSummarizer
+	staticCompaction := s.summarizer
+	validate := s.validateAccess
+	retry := s.summaryRetry
+	s.mu.RUnlock()
+	if resolve == nil && static != nil && !isNilInterface(static) {
+		if !hasModel {
+			return nil, provider.Model{}, s.noModelSelectedError()
+		}
+		if validate != nil {
+			if err := validate(ctx, selected); err != nil {
+				return nil, provider.Model{}, err
+			}
+		}
+		return static, selected, nil
+	}
+	if resolve == nil && resolveCompaction != nil {
+		resolve = func(resolveCtx context.Context, request SummarizerResolveRequest) (session.BranchSummarizer, error) {
+			value, err := resolveCompaction(resolveCtx, request)
+			if err != nil {
+				return nil, err
+			}
+			branch, ok := value.(session.BranchSummarizer)
+			if !ok {
+				return nil, ErrBranchSummaryUnavailable
+			}
+			return branch, nil
+		}
+	}
+	if resolve == nil {
+		static, _ = staticCompaction.(session.BranchSummarizer)
+	}
+	if !hasModel {
+		return nil, provider.Model{}, s.noModelSelectedError()
+	}
+	if resolve == nil {
+		if validate != nil {
+			if err := validate(ctx, selected); err != nil {
+				return nil, provider.Model{}, err
+			}
+		}
+		if static == nil || isNilInterface(static) {
+			return nil, provider.Model{}, ErrBranchSummaryUnavailable
+		}
+		return static, selected, nil
+	}
+	if resolveStream != nil {
+		resolved, err := resolveStream(ctx, selected)
+		if err != nil {
+			return nil, provider.Model{}, err
+		}
+		stream = provider.MergeStreamOptions(stream, resolved)
+	} else if validate != nil {
+		if err := validate(ctx, selected); err != nil {
+			return nil, provider.Model{}, err
+		}
+	}
+	stream = provider.MergeStreamOptions(stream, provider.StreamOptions{
+		OnPayload: s.hooks.BeforeProviderRequest, OnHeaders: s.hooks.BeforeProviderHeaders, OnResponse: s.hooks.AfterProviderResponse,
+	})
+	maxTokens := session.BranchSummaryMaxOutputTokens
+	stream.MaxTokens = &maxTokens
+	resolved, err := resolve(ctx, SummarizerResolveRequest{Model: selected, ThinkingLevel: thinking, Stream: stream, Retry: retry})
+	if err != nil {
+		return nil, provider.Model{}, err
+	}
+	if resolved == nil || isNilInterface(resolved) {
+		return nil, provider.Model{}, ErrBranchSummaryUnavailable
+	}
+	return resolved, selected, nil
+}
+
+func (s *AgentSession) hasSelectedModel() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hasModel
+}
+
+type treeNavigationBusyError struct{}
+
+func (treeNavigationBusyError) Error() string {
+	return "Wait for the current response to finish before navigating the session tree."
+}
+func (treeNavigationBusyError) Unwrap() error { return ErrBusy }
+
+type treeSummaryModelError struct{}
+
+func (treeSummaryModelError) Error() string { return "No model available for summarization" }
+func (treeSummaryModelError) Unwrap() error { return ErrNoModelSelected }
+
+type treeEntryNotFoundError struct{ id string }
+
+func (e treeEntryNotFoundError) Error() string { return fmt.Sprintf("Entry %s not found", e.id) }
+func (e treeEntryNotFoundError) Unwrap() error { return session.ErrEntryNotFound }
+
+// NavigateTree faithfully performs pi's tree navigation: it summarizes the
+// abandoned suffix when requested, places user/custom targets in the editor,
+// persists extension provenance, and only publishes the new Agent state after
+// the durable tree operation succeeds.
+func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, options NavigateTreeOptions) (NavigateTreeResult, error) {
+	if ctx == nil {
+		return NavigateTreeResult{}, fmt.Errorf("%w: nil tree context", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return NavigateTreeResult{}, err
+	}
+	run, err := s.admitSessionRun(ctx)
+	if err != nil {
+		if errors.Is(err, ErrBusy) {
+			return NavigateTreeResult{}, treeNavigationBusyError{}
+		}
+		return NavigateTreeResult{}, err
+	}
+	s.lifecycleMu.Lock()
+	if s.run == run {
+		run.branchSummary = true
+	}
+	s.lifecycleMu.Unlock()
+	defer s.finishSessionRun(run)
+	manager := s.sessionManager
+	oldLeaf, _ := manager.LeafID()
+	if oldLeaf == targetID {
+		return NavigateTreeResult{}, nil
+	}
+	if options.Summarize && !s.hasSelectedModel() {
+		return NavigateTreeResult{}, treeSummaryModelError{}
+	}
+	target, ok := manager.Entry(targetID)
+	if !ok {
+		return NavigateTreeResult{}, treeEntryNotFoundError{id: targetID}
+	}
+	oldPath, _ := manager.BranchPath("")
+	targetPath, err := manager.BranchPath(targetID)
+	if err != nil {
+		return NavigateTreeResult{}, err
+	}
+	collected := session.CollectEntriesForBranchSummary(oldPath, targetPath)
+	customInstructions := cloneStringPointer(options.CustomInstructions)
+	replaceInstructions := cloneBoolPointer(options.ReplaceInstructions)
+	label := cloneStringPointer(options.Label)
+	preparation := TreePreparation{
+		TargetID: targetID, OldLeafID: optionalString(oldLeaf), CommonAncestorID: cloneStringPointer(collected.CommonAncestorID),
+		EntriesToSummarize: cloneSessionEntries(collected.Entries), UserWantsSummary: options.Summarize,
+		CustomInstructions: cloneStringPointer(customInstructions), ReplaceInstructions: cloneBoolPointer(replaceInstructions), Label: cloneStringPointer(label),
+	}
+	var extensionSummary *TreeSummary
+	if hook := s.hooks.SessionBeforeTree; hook != nil {
+		result, hookErr := hook(run.ctx, SessionBeforeTreeEvent{Preparation: preparation})
+		if hookErr == nil {
+			if err := result.Cancel.Validate(); err != nil {
+				return NavigateTreeResult{}, err
+			}
+			if result.Cancel.Cancelled() {
+				return NavigateTreeResult{Cancelled: true}, nil
+			}
+			if options.Summarize && result.Summary != nil {
+				value := *result.Summary
+				value.Details = bytes.Clone(value.Details)
+				value.Usage = cloneCompactionUsage(value.Usage)
+				extensionSummary = &value
+			}
+			if result.CustomInstructions != nil {
+				customInstructions = cloneStringPointer(result.CustomInstructions)
+			}
+			if result.ReplaceInstructions != nil {
+				replaceInstructions = cloneBoolPointer(result.ReplaceInstructions)
+			}
+			if result.Label != nil {
+				label = cloneStringPointer(result.Label)
+			}
+		}
+	}
+
+	summaryText := ""
+	var summaryDetails json.RawMessage
+	var summaryUsage *session.CompactionUsage
+	fromExtension := false
+	if extensionSummary != nil {
+		summaryText, summaryDetails = extensionSummary.Summary, bytes.Clone(extensionSummary.Details)
+		summaryUsage, fromExtension = cloneCompactionUsage(extensionSummary.Usage), true
+	} else if options.Summarize && len(collected.Entries) > 0 {
+		resolved, selected, resolveErr := s.resolveTreeSummarizer(run.ctx)
+		if resolveErr != nil {
+			if context.Cause(run.ctx) != nil {
+				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
+			}
+			return NavigateTreeResult{}, resolveErr
+		}
+		s.mu.RLock()
+		reserve := s.branchSummaryReserve
+		s.mu.RUnlock()
+		custom := ""
+		if customInstructions != nil {
+			custom = *customInstructions
+		}
+		replace := replaceInstructions != nil && *replaceInstructions
+		input, buildErr := session.BuildBranchSummaryInput(collected.Entries, selected.ContextWindow(), reserve, custom, replace)
+		if buildErr != nil {
+			return NavigateTreeResult{}, buildErr
+		}
+		if len(input.Messages) == 0 {
+			summaryText = "No content to summarize"
+			summaryDetails = json.RawMessage(`{"readFiles":[],"modifiedFiles":[]}`)
+		} else {
+			var output session.BranchSummaryOutput
+			if observable, ok := resolved.(branchSummarizerWithRetryObserver); ok {
+				output, err = observable.SummarizeBranchWithRetryObserver(run.ctx, input, func(_ context.Context, retry provider.RetryEvent) {
+					s.emitSummarizationRetryFrom(run.ctx, CompactionBranchSummary, "branchSummary", retry)
+				})
+			} else {
+				output, err = resolved.SummarizeBranch(run.ctx, input)
+			}
+			if err != nil {
+				if context.Cause(run.ctx) != nil {
+					return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
+				}
+				return NavigateTreeResult{}, err
+			}
+			if output.Aborted || context.Cause(run.ctx) != nil {
+				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
+			}
+			if output.Error != "" {
+				return NavigateTreeResult{}, errors.New(output.Error)
+			}
+			summaryText, summaryDetails, err = session.FinalizeBranchSummary(output.Text, input.FileOps)
+			if err != nil {
+				return NavigateTreeResult{}, err
+			}
+			summaryUsage = cloneCompactionUsage(output.Usage)
+		}
+	}
+
+	var newLeafID *string
+	var editorText *string
+	if text, editable := session.BranchEditorText(target); editable {
+		if parent, hasParent := target.ParentID(); hasParent {
+			newLeafID = optionalString(parent)
+		}
+		editorText = optionalStringPreserveEmpty(text)
+	} else {
+		newLeafID = optionalString(targetID)
+	}
+	var summaryEntry *session.Entry
+	if summaryText != "" {
+		flag := fromExtension
+		entry, commitErr := manager.BranchWithSummary(run.ctx, newLeafID, summaryText, summaryDetails, &flag, summaryUsage)
+		if commitErr != nil {
+			if context.Cause(run.ctx) != nil {
+				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
+			}
+			return NavigateTreeResult{}, commitErr
+		}
+		summaryEntry = &entry
+		if label != nil && *label != "" {
+			if _, err := manager.AppendLabelChange(context.WithoutCancel(run.ctx), entry.ID(), label); err != nil {
+				return NavigateTreeResult{}, err
+			}
+		}
+	} else {
+		if _, err := manager.NavigateTreePosition(run.ctx, newLeafID, targetID, label); err != nil {
+			if context.Cause(run.ctx) != nil {
+				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
+			}
+			return NavigateTreeResult{}, err
+		}
+	}
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return NavigateTreeResult{}, err
+	}
+	if hook := s.hooks.SessionTree; hook != nil {
+		newLeaf, hasNewLeaf := manager.LeafID()
+		var actualNewLeaf *string
+		if hasNewLeaf {
+			actualNewLeaf = optionalString(newLeaf)
+		}
+		var fromHook *bool
+		if summaryText != "" {
+			fromHook = &fromExtension
+		}
+		_ = hook(run.ctx, SessionTreeEvent{NewLeafID: actualNewLeaf, OldLeafID: optionalString(oldLeaf), SummaryEntry: summaryEntry, FromExtension: fromHook})
+	}
+	return NavigateTreeResult{EditorText: editorText, SummaryEntry: summaryEntry}, nil
+}
+
+func optionalStringPreserveEmpty(value string) *string { return &value }
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneSessionEntries(entries []session.Entry) []session.Entry {
+	result := make([]session.Entry, len(entries))
+	for index := range entries {
+		result[index] = entries[index]
+	}
+	return result
+}
+
+// AbortBranchSummary cancels only an active navigateTree lifecycle.
+func (s *AgentSession) AbortBranchSummary() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if s.run != nil && s.run.branchSummary {
+		s.run.cancel(ErrAgentAborted)
+	}
+	s.lifecycleMu.Unlock()
 }
 
 // SelectLeaf exposes the current Session tree navigation boundary without

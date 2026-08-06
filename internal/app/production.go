@@ -284,6 +284,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 			ContextReserve:    snapshot.Settings.Compaction.ReserveTokensOrDefault(),
 			KeepRecentTokens:  snapshot.Settings.Compaction.KeepRecentTokensOrDefault(),
 			ContextReserveSet: true, KeepRecentTokensSet: true,
+			BranchSummaryReserveTokens: snapshot.Settings.BranchSummary.ReserveTokensOrDefault(), BranchSummaryReserveSet: true,
 			Retry: retryPolicy,
 			ResolveStreamOptions: func(turnCtx context.Context, selected provider.Model) (provider.StreamOptions, error) {
 				resolved, err := authResolver.requirePromptAccess(turnCtx, selected, p.docsDir)
@@ -293,6 +294,13 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 				return provider.StreamOptions{APIKey: resolved.APIKey}, nil
 			},
 			ResolveSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
+				return provider.NewContextSummarizerWithOptions(router, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
+					ThinkingLevel: request.ThinkingLevel,
+					Stream:        request.Stream,
+					Retry:         request.Retry,
+				})
+			},
+			ResolveBranchSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.BranchSummarizer, error) {
 				return provider.NewContextSummarizerWithOptions(router, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
 					ThinkingLevel: request.ThinkingLevel,
 					Stream:        request.Stream,

@@ -21,24 +21,25 @@ import (
 const defaultSettlementTimeout = 30 * time.Second
 
 var (
-	ErrInvalidConfig         = errors.New("invalid agent configuration")
-	ErrInvalidRun            = errors.New("invalid agent run")
-	ErrBusy                  = errors.New("agent is already running")
-	ErrRunIDExhausted        = errors.New("agent run id exhausted")
-	ErrTranscriptCommit      = errors.New("agent transcript commit failed")
-	ErrInvariant             = errors.New("agent invariant failure")
-	ErrProviderStream        = errors.New("provider stream failed")
-	ErrToolNotFound          = errors.New("tool not found")
-	ErrTruncatedToolCall     = errors.New("tool call arguments may be truncated")
-	ErrToolUnsettled         = errors.New("tool returned an unsettled outcome")
-	ErrAgentAborted          = errors.New("agent run aborted")
-	ErrContextTransform      = errors.New("agent context transform failed")
-	ErrInvalidQueueMessage   = errors.New("invalid queued message")
-	ErrCannotContinue        = errors.New("agent cannot continue from current transcript")
-	ErrNoModelSelected       = errors.New("No model selected.")
-	ErrModelAccess           = errors.New("model access unavailable")
-	ErrCompactionUnavailable = errors.New("agent compaction is not configured")
-	ErrRetryPolicy           = provider.ErrInvalidRetryPolicy
+	ErrInvalidConfig            = errors.New("invalid agent configuration")
+	ErrInvalidRun               = errors.New("invalid agent run")
+	ErrBusy                     = errors.New("agent is already running")
+	ErrRunIDExhausted           = errors.New("agent run id exhausted")
+	ErrTranscriptCommit         = errors.New("agent transcript commit failed")
+	ErrInvariant                = errors.New("agent invariant failure")
+	ErrProviderStream           = errors.New("provider stream failed")
+	ErrToolNotFound             = errors.New("tool not found")
+	ErrTruncatedToolCall        = errors.New("tool call arguments may be truncated")
+	ErrToolUnsettled            = errors.New("tool returned an unsettled outcome")
+	ErrAgentAborted             = errors.New("agent run aborted")
+	ErrContextTransform         = errors.New("agent context transform failed")
+	ErrInvalidQueueMessage      = errors.New("invalid queued message")
+	ErrCannotContinue           = errors.New("agent cannot continue from current transcript")
+	ErrNoModelSelected          = errors.New("No model selected.")
+	ErrModelAccess              = errors.New("model access unavailable")
+	ErrCompactionUnavailable    = errors.New("agent compaction is not configured")
+	ErrBranchSummaryUnavailable = errors.New("agent branch summarization is not configured")
+	ErrRetryPolicy              = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
 	// v0.1 internal implementation; v0.2 no longer returns it for batches.
 	ErrUnsupportedToolTurn = errors.New("unsupported tool turn")
@@ -302,6 +303,7 @@ const (
 	CompactionManual CompactionReason = iota + 1
 	CompactionThreshold
 	CompactionContextOverflow
+	CompactionBranchSummary
 )
 
 func (r CompactionReason) String() string {
@@ -312,6 +314,8 @@ func (r CompactionReason) String() string {
 		return "threshold"
 	case CompactionContextOverflow:
 		return "overflow"
+	case CompactionBranchSummary:
+		return "branchSummary"
 	default:
 		return "unknown"
 	}

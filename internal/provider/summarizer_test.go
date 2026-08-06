@@ -57,6 +57,55 @@ func TestContextSummarizerCreatesFreshIsolatedRequestPerSummarize(t *testing.T) 
 	}
 }
 
+func TestContextSummarizerBranchUsesPiOutputLimitAndIsolatedRequest(t *testing.T) {
+	implementation := mustProvider(t, provider.ScriptedConfig{})
+	mustSetResponses(t, implementation, mustFixedStep(t, mustTextTerminal(t, "branch result")))
+	model, err := newModel(provider.ModelSpec{Provider: "openai", API: provider.OpenAIResponsesAPI, ID: "branch-model", MaxTokens: 8_192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summarizer, err := provider.NewContextSummarizerWithOptions(implementation, model, func() time.Time { return responsesTestTime }, provider.ContextSummarizerOptions{
+		Stream: provider.StreamOptions{SessionID: "durable-session", CacheRetention: provider.CacheRetentionLong},
+		Retry:  provider.RetryPolicy{MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := summarizer.SummarizeBranch(context.Background(), session.BranchSummaryInput{SystemPrompt: "system", Prompt: "branch", MaxTokens: session.BranchSummaryMaxOutputTokens})
+	if err != nil || output.Error != "" || output.Aborted || output.Text != "branch result" || output.Usage == nil {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+	requests := implementation.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests=%d", len(requests))
+	}
+	options := requests[0].StreamOptions()
+	if options.MaxTokens == nil || *options.MaxTokens != session.BranchSummaryMaxOutputTokens || options.CacheRetention != provider.CacheRetentionNone || options.SessionID == "durable-session" {
+		t.Fatalf("stream options=%#v", options)
+	}
+}
+
+func TestContextSummarizerBranchAcceptsEmptySuccessfulResponseLikePi(t *testing.T) {
+	implementation := mustProvider(t, provider.ScriptedConfig{})
+	empty, err := newAssistantTextMessage(nil, llm.FinishStop, llm.Usage{}, responsesTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustSetResponses(t, implementation, mustFixedStep(t, empty))
+	model, err := newModel(provider.ModelSpec{Provider: "openai", API: provider.OpenAIResponsesAPI, ID: "branch-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summarizer, err := provider.NewContextSummarizerWithOptions(implementation, model, nil, provider.ContextSummarizerOptions{Retry: provider.RetryPolicy{MaxAttempts: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := summarizer.SummarizeBranch(context.Background(), session.BranchSummaryInput{SystemPrompt: "system", Prompt: "branch"})
+	if err != nil || output.Error != "" || output.Aborted || output.Text != "" || output.Usage == nil {
+		t.Fatalf("SummarizeBranch()=%#v, %v", output, err)
+	}
+}
+
 func summaryAgentMessage(t *testing.T, text string) agentmsg.Message {
 	t.Helper()
 	message, err := llm.NewUserTextMessage(text, responsesTestTime)

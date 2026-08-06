@@ -233,6 +233,115 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 	}
 }
 
+func TestProductionBranchSummaryUsesRealToolFreeHTTPProviderAndReloads(t *testing.T) {
+	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
+		t.Run(api, func(t *testing.T) {
+			cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+			capture := &productionSummaryServer{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { capture.serve(t, w, r) }))
+			defer server.Close()
+			writeCompactionProductionConfig(t, agentDir, server.URL+"/v1", api, "branch-key", "branch-model")
+			path := filepath.Join(t.TempDir(), "branch-session.jsonl")
+			manager, err := session.OpenSessionManager(path, "", cwd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendUser := func(text string) session.Entry {
+				message, createErr := llm.NewUserTextMessage(text, time.Now())
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				entry, appendErr := manager.AppendLLMMessage(context.Background(), message)
+				if appendErr != nil {
+					t.Fatal(appendErr)
+				}
+				return entry
+			}
+			appendAssistant := func(text string) session.Entry {
+				block, createErr := llm.NewTextBlock(text)
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				message, createErr := llm.NewAssistantTextMessage(
+					[]llm.TextBlock{block}, llm.FinishStop, llm.Usage{}, time.Now(),
+					llm.AssistantProvenance{Provider: "openai", API: api, Model: "branch-model"},
+				)
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				entry, appendErr := manager.AppendLLMMessage(context.Background(), message)
+				if appendErr != nil {
+					t.Fatal(appendErr)
+				}
+				return entry
+			}
+			appendUser("root request")
+			common := appendAssistant("common answer")
+			target := appendUser("target draft")
+			if err := manager.Branch(common.ID()); err != nil {
+				t.Fatal(err)
+			}
+			appendUser("abandoned branch marker BRANCH_HTTP")
+			appendAssistant("alternate branch result")
+
+			deps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), options{modelID: "openai/branch-model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			productRuntime, err := agentruntime.Create(context.Background(), deps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := productRuntime.Session().NavigateTree(context.Background(), target.ID(), agent.NavigateTreeOptions{Summarize: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.EditorText == nil || *result.EditorText != "target draft" || result.SummaryEntry == nil {
+				t.Fatalf("NavigateTree()=%#v", result)
+			}
+			payload, ok := result.SummaryEntry.Payload().(session.BranchSummaryPayload)
+			if !ok || payload.FromID != common.ID() || payload.FromHook || !payload.HasFromHook || payload.Usage == nil || payload.Summary != session.BranchSummaryPreamble+"production summary" {
+				t.Fatalf("branch summary payload=%#v", result.SummaryEntry.Payload())
+			}
+			if err := productRuntime.Dispose(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			requests := capture.snapshot()
+			if len(requests) != 1 || requests[0].authorization != "Bearer branch-key" || requests[0].payload["model"] != "branch-model" {
+				t.Fatalf("branch summary requests=%#v", requests)
+			}
+			encoded, err := json.Marshal(requests[0].payload)
+			if err != nil || !bytes.Contains(encoded, []byte("BRANCH_HTTP")) {
+				t.Fatalf("branch summary prompt=%s, err=%v", encoded, err)
+			}
+			if _, exists := requests[0].payload["tools"]; exists || requests[0].sessionID != "" {
+				t.Fatalf("branch summary leaked tools/session affinity: %#v", requests[0])
+			}
+			wantPath, maxField := "/v1/responses", "max_output_tokens"
+			if api == provider.OpenAICompletionsAPI {
+				wantPath, maxField = "/v1/chat/completions", "max_completion_tokens"
+			}
+			if requests[0].path != wantPath || requests[0].payload[maxField] != float64(session.BranchSummaryMaxOutputTokens) {
+				t.Fatalf("branch request path/budget=%q/%#v", requests[0].path, requests[0].payload[maxField])
+			}
+			reloaded, err := session.OpenSessionManager(path, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reloaded.Close()
+			persisted, ok := reloaded.Entry(result.SummaryEntry.ID())
+			if !ok {
+				t.Fatal("branch summary missing after reopen")
+			}
+			persistedPayload, ok := persisted.Payload().(session.BranchSummaryPayload)
+			if !ok || persistedPayload.Summary != payload.Summary || persistedPayload.Usage == nil {
+				t.Fatalf("reopened branch summary=%#v", persisted.Payload())
+			}
+		})
+	}
+}
+
 func TestProductionSplitCompactionRunsOrderedDualSummaryAndReloads(t *testing.T) {
 	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
 	var capture productionSummaryServer

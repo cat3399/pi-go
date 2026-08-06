@@ -492,10 +492,24 @@ func (s *Session) Append(ctx context.Context, message llm.ConversationMessage, o
 // MessagePayload is intentionally rejected: callers must use Append so
 // assistant provenance and replay metadata cannot be accidentally omitted.
 func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entry, error) {
+	return s.appendPayload(ctx, payload, nil, false)
+}
+
+// AppendPayloadAt appends a non-message entry with an explicit parent and only
+// advances the selected leaf after the durable append succeeds. A nil parent
+// creates a root entry. It is the atomic primitive behind tree navigation.
+func (s *Session) AppendPayloadAt(ctx context.Context, parentID *string, payload EntryPayload) (Entry, error) {
+	return s.appendPayload(ctx, payload, parentID, true)
+}
+
+func (s *Session) appendPayload(ctx context.Context, payload EntryPayload, selectedParent *string, explicitParent bool) (Entry, error) {
 	if payload == nil {
 		return Entry{}, fmt.Errorf("%w: nil entry payload", ErrInvalidEntry)
 	}
 	if message, ok := payload.(MessagePayload); ok {
+		if explicitParent {
+			return Entry{}, fmt.Errorf("%w: explicit-parent message payload", ErrInvalidEntry)
+		}
 		return s.AppendAgentMessage(ctx, message.Message, AppendOptions{})
 	}
 	if ctx == nil {
@@ -525,9 +539,17 @@ func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entr
 		return Entry{}, fmt.Errorf("%w: invalid entry timestamp", ErrInvalidEntry)
 	}
 	parentID := ""
-	hasParent := s.leaf >= 0
-	if hasParent {
-		parentID = s.entries[s.leaf].id
+	hasParent := false
+	if explicitParent {
+		if selectedParent != nil {
+			if _, ok := s.byID[*selectedParent]; !ok {
+				s.mu.Unlock()
+				return Entry{}, fmt.Errorf("%w: %s", ErrEntryNotFound, *selectedParent)
+			}
+			parentID, hasParent = *selectedParent, true
+		}
+	} else if s.leaf >= 0 {
+		parentID, hasParent = s.entries[s.leaf].id, true
 	}
 	raw, err := encodePayloadEntry(entryID, parentID, hasParent, timestamp, payload.CloneEntryPayload())
 	if err != nil {

@@ -480,6 +480,31 @@ func (m *SessionManager) ResetLeaf() error {
 	defer m.mu.Unlock()
 	return m.store.ResetLeaf()
 }
+
+// NavigateTreePosition selects an existing entry (or the virtual root) and,
+// when requested, appends the label as a child of that selected position in
+// the same durable operation. This matches navigateTree's post-navigation
+// label placement without exposing Session's append-parent mechanics.
+func (m *SessionManager) NavigateTreePosition(ctx context.Context, newLeafID *string, labelTargetID string, label *string) (*Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if label != nil && *label != "" {
+		if _, ok := m.store.Entry(labelTargetID); !ok {
+			return nil, fmt.Errorf("%w: %s", ErrEntryNotFound, labelTargetID)
+		}
+		entry, err := m.appendAndFlush(ctx, func(s *Session) (Entry, error) {
+			return s.AppendPayloadAt(ctx, newLeafID, LabelPayload{TargetID: labelTargetID, Label: label})
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &entry, nil
+	}
+	if newLeafID == nil {
+		return nil, m.store.ResetLeaf()
+	}
+	return nil, m.store.SelectLeaf(*newLeafID)
+}
 func (m *SessionManager) BranchPath(fromID string) ([]Entry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -595,19 +620,12 @@ func (m *SessionManager) BranchWithSummary(ctx context.Context, branchFromID *st
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fromID := "root"
-	if branchFromID == nil {
-		if err := m.store.ResetLeaf(); err != nil {
-			return Entry{}, err
-		}
-	} else {
+	if branchFromID != nil {
 		fromID = *branchFromID
-		if err := m.store.SelectLeaf(*branchFromID); err != nil {
-			return Entry{}, err
-		}
 	}
 	value, present := optionalManagerBool(fromHook)
 	return m.appendAndFlush(ctx, func(s *Session) (Entry, error) {
-		return s.AppendPayload(ctx, BranchSummaryPayload{FromID: fromID, Summary: summary, Details: details, Usage: usage, FromHook: value, HasFromHook: present})
+		return s.AppendPayloadAt(ctx, branchFromID, BranchSummaryPayload{FromID: fromID, Summary: summary, Details: details, Usage: usage, FromHook: value, HasFromHook: present})
 	})
 }
 

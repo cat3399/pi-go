@@ -150,6 +150,133 @@ func TestLiveProductionDeepSeekCompaction(t *testing.T) {
 	}
 }
 
+// TestLiveProductionDeepSeekBranchSummary is opt-in with the same credential
+// gate. It executes the real production navigateTree provider path for both
+// DeepSeek-compatible transports and verifies durable reopen semantics.
+func TestLiveProductionDeepSeekBranchSummary(t *testing.T) {
+	apiKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if apiKey == "" {
+		t.Skip("DEEPSEEK_API_KEY is not set")
+	}
+	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
+		t.Run(api, func(t *testing.T) {
+			cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+			writeDeepSeekCompactionLiveConfig(t, agentDir, api)
+			sessionPath := filepath.Join(t.TempDir(), "deepseek-branch-summary.jsonl")
+			manager, err := session.OpenSessionManager(sessionPath, "", cwd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendUser := func(text string, at int64) session.Entry {
+				message, createErr := llm.NewUserTextMessage(text, time.UnixMilli(at))
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				entry, appendErr := manager.AppendLLMMessage(context.Background(), message)
+				if appendErr != nil {
+					t.Fatal(appendErr)
+				}
+				return entry
+			}
+			appendAssistant := func(text string) session.Entry {
+				entry, appendErr := manager.AppendLLMMessage(context.Background(), deepSeekBranchHistoryAssistant(t, text, api))
+				if appendErr != nil {
+					t.Fatal(appendErr)
+				}
+				return entry
+			}
+			appendUser("root request", 1)
+			common := appendAssistant("common answer")
+			target := appendUser("target draft", 2)
+			if err := manager.Branch(common.ID()); err != nil {
+				t.Fatal(err)
+			}
+			appendUser("Explore a different implementation and preserve the exact marker BRANCH_WORK.", 3)
+			appendAssistant("BRANCH_WORK completed on the alternate branch")
+
+			assemblyCtx, assemblyCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			dependencies, err := assembleProductionRuntime(assemblyCtx, fixedProductionConfig(cwd, agentDir, docsDir), options{modelID: "openai/" + deepSeekCompactionLiveModelID})
+			assemblyCancel()
+			if err != nil {
+				_ = manager.Close()
+				t.Fatal(err)
+			}
+			createCtx, createCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			productRuntime, err := agentruntime.Create(createCtx, dependencies.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+			createCancel()
+			if err != nil {
+				_ = manager.Close()
+				t.Fatal(err)
+			}
+			disposed := false
+			defer func() {
+				if !disposed {
+					closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+					defer cancel()
+					_ = productRuntime.Dispose(closeCtx)
+				}
+			}()
+			if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", apiKey); err != nil {
+				t.Fatal(err)
+			}
+			navigateCtx, navigateCancel := context.WithTimeout(context.Background(), 120*time.Second)
+			instructions := "Preserve the exact marker BRANCH_WORK in the structured branch summary."
+			result, err := productRuntime.Session().NavigateTree(navigateCtx, target.ID(), agent.NavigateTreeOptions{Summarize: true, CustomInstructions: &instructions})
+			navigateCancel()
+			if err != nil {
+				t.Fatalf("live branch summary failed (%T)", err)
+			}
+			if result.EditorText == nil || *result.EditorText != "target draft" || result.SummaryEntry == nil {
+				t.Fatalf("navigate result=%#v", result)
+			}
+			payload, ok := result.SummaryEntry.Payload().(session.BranchSummaryPayload)
+			if !ok || payload.FromID != common.ID() || payload.FromHook || payload.Usage == nil || !strings.Contains(payload.Summary, "BRANCH_WORK") {
+				t.Fatalf("live branch payload missing real model summary/provenance")
+			}
+			disposeCtx, disposeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err = productRuntime.Dispose(disposeCtx)
+			disposeCancel()
+			if err != nil {
+				t.Fatal(err)
+			}
+			disposed = true
+			assertDeepSeekCredentialNotPersisted(t, apiKey, filepath.Join(agentDir, "models.json"), filepath.Join(agentDir, "settings.json"), sessionPath)
+			reopened, err := session.OpenSessionManager(sessionPath, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			persisted, ok := reopened.Entry(result.SummaryEntry.ID())
+			if !ok {
+				t.Fatal("live branch summary missing after reopen")
+			}
+			persistedPayload, ok := persisted.Payload().(session.BranchSummaryPayload)
+			if !ok || persistedPayload.Usage == nil || persistedPayload.FromID != common.ID() {
+				t.Fatalf("reopened live branch payload=%#v", persisted.Payload())
+			}
+		})
+	}
+}
+
+func deepSeekBranchHistoryAssistant(t *testing.T, text, api string) llm.AssistantTextMessage {
+	t.Helper()
+	block, err := llm.NewTextBlock(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{Input: 1, Output: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantTextMessage([]llm.TextBlock{block}, llm.FinishStop, usage, time.Now(), llm.AssistantProvenance{
+		Provider: "openai", API: api, Model: deepSeekCompactionLiveModelID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return message
+}
+
 func writeDeepSeekCompactionLiveConfig(t *testing.T, agentDir, api string) {
 	t.Helper()
 	compat := map[string]any{"supportsDeveloperRole": false}

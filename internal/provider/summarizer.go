@@ -79,6 +79,33 @@ func (s *ContextSummarizer) Summarize(ctx context.Context, input session.Summary
 	return s.SummarizeWithRetryObserver(ctx, input, nil)
 }
 
+// SummarizeBranch uses the same isolated request, retry, auth/header and
+// collection path as compaction, with pi's fixed 2048-token branch budget.
+func (s *ContextSummarizer) SummarizeBranch(ctx context.Context, input session.BranchSummaryInput) (session.BranchSummaryOutput, error) {
+	return s.SummarizeBranchWithRetryObserver(ctx, input, nil)
+}
+
+func (s *ContextSummarizer) SummarizeBranchWithRetryObserver(ctx context.Context, input session.BranchSummaryInput, observer RetryObserver) (session.BranchSummaryOutput, error) {
+	if s == nil || s.provider == nil {
+		return session.BranchSummaryOutput{}, errors.New("context summarizer is not configured")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	maxTokens := input.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = session.BranchSummaryMaxOutputTokens
+	}
+	output, err := s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &maxTokens, observer, true)
+	if err != nil {
+		if context.Cause(ctx) != nil {
+			return session.BranchSummaryOutput{Aborted: true}, nil
+		}
+		return session.BranchSummaryOutput{Error: err.Error()}, nil
+	}
+	return session.BranchSummaryOutput{Text: output.Text, Usage: output.Usage}, nil
+}
+
 // SummarizeWithRetryObserver reports only normalized retry metadata. Each
 // scheduled retry has exactly one finished event, including cancellation while
 // waiting; an attempt event means provider redispatch is beginning.
@@ -92,7 +119,7 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 	// Direct low-level callers predating the complete preparation model still
 	// provide one already-built prompt. Production inputs always carry Settings.
 	if !input.Settings.Enabled && len(input.MessagesToSummarize) == 0 && len(input.TurnPrefixMessages) == 0 {
-		return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, s.request.Stream.MaxTokens, observer)
+		return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, s.request.Stream.MaxTokens, observer, false)
 	}
 	historyBudget := fractionBudget(input.Settings.ReserveTokens, 4, 5)
 	prefixBudget := fractionBudget(input.Settings.ReserveTokens, 1, 2)
@@ -100,13 +127,13 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		historyText := "No prior history."
 		var historyUsage *session.CompactionUsage
 		if len(input.MessagesToSummarize) > 0 {
-			history, err := s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer)
+			history, err := s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer, false)
 			if err != nil {
 				return session.SummaryOutput{}, err
 			}
 			historyText, historyUsage = history.Text, history.Usage
 		}
-		prefix, err := s.summarizeCall(ctx, input.SystemPrompt, input.TurnPrefixPrompt, &prefixBudget, observer)
+		prefix, err := s.summarizeCall(ctx, input.SystemPrompt, input.TurnPrefixPrompt, &prefixBudget, observer, false)
 		if err != nil {
 			return session.SummaryOutput{}, fmt.Errorf("turn prefix summarization: %w", err)
 		}
@@ -122,7 +149,7 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 			Usage: usage,
 		}, nil
 	}
-	return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer)
+	return s.summarizeCall(ctx, input.SystemPrompt, input.Prompt, &historyBudget, observer, false)
 }
 
 func fractionBudget(reserve, numerator, denominator uint64) uint64 {
@@ -130,7 +157,7 @@ func fractionBudget(reserve, numerator, denominator uint64) uint64 {
 	return budget
 }
 
-func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, prompt string, maxTokens *uint64, observer RetryObserver) (session.SummaryOutput, error) {
+func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, prompt string, maxTokens *uint64, observer RetryObserver, allowEmpty bool) (session.SummaryOutput, error) {
 	timestamp := s.now().UTC()
 	summarySessionID, generationErr := session.NewSessionID(timestamp)
 	if generationErr != nil {
@@ -214,7 +241,7 @@ func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, pro
 			finishRetry(kind, status, false, failureReason, errorMessage)
 			return session.SummaryOutput{}, fmt.Errorf("summary stream: %w", streamErr)
 		}
-		text, usage, err := summaryTerminal(terminal)
+		text, usage, err := summaryTerminal(terminal, allowEmpty)
 		if err != nil {
 			if kind == 0 {
 				kind = FailureInvalidResponse
@@ -365,7 +392,7 @@ func (s *ContextSummarizer) collectAttempt(ctx context.Context, request Request)
 	return terminal, nil
 }
 
-func summaryTerminal(terminal llm.AssistantTerminal) (string, llm.Usage, error) {
+func summaryTerminal(terminal llm.AssistantTerminal, allowEmpty bool) (string, llm.Usage, error) {
 	textFromBlocks := func(blocks []llm.AssistantBlock) string {
 		text := make([]string, 0, len(blocks))
 		for _, block := range blocks {
@@ -378,19 +405,19 @@ func summaryTerminal(terminal llm.AssistantTerminal) (string, llm.Usage, error) 
 	switch value := terminal.(type) {
 	case llm.AssistantTextMessage:
 		text := textFromBlocks(value.Blocks())
-		if strings.TrimSpace(text) == "" {
+		if !allowEmpty && strings.TrimSpace(text) == "" {
 			return "", llm.Usage{}, errors.New("summary response was empty")
 		}
 		return text, value.Usage(), nil
 	case llm.AssistantRichMessage:
 		text := textFromBlocks(value.Blocks())
-		if strings.TrimSpace(text) == "" {
+		if !allowEmpty && strings.TrimSpace(text) == "" {
 			return "", llm.Usage{}, errors.New("summary response was empty")
 		}
 		return text, value.Usage(), nil
 	case llm.AssistantToolUseMessage:
 		text := textFromBlocks(value.Blocks())
-		if strings.TrimSpace(text) == "" {
+		if !allowEmpty && strings.TrimSpace(text) == "" {
 			return "", llm.Usage{}, errors.New("summary response was empty")
 		}
 		return text, value.Usage(), nil

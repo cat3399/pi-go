@@ -55,6 +55,43 @@ func TestCompactionSettingsDefaultsAndExplicitFalseMatchPi(t *testing.T) {
 	}
 }
 
+func TestBranchSummarySettingsDefaultMergeAndPersistence(t *testing.T) {
+	if got := (BranchSummarySettings{}).ReserveTokensOrDefault(); got != 16_384 {
+		t.Fatalf("default reserve=%d", got)
+	}
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"branchSummary":{"reserveTokens":123,"skipPrompt":true,"future":"kept"}}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"branchSummary":{"reserveTokens":0}}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings.BranchSummary
+	if settings.ReserveTokensOrDefault() != 0 || settings.SkipPrompt == nil || !*settings.SkipPrompt {
+		t.Fatalf("merged settings=%#v", settings)
+	}
+	zero, skip := uint64(0), false
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.BranchSummary.ReserveTokens = &zero
+		settings.BranchSummary.SkipPrompt = &skip
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	branch := root["branchSummary"].(map[string]any)
+	if branch["reserveTokens"] != float64(0) || branch["skipPrompt"] != false || branch["future"] != "kept" {
+		t.Fatalf("persisted branch settings=%#v", branch)
+	}
+}
+
 func TestRetrySettingsDefaultsExplicitZerosAndFieldLevelProjectMerge(t *testing.T) {
 	defaults := (RetrySettings{})
 	if !defaults.EnabledOrDefault() || defaults.MaxRetriesOrDefault() != 3 || defaults.BaseDelayMSOrDefault() != 2_000 {

@@ -105,7 +105,23 @@ type Settings struct {
 	DefaultThinkingLevel provider.ThinkingLevel
 	EnabledModels        []string
 	Compaction           CompactionSettings
+	BranchSummary        BranchSummarySettings
 	Retry                RetrySettings
+}
+
+// BranchSummarySettings mirrors pi's settings.branchSummary. SkipPrompt is
+// retained for the later interactive layer even though core navigateTree is
+// explicitly directed by its caller.
+type BranchSummarySettings struct {
+	ReserveTokens *uint64 `json:"reserveTokens,omitempty"`
+	SkipPrompt    *bool   `json:"skipPrompt,omitempty"`
+}
+
+func (s BranchSummarySettings) ReserveTokensOrDefault() uint64 {
+	if s.ReserveTokens == nil {
+		return 16_384
+	}
+	return *s.ReserveTokens
 }
 
 // CompactionSettings preserves optionality so project settings can override
@@ -353,6 +369,9 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	putOptionalSettingsObject(root, "compaction", map[string]json.RawMessage{
 		"enabled": optionalBoolJSON(current.Compaction.Enabled), "reserveTokens": optionalUint64JSON(current.Compaction.ReserveTokens),
 		"keepRecentTokens": optionalUint64JSON(current.Compaction.KeepRecentTokens),
+	})
+	putOptionalSettingsObject(root, "branchSummary", map[string]json.RawMessage{
+		"reserveTokens": optionalUint64JSON(current.BranchSummary.ReserveTokens), "skipPrompt": optionalBoolJSON(current.BranchSummary.SkipPrompt),
 	})
 	putOptionalSettingsObject(root, "retry", map[string]json.RawMessage{
 		"enabled": optionalBoolJSON(current.Retry.Enabled), "maxRetries": optionalUint64JSON(current.Retry.MaxRetries),
@@ -885,6 +904,11 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 			return s, Diagnostic{label, "compaction", "must be an object with enabled, reserveTokens, and keepRecentTokens"}
 		}
 	}
+	if raw, ok := root["branchSummary"]; ok {
+		if err := json.Unmarshal(raw, &s.BranchSummary); err != nil {
+			return s, Diagnostic{label, "branchSummary", "must be an object with reserveTokens and skipPrompt"}
+		}
+	}
 	if raw, ok := root["retry"]; ok {
 		if err := json.Unmarshal(raw, &s.Retry); err != nil {
 			return s, Diagnostic{label, "retry", "must be an object with enabled, maxRetries, and baseDelayMs"}
@@ -935,6 +959,12 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.Compaction.KeepRecentTokens != nil {
 		out.Compaction.KeepRecentTokens = cloneUint64Pointer(override.Compaction.KeepRecentTokens)
+	}
+	if override.BranchSummary.ReserveTokens != nil {
+		out.BranchSummary.ReserveTokens = cloneUint64Pointer(override.BranchSummary.ReserveTokens)
+	}
+	if override.BranchSummary.SkipPrompt != nil {
+		out.BranchSummary.SkipPrompt = cloneBoolPointer(override.BranchSummary.SkipPrompt)
 	}
 	if override.Retry.Enabled != nil {
 		out.Retry.Enabled = cloneBoolPointer(override.Retry.Enabled)
@@ -1740,6 +1770,8 @@ func cloneSettings(s Settings) Settings {
 	s.Compaction.Enabled = cloneBoolPointer(s.Compaction.Enabled)
 	s.Compaction.ReserveTokens = cloneUint64Pointer(s.Compaction.ReserveTokens)
 	s.Compaction.KeepRecentTokens = cloneUint64Pointer(s.Compaction.KeepRecentTokens)
+	s.BranchSummary.ReserveTokens = cloneUint64Pointer(s.BranchSummary.ReserveTokens)
+	s.BranchSummary.SkipPrompt = cloneBoolPointer(s.BranchSummary.SkipPrompt)
 	s.Retry.Enabled = cloneBoolPointer(s.Retry.Enabled)
 	s.Retry.MaxRetries = cloneUint64Pointer(s.Retry.MaxRetries)
 	s.Retry.BaseDelayMS = cloneUint64Pointer(s.Retry.BaseDelayMS)
