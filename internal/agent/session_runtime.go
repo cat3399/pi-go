@@ -42,6 +42,9 @@ type SessionConfig struct {
 	// model selected by a concrete turn. It is invoked outside session locks.
 	ResolveStreamOptions func(context.Context, provider.Model) (provider.StreamOptions, error)
 	Hooks                Hooks
+	// SessionStartEvent selects the lifecycle reason emitted after construction.
+	// Nil preserves the ordinary process-start behavior.
+	SessionStartEvent *SessionStartHookEvent
 
 	ToolExecution     ToolExecutionMode
 	TransformContext  ContextTransform
@@ -334,7 +337,11 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		unsubscribeControl()
 	}
 	if s.hooks.SessionStart != nil {
-		if hookErr := s.hooks.SessionStart(context.Background(), SessionStartHookEvent{Reason: SessionStartup}); hookErr != nil {
+		startEvent := SessionStartHookEvent{Reason: SessionStartup}
+		if config.SessionStartEvent != nil {
+			startEvent = cloneSessionStartHookEvent(*config.SessionStartEvent)
+		}
+		if hookErr := s.hooks.SessionStart(context.Background(), startEvent); hookErr != nil {
 			s.loopUnsubscribe()
 			return nil, hookErr
 		}
@@ -1701,6 +1708,24 @@ func (s *AgentSession) reloadAgentMessagesFromSession() error {
 	return s.loop.SetMessages(s.sessionManager.BuildContext().AgentMessages())
 }
 
+// ReloadMessagesFromSession rebuilds the in-memory agent state from the
+// manager's selected branch. Runtime calls this after an explicit new-session
+// setup callback has populated the manager.
+func (s *AgentSession) ReloadMessagesFromSession() error {
+	if s == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed || s.closing {
+		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
+	}
+	if s.run != nil {
+		return fmt.Errorf("%w: cannot reload messages while the agent is running", ErrInvalidRun)
+	}
+	return s.reloadAgentMessagesFromSession()
+}
+
 func (s *AgentSession) afterCompaction(ctx context.Context, result session.CompactResult, reason CompactionReason, willRetry bool) {
 	if hook := s.hooks.SessionCompact; hook != nil {
 		firstKept, tokensBefore := result.Input.FirstKeptEntryID, result.Input.TokensBefore
@@ -2285,9 +2310,49 @@ func (s *AgentSession) Subscribe(observer SessionObserver) func() {
 	}
 }
 
-// Close first settles/cancels work, detaches event delivery, and closes the
-// owned SessionManager. It is safe to call repeatedly.
-func (s *AgentSession) Close(ctx context.Context) error {
+// SessionShutdownOptions names the real lifecycle boundary used by the
+// transport-neutral runtime. BeforeInvalidate runs synchronously after the
+// session_shutdown hook and before the session is made stale.
+type SessionShutdownOptions struct {
+	Event            SessionShutdownHookEvent
+	BeforeInvalidate func()
+}
+
+// PrepareSessionSwitch emits session_before_switch through the current
+// session's hook set. It intentionally runs before the runtime opens or creates
+// replacement resources.
+func (s *AgentSession) PrepareSessionSwitch(ctx context.Context, event SessionBeforeSwitchEvent) (SessionBeforeSwitchResult, error) {
+	if err := s.rejectIfClosed(); err != nil {
+		return SessionBeforeSwitchResult{}, err
+	}
+	if s.hooks.SessionBeforeSwitch == nil {
+		return SessionBeforeSwitchResult{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.hooks.SessionBeforeSwitch(ctx, event)
+}
+
+// PrepareSessionFork emits session_before_fork before entry validation, matching
+// the original runtime's cancellation boundary.
+func (s *AgentSession) PrepareSessionFork(ctx context.Context, event SessionBeforeForkEvent) (SessionBeforeForkResult, error) {
+	if err := s.rejectIfClosed(); err != nil {
+		return SessionBeforeForkResult{}, err
+	}
+	if s.hooks.SessionBeforeFork == nil {
+		return SessionBeforeForkResult{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.hooks.SessionBeforeFork(ctx, event)
+}
+
+// Shutdown settles active work, emits the requested shutdown event, invokes
+// the final synchronous invalidation callback, then disposes the owned manager
+// and event subscriptions. It is safe to call repeatedly after success.
+func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOptions) error {
 	if s == nil {
 		return nil
 	}
@@ -2309,12 +2374,15 @@ func (s *AgentSession) Close(ctx context.Context) error {
 		return err
 	}
 	if s.hooks.SessionShutdown != nil {
-		if hookErr := s.hooks.SessionShutdown(ctx, SessionShutdownHookEvent{Reason: ShutdownQuit}); hookErr != nil {
+		if hookErr := s.hooks.SessionShutdown(ctx, cloneSessionShutdownHookEvent(options.Event)); hookErr != nil {
 			s.lifecycleMu.Lock()
 			s.closing = false
 			s.lifecycleMu.Unlock()
 			return hookErr
 		}
+	}
+	if options.BeforeInvalidate != nil {
+		options.BeforeInvalidate()
 	}
 	if managerErr := s.sessionManager.Close(); managerErr != nil {
 		return managerErr
@@ -2332,6 +2400,21 @@ func (s *AgentSession) Close(ctx context.Context) error {
 		unsubscribe()
 	}
 	return nil
+}
+
+// Close is the process-level compatibility path and therefore emits quit.
+func (s *AgentSession) Close(ctx context.Context) error {
+	return s.Shutdown(ctx, SessionShutdownOptions{Event: SessionShutdownHookEvent{Reason: ShutdownQuit}})
+}
+
+func cloneSessionStartHookEvent(event SessionStartHookEvent) SessionStartHookEvent {
+	event.PreviousSessionFile = cloneStringPointer(event.PreviousSessionFile)
+	return event
+}
+
+func cloneSessionShutdownHookEvent(event SessionShutdownHookEvent) SessionShutdownHookEvent {
+	event.TargetSessionFile = cloneStringPointer(event.TargetSessionFile)
+	return event
 }
 
 func cloneHeaderMap(values map[string]string) map[string]string {

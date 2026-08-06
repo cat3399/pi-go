@@ -610,15 +610,41 @@ func optionalManagerBool(value *bool) (bool, bool) {
 func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	next, err := m.cloneBranchedManagerLocked(ctx, leafID)
+	if err != nil {
+		return "", false, err
+	}
+	old := m.store
+	m.cwd, m.sessionDir, m.sessionFile = next.cwd, next.sessionDir, next.sessionFile
+	m.persist, m.flushed, m.runtime, m.store = next.persist, next.flushed, next.runtime, next.store
+	_ = old.Close()
+	return m.sessionFile, m.sessionFile != "", nil
+}
+
+// CloneBranchedSession creates an independently owned manager containing the
+// selected root-to-leaf path without mutating the source manager. This is the
+// Go ownership-safe equivalent of opening the current JSONL a second time
+// before createBranchedSession: an open SessionManager already owns the sole
+// writer lock for its file.
+func (m *SessionManager) CloneBranchedSession(ctx context.Context, leafID string) (*SessionManager, error) {
+	if m == nil {
+		return nil, fmt.Errorf("%w: nil session manager", ErrInvalidSession)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cloneBranchedManagerLocked(ctx, leafID)
+}
+
+func (m *SessionManager) cloneBranchedManagerLocked(ctx context.Context, leafID string) (*SessionManager, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if cause := context.Cause(ctx); cause != nil {
-		return "", false, fmt.Errorf("%w: %v", ErrAppendCanceled, cause)
+		return nil, fmt.Errorf("%w: %v", ErrAppendCanceled, cause)
 	}
 	path, err := m.store.PathTo(leafID)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	resolvedLabels := resolvedManagerLabels(m.store.Entries())
 	retained := make([]Entry, 0, len(path))
@@ -630,7 +656,7 @@ func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID strin
 		}
 		reparented, err := reparentManagerEntry(entry, parentID, hasParent)
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
 		retained = append(retained, reparented)
 		parentID, hasParent = reparented.ID(), true
@@ -642,7 +668,7 @@ func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID strin
 	}
 	header, err := newManagerHeader(m.cwd, NewSessionOptions{ParentSession: parentSession}, m.runtime)
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
 	retainedIDs := make(map[string]struct{}, len(retained))
 	for _, entry := range retained {
@@ -654,16 +680,16 @@ func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID strin
 		}
 		id, err := nextManagerEntryID(m.runtime, retainedIDs)
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
 		labelCopy := label.label
 		raw, err := encodePayloadEntry(id, parentID, hasParent, label.timestamp, LabelPayload{TargetID: label.targetID, Label: &labelCopy})
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
 		labelEntry, err := decodeEntry(raw)
 		if err != nil {
-			return "", false, err
+			return nil, err
 		}
 		retained = append(retained, labelEntry)
 		retainedIDs[id] = struct{}{}
@@ -676,17 +702,16 @@ func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID strin
 		if managerHasAssistant(retained) {
 			durable, err := createSessionSnapshot(newFile, header, retained, m.runtime)
 			if err != nil {
-				return "", false, err
+				return nil, err
 			}
 			next = durable
 		}
 	}
-	old := m.store
-	m.store = next
-	m.sessionFile = newFile
-	m.flushed = m.persist && managerHasAssistant(retained)
-	_ = old.Close()
-	return newFile, newFile != "", nil
+	return &SessionManager{
+		cwd: m.cwd, sessionDir: m.sessionDir, sessionFile: newFile,
+		persist: m.persist, flushed: m.persist && managerHasAssistant(retained),
+		runtime: m.runtime, store: next,
+	}, nil
 }
 
 type managerLabel struct {

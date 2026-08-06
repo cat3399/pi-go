@@ -334,6 +334,119 @@ func TestSessionManagerCreateBranchedSessionRechainsLabelsAndDefers(t *testing.T
 	}
 }
 
+func TestSessionManagerCloneBranchedSessionPreservesTreeLabelsAndIndependentOwnership(t *testing.T) {
+	directory := t.TempDir()
+	source, err := CreateSessionManager(directory, directory, NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceClosed := false
+	t.Cleanup(func() {
+		if !sourceClosed {
+			if err := source.Close(); err != nil {
+				t.Errorf("close source manager: %v", err)
+			}
+		}
+	})
+	root, err := source.AppendLLMMessage(context.Background(), mustUserMessage(t, "root", time.UnixMilli(1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootAnswer, err := source.AppendLLMMessage(context.Background(), managerAssistant(t, "root answer", time.UnixMilli(2)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, err := source.AppendLLMMessage(context.Background(), mustUserMessage(t, "left", time.UnixMilli(3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := "left branch"
+	if _, err := source.AppendLabelChange(context.Background(), left.ID(), &label); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Branch(rootAnswer.ID()); err != nil {
+		t.Fatal(err)
+	}
+	right, err := source.AppendLLMMessage(context.Background(), mustUserMessage(t, "right", time.UnixMilli(4)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceFile, ok := source.SessionFile()
+	if !ok {
+		t.Fatal("source manager has no session file")
+	}
+
+	clone, err := source.CloneBranchedSession(context.Background(), left.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloneClosed := false
+	t.Cleanup(func() {
+		if !cloneClosed {
+			if err := clone.Close(); err != nil {
+				t.Errorf("close branch clone: %v", err)
+			}
+		}
+	})
+	cloneFile, ok := clone.SessionFile()
+	if !ok || cloneFile == sourceFile {
+		t.Fatalf("clone file=%q ok=%v source=%q", cloneFile, ok, sourceFile)
+	}
+	if parent, ok := clone.Header().ParentSession(); !ok || parent != sourceFile {
+		t.Fatalf("clone parentSession=%q ok=%v, want %q", parent, ok, sourceFile)
+	}
+	if got, ok := clone.Label(left.ID()); !ok || got != label {
+		t.Fatalf("clone label=%q ok=%v", got, ok)
+	}
+	forest := clone.Tree()
+	if len(forest) != 1 || forest[0].Entry.ID() != root.ID() || len(forest[0].Children) != 1 {
+		t.Fatalf("clone roots=%#v", forest)
+	}
+	answerNode := forest[0].Children[0]
+	if answerNode.Entry.ID() != rootAnswer.ID() || len(answerNode.Children) != 1 {
+		t.Fatalf("clone answer node=%#v", answerNode)
+	}
+	leftNode := answerNode.Children[0]
+	if leftNode.Entry.ID() != left.ID() || leftNode.Label == nil || *leftNode.Label != label || len(leftNode.Children) != 1 || leftNode.Children[0].Entry.Type() != "label" {
+		t.Fatalf("clone selected node=%#v", leftNode)
+	}
+	if path, err := source.BranchPath(""); err != nil || len(path) != 3 || path[2].ID() != right.ID() {
+		t.Fatalf("source branch after clone=%#v err=%v", path, err)
+	}
+
+	if err := clone.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cloneClosed = true
+	if _, err := source.AppendLLMMessage(context.Background(), managerAssistant(t, "source continues", time.UnixMilli(5))); err != nil {
+		t.Fatalf("source append after clone close: %v", err)
+	}
+
+	secondClone, err := source.CloneBranchedSession(context.Background(), right.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondCloneClosed := false
+	t.Cleanup(func() {
+		if !secondCloneClosed {
+			if err := secondClone.Close(); err != nil {
+				t.Errorf("close second branch clone: %v", err)
+			}
+		}
+	})
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sourceClosed = true
+	if _, err := secondClone.AppendLLMMessage(context.Background(), managerAssistant(t, "clone continues", time.UnixMilli(6))); err != nil {
+		t.Fatalf("clone append after source close: %v", err)
+	}
+	if err := secondClone.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondCloneClosed = true
+}
+
 func TestSessionDiscoveryContinueRecentAndListSorting(t *testing.T) {
 	directory := t.TempDir()
 	projectA := filepath.Join(directory, "project-a")

@@ -321,9 +321,9 @@ type SessionTreeEvent struct {
 }
 type SessionTreeHook func(context.Context, SessionTreeEvent) error
 
-// Switch and fork are owned by the future session-runtime coordinator. Their
-// exact extension contracts live here now; AgentSession does not fabricate an
-// execution boundary for operations it does not own.
+// Switch and fork are owned by the transport-neutral agentruntime.Runtime.
+// Their exact extension contracts live here so Runtime can emit them through
+// AgentSession without reaching into its private hook state.
 type SessionSwitchReason string
 
 const (
