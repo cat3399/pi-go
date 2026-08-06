@@ -24,6 +24,8 @@ const entryIDAttempts = 100
 
 var validSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 
+var errIDGeneratorCallbackPanicked = errors.New("session entry ID generator callback panicked")
+
 type runtimeConfig struct {
 	now        Clock
 	newEntryID IDGenerator
@@ -715,7 +717,44 @@ func normalizeRuntime(now Clock, newEntryID IDGenerator) runtimeConfig {
 	if newEntryID == nil {
 		newEntryID = func() (string, error) { return randomHex(4) }
 	}
-	return runtimeConfig{now: now, newEntryID: newEntryID}
+	return runtimeConfig{now: panicSafeClock(now), newEntryID: panicSafeIDGenerator(newEntryID)}
+}
+
+// panicSafeClock converts a host callback panic into the clock's existing
+// invalid-value channel. Call sites already reject zero timestamps with their
+// operation-specific ErrInvalidSession/ErrInvalidEntry classification.
+func panicSafeClock(clock Clock) Clock {
+	return func() (value time.Time) {
+		completed := false
+		defer func() {
+			if !completed {
+				_ = recover()
+				value = time.Time{}
+			}
+		}()
+		value = clock()
+		completed = true
+		return value
+	}
+}
+
+// panicSafeIDGenerator preserves ordinary callback results and errors. Panic
+// payloads are deliberately discarded because host panic text may contain
+// credentials or other sensitive data; nextEntryID retains ErrIDGeneration.
+func panicSafeIDGenerator(generator IDGenerator) IDGenerator {
+	return func() (id string, err error) {
+		completed := false
+		defer func() {
+			if !completed {
+				_ = recover()
+				id = ""
+				err = errIDGeneratorCallbackPanicked
+			}
+		}()
+		id, err = generator()
+		completed = true
+		return id, err
+	}
 }
 
 func newSessionID(timestamp time.Time) (string, error) {
