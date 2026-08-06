@@ -99,9 +99,10 @@ type modelOverride struct {
 }
 
 type Settings struct {
-	DefaultProvider string
-	DefaultModel    string
-	EnabledModels   []string
+	DefaultProvider      string
+	DefaultModel         string
+	DefaultThinkingLevel provider.ThinkingLevel
+	EnabledModels        []string
 }
 
 type Snapshot struct {
@@ -287,6 +288,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	}
 	putString(root, "defaultProvider", current.DefaultProvider)
 	putString(root, "defaultModel", current.DefaultModel)
+	putString(root, "defaultThinkingLevel", string(current.DefaultThinkingLevel))
 	if current.EnabledModels == nil {
 		delete(root, "enabledModels")
 	} else {
@@ -325,126 +327,71 @@ type Resolution struct {
 	Diagnostics []Diagnostic
 }
 
-// Resolve applies exact provider/model selection first, otherwise settings'
-// default then the ordered enabledModels scope. It is intentionally exact: fuzzy
-// selection and cycling need catalog completeness and remain deferred.
+// Resolve is a credential-blind compatibility entry point. Explicit selections
+// use the same CLI resolver as pi; implicit selections use the same new-session
+// scope/settings/provider-default order. Production code that knows credentials
+// and registered routes must call ResolveInitialModel with real predicates.
 func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 	s := r.Snapshot()
 	providerID, modelID := strings.TrimSpace(selection.Provider), strings.TrimSpace(selection.Model)
-	if modelID != "" && providerID == "" {
-		if p, id, ok := splitKnownProvider(modelID, s.Models); ok {
-			providerID, modelID = p, id
-		}
-	}
 	if modelID != "" {
-		matches := filterModels(s.Models, providerID, modelID)
-		if len(matches) == 1 {
-			return Resolution{Model: matches[0]}, nil
+		resolved := ResolveCLIModel(CLIModelOptions{Provider: providerID, Model: modelID, AllModels: s.Models})
+		if resolved.Error != "" || resolved.Model == nil {
+			return Resolution{}, fmt.Errorf("%w: %s", ErrNotFound, resolved.Error)
 		}
-		if len(matches) > 1 {
-			return Resolution{}, fmt.Errorf("%w: bare model %q is ambiguous", ErrNotFound, modelID)
+		selected := r.applyConfiguredOverride(*resolved.Model)
+		var diagnostics []Diagnostic
+		if resolved.Warning != "" {
+			diagnostics = append(diagnostics, Diagnostic{Source: "selection", Path: modelID, Message: resolved.Warning})
 		}
-		// An explicit provider is an intentional custom-model request. Derive its
-		// transport metadata from the provider baseline, never from a guessed API.
-		if providerID != "" {
-			if custom, ok := r.customModel(providerID, modelID); ok {
-				return Resolution{Model: custom}, nil
-			}
-		}
-		return Resolution{}, fmt.Errorf("%w: %s", ErrNotFound, reference(providerID, modelID))
+		return Resolution{Model: selected, Diagnostics: diagnostics}, nil
 	}
 	if providerID != "" {
 		return Resolution{}, fmt.Errorf("%w: provider requires a model", ErrInvalidConfig)
 	}
-	if s.Settings.DefaultModel != "" {
-		p, defaultModel := strings.TrimSpace(s.Settings.DefaultProvider), strings.TrimSpace(s.Settings.DefaultModel)
-		if p == "" {
-			if inferredProvider, inferredModel, ok := splitKnownProvider(defaultModel, s.Models); ok {
-				p, defaultModel = inferredProvider, inferredModel
-			}
-		}
-		matches := filterModels(s.Models, p, defaultModel)
-		if len(matches) == 1 {
-			return Resolution{Model: matches[0]}, nil
-		}
-		if p != "" {
-			if custom, ok := r.customModel(p, defaultModel); ok {
-				return Resolution{Model: custom}, nil
-			}
-		}
-		return Resolution{}, fmt.Errorf("%w: settings default %s", ErrNotFound, reference(p, defaultModel))
-	}
-	if len(s.Settings.EnabledModels) > 0 {
-		scoped, diagnostics := scope(s.Models, s.Settings.EnabledModels)
-		if len(scoped) > 0 {
-			return Resolution{Model: scoped[0], Diagnostics: diagnostics}, nil
-		}
-		return Resolution{Diagnostics: diagnostics}, fmt.Errorf("%w: no enabled model", ErrUnavailable)
-	}
-	for _, m := range s.Models {
-		if m.Provider == OpenAIProviderID && m.ID == DefaultOpenAIModel {
-			return Resolution{Model: m}, nil
+	// The current production assembly still calls this compatibility method
+	// before the session-aware factory exists. Preserve its explicit custom
+	// settings path without leaking that behavior into ResolveInitialModel,
+	// whose saved-default semantics remain identical to pi.
+	if len(s.Settings.EnabledModels) == 0 && s.Settings.DefaultProvider != "" && s.Settings.DefaultModel != "" &&
+		exactProviderModel(s.Models, s.Settings.DefaultProvider, s.Settings.DefaultModel) == nil {
+		resolved := ResolveCLIModel(CLIModelOptions{Provider: s.Settings.DefaultProvider, Model: s.Settings.DefaultModel, AllModels: s.Models})
+		if resolved.Model != nil && resolved.Error == "" {
+			return Resolution{Model: r.applyConfiguredOverride(*resolved.Model)}, nil
 		}
 	}
-	return Resolution{}, fmt.Errorf("%w: no baseline model", ErrNotFound)
+	thinking := s.Settings.DefaultThinkingLevel
+	var thinkingPointer *provider.ThinkingLevel
+	if thinking != "" {
+		thinkingPointer = &thinking
+	}
+	initial := ResolveInitialModel(InitialModelOptions{
+		ScopePatterns: s.Settings.EnabledModels, DefaultProvider: s.Settings.DefaultProvider,
+		DefaultModelID: s.Settings.DefaultModel, DefaultThinkingLevel: thinkingPointer, AllModels: s.Models,
+		Availability: Availability{HasConfiguredAuth: func(string) bool { return true }, SupportsRoute: func(Model) bool { return true }},
+	})
+	diagnostics := make([]Diagnostic, 0, len(initial.Scope.Diagnostics))
+	for _, diagnostic := range initial.Scope.Diagnostics {
+		diagnostics = append(diagnostics, Diagnostic{Source: "settings", Path: "enabledModels", Message: diagnostic.Message})
+	}
+	if initial.Model == nil {
+		return Resolution{Diagnostics: diagnostics}, fmt.Errorf("%w: no available model", ErrUnavailable)
+	}
+	return Resolution{Model: *initial.Model, Diagnostics: diagnostics}, nil
 }
 
-func reference(providerID, modelID string) string {
-	if providerID == "" {
-		return modelID
+func (r *Runtime) applyConfiguredOverride(selected Model) Model {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	configured, ok := r.providers[canonicalKey(selected.Provider)]
+	if !ok {
+		return selected
 	}
-	return providerID + "/" + modelID
-}
-func filterModels(models []Model, providerID, modelID string) []Model {
-	var out []Model
-	for _, m := range models {
-		if (providerID == "" || strings.EqualFold(m.Provider, providerID)) && strings.EqualFold(m.ID, modelID) {
-			out = append(out, m)
-		}
+	override, ok := configured.overrides[canonicalKey(selected.ID)]
+	if !ok {
+		return selected
 	}
-	return out
-}
-func splitKnownProvider(value string, models []Model) (providerID, modelID string, ok bool) {
-	p, id, found := strings.Cut(value, "/")
-	if !found || p == "" || id == "" {
-		return "", value, false
-	}
-	for _, m := range models {
-		if strings.EqualFold(m.Provider, p) {
-			return m.Provider, id, true
-		}
-	}
-	return "", value, false
-}
-func scope(models []Model, patterns []string) ([]Model, []Diagnostic) {
-	var out []Model
-	var ds []Diagnostic
-	for _, p := range patterns {
-		matches := filterPattern(models, p)
-		if len(matches) == 0 {
-			ds = append(ds, Diagnostic{Source: "settings", Path: "enabledModels", Message: "no model matches configured scope"})
-			continue
-		}
-		for _, m := range matches {
-			duplicate := false
-			for _, x := range out {
-				if x.Provider == m.Provider && x.ID == m.ID {
-					duplicate = true
-				}
-			}
-			if !duplicate {
-				out = append(out, m)
-			}
-		}
-	}
-	return out, ds
-}
-func filterPattern(models []Model, pattern string) []Model {
-	pattern = strings.TrimSpace(pattern)
-	if p, id, ok := splitKnownProvider(pattern, models); ok {
-		return filterModels(models, p, id)
-	}
-	return filterModels(models, "", pattern)
+	return applyModelOverride(selected, override)
 }
 
 func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings) Snapshot {
@@ -533,32 +480,8 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 	return Snapshot{Models: models, Providers: ids, Settings: cloneSettings(settings)}
 }
 
-// customModel derives only from the provider's canonical default. v0.1 has one
-// complete builtin provider baseline: openai/gpt-5.5. A configured provider
-// without a migrated canonical default fails closed instead of borrowing an
-// arbitrary configured model's request metadata.
-func (r *Runtime) customModel(providerID, modelID string) (Model, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	providerID = canonicalKey(providerID)
-	if providerID != OpenAIProviderID {
-		return Model{}, false
-	}
-	model := builtinOpenAIModel(modelID)
-	if configured, ok := r.providers[providerID]; ok {
-		if configured.API != "" {
-			model.API = configured.API
-		}
-		if configured.BaseURL != "" {
-			model.BaseURL = configured.BaseURL
-		}
-		if override, ok := configured.overrides[canonicalKey(modelID)]; ok {
-			model = applyModelOverride(model, override)
-		}
-	}
-	return model, true
-}
-
+// builtinOpenAIModel is the local seed used when no external catalog has been
+// cached. Selection policy lives in resolver.go and does not special-case it.
 func builtinOpenAIModel(modelID string) Model {
 	off := "none"
 	xhigh := "xhigh"
@@ -834,6 +757,17 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	if s.DefaultModel, err = optionalString(root, "defaultModel", ""); err != nil {
 		return s, fmt.Errorf("%w: %s", ErrInvalidConfig, label)
 	}
+	if raw, ok := root["defaultThinkingLevel"]; ok {
+		var value string
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) < 2 || trimmed[0] != '"' {
+			return s, Diagnostic{label, "defaultThinkingLevel", "must be a valid thinking level"}
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return s, Diagnostic{label, "defaultThinkingLevel", "must be a valid thinking level"}
+		}
+		s.DefaultThinkingLevel = provider.ThinkingLevel(value)
+	}
 	if raw, ok := root["enabledModels"]; ok {
 		if err := json.Unmarshal(raw, &s.EnabledModels); err != nil {
 			return s, Diagnostic{label, "enabledModels", "must be an array of strings"}
@@ -856,6 +790,9 @@ func validateSettings(s Settings, label string) error {
 	if s.DefaultModel != "" && !validValue(s.DefaultModel) {
 		return Diagnostic{label, "defaultModel", "must be a non-empty selector"}
 	}
+	if s.DefaultThinkingLevel != "" && !s.DefaultThinkingLevel.Valid() {
+		return Diagnostic{label, "defaultThinkingLevel", "must be one of off, minimal, low, medium, high, xhigh, max"}
+	}
 	return nil
 }
 func mergeSettings(base, override Settings) Settings {
@@ -865,6 +802,9 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.DefaultModel != "" {
 		out.DefaultModel = override.DefaultModel
+	}
+	if override.DefaultThinkingLevel != "" {
+		out.DefaultThinkingLevel = override.DefaultThinkingLevel
 	}
 	if override.EnabledModels != nil {
 		out.EnabledModels = append([]string(nil), override.EnabledModels...)

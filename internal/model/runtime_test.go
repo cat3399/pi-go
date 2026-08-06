@@ -186,7 +186,7 @@ func TestRuntimeOnlySelectedProviderRejectsFutureFields(t *testing.T) {
 	r, _, _ = newTestRuntime(t, `{"providers":{"openai":{"modelOverrides":{"custom":{"compat":{"token":"do-not-leak"}}}}}}`, "", false)
 	custom, err := r.Resolve(Selection{Provider: "openai", Model: "custom"})
 	if err != nil || !errors.Is(r.ValidateRoute(custom.Model), ErrUnsupported) {
-		t.Fatalf("selected custom override must fail safely: %#v, %v", custom, err)
+		t.Fatalf("selected custom override must fail safely at the compatibility boundary: %#v, %v", custom, err)
 	}
 }
 
@@ -225,34 +225,22 @@ func TestRuntimeCanonicalIdentifiersRejectDuplicatesAndApplyOverrides(t *testing
 	}
 }
 
-func TestRuntimeCustomFallbackUsesOnlyCanonicalProviderBaseline(t *testing.T) {
+func TestRuntimeCustomFallbackUsesOriginalProviderDefaultBaseline(t *testing.T) {
 	models := `{"providers":{"openai":{"api":"provider-api","baseUrl":"https://provider.invalid/v1","models":[{"id":"aaa","name":"poison","api":"poison-api","baseUrl":"https://aaa.invalid/v1","headers":{"Authorization":"aaa-secret"},"compat":{"token":"aaa-secret"},"futureOption":"aaa-secret"}]}}}`
-	for _, testCase := range []struct {
-		name      string
-		settings  string
-		selection Selection
-	}{
-		{name: "explicit custom", selection: Selection{Provider: "OPENAI", Model: "custom"}},
-		{name: "settings provider custom", settings: `{"defaultProvider":"OpEnAi","defaultModel":"custom"}`},
-		{name: "settings prefixed custom", settings: `{"defaultModel":"OPENAI/custom"}`},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			r, _, _ := newTestRuntime(t, models, testCase.settings, false)
-			resolved, err := r.Resolve(testCase.selection)
-			if err != nil {
-				t.Fatal(err)
-			}
-			model := resolved.Model
-			if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != "provider-api" || model.BaseURL != "https://provider.invalid/v1" {
-				t.Fatalf("custom baseline = %#v", model)
-			}
-			if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") {
-				t.Fatalf("custom inherited per-model metadata: %#v", model)
-			}
-			if err := r.ValidateRoute(model); err != nil {
-				t.Fatalf("clean custom route = %v", err)
-			}
-		})
+	r, _, _ := newTestRuntime(t, models, "", false)
+	resolved, err := r.Resolve(Selection{Provider: "OPENAI", Model: "custom"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := resolved.Model
+	if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != "provider-api" || model.BaseURL != "https://provider.invalid/v1" {
+		t.Fatalf("custom baseline = %#v", model)
+	}
+	if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") {
+		t.Fatalf("custom inherited non-default per-model metadata: %#v", model)
+	}
+	if err := r.ValidateRoute(model); err != nil {
+		t.Fatalf("clean custom route = %v", err)
 	}
 }
 
@@ -272,7 +260,7 @@ func TestRuntimeStrictDiagnosticsAndKeepsLastHealthySnapshot(t *testing.T) {
 }
 
 func TestRuntimeSettingsTrustPrecedenceScopesAndUnknownPreservation(t *testing.T) {
-	r, agent, cwd := newTestRuntime(t, "", `{"defaultProvider":"openai","defaultModel":"gpt-5.5","unknown":{"keep":1}}`, false)
+	r, agent, cwd := newTestRuntime(t, `{"providers":{"openai":{"models":[{"id":"project-model","api":"openai-responses"}]}}}`, `{"defaultProvider":"openai","defaultModel":"gpt-5.5","defaultThinkingLevel":"low","unknown":{"keep":1}}`, false)
 	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"defaultModel":"project-model"}`)
 	got, err := r.Resolve(Selection{})
 	if err != nil {
@@ -292,16 +280,52 @@ func TestRuntimeSettingsTrustPrecedenceScopesAndUnknownPreservation(t *testing.T
 	if got.Model.ID != "project-model" {
 		t.Fatalf("trusted project did not win: %#v", got)
 	}
-	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.EnabledModels = []string{"openai/gpt-5.5"}; return nil }); err != nil {
+	if r.Snapshot().Settings.DefaultThinkingLevel != provider.ThinkingLow {
+		t.Fatalf("default thinking was not parsed/merged: %#v", r.Snapshot().Settings)
+	}
+	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error {
+		s.EnabledModels = []string{"openai/gpt-5.5"}
+		s.DefaultThinkingLevel = provider.ThinkingHigh
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(agent, "settings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"unknown"`) {
+	if !strings.Contains(string(b), `"unknown"`) || !strings.Contains(string(b), `"defaultThinkingLevel": "high"`) {
 		t.Fatalf("unknown setting lost: %s", b)
 	}
+}
+
+func TestRuntimeSettingsDefaultThinkingValidationAndProjectOverride(t *testing.T) {
+	for _, invalid := range []string{`{"defaultThinkingLevel":"turbo"}`, `{"defaultThinkingLevel":null}`, `{"defaultThinkingLevel":1}`} {
+		if _, _, err := newTestRuntimeNoFatal(t, "", invalid, false); err == nil {
+			t.Fatalf("invalid defaultThinkingLevel was accepted: %s", invalid)
+		}
+	}
+	r, _, cwd := newTestRuntime(t, "", `{"defaultThinkingLevel":"low"}`, true)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"defaultThinkingLevel":"xhigh","future":{"keep":true}}`)
+	if err := r.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Snapshot().Settings.DefaultThinkingLevel; got != provider.ThinkingXHigh {
+		t.Fatalf("project thinking override = %q", got)
+	}
+}
+
+func newTestRuntimeNoFatal(t *testing.T, models, settings string, trusted bool) (*Runtime, string, error) {
+	t.Helper()
+	agent, cwd := t.TempDir(), t.TempDir()
+	if models != "" {
+		writeFile(t, filepath.Join(agent, "models.json"), models)
+	}
+	if settings != "" {
+		writeFile(t, filepath.Join(agent, "settings.json"), settings)
+	}
+	r, err := NewRuntime(Options{AgentDir: agent, WorkingDir: cwd, ProjectTrusted: trusted})
+	return r, cwd, err
 }
 
 func TestRuntimeScopedOrderAndUnavailableDiagnostic(t *testing.T) {
