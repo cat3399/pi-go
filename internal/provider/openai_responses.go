@@ -234,7 +234,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	}
 	streamContext, cancel := context.WithCancelCause(ctx)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
-	if sessionID := options.SessionID; sessionID != "" {
+	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone {
 		format := "openai"
 		if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SessionAffinityFormat != nil {
 			format = *compat.SessionAffinityFormat

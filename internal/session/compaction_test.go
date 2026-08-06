@@ -139,6 +139,38 @@ func TestCompactPersistsV3CheckpointAndBuildsSelectedContext(t *testing.T) {
 	}
 }
 
+func TestCompactExplicitZeroKeepRecentTokensDoesNotUseLegacyDefault(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	clock := sequenceClock(time.Date(2026, time.August, 6, 1, 2, 3, 0, time.UTC))
+	session, err := Create(filepath.Join(directory, "explicit-zero.jsonl"), CreateOptions{
+		ID: "explicit-zero", WorkingDir: directory, Now: clock, NewEntryID: sequenceIDs("one", "two", "compact"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	for _, text := range []string{"summarized", "retained"} {
+		if _, err := session.Append(context.Background(), mustUserMessage(t, text, clock()), AppendOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summarizer := &recordingSummarizer{output: SummaryOutput{Text: "explicit zero"}}
+	result, err := session.Compact(context.Background(), CompactRequest{
+		KeepRecentTokens: 0, KeepRecentTokensSet: true, Summarizer: summarizer,
+	})
+	if err != nil || !result.Committed {
+		t.Fatalf("Compact() = %#v, %v", result, err)
+	}
+	input := summarizer.input(t)
+	if got := messageTexts(input.Messages); fmt.Sprint(got) != fmt.Sprint([]string{"summarized"}) {
+		t.Fatalf("summary messages = %v", got)
+	}
+	if got := messageTexts(input.RetainedTail); fmt.Sprint(got) != fmt.Sprint([]string{"retained"}) {
+		t.Fatalf("retained messages = %v", got)
+	}
+}
+
 func TestCompactSnapshotDoesNotBlockAppendAndRejectsChangedBranch(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()

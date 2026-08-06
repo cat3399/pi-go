@@ -1628,6 +1628,141 @@ func TestAgentSessionManualCompactUsesSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestAgentSessionResolvesSummaryFromCurrentRequestSnapshot(t *testing.T) {
+	model := sessionTestModel(t)
+	transcript, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{ID: "current-summary-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transcript.Close() })
+	for _, text := range []string{"old", "recent"} {
+		message, messageErr := llm.NewUserTextMessage(text, agentTestEpoch)
+		if messageErr != nil {
+			t.Fatal(messageErr)
+		}
+		if _, appendErr := transcript.AppendLLMMessage(context.Background(), message); appendErr != nil {
+			t.Fatal(appendErr)
+		}
+	}
+	var captured agent.SummarizerResolveRequest
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingHigh,
+		Stream: provider.StreamOptions{APIKey: "stale", SessionID: "stale-session"}, KeepRecentTokens: 1,
+		ResolveStreamOptions: func(context.Context, provider.Model) (provider.StreamOptions, error) {
+			return provider.StreamOptions{APIKey: "current-key"}, nil
+		},
+		ResolveSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
+			captured = request
+			return contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+				return session.SummaryOutput{Text: "dynamic checkpoint"}, nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Compact(context.Background(), "dynamic"); err != nil {
+		t.Fatal(err)
+	}
+	if !captured.Model.Equal(model) || captured.ThinkingLevel != model.ClampThinkingLevel(provider.ThinkingHigh) ||
+		captured.Stream.APIKey != "current-key" || captured.Stream.CacheRetention != "" ||
+		captured.Stream.MaxTokens == nil || *captured.Stream.MaxTokens != agent.DefaultCompactionReserveTokens ||
+		captured.Stream.SessionID != "stale-session" {
+		t.Fatalf("summary request snapshot = %#v", captured)
+	}
+}
+
+func TestAgentSessionAutoCompactionDoesNotStartWhenPreparationFails(t *testing.T) {
+	model := sessionTestModel(t)
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "answer")), SessionManager: newSessionManager(t), Model: model,
+		ContextWindow: 1, KeepRecentTokens: 100_000,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			return session.SummaryOutput{Text: "must not run"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compactionEvents int
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if event.Type() == agent.CompactionStartEventType || event.Type() == agent.CompactionEndEventType {
+			compactionEvents++
+		}
+	})
+	if result, err := runtime.Run(context.Background(), "too small to compact"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	if compactionEvents != 0 {
+		t.Fatalf("preparation failure emitted %d compaction events", compactionEvents)
+	}
+}
+
+func TestAgentSessionExplicitZeroCompactionReserveDoesNotUseDefaultOrModelMaxTokens(t *testing.T) {
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "independent-reserve",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 100, MaxTokens: 99,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{mustTextBlock(t, "below configured threshold")}, llm.FinishStop, mustUsage(t, 50, 0), agentTestEpoch,
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summaries atomic.Uint32
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, terminal), SessionManager: newSessionManager(t), Model: model,
+		ContextReserve: 0, ContextReserveSet: true, KeepRecentTokens: 1,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			summaries.Add(1)
+			return session.SummaryOutput{Text: "unexpected"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Run(context.Background(), "remain below 100 tokens"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run() = %#v, %v", result, err)
+	}
+	if summaries.Load() != 0 {
+		t.Fatalf("model maxTokens replaced compaction reserve: summaries=%d", summaries.Load())
+	}
+}
+
+func TestAgentSessionExplicitZeroKeepRecentTokensReachesCompactionCut(t *testing.T) {
+	model := sessionTestModel(t)
+	transcript := newSessionManager(t)
+	for _, text := range []string{"summarize this", "keep this"} {
+		message, err := llm.NewUserTextMessage(text, agentTestEpoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model,
+		KeepRecentTokens: 0, KeepRecentTokensSet: true,
+		Summarizer: contextRetrySummarizerFunc(func(_ context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
+			if len(input.Messages) != 1 || len(input.RetainedTail) != 1 {
+				t.Fatalf("explicit-zero compaction split = %d/%d", len(input.Messages), len(input.RetainedTail))
+			}
+			return session.SummaryOutput{Text: "zero keep checkpoint"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Compact(context.Background(), "zero keep"); err != nil || !result.Committed {
+		t.Fatalf("Compact() = %#v, %v", result, err)
+	}
+}
+
 func TestAgentSessionManualCompactSharesGateAndAbort(t *testing.T) {
 	model := sessionTestModel(t)
 	transcript := newSessionManager(t)

@@ -157,7 +157,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	}
 	streamCtx, cancel := context.WithCancelCause(ctx)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
-	if sessionID := options.SessionID; sessionID != "" && completionsSendSessionAffinity(request.Model()) {
+	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone && completionsSendSessionAffinity(request.Model()) {
 		switch completionsSessionAffinityFormat(request.Model()) {
 		case "openrouter":
 			headers["x-session-id"] = sessionID

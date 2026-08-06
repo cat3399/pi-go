@@ -341,7 +341,7 @@ func (s *Session) compactionSnapshot(ctx context.Context, request CompactRequest
 		return SummaryInput{}, ErrAlreadyCompacted
 	}
 	keep := request.KeepRecentTokens
-	if keep == 0 {
+	if keep == 0 && !request.KeepRecentTokensSet {
 		keep = defaultKeepRecentTokens
 	}
 	contextMessages := s.buildContextLocked().Messages()
@@ -519,7 +519,11 @@ func findCompactionCutWithEstimator(
 	var accumulated uint64
 	for index := end - 1; index >= start; index-- {
 		entry := entries[index]
-		for _, message := range entryMessages(entry) {
+		messages := entryMessages(entry)
+		if len(messages) == 0 {
+			continue
+		}
+		for _, message := range messages {
 			tokens, err := estimate(message)
 			if err != nil {
 				return -1, err
@@ -532,7 +536,15 @@ func findCompactionCutWithEstimator(
 		if accumulated >= keepRecentTokens {
 			for candidate := index; candidate < end; candidate++ {
 				if isValidCompactionCut(entries[candidate]) {
-					return candidate, nil
+					cut := candidate
+					for cut > start {
+						previous := entries[cut-1]
+						if previous.compaction != nil || len(entryMessages(previous)) != 0 {
+							break
+						}
+						cut--
+					}
+					return cut, nil
 				}
 			}
 			return -1, nil

@@ -260,6 +260,11 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	if hasAuth {
 		stream.APIKey = resolvedAuth.APIKey
 	}
+	compactionEnabled := snapshot.Settings.Compaction.EnabledOrDefault()
+	retryPolicy, err := productionRetryPolicy(snapshot.Settings.Retry)
+	if err != nil {
+		return agentruntime.CreateResult{}, err
+	}
 	runtimeHooks := p.config.Hooks
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Kind == agentruntime.DiagnosticError {
@@ -275,12 +280,24 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		ExplicitThinkingLevel: explicitThinking, ScopedModels: scope.ScopedModels, Settings: snapshot.Settings,
 		BaseConfig: agent.SessionConfig{
 			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: definitions, Stream: stream,
+			CompactionEnabled: &compactionEnabled,
+			ContextReserve:    snapshot.Settings.Compaction.ReserveTokensOrDefault(),
+			KeepRecentTokens:  snapshot.Settings.Compaction.KeepRecentTokensOrDefault(),
+			ContextReserveSet: true, KeepRecentTokensSet: true,
+			Retry: retryPolicy,
 			ResolveStreamOptions: func(turnCtx context.Context, selected provider.Model) (provider.StreamOptions, error) {
 				resolved, err := authResolver.requirePromptAccess(turnCtx, selected, p.docsDir)
 				if err != nil {
 					return provider.StreamOptions{}, err
 				}
 				return provider.StreamOptions{APIKey: resolved.APIKey}, nil
+			},
+			ResolveSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
+				return provider.NewContextSummarizerWithOptions(router, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
+					ThinkingLevel: request.ThinkingLevel,
+					Stream:        request.Stream,
+					Retry:         request.Retry,
+				})
 			},
 			ValidateModelAccess: func(accessCtx context.Context, selected provider.Model) error {
 				_, err := authResolver.requirePromptAccess(accessCtx, selected, p.docsDir)
@@ -295,6 +312,21 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		SessionStartEvent: options.SessionStartEvent, Diagnostics: diagnostics, DocsDir: p.docsDir,
 	})
 	return created, err
+}
+
+func productionRetryPolicy(settings modelcatalog.RetrySettings) (agent.RetryPolicy, error) {
+	maxRetries := settings.MaxRetriesOrDefault()
+	if !settings.EnabledOrDefault() {
+		maxRetries = 0
+	}
+	if maxRetries > uint64(^uint32(0)-1) {
+		return agent.RetryPolicy{}, fmt.Errorf("%w: retry.maxRetries is too large", ErrInvalidProductionConfig)
+	}
+	baseDelayMS := settings.BaseDelayMSOrDefault()
+	if baseDelayMS > uint64(time.Duration(1<<63-1)/time.Millisecond) {
+		return agent.RetryPolicy{}, fmt.Errorf("%w: retry.baseDelayMs is too large", ErrInvalidProductionConfig)
+	}
+	return agent.RetryPolicy{MaxAttempts: uint32(maxRetries) + 1, InitialDelay: time.Duration(baseDelayMS) * time.Millisecond}, nil
 }
 
 func clockBeginningWith(first time.Time, subsequent session.Clock) session.Clock {

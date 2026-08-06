@@ -220,7 +220,7 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, SessionManager: transcript, Model: model,
-		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
+		ContextReserve: 1, KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,9 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 		t.Fatal(err)
 	}
 	var calls atomic.Uint32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var requestSessionIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestSessionIDs = append(requestSessionIDs, request.Header.Get("session_id"))
 		call := calls.Add(1)
 		switch call {
 		case 1:
@@ -272,9 +274,14 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
+	var capturedRequests []provider.Request
+	capturing := loopProviderFunc(func(ctx context.Context, request provider.Request) provider.EventStream {
+		capturedRequests = append(capturedRequests, request)
+		return implementation.Stream(ctx, request)
+	})
 	appendMatchingAssistant(t, transcript, model)
 	var delays []time.Duration
-	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
+	summarizer, err := provider.NewContextSummarizerWithRetry(capturing, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 2, InitialDelay: time.Millisecond, MaxRetryAfter: 10 * time.Millisecond,
 		Sleep: func(_ context.Context, delay time.Duration) error { delays = append(delays, delay); return nil },
 	})
@@ -282,7 +289,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: capturing, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -302,6 +309,20 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	}
 	if calls.Load() != 3 || len(delays) != 1 || delays[0] != time.Millisecond {
 		t.Fatalf("calls=%d delays=%v", calls.Load(), delays)
+	}
+	if len(requestSessionIDs) != 3 || requestSessionIDs[0] != "" || requestSessionIDs[1] != "" {
+		t.Fatalf("summary retry HTTP affinity headers = %#v", requestSessionIDs)
+	}
+	if len(capturedRequests) != 3 {
+		t.Fatalf("captured requests = %d", len(capturedRequests))
+	}
+	firstSummary := capturedRequests[0].StreamOptions()
+	retriedSummary := capturedRequests[1].StreamOptions()
+	if firstSummary.CacheRetention != provider.CacheRetentionNone || retriedSummary.CacheRetention != provider.CacheRetentionNone ||
+		firstSummary.SessionID == "" || firstSummary.SessionID != retriedSummary.SessionID ||
+		firstSummary.SessionID == transcript.SessionID() || len(firstSummary.SessionID) != 36 || firstSummary.SessionID[14] != '7' ||
+		!strings.ContainsRune("89ab", rune(firstSummary.SessionID[19])) {
+		t.Fatalf("summary retry request affinity = %#v / %#v, durable %q", firstSummary, retriedSummary, transcript.SessionID())
 	}
 	if len(retryEvents) != 3 ||
 		retryEvents[0].Kind != agent.SummarizationRetryScheduledEventType ||
@@ -417,7 +438,7 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 		t.Fatalf("cancelled summary retry events leaked provider detail: %+v", retryEvents)
 	}
 	assertSummarizationRetryReason(t, retryEvents, agent.CompactionThreshold)
-	assertCompactionLifecycle(t, compactionEvents, agent.CompactionThreshold, session.ErrAppendCanceled)
+	assertCompactionLifecycle(t, compactionEvents, agent.CompactionThreshold, errExpectedCompactionAbort)
 }
 
 func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
@@ -809,7 +830,7 @@ func TestManualCompactionFailurePublishesOneSafeSettledPair(t *testing.T) {
 	if _, err := coordinator.Compact(context.Background(), "focus"); !errors.Is(err, session.ErrSummaryFailed) {
 		t.Fatalf("Compact() error = %v", err)
 	}
-	assertManualCompactionFailureLifecycle(t, lifecycle, session.ErrSummaryFailed, secret)
+	assertManualCompactionFailureLifecycle(t, lifecycle, errors.New("Compaction failed: "+session.ErrSummaryFailed.Error()), secret)
 	assertNoCompactionEntry(t, transcript)
 }
 
@@ -856,7 +877,7 @@ func TestManualCompactionRejectsStaleSnapshotAndPublishesSafeConflict(t *testing
 	if err := <-done; !errors.Is(err, session.ErrCompactionConflict) {
 		t.Fatalf("Compact() error = %v", err)
 	}
-	assertManualCompactionFailureLifecycle(t, lifecycle, session.ErrCompactionConflict, "stale summary")
+	assertManualCompactionFailureLifecycle(t, lifecycle, errors.New("Compaction failed: "+session.ErrCompactionConflict.Error()), "stale summary")
 	assertNoCompactionEntry(t, transcript)
 }
 
@@ -894,7 +915,7 @@ func TestManualCompactionAbortPublishesSafeCancellationSettlement(t *testing.T) 
 	if err := <-done; !errors.Is(err, session.ErrAppendCanceled) {
 		t.Fatalf("Compact() error = %v", err)
 	}
-	assertManualCompactionFailureLifecycle(t, lifecycle, session.ErrAppendCanceled, secret)
+	assertManualCompactionFailureLifecycle(t, lifecycle, errExpectedCompactionAbort, secret)
 	assertNoCompactionEntry(t, transcript)
 }
 
@@ -1054,11 +1075,19 @@ func assertCompactionLifecycle(t *testing.T, events []agentEventSnapshot, reason
 		}
 		return
 	}
+	if errors.Is(settledError, errExpectedCompactionAbort) {
+		if events[1].RunError != nil || events[1].Compaction != nil || !events[1].CompactionAborted || events[1].CompactionWillRetry {
+			t.Fatalf("aborted compaction settlement = %+v", events[1])
+		}
+		return
+	}
 	matches := events[1].RunError != nil && events[1].RunError.Error() == settledError.Error()
 	if !matches || events[1].Compaction != nil {
 		t.Fatalf("failed compaction settlement = %+v, want exact safe error %v", events[1], settledError)
 	}
 }
+
+var errExpectedCompactionAbort = errors.New("expected compaction abort")
 
 func joinContextText(parts []llm.TextBlock) string {
 	var b strings.Builder

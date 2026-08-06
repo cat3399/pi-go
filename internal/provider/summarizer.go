@@ -20,12 +20,22 @@ type ContextSummarizer struct {
 	model    Model
 	now      func() time.Time
 	retry    RetryController
+	request  RequestOptions
+}
+
+// ContextSummarizerOptions are snapshotted for one compaction operation. Tools
+// are intentionally not exposed here: a summary is an isolated provider call,
+// never an Agent continuation.
+type ContextSummarizerOptions struct {
+	ThinkingLevel ThinkingLevel
+	Stream        StreamOptions
+	Retry         RetryPolicy
 }
 
 func NewContextSummarizer(implementation Provider, model Model, now func() time.Time) (*ContextSummarizer, error) {
-	return NewContextSummarizerWithRetry(implementation, model, now, RetryPolicy{
+	return NewContextSummarizerWithOptions(implementation, model, now, ContextSummarizerOptions{Retry: RetryPolicy{
 		MaxAttempts: 3, InitialDelay: 250 * time.Millisecond, MaxDelay: 2 * time.Second,
-	})
+	}})
 }
 
 // NewContextSummarizerWithRetry exposes deterministic timing seams for tests
@@ -33,20 +43,34 @@ func NewContextSummarizer(implementation Provider, model Model, now func() time.
 // Session sees either one accepted SummaryOutput or one error and therefore
 // never appends a checkpoint for a failed attempt.
 func NewContextSummarizerWithRetry(implementation Provider, model Model, now func() time.Time, policy RetryPolicy) (*ContextSummarizer, error) {
+	return NewContextSummarizerWithOptions(implementation, model, now, ContextSummarizerOptions{Retry: policy})
+}
+
+// NewContextSummarizerWithOptions constructs the concrete request used by a
+// single compaction operation. Callers should create a new value for each
+// operation so model selection, thinking, credentials, headers, and session
+// attribution cannot become stale.
+func NewContextSummarizerWithOptions(implementation Provider, model Model, now func() time.Time, options ContextSummarizerOptions) (*ContextSummarizer, error) {
 	if implementation == nil || isTypedNil(implementation) {
 		return nil, errors.New("context summarizer requires a provider")
 	}
-	if _, err := NewRequest(model, "", nil); err != nil {
+	requestOptions := RequestOptions{
+		ThinkingLevel: options.ThinkingLevel,
+		Stream:        CloneStreamOptions(options.Stream),
+	}
+	if _, err := NewRequestWithOptions(model, "", nil, requestOptions); err != nil {
 		return nil, fmt.Errorf("context summarizer model: %w", err)
 	}
 	if now == nil {
 		now = time.Now
 	}
-	retry, err := NewRetryController(policy)
+	retry, err := NewRetryController(options.Retry)
 	if err != nil {
 		return nil, fmt.Errorf("context summarizer retry: %w", err)
 	}
-	return &ContextSummarizer{provider: implementation, model: model, now: now, retry: retry}, nil
+	return &ContextSummarizer{
+		provider: implementation, model: model, now: now, retry: retry, request: requestOptions,
+	}, nil
 }
 
 func (s *ContextSummarizer) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
@@ -64,11 +88,23 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		ctx = context.Background()
 	}
 	timestamp := s.now().UTC()
+	summarySessionID, generationErr := session.NewSessionID(timestamp)
+	if generationErr != nil {
+		return session.SummaryOutput{}, fmt.Errorf("build summary session id: %w", generationErr)
+	}
 	user, err := llm.NewUserTextMessage(input.Prompt, timestamp)
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary prompt: %w", err)
 	}
-	request, err := NewRequest(s.model, input.SystemPrompt, []llm.ConversationMessage{user})
+	requestOptions := s.request
+	requestOptions.Stream = CloneStreamOptions(requestOptions.Stream)
+	requestOptions.Stream.CacheRetention = CacheRetentionNone
+	requestOptions.Stream.SessionID = summarySessionID
+	if requestOptions.Stream.MaxTokens != nil && *requestOptions.Stream.MaxTokens == 0 {
+		minimum := uint64(1)
+		requestOptions.Stream.MaxTokens = &minimum
+	}
+	request, err := NewRequestWithOptions(s.model, input.SystemPrompt, []llm.ConversationMessage{user}, requestOptions)
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary request: %w", err)
 	}
@@ -140,7 +176,7 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 			return session.SummaryOutput{}, err
 		}
 		finishRetry(0, 0, true, RetryFinishSucceeded, "")
-		return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.ZeroUsageCost()}}, nil
+		return session.SummaryOutput{Text: text, Usage: &session.CompactionUsage{Usage: usage, Cost: session.UsageCostFromLLM(usage.Cost())}}, nil
 	}
 }
 

@@ -508,9 +508,17 @@ func (m *SessionManager) Tree() []TreeNode {
 // AgentSession's summarization orchestration. It never calls a provider or an
 // extension hook.
 func (m *SessionManager) PrepareCompaction(ctx context.Context, keepRecentTokens uint64, instructions string) (SummaryInput, error) {
+	return m.PrepareCompactionWithOptions(ctx, PrepareCompactionOptions{KeepRecentTokens: keepRecentTokens, Instructions: instructions})
+}
+
+// PrepareCompactionWithOptions preserves an explicitly configured zero keep
+// budget while keeping PrepareCompaction source-compatible for low-level users.
+func (m *SessionManager) PrepareCompactionWithOptions(ctx context.Context, options PrepareCompactionOptions) (SummaryInput, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.store.compactionSnapshot(ctx, CompactRequest{KeepRecentTokens: keepRecentTokens, Instructions: instructions})
+	return m.store.compactionSnapshot(ctx, CompactRequest{
+		KeepRecentTokens: options.KeepRecentTokens, KeepRecentTokensSet: options.KeepRecentTokensSet, Instructions: options.Instructions,
+	})
 }
 
 // CommitCompaction validates and persists one real summary result. Summary

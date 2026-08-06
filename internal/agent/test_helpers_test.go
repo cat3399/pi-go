@@ -117,6 +117,7 @@ type agentEventSnapshot struct {
 	RetryFinishReason   provider.RetryFinishReason
 	CompactionReason    agent.CompactionReason
 	CompactionWillRetry bool
+	CompactionAborted   bool
 	Compaction          *session.CompactResult
 }
 
@@ -175,7 +176,7 @@ func snapshotAgentEvent(event any) agentEventSnapshot {
 	case agent.CompactionEndEvent:
 		result.RunID, result.Turn = value.RunID, value.Turn
 		result.CompactionReason, result.CompactionWillRetry = value.Reason, value.WillRetry
-		result.Compaction, result.RunError = value.Result, value.Err
+		result.CompactionAborted, result.Compaction, result.RunError = value.Aborted, value.Result, value.Err
 	case agent.ProviderRetryScheduledEvent:
 		result.RunID, result.Turn, result.RetryAttempt, result.RetryDelay = value.RunID, value.Turn, value.Attempt, value.Delay
 		result.RetryFailureKind, result.RetryHTTPStatus = value.FailureKind, value.HTTPStatus

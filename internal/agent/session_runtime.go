@@ -65,17 +65,45 @@ type SessionConfig struct {
 	// enables it for product sessions.
 	InitializeSessionState bool
 
-	ToolExecution     ToolExecutionMode
-	TransformContext  ContextTransform
-	SteeringMode      QueueMode
-	FollowUpMode      QueueMode
-	ContextWindow     uint64
-	ContextReserve    uint64
-	KeepRecentTokens  uint64
+	ToolExecution    ToolExecutionMode
+	TransformContext ContextTransform
+	SteeringMode     QueueMode
+	FollowUpMode     QueueMode
+	ContextWindow    uint64
+	ContextReserve   uint64
+	KeepRecentTokens uint64
+	// Presence flags allow production settings to preserve an explicit zero.
+	// Existing low-level callers retain zero-means-default behavior.
+	ContextReserveSet   bool
+	KeepRecentTokensSet bool
+	// CompactionEnabled follows pi's settings.compaction.enabled. Nil uses the
+	// upstream default (enabled); a pointer is required so false remains a real
+	// configured value.
+	CompactionEnabled *bool
 	Summarizer        session.Summarizer
+	// ResolveSummarizer is the production seam. It is invoked once per
+	// compaction after current model/thinking/stream auth have been snapshotted.
+	// Summarizer remains the static injection seam for deterministic tests and
+	// embedders.
+	ResolveSummarizer func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
 	Retry             RetryPolicy
 	Now               func() time.Time
 	SettlementTimeout time.Duration
+}
+
+const (
+	DefaultCompactionReserveTokens    uint64 = 16_384
+	DefaultCompactionKeepRecentTokens uint64 = 20_000
+)
+
+// SummarizerResolveRequest contains the exact request-scoped state selected
+// for one compaction. Stream includes dynamically resolved auth; the concrete
+// summarizer adds request-local cache/session isolation when it actually runs.
+type SummarizerResolveRequest struct {
+	Model         provider.Model
+	ThinkingLevel provider.ThinkingLevel
+	Stream        provider.StreamOptions
+	Retry         RetryPolicy
 }
 
 // SessionState is a copy-only view of the mutable product configuration.
@@ -241,7 +269,11 @@ type AgentSession struct {
 	contextWindow     uint64
 	contextReserve    uint64
 	keepRecentTokens  uint64
+	keepRecentSet     bool
+	compactionEnabled bool
 	summarizer        session.Summarizer
+	resolveSummarizer func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
+	summaryRetry      RetryPolicy
 	settlementTimeout time.Duration
 	observers         []sessionObserverEntry
 	nextObserver      uint64
@@ -290,7 +322,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
 		return nil, fmt.Errorf("%w: context reserve exceeds window", ErrInvalidConfig)
 	}
-	if config.ContextWindow != 0 && config.Summarizer == nil {
+	if config.ContextWindow != 0 && config.Summarizer == nil && config.ResolveSummarizer == nil {
 		return nil, fmt.Errorf("%w: automatic compaction requires summarizer", ErrInvalidConfig)
 	}
 	if len(config.Tools) != 0 && isNilInterface(config.Tool) {
@@ -320,6 +352,16 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: retry policy: %w", ErrInvalidConfig, err)
 	}
+	if config.ContextReserve == 0 && !config.ContextReserveSet {
+		config.ContextReserve = DefaultCompactionReserveTokens
+	}
+	if config.KeepRecentTokens == 0 && !config.KeepRecentTokensSet {
+		config.KeepRecentTokens = DefaultCompactionKeepRecentTokens
+	}
+	compactionEnabled := true
+	if config.CompactionEnabled != nil {
+		compactionEnabled = *config.CompactionEnabled
+	}
 	systemOptions := cloneBuildSystemPromptOptions(config.SystemPromptOptions)
 	if systemOptions.CWD == "" {
 		systemOptions.CWD = config.SessionManager.Cwd()
@@ -338,7 +380,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
-		summarizer: config.Summarizer,
+		keepRecentSet: config.KeepRecentTokensSet, compactionEnabled: compactionEnabled,
+		summarizer: config.Summarizer, resolveSummarizer: config.ResolveSummarizer,
+		summaryRetry: config.Retry,
 	}
 	s.settlementTimeout = config.SettlementTimeout
 	if s.settlementTimeout <= 0 {
@@ -1632,7 +1676,7 @@ func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bo
 }
 
 func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTerminal, skipAborted bool) bool {
-	if s == nil || s.sessionManager == nil || s.summarizer == nil || terminal == nil {
+	if s == nil || s.sessionManager == nil || !s.compactionAvailable() || !s.compactionEnabled || terminal == nil {
 		return false
 	}
 	if skipAborted && terminal.FinishReason() == llm.FinishAborted {
@@ -1662,6 +1706,8 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 		}
 		s.lifecycleMu.Unlock()
 		if already {
+			s.emitCompaction(run.ctx, "compaction_end", CompactionContextOverflow, nil, false, false,
+				"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.")
 			return false
 		}
 		// Preserve the failed assistant durably, but never include it in the
@@ -1671,9 +1717,6 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 		if s.runCompaction(run, CompactionContextOverflow, true, "") {
 			return true
 		}
-		return false
-	}
-	if s.contextWindow == 0 {
 		return false
 	}
 	if terminal.FinishReason() != llm.FinishError && terminal.Usage().TotalTokens() > window {
@@ -1756,25 +1799,44 @@ func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64
 	if model.ContextWindow() != 0 {
 		window = model.ContextWindow()
 	}
-	if model.MaxTokens() != 0 {
-		reserve = model.MaxTokens()
-	}
 	return window, reserve
+}
+
+func (s *AgentSession) compactionAvailable() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	available := s.summarizer != nil || s.resolveSummarizer != nil
+	s.mu.RUnlock()
+	return available
 }
 
 // runCompaction returns true only on a committed compaction. Automatic
 // failures are surfaced as compaction_end and leave the surrounding request's
 // settled result intact.
 func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) bool {
-	if s == nil || s.sessionManager == nil || s.summarizer == nil {
+	if s == nil || s.sessionManager == nil || !s.compactionAvailable() {
+		return false
+	}
+	input, summarizer, err := s.prepareCompaction(run.ctx, instructions)
+	if err != nil {
 		return false
 	}
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", reason, nil, false, willRetry, "")
-	result, err := s.compactTranscript(run, reason, willRetry, instructions)
+	result, err := s.compactPrepared(run, reason, willRetry, instructions, input, summarizer)
 	if err != nil {
 		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
-		s.emitCompaction(run.ctx, "compaction_end", reason, nil, aborted, false, safeCompactionEventError(err))
+		errorMessage := ""
+		if !aborted {
+			prefix := "Auto-compaction failed: "
+			if reason == CompactionContextOverflow {
+				prefix = "Context overflow recovery failed: "
+			}
+			errorMessage = prefix + safeCompactionEventError(err)
+		}
+		s.emitCompaction(run.ctx, "compaction_end", reason, nil, aborted, false, errorMessage)
 		return false
 	}
 	if willRetry {
@@ -1791,11 +1853,29 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 var errExtensionCompactionCancelled = errors.New("extension cancelled compaction")
 
 func (s *AgentSession) compactTranscript(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
-	base := sessionObservedSummarizer{session: s, run: run, reason: reason, base: s.summarizer}
-	input, err := s.sessionManager.PrepareCompaction(run.ctx, s.keepRecentTokens, instructions)
+	input, summarizer, err := s.prepareCompaction(run.ctx, instructions)
 	if err != nil {
 		return session.CompactResult{}, err
 	}
+	return s.compactPrepared(run, reason, willRetry, instructions, input, summarizer)
+}
+
+func (s *AgentSession) prepareCompaction(ctx context.Context, instructions string) (session.SummaryInput, session.Summarizer, error) {
+	summarizer, err := s.resolveCompactionSummarizer(ctx)
+	if err != nil {
+		return session.SummaryInput{}, nil, err
+	}
+	input, err := s.sessionManager.PrepareCompactionWithOptions(ctx, session.PrepareCompactionOptions{
+		KeepRecentTokens: s.keepRecentTokens, KeepRecentTokensSet: s.keepRecentSet, Instructions: instructions,
+	})
+	if err != nil {
+		return session.SummaryInput{}, nil, err
+	}
+	return input, summarizer, nil
+}
+
+func (s *AgentSession) compactPrepared(run *sessionRun, reason CompactionReason, willRetry bool, instructions string, input session.SummaryInput, resolved session.Summarizer) (session.CompactResult, error) {
+	base := sessionObservedSummarizer{session: s, run: run, reason: reason, base: resolved}
 	summarizer := extensionCompactionSummarizer{session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base}
 	output, err := summarizer.Summarize(run.ctx, input)
 	if cause := context.Cause(run.ctx); cause != nil {
@@ -1815,6 +1895,63 @@ func (s *AgentSession) compactTranscript(run *sessionRun, reason CompactionReaso
 		return session.CompactResult{}, err
 	}
 	return result, nil
+}
+
+func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session.Summarizer, error) {
+	if s == nil {
+		return nil, ErrCompactionUnavailable
+	}
+	s.mu.RLock()
+	hasModel := s.hasModel
+	selected := s.model
+	thinking := s.thinkingLevel
+	stream := provider.CloneStreamOptions(s.stream)
+	resolveStream := s.resolveStream
+	resolveSummarizer := s.resolveSummarizer
+	static := s.summarizer
+	validate := s.validateAccess
+	retry := s.summaryRetry
+	s.mu.RUnlock()
+	if !hasModel {
+		return nil, s.noModelSelectedError()
+	}
+	if resolveSummarizer == nil {
+		if validate != nil {
+			if err := validate(ctx, selected); err != nil {
+				return nil, err
+			}
+		}
+		if static == nil {
+			return nil, ErrCompactionUnavailable
+		}
+		return static, nil
+	}
+	if resolveStream != nil {
+		resolved, err := resolveStream(ctx, selected)
+		if err != nil {
+			return nil, err
+		}
+		stream = provider.MergeStreamOptions(stream, resolved)
+	} else if validate != nil {
+		if err := validate(ctx, selected); err != nil {
+			return nil, err
+		}
+	}
+	stream = provider.MergeStreamOptions(stream, provider.StreamOptions{
+		OnPayload: s.hooks.BeforeProviderRequest, OnHeaders: s.hooks.BeforeProviderHeaders, OnResponse: s.hooks.AfterProviderResponse,
+	})
+	maxTokens := s.contextReserve
+	stream.MaxTokens = &maxTokens
+	resolved, err := resolveSummarizer(ctx, SummarizerResolveRequest{
+		Model: selected, ThinkingLevel: thinking, Stream: stream, Retry: retry,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resolved == nil || isNilInterface(resolved) {
+		return nil, ErrCompactionUnavailable
+	}
+	return resolved, nil
 }
 
 func (s *AgentSession) agentStateLLMMessages() ([]llm.ConversationMessage, error) {
@@ -1993,6 +2130,10 @@ func safeCompactionEventError(err error) string {
 		return err.Error()
 	case errors.Is(err, ErrModelAccess), errors.Is(err, ErrCompactionUnavailable):
 		return err.Error()
+	case errors.Is(err, session.ErrAlreadyCompacted):
+		return "Already compacted"
+	case errors.Is(err, session.ErrNothingToCompact):
+		return "Nothing to compact (session too small)"
 	case errors.Is(err, session.ErrAppendCanceled):
 		return session.ErrAppendCanceled.Error()
 	case errors.Is(err, session.ErrCompactionConflict):
@@ -2594,18 +2735,14 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	defer s.finishSessionRun(run)
 	s.setSessionPhase(run, PhaseCompacting)
 	s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
-	if err := s.requireModelAccess(run.ctx); err != nil {
-		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(err))
-		return session.CompactResult{}, err
-	}
-	if s.summarizer == nil {
-		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, false, false, "Compaction failed: "+safeCompactionEventError(ErrCompactionUnavailable))
-		return session.CompactResult{}, ErrCompactionUnavailable
-	}
 	result, err := s.compactTranscript(run, CompactionManual, false, instructions)
 	if err != nil {
 		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
-		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, aborted, false, safeCompactionEventError(err))
+		errorMessage := ""
+		if !aborted {
+			errorMessage = "Compaction failed: " + safeCompactionEventError(err)
+		}
+		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, aborted, false, errorMessage)
 		if errors.Is(err, errExtensionCompactionCancelled) {
 			return session.CompactResult{}, ErrAgentAborted
 		}

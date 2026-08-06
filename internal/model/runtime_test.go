@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,92 @@ func TestRuntimeCompatMergeRecursivelyClonesNamedMapsAndSlices(t *testing.T) {
 	compat.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"] = "mutated-result"
 	if got := snapshot.OpenAICompletions.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"]; got != "base" {
 		t.Fatalf("snapshot nested clone = %q", got)
+	}
+}
+
+func TestCompactionSettingsDefaultsAndExplicitFalseMatchPi(t *testing.T) {
+	defaults := (CompactionSettings{})
+	if !defaults.EnabledOrDefault() || defaults.ReserveTokensOrDefault() != 16_384 || defaults.KeepRecentTokensOrDefault() != 20_000 {
+		t.Fatalf("compaction defaults = enabled %t reserve %d keep %d", defaults.EnabledOrDefault(), defaults.ReserveTokensOrDefault(), defaults.KeepRecentTokensOrDefault())
+	}
+	runtime, _, _ := newTestRuntime(t, "", `{"compaction":{"enabled":false,"reserveTokens":123,"keepRecentTokens":456}}`, false)
+	settings := runtime.Snapshot().Settings.Compaction
+	if settings.EnabledOrDefault() || settings.ReserveTokensOrDefault() != 123 || settings.KeepRecentTokensOrDefault() != 456 {
+		t.Fatalf("explicit compaction settings = %#v", settings)
+	}
+}
+
+func TestRetrySettingsDefaultsExplicitZerosAndFieldLevelProjectMerge(t *testing.T) {
+	defaults := (RetrySettings{})
+	if !defaults.EnabledOrDefault() || defaults.MaxRetriesOrDefault() != 3 || defaults.BaseDelayMSOrDefault() != 2_000 {
+		t.Fatalf("retry defaults = enabled %t retries %d delay %d", defaults.EnabledOrDefault(), defaults.MaxRetriesOrDefault(), defaults.BaseDelayMSOrDefault())
+	}
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"retry":{"enabled":false,"maxRetries":7,"baseDelayMs":250}}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"retry":{"maxRetries":0,"baseDelayMs":0}}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := runtime.Snapshot().Settings.Retry
+	if retry.EnabledOrDefault() || retry.MaxRetriesOrDefault() != 0 || retry.BaseDelayMSOrDefault() != 0 {
+		t.Fatalf("merged retry settings = %#v", retry)
+	}
+}
+
+func TestSetGlobalSettingsPreservesUnportedRetryProviderFields(t *testing.T) {
+	runtime, agentDir, _ := newTestRuntime(t, "", `{"retry":{"enabled":true,"provider":{"maxRetries":9},"future":true}}`, false)
+	disabled, zero := false, uint64(0)
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.Retry.Enabled = &disabled
+		settings.Retry.MaxRetries = &zero
+		settings.Retry.BaseDelayMS = &zero
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	retry := root["retry"].(map[string]any)
+	providerSettings := retry["provider"].(map[string]any)
+	if retry["enabled"] != false || retry["maxRetries"] != float64(0) || retry["baseDelayMs"] != float64(0) ||
+		retry["future"] != true || providerSettings["maxRetries"] != float64(9) {
+		t.Fatalf("persisted retry = %#v", retry)
+	}
+}
+
+func TestSetGlobalSettingsReplacesNullOptionalObjects(t *testing.T) {
+	runtime, agentDir, _ := newTestRuntime(t, "", `{"retry":null,"compaction":null}`, false)
+	enabled := false
+	zero := uint64(0)
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.Retry.Enabled = &enabled
+		settings.Retry.MaxRetries = &zero
+		settings.Compaction.Enabled = &enabled
+		settings.Compaction.ReserveTokens = &zero
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	retry, retryOK := root["retry"].(map[string]any)
+	compaction, compactionOK := root["compaction"].(map[string]any)
+	if !retryOK || !compactionOK || retry["enabled"] != false || retry["maxRetries"] != float64(0) ||
+		compaction["enabled"] != false || compaction["reserveTokens"] != float64(0) {
+		t.Fatalf("persisted optional objects = %#v", root)
 	}
 }
 

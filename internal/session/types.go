@@ -176,8 +176,20 @@ type Summarizer interface {
 // smaller explicit value for deterministic/manual control.
 type CompactRequest struct {
 	KeepRecentTokens uint64
-	Instructions     string
-	Summarizer       Summarizer
+	// KeepRecentTokensSet distinguishes an explicit zero from the legacy zero
+	// value, which remains the 20k default for source compatibility.
+	KeepRecentTokensSet bool
+	Instructions        string
+	Summarizer          Summarizer
+}
+
+// PrepareCompactionOptions is the presence-aware manager boundary used by the
+// production AgentSession. The legacy PrepareCompaction method retains its
+// zero-means-default behavior.
+type PrepareCompactionOptions struct {
+	KeepRecentTokens    uint64
+	KeepRecentTokensSet bool
+	Instructions        string
 }
 
 // CompactResult reports the durable record and the immutable request snapshot

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,6 +104,60 @@ type Settings struct {
 	DefaultModel         string
 	DefaultThinkingLevel provider.ThinkingLevel
 	EnabledModels        []string
+	Compaction           CompactionSettings
+	Retry                RetrySettings
+}
+
+// CompactionSettings preserves optionality so project settings can override
+// individual global fields and an explicit enabled:false is not lost.
+type CompactionSettings struct {
+	Enabled          *bool   `json:"enabled,omitempty"`
+	ReserveTokens    *uint64 `json:"reserveTokens,omitempty"`
+	KeepRecentTokens *uint64 `json:"keepRecentTokens,omitempty"`
+}
+
+func (s CompactionSettings) EnabledOrDefault() bool {
+	return s.Enabled == nil || *s.Enabled
+}
+
+func (s CompactionSettings) ReserveTokensOrDefault() uint64 {
+	if s.ReserveTokens == nil {
+		return 16_384
+	}
+	return *s.ReserveTokens
+}
+
+func (s CompactionSettings) KeepRecentTokensOrDefault() uint64 {
+	if s.KeepRecentTokens == nil {
+		return 20_000
+	}
+	return *s.KeepRecentTokens
+}
+
+// RetrySettings mirrors settings.retry. Optional fields are retained so
+// global/project overlays preserve explicit false and zero values.
+type RetrySettings struct {
+	Enabled     *bool   `json:"enabled,omitempty"`
+	MaxRetries  *uint64 `json:"maxRetries,omitempty"`
+	BaseDelayMS *uint64 `json:"baseDelayMs,omitempty"`
+}
+
+func (s RetrySettings) EnabledOrDefault() bool {
+	return s.Enabled == nil || *s.Enabled
+}
+
+func (s RetrySettings) MaxRetriesOrDefault() uint64 {
+	if s.MaxRetries == nil {
+		return 3
+	}
+	return *s.MaxRetries
+}
+
+func (s RetrySettings) BaseDelayMSOrDefault() uint64 {
+	if s.BaseDelayMS == nil {
+		return 2_000
+	}
+	return *s.BaseDelayMS
 }
 
 type Snapshot struct {
@@ -295,6 +350,14 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 		b, _ := json.Marshal(current.EnabledModels)
 		root["enabledModels"] = b
 	}
+	putOptionalSettingsObject(root, "compaction", map[string]json.RawMessage{
+		"enabled": optionalBoolJSON(current.Compaction.Enabled), "reserveTokens": optionalUint64JSON(current.Compaction.ReserveTokens),
+		"keepRecentTokens": optionalUint64JSON(current.Compaction.KeepRecentTokens),
+	})
+	putOptionalSettingsObject(root, "retry", map[string]json.RawMessage{
+		"enabled": optionalBoolJSON(current.Retry.Enabled), "maxRetries": optionalUint64JSON(current.Retry.MaxRetries),
+		"baseDelayMs": optionalUint64JSON(current.Retry.BaseDelayMS),
+	})
 	encoded, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return fmt.Errorf("%w: encode global settings", ErrInvalidConfig)
@@ -319,6 +382,45 @@ func putString(root map[string]json.RawMessage, key, value string) {
 	}
 	b, _ := json.Marshal(value)
 	root[key] = b
+}
+
+func putOptionalSettingsObject(root map[string]json.RawMessage, key string, fields map[string]json.RawMessage) {
+	object := map[string]json.RawMessage{}
+	if existing := root[key]; existing != nil {
+		_ = json.Unmarshal(existing, &object)
+	}
+	if object == nil {
+		object = map[string]json.RawMessage{}
+	}
+	for name, value := range fields {
+		if value == nil {
+			delete(object, name)
+		} else {
+			object[name] = value
+		}
+	}
+	if len(object) == 0 {
+		delete(root, key)
+		return
+	}
+	encoded, _ := json.Marshal(object)
+	root[key] = encoded
+}
+
+func optionalBoolJSON(value *bool) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	encoded, _ := json.Marshal(*value)
+	return encoded
+}
+
+func optionalUint64JSON(value *uint64) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	encoded, _ := json.Marshal(*value)
+	return encoded
 }
 
 type Selection struct{ Provider, Model string }
@@ -778,6 +880,16 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 			}
 		}
 	}
+	if raw, ok := root["compaction"]; ok {
+		if err := json.Unmarshal(raw, &s.Compaction); err != nil {
+			return s, Diagnostic{label, "compaction", "must be an object with enabled, reserveTokens, and keepRecentTokens"}
+		}
+	}
+	if raw, ok := root["retry"]; ok {
+		if err := json.Unmarshal(raw, &s.Retry); err != nil {
+			return s, Diagnostic{label, "retry", "must be an object with enabled, maxRetries, and baseDelayMs"}
+		}
+	}
 	if err := validateSettings(s, label); err != nil {
 		return s, err
 	}
@@ -792,6 +904,12 @@ func validateSettings(s Settings, label string) error {
 	}
 	if s.DefaultThinkingLevel != "" && !s.DefaultThinkingLevel.Valid() {
 		return Diagnostic{label, "defaultThinkingLevel", "must be one of off, minimal, low, medium, high, xhigh, max"}
+	}
+	if s.Retry.MaxRetries != nil && *s.Retry.MaxRetries > uint64(math.MaxUint32-1) {
+		return Diagnostic{label, "retry.maxRetries", "is too large"}
+	}
+	if s.Retry.BaseDelayMS != nil && *s.Retry.BaseDelayMS > uint64(math.MaxInt64/int64(time.Millisecond)) {
+		return Diagnostic{label, "retry.baseDelayMs", "is too large"}
 	}
 	return nil
 }
@@ -808,6 +926,24 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.EnabledModels != nil {
 		out.EnabledModels = append([]string(nil), override.EnabledModels...)
+	}
+	if override.Compaction.Enabled != nil {
+		out.Compaction.Enabled = cloneBoolPointer(override.Compaction.Enabled)
+	}
+	if override.Compaction.ReserveTokens != nil {
+		out.Compaction.ReserveTokens = cloneUint64Pointer(override.Compaction.ReserveTokens)
+	}
+	if override.Compaction.KeepRecentTokens != nil {
+		out.Compaction.KeepRecentTokens = cloneUint64Pointer(override.Compaction.KeepRecentTokens)
+	}
+	if override.Retry.Enabled != nil {
+		out.Retry.Enabled = cloneBoolPointer(override.Retry.Enabled)
+	}
+	if override.Retry.MaxRetries != nil {
+		out.Retry.MaxRetries = cloneUint64Pointer(override.Retry.MaxRetries)
+	}
+	if override.Retry.BaseDelayMS != nil {
+		out.Retry.BaseDelayMS = cloneUint64Pointer(override.Retry.BaseDelayMS)
 	}
 	return out
 }
@@ -1601,7 +1737,29 @@ func appendUnique(base []string, values ...string) []string {
 }
 func cloneSettings(s Settings) Settings {
 	s.EnabledModels = append([]string(nil), s.EnabledModels...)
+	s.Compaction.Enabled = cloneBoolPointer(s.Compaction.Enabled)
+	s.Compaction.ReserveTokens = cloneUint64Pointer(s.Compaction.ReserveTokens)
+	s.Compaction.KeepRecentTokens = cloneUint64Pointer(s.Compaction.KeepRecentTokens)
+	s.Retry.Enabled = cloneBoolPointer(s.Retry.Enabled)
+	s.Retry.MaxRetries = cloneUint64Pointer(s.Retry.MaxRetries)
+	s.Retry.BaseDelayMS = cloneUint64Pointer(s.Retry.BaseDelayMS)
 	return s
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneUint64Pointer(value *uint64) *uint64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 func cloneSnapshot(s Snapshot) Snapshot {
 	s.Models = append([]Model(nil), s.Models...)
