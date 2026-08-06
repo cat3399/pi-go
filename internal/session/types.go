@@ -34,6 +34,7 @@ var (
 	ErrCompactionConflict    = errors.New("session changed while compaction summary was in progress")
 	ErrSummaryFailed         = errors.New("session compaction summary failed")
 	ErrTokenEstimateOverflow = errors.New("session token estimate overflow")
+	ErrInvalidSessionID      = errors.New("invalid session id")
 	ErrRecoveryNotApplicable = errors.New("session recovery is not applicable")
 	ErrRecoveryBackupExists  = errors.New("session recovery backup already exists")
 	ErrSessionTooLarge       = errors.New("session exceeds safety limit")
@@ -69,6 +70,14 @@ type CreateOptions struct {
 type OpenOptions struct {
 	Now        Clock
 	NewEntryID IDGenerator
+}
+
+// NewSessionOptions is the Go equivalent of pi's SessionManager
+// NewSessionOptions. ParentSession is header metadata; it never grants the
+// manager write access to the source session.
+type NewSessionOptions struct {
+	ID            string
+	ParentSession string
 }
 
 // RecoveryResult describes an explicit, user-requested repair. Ordinary Open

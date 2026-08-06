@@ -31,8 +31,10 @@ P1 AgentLoop 与 P2 stateful Agent 已收口：`AgentLoop` 是唯一的 Provider
 streaming、工具链和 settlement。持久化、retry 与 compaction 位于 `AgentSession` 边界，不在
 Agent 内形成第二套执行路径。
 
-当前下一优先级是 P3 SessionManager 的完整产品语义，随后是 P4 AgentSession 的完整装配与
-组合场景。内部 Runtime 尚未达到首期总验收条件。
+独立 `SessionManager` 已实现原版主要 P3 生命周期、typed entry、tree/context、listing、
+branch/fork、name/label 和首个 assistant 延迟落盘语义。它尚未接入 `AgentSession`，P3 也尚未
+通过 TypeScript/Go 共用 fixture 的最终验收；当前下一优先级是先关闭这两项边界，再推进 P4
+完整装配与组合场景。内部 Runtime 尚未达到首期总验收条件。
 
 现有 `cmd/pi-go -p` 是诊断入口，不代表产品 Runtime 已完成。更精确的实现盘点和已知测试
 基线见 [当前状态](docs/STATUS.md)。
@@ -46,8 +48,9 @@ go vet ./...
 go build ./...
 ```
 
-涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。测试默认
-使用 deterministic fake，不依赖真实 credential、网络或 TypeScript runtime。
+涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。普通测试默认
+使用 deterministic fake，不依赖真实 credential、网络或 TypeScript runtime；需要证明真实
+模型链路时，使用显式 opt-in live test，不能用 fake 的通过结果替代。
 
 ## 文档
 

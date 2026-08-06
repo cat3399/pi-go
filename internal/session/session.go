@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ import (
 )
 
 const entryIDAttempts = 100
+
+var validSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
 
 type runtimeConfig struct {
 	now        Clock
@@ -274,7 +277,7 @@ func (s *Session) BuildContext() Context {
 
 func (s *Session) buildContextLocked() Context {
 	if s.leaf < 0 {
-		return Context{}
+		return Context{thinkingLevel: "off", hasThinkingLevel: true}
 	}
 
 	path := make([]int, 0, len(s.entries))
@@ -795,8 +798,8 @@ func validateOpaqueID(value, field string) error {
 // ValidateSessionID applies the same side-effect-free ID rule used by Create.
 // Application assembly may call it before provisioning durable directories.
 func ValidateSessionID(value string) error {
-	if err := validateOpaqueID(value, "session id"); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidSession, err)
+	if !utf8.ValidString(value) || !validSessionIDPattern.MatchString(value) {
+		return fmt.Errorf("%w: %w: session id must be non-empty, contain only alphanumeric characters, '-', '_', and '.', and start and end with an alphanumeric character", ErrInvalidSession, ErrInvalidSessionID)
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 # 当前状态
 
-本文是 2026-08-05 的工作树实现快照。
+本文是 2026-08-06 的工作树实现快照。
 
 ## 总体结论
 
@@ -9,7 +9,8 @@ P1 AgentLoop 与 P2 stateful Agent 已完成职责收口。当前执行链只有
 产品配置；Agent 只负责内存状态、监听器、队列和 active run；AgentLoop 负责单次调用中的
 Provider streaming、工具执行和 turn lifecycle。
 
-首期整体仍未完成。下一优先级是 P3 SessionManager，随后是 P4 AgentSession 完整产品语义；
+首期整体仍未完成。独立 P3 SessionManager 的代码层已经建立，但尚未由 AgentSession 组合，
+也尚未通过 TypeScript/Go 共用 fixture 的最终验收。下一优先级是完成这两项边界后推进 P4；
 RPC 与 pi-web 接入不在当前里程碑。
 
 ## 当前实现
@@ -22,6 +23,7 @@ RPC 与 pi-web 接入不在当前里程碑。
 | 控制策略 | continue、steering/follow-up queue、retry 与 compaction 的主要机制已经存在 |
 | Provider | deterministic fake、OpenAI Responses、OpenAI Chat Completions，以及 reasoning/tool replay 支持 |
 | Session 存储 | JSONL v3、锁与原子追加、恢复、tree/branch/fork、compaction、legacy/unknown raw 保护 |
+| SessionManager | 已独立实现 create/open/continue/in-memory/list、typed append、leaf/tree/context、label/name、branch/fork 与延迟落盘；尚未接入 AgentSession |
 | Agent 核心 | P1/P2 已收口；唯一执行核心、stateful lifecycle、queue、abort、动态 turn snapshot 已有对照测试 |
 | 产品基础 | `AgentSession` 已承接持久化、队列、重试、压缩和动态配置，但 P4 完整产品组合语义尚未验收 |
 | 工具与服务 | bash/read/write/edit/grep/find/ls，API key/OAuth，settings/model/resource/prompt 加载 |
@@ -46,9 +48,14 @@ synthetic lifecycle、string prompt 的 content-block 形状、steering/follow-u
 cancellation signal、动态 API key/convertToLlm，以及 before/message mutation seam 均有行为
 测试。Agent 不依赖 Transcript，也不拥有 retry 或 compaction。
 
-尚未完成的核心边界是 P3 SessionManager 的完整产品 workflow、P4 AgentSession 的完整组合
-语义，以及后续长期 transport-neutral Runtime。RPC、pi-web、TUI 与 provider breadth 不是
-当前里程碑。
+P3 当前剩余的是原版共用 fixture 验收，以及让 P4 AgentSession 真正组合 SessionManager，
+不能继续直接把底层 Store 当成产品 session 服务。P4 的完整组合语义和后续长期
+transport-neutral Runtime 仍未完成。RPC、pi-web、TUI 与 provider breadth 不是当前里程碑。
+
+另有一个 opt-in DeepSeek V4 Flash live test，使用现有 OpenAI Responses 与 Chat Completions
+adapter 真实覆盖 streaming、工具闭环和 JSONL 重开；无 `DEEPSEEK_API_KEY` 时跳过，不以 fake
+结果替代 live 验收。实测中发现并按原版补齐了 Chat Completions 的 DeepSeek thinking wire
+映射。该测试不表示 model catalog 或 Provider breadth 已完成。
 
 ## 当前验证状态
 
