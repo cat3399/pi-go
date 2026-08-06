@@ -275,11 +275,15 @@ type completionsRequestPayload struct {
 	StreamOptions       *completionsStreamOptions `json:"stream_options,omitempty"`
 	MaxCompletionTokens uint64                    `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string                    `json:"reasoning_effort,omitempty"`
+	Thinking            *completionsThinking      `json:"thinking,omitempty"`
 	MaxTokens           uint64                    `json:"max_tokens,omitempty"`
 	Store               *bool                     `json:"store,omitempty"`
 }
 type completionsStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+type completionsThinking struct {
+	Type string `json:"type"`
 }
 type completionsFunctionTool struct {
 	Type     string              `json:"type"`
@@ -301,8 +305,9 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		}
 		messages = append(messages, map[string]any{"role": role, "content": request.SystemPrompt()})
 	}
-	if format := completionsThinkingFormat(request.Model()); request.Model().Reasoning() && format != "openai" {
-		return nil, fmt.Errorf("%w: thinking format %q is not implemented", ErrOpenAICompletionsRequest, format)
+	thinkingFormat := completionsThinkingFormat(request.Model())
+	if request.Model().Reasoning() && thinkingFormat != "openai" && thinkingFormat != "deepseek" {
+		return nil, fmt.Errorf("%w: thinking format %q is not implemented", ErrOpenAICompletionsRequest, thinkingFormat)
 	}
 	lastToolResult := false
 	pendingToolImages := make([]any, 0)
@@ -437,7 +442,27 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		value := false
 		p.Store = &value
 	}
-	if effort, ok := request.Model().ThinkingEffort(request.ThinkingLevel()); ok && effort != "" && completionsSupportsReasoningEffort(request.Model()) {
+	if request.Model().Reasoning() && thinkingFormat == "deepseek" {
+		level := request.ThinkingLevel()
+		if level == "" {
+			level = ThinkingOff
+		}
+		if level == ThinkingOff {
+			off, configured := request.Model().ThinkingLevelMap()[ThinkingOff]
+			if !configured || off != nil {
+				p.Thinking = &completionsThinking{Type: "disabled"}
+			}
+		} else {
+			p.Thinking = &completionsThinking{Type: "enabled"}
+			if completionsSupportsReasoningEffort(request.Model()) {
+				effort := string(level)
+				if mapped, configured := request.Model().ThinkingLevelMap()[level]; configured && mapped != nil {
+					effort = *mapped
+				}
+				p.ReasoningEffort = effort
+			}
+		}
+	} else if effort, ok := request.Model().ThinkingEffort(request.ThinkingLevel()); ok && effort != "" && completionsSupportsReasoningEffort(request.Model()) {
 		p.ReasoningEffort = effort
 	}
 	encoded, err := json.Marshal(p)

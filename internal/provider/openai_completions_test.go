@@ -100,6 +100,132 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 	}
 }
 
+func TestOpenAICompletionsMapsDeepSeekThinkingFormat(t *testing.T) {
+	supportsStore := false
+	thinkingFormat := "deepseek"
+	highEffort := "mapped-high"
+	model, err := newModel(provider.ModelSpec{
+		Provider: "deepseek", API: provider.OpenAICompletionsAPI, ID: "deepseek-v4-flash",
+		Reasoning: true,
+		ThinkingLevelMap: map[provider.ThinkingLevel]*string{
+			provider.ThinkingHigh: &highEffort,
+		},
+		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
+			SupportsStore:  &supportsStore,
+			ThinkingFormat: &thinkingFormat,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads := make(chan map[string]any, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		payloads <- payload
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, completionsSSE(
+			map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "ok"}, "finish_reason": nil}}},
+			map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}},
+		)+"data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: server.URL + "/v1", APIKey: "key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, level := range []provider.ThinkingLevel{provider.ThinkingOff, provider.ThinkingHigh} {
+		request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustUser(t, "hello")}, provider.RequestOptions{ThinkingLevel: level})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+		if terminal.FinishReason() != llm.FinishStop {
+			t.Fatalf("level %s terminal = %#v", level, terminal)
+		}
+		payload := <-payloads
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok {
+			t.Fatalf("level %s thinking = %#v", level, payload["thinking"])
+		}
+		if level == provider.ThinkingOff {
+			if thinking["type"] != "disabled" {
+				t.Fatalf("off thinking = %#v", thinking)
+			}
+			if _, sent := payload["reasoning_effort"]; sent {
+				t.Fatalf("off reasoning_effort = %#v", payload["reasoning_effort"])
+			}
+		} else {
+			if thinking["type"] != "enabled" || payload["reasoning_effort"] != highEffort {
+				t.Fatalf("high thinking/effort = %#v / %#v", thinking, payload["reasoning_effort"])
+			}
+		}
+	}
+}
+
+func TestOpenAICompletionsPreservesDeepSeekThinkingOptionSemantics(t *testing.T) {
+	supportsStore := false
+	supportsEffort := false
+	thinkingFormat := "deepseek"
+	model, err := newModel(provider.ModelSpec{
+		Provider: "deepseek", API: provider.OpenAICompletionsAPI, ID: "deepseek-v4-flash",
+		Reasoning: true,
+		ThinkingLevelMap: map[provider.ThinkingLevel]*string{
+			provider.ThinkingOff: nil,
+		},
+		Compat: provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
+			SupportsStore: &supportsStore, SupportsReasoningEffort: &supportsEffort, ThinkingFormat: &thinkingFormat,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloads := make(chan map[string]any, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		payloads <- payload
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, completionsSSE(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "ok"}, "finish_reason": "stop"}}})+"data: [DONE]\n\n")
+	}))
+	defer server.Close()
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: server.URL, APIKey: "key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, level := range []provider.ThinkingLevel{provider.ThinkingOff, provider.ThinkingHigh} {
+		request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustUser(t, "hello")}, provider.RequestOptions{ThinkingLevel: level})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+		if terminal.FinishReason() != llm.FinishStop {
+			t.Fatalf("level %s terminal=%#v", level, terminal)
+		}
+		payload := <-payloads
+		if level == provider.ThinkingOff {
+			if _, present := payload["thinking"]; present {
+				t.Fatalf("off:null emitted thinking=%#v", payload["thinking"])
+			}
+		} else {
+			thinking, ok := payload["thinking"].(map[string]any)
+			if !ok || thinking["type"] != "enabled" {
+				t.Fatalf("high thinking=%#v", payload["thinking"])
+			}
+		}
+		if _, present := payload["reasoning_effort"]; present {
+			t.Fatalf("unsupported reasoning_effort=%#v", payload["reasoning_effort"])
+		}
+	}
+}
+
 func TestOpenAICompletionsOmitsUnsupportedStreamOptionsAndInfersFinishReason(t *testing.T) {
 	supportsUsage, supportsFinish := false, false
 	model, err := newModel(provider.ModelSpec{
