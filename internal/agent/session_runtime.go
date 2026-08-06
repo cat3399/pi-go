@@ -20,14 +20,14 @@ import (
 
 // SessionConfig supplies the long-lived product state around the in-memory
 // Agent and its AgentLoop execution core.
-// Provider and Transcript are lifecycle dependencies; all prompt-visible
+// Provider and SessionManager are lifecycle dependencies; all prompt-visible
 // settings below are owned by AgentSession and snapshotted per provider turn.
 type SessionConfig struct {
-	Provider      provider.Provider
-	Transcript    Transcript
-	Model         provider.Model
-	ThinkingLevel provider.ThinkingLevel
-	SystemPrompt  string
+	Provider       provider.Provider
+	SessionManager *session.SessionManager
+	Model          provider.Model
+	ThinkingLevel  provider.ThinkingLevel
+	SystemPrompt   string
 	// SystemPromptOptions preserves the structured inputs exposed by the
 	// original before_agent_start hook. Product resource assembly may populate
 	// the complete value; AgentSession fills CWD and selected tool names when
@@ -57,8 +57,8 @@ type SessionConfig struct {
 }
 
 // SessionState is a copy-only view of the mutable product configuration.
-// Conversation remains durable in Transcript, which is intentionally the
-// only source of truth for a resumed session.
+// Active Agent state owns the current runtime conversation; SessionManager
+// entries and BuildContext own its durable form and resume reconstruction.
 type SessionState struct {
 	Model         provider.Model
 	ThinkingLevel provider.ThinkingLevel
@@ -184,14 +184,14 @@ func (BashExecutionUpdateEvent) sessionEvent()                {}
 type SessionObserver func(context.Context, SessionEvent)
 
 // AgentSession owns the persistent agent product state. It never invokes
-// providers, tools, transcript writes, or observers while holding mu. The
+// providers, tools, session writes, or observers while holding mu. The
 // loop calls prepareTurn immediately before each provider request, so a
 // model/tool/prompt change made while tools are running applies to the next
 // request in that same run.
 type AgentSession struct {
 	mu             sync.RWMutex
 	loop           *Agent
-	transcript     Transcript
+	sessionManager *session.SessionManager
 	model          provider.Model
 	thinkingLevel  provider.ThinkingLevel
 	systemPrompt   string
@@ -215,12 +215,10 @@ type AgentSession struct {
 	contextReserve    uint64
 	keepRecentTokens  uint64
 	summarizer        session.Summarizer
-	compactor         sessionCompactor
 	settlementTimeout time.Duration
 	observers         []sessionObserverEntry
 	nextObserver      uint64
 	loopUnsubscribe   func()
-	runtimeTranscript *sessionTranscript
 }
 
 type sessionRun struct {
@@ -243,105 +241,6 @@ type sessionRun struct {
 	started                      bool
 	extensionSystemPrompt        *string
 }
-type sessionTranscript struct {
-	mu            sync.RWMutex
-	durable       Transcript
-	messages      []llm.ConversationMessage
-	agentMessages []agentmsg.Message
-	assistant     session.AssistantProvenance
-	hasAssistant  bool
-}
-
-func newSessionTranscript(durable Transcript) *sessionTranscript {
-	context := durable.Context()
-	assistant, hasAssistant := context.AssistantProvenance()
-	return &sessionTranscript{durable: durable, messages: context.Messages(), agentMessages: context.AgentMessages(), assistant: assistant, hasAssistant: hasAssistant}
-}
-func (t *sessionTranscript) Context() session.Context {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return session.NewAgentContext(t.agentMessages)
-}
-func (t *sessionTranscript) BuildContext() session.Context { return t.Context() }
-func (t *sessionTranscript) Append(ctx context.Context, message llm.ConversationMessage, options session.AppendOptions) (session.Entry, error) {
-	entry, err := t.durable.Append(ctx, message, options)
-	if err != nil {
-		return session.Entry{}, err
-	}
-	t.mu.Lock()
-	t.messages = append(t.messages, message)
-	if wrapped, wrapErr := agentmsg.NewLLM(message); wrapErr == nil {
-		t.agentMessages = append(t.agentMessages, wrapped)
-	}
-	context := t.durable.Context()
-	t.assistant, t.hasAssistant = context.AssistantProvenance()
-	t.mu.Unlock()
-	return entry, nil
-}
-func (t *sessionTranscript) AppendAgentMessage(ctx context.Context, message agentmsg.Message, options session.AppendOptions) (session.Entry, error) {
-	durable, ok := t.durable.(interface {
-		AppendAgentMessage(context.Context, agentmsg.Message, session.AppendOptions) (session.Entry, error)
-	})
-	if !ok {
-		return session.Entry{}, fmt.Errorf("%w: transcript does not support agent messages", ErrInvalidConfig)
-	}
-	entry, err := durable.AppendAgentMessage(ctx, message, options)
-	if err != nil {
-		return session.Entry{}, err
-	}
-	converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{message})
-	if err != nil {
-		return session.Entry{}, err
-	}
-	t.mu.Lock()
-	t.agentMessages = append(t.agentMessages, agentmsg.CloneOne(message))
-	t.messages = append(t.messages, converted...)
-	current := t.durable.Context()
-	t.assistant, t.hasAssistant = current.AssistantProvenance()
-	t.mu.Unlock()
-	return entry, nil
-}
-func (t *sessionTranscript) removeLastFailure() {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if len(t.messages) != 0 {
-		if _, ok := t.messages[len(t.messages)-1].(llm.AssistantFailureMessage); ok {
-			t.messages = t.messages[:len(t.messages)-1]
-			if len(t.agentMessages) > 0 {
-				t.agentMessages = t.agentMessages[:len(t.agentMessages)-1]
-			}
-		}
-	}
-}
-
-func (t *sessionTranscript) Compact(ctx context.Context, request session.CompactRequest) (session.CompactResult, error) {
-	compactor, ok := t.durable.(sessionCompactor)
-	if !ok {
-		return session.CompactResult{}, ErrCompactionUnavailable
-	}
-	result, err := compactor.Compact(ctx, request)
-	if err != nil {
-		return session.CompactResult{}, err
-	}
-	var refreshed session.Context
-	if builder, ok := t.durable.(ContextBuilder); ok {
-		refreshed = builder.BuildContext()
-	} else {
-		refreshed = t.durable.Context()
-	}
-	t.mu.Lock()
-	t.messages = refreshed.Messages()
-	t.agentMessages = refreshed.AgentMessages()
-	t.assistant, t.hasAssistant = refreshed.AssistantProvenance()
-	t.mu.Unlock()
-	return result, nil
-}
-func (t *sessionTranscript) AssistantProvenance() (session.AssistantProvenance, bool) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.assistant, t.hasAssistant
-}
-
 type sessionObserverEntry struct {
 	id       uint64
 	observer SessionObserver
@@ -358,15 +257,14 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if isNilInterface(config.Provider) {
 		return nil, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
 	}
-	if isNilInterface(config.Transcript) {
-		return nil, fmt.Errorf("%w: transcript is required", ErrInvalidConfig)
+	if config.SessionManager == nil {
+		return nil, fmt.Errorf("%w: session manager is required", ErrInvalidConfig)
 	}
 	if config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
 		return nil, fmt.Errorf("%w: context reserve exceeds window", ErrInvalidConfig)
 	}
-	compactor, hasCompactor := config.Transcript.(sessionCompactor)
-	if config.ContextWindow != 0 && (!hasCompactor || config.Summarizer == nil) {
-		return nil, fmt.Errorf("%w: automatic compaction requires Session and summarizer", ErrInvalidConfig)
+	if config.ContextWindow != 0 && config.Summarizer == nil {
+		return nil, fmt.Errorf("%w: automatic compaction requires summarizer", ErrInvalidConfig)
 	}
 	if len(config.Tools) != 0 && isNilInterface(config.Tool) {
 		return nil, fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
@@ -375,7 +273,12 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		return nil, fmt.Errorf("%w: settlement timeout cannot be negative", ErrInvalidConfig)
 	}
 	if config.ThinkingLevel == "" {
-		config.ThinkingLevel = provider.ThinkingOff
+		context := config.SessionManager.BuildContext()
+		if stored, ok := context.ThinkingLevel(); ok && provider.ThinkingLevel(stored).Valid() {
+			config.ThinkingLevel = provider.ThinkingLevel(stored)
+		} else {
+			config.ThinkingLevel = provider.ThinkingOff
+		}
 	}
 	if !config.ThinkingLevel.Valid() {
 		return nil, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, config.ThinkingLevel)
@@ -387,9 +290,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	}
 	systemOptions := cloneBuildSystemPromptOptions(config.SystemPromptOptions)
 	if systemOptions.CWD == "" {
-		if durable, ok := config.Transcript.(*session.Session); ok {
-			systemOptions.CWD = durable.Header().WorkingDir()
-		}
+		systemOptions.CWD = config.SessionManager.Cwd()
 	}
 	if systemOptions.SelectedTools == nil {
 		systemOptions.SelectedTools = make([]string, len(config.Tools))
@@ -398,21 +299,21 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		}
 	}
 	s := &AgentSession{
-		transcript: config.Transcript, model: config.Model, thinkingLevel: config.ThinkingLevel,
+		sessionManager: config.SessionManager, model: config.Model, thinkingLevel: config.ThinkingLevel,
 		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
 		resolveStream: config.ResolveStreamOptions, hooks: config.Hooks,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
-		summarizer: config.Summarizer, compactor: compactor,
+		summarizer: config.Summarizer,
 	}
 	s.settlementTimeout = config.SettlementTimeout
 	if s.settlementTimeout <= 0 {
 		s.settlementTimeout = defaultSettlementTimeout
 	}
-	s.runtimeTranscript = newSessionTranscript(config.Transcript)
+	initialContext := config.SessionManager.BuildContext()
 	loop, err := New(Config{
-		Provider: config.Provider, InitialMessages: s.runtimeTranscript.Context().AgentMessages(), Model: config.Model, ThinkingLevel: config.ThinkingLevel, Stream: config.Stream,
+		Provider: config.Provider, InitialMessages: initialContext.AgentMessages(), Model: config.Model, ThinkingLevel: config.ThinkingLevel, Stream: config.Stream,
 		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
 		ToolExecution: config.ToolExecution, TransformContext: config.TransformContext, TransformAgentContext: contextHookTransform(config.Hooks.Context),
 		MessageEnd:   s.messageEndTransform,
@@ -442,31 +343,34 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 }
 
 func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) error {
+	if runtimeEvent, ok := event.(agentRuntimeEvent); ok {
+		s.handleLoopRuntimeEvent(ctx, runtimeEvent)
+	}
 	if ended, ok := event.(MessageEndEvent); ok {
 		if err := s.persistAgentMessage(ctx, ended.Message); err != nil {
 			return err
 		}
-	}
-	if runtimeEvent, ok := event.(agentRuntimeEvent); ok {
-		s.handleLoopRuntimeEvent(ctx, runtimeEvent)
+		if standard, ok := ended.Message.(agentmsg.LLM); ok && retrySucceededMessage(standard.Conversation()) {
+			s.endRetrySeries(ctx, true, "")
+		}
 	}
 	return nil
 }
 
 func (s *AgentSession) persistAgentMessage(ctx context.Context, message agentmsg.Message) error {
-	if s == nil || s.runtimeTranscript == nil || message == nil {
+	if s == nil || s.sessionManager == nil || message == nil {
 		return fmt.Errorf("%w: invalid session message", ErrTranscriptCommit)
 	}
 	settlement, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.settlementTimeout)
 	defer cancel()
 	if standard, ok := message.(agentmsg.LLM); ok {
-		_, err := s.runtimeTranscript.Append(settlement, standard.Conversation(), session.AppendOptions{})
+		_, err := s.sessionManager.AppendLLMMessage(settlement, standard.Conversation())
 		if err != nil {
 			return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 		}
 		return nil
 	}
-	if _, err := s.runtimeTranscript.AppendAgentMessage(settlement, message, session.AppendOptions{}); err != nil {
+	if _, err := s.sessionManager.AppendMessage(settlement, message); err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 	}
 	return nil
@@ -608,18 +512,17 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 			s.emitToObservers(ctx, observers, emitted)
 		}
 	}
-	// Upstream ends a successful retry immediately after the successful
-	// assistant message has been committed, before that low run emits
-	// agent_end. A final failed low run ends only after its agent_end.
-	if _, ended := event.(MessageEndEvent); ended && retrySucceededMessage(message) {
-		s.endRetrySeries(ctx, true, "")
-	}
+	// A successful retry ends only in handleLoopEvent after this pre-persist
+	// extension/observer dispatch and the durable append both succeed. A final
+	// failed low run ends here after its agent_end.
 	if ended, ok := event.(AgentEndEvent); ok && !willRetry {
 		s.endRetrySeries(ctx, false, retryFinalError(ended))
 	}
 }
 
-// dispatchExtensionHook is observational for post-commit lifecycle events.
+// dispatchExtensionHook is observational for lifecycle events. For
+// message_end it runs before SessionManager persistence, matching the original
+// AgentSession event pipeline.
 // Mutation/cancellation hooks run at their safe pre-boundaries (context and
 // compaction); an error here cannot retroactively alter durable history.
 func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, message llm.ConversationMessage, agentMessage agentmsg.Message, terminal llm.AssistantTerminal, event agentRuntimeEvent) {
@@ -1010,11 +913,54 @@ func (s *AgentSession) Model() provider.Model                 { return s.State()
 func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel { return s.State().ThinkingLevel }
 func (s *AgentSession) SystemPrompt() string                  { return s.State().SystemPrompt }
 func (s *AgentSession) Tools() []provider.ToolDefinition      { return s.State().Tools }
-func (s *AgentSession) Transcript() Transcript {
+func (s *AgentSession) SessionManager() *session.SessionManager {
 	if s == nil {
 		return nil
 	}
-	return s.transcript
+	return s.sessionManager
+}
+
+func (s *AgentSession) SessionName() (string, bool) {
+	if s == nil || s.sessionManager == nil {
+		return "", false
+	}
+	return s.sessionManager.SessionName()
+}
+
+// SetSessionName persists the sanitized session_info entry before publishing
+// the product event, matching the original AgentSession ordering.
+func (s *AgentSession) SetSessionName(ctx context.Context, name string) error {
+	if s == nil || s.sessionManager == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, err := s.sessionManager.AppendSessionInfo(ctx, name)
+	if err != nil {
+		return fmt.Errorf("%w: session info: %w", ErrTranscriptCommit, err)
+	}
+	resolved, ok := s.sessionManager.SessionName()
+	var eventName *string
+	if ok {
+		eventName = &resolved
+	}
+	s.mu.RLock()
+	observers := make([]SessionObserver, 0, len(s.observers))
+	for _, observer := range s.observers {
+		if observer.observer != nil {
+			observers = append(observers, observer.observer)
+		}
+	}
+	s.mu.RUnlock()
+	s.emitToObservers(ctx, observers, SessionInfoChangeEvent{Name: eventName})
+	if hook := s.hooks.SessionInfoChanged; hook != nil {
+		_ = hook(ctx, SessionInfoChangedEvent{Name: eventName})
+	}
+	return nil
 }
 func (s *AgentSession) SetModel(model provider.Model) error {
 	if s == nil {
@@ -1046,9 +992,24 @@ func (s *AgentSession) SetModel(model provider.Model) error {
 		s.lifecycleMu.Unlock()
 		return err
 	}
+	settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
+	defer cancel()
+	if _, err := s.sessionManager.AppendModelChange(settlement, model.Provider(), model.ID()); err != nil {
+		s.lifecycleMu.Unlock()
+		return fmt.Errorf("%w: model change: %w", ErrTranscriptCommit, err)
+	}
+	if selectedThinking != previousThinking {
+		if _, err := s.sessionManager.AppendThinkingLevelChange(settlement, string(selectedThinking)); err != nil {
+			s.lifecycleMu.Unlock()
+			return fmt.Errorf("%w: thinking level change: %w", ErrTranscriptCommit, err)
+		}
+	}
 	s.lifecycleMu.Unlock()
-	if selectedThinking != previousThinking && s.hooks.ThinkingLevelSelect != nil {
-		_ = s.hooks.ThinkingLevelSelect(context.Background(), ThinkingLevelSelectEvent{Level: selectedThinking, PreviousLevel: previousThinking})
+	if selectedThinking != previousThinking {
+		s.emitControl(context.Background(), "thinking_level_changed")
+		if s.hooks.ThinkingLevelSelect != nil {
+			_ = s.hooks.ThinkingLevelSelect(context.Background(), ThinkingLevelSelectEvent{Level: selectedThinking, PreviousLevel: previousThinking})
+		}
 	}
 	if hook := s.hooks.ModelSelect; hook != nil && !previous.Equal(model) {
 		previousCopy := previous
@@ -1078,12 +1039,21 @@ func (s *AgentSession) SetThinkingLevel(level provider.ThinkingLevel) error {
 		s.lifecycleMu.Unlock()
 		return err
 	}
-	s.lifecycleMu.Unlock()
-	if hook := s.hooks.ThinkingLevelSelect; hook != nil && selected != previous {
-		_ = hook(context.Background(), ThinkingLevelSelectEvent{Level: selected, PreviousLevel: previous})
+	if selected != previous {
+		settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
+		_, persistErr := s.sessionManager.AppendThinkingLevelChange(settlement, string(selected))
+		cancel()
+		if persistErr != nil {
+			s.lifecycleMu.Unlock()
+			return fmt.Errorf("%w: thinking level change: %w", ErrTranscriptCommit, persistErr)
+		}
 	}
+	s.lifecycleMu.Unlock()
 	if selected != previous {
 		s.emitControl(context.Background(), "thinking_level_changed")
+		if hook := s.hooks.ThinkingLevelSelect; hook != nil {
+			_ = hook(context.Background(), ThinkingLevelSelectEvent{Level: selected, PreviousLevel: previous})
+		}
 	}
 	return nil
 }
@@ -1326,7 +1296,7 @@ func (s *AgentSession) runSession(
 		state := s.State()
 		out, hookErr := hook(run.ctx, BeforeAgentStartEvent{
 			Prompt: input.Text, Images: append([]llm.ImageBlock(nil), input.Images...), PromptMessages: agentmsg.Clone(input.Messages),
-			SystemPrompt: state.SystemPrompt, SystemPromptOptions: s.systemPromptOptions(), Messages: s.runtimeTranscript.Context().AgentMessages(),
+			SystemPrompt: state.SystemPrompt, SystemPromptOptions: s.systemPromptOptions(), Messages: s.loop.State().Messages(),
 		})
 		if hookErr != nil {
 			return Result{}, hookErr
@@ -1374,8 +1344,7 @@ func (s *AgentSession) runSession(
 			})
 			// The failed assistant turn is durable history but must not be sent
 			// back to the provider when resending this attempt.
-			s.runtimeTranscript.removeLastFailure()
-			s.syncAgentMessages()
+			s.removeLastFailureFromAgentState()
 			if waitErr := s.retry.Wait(run.ctx, delay); waitErr != nil {
 				s.endRetrySeries(run.ctx, false, waitErr.Error())
 				return result, nil
@@ -1481,7 +1450,10 @@ func retryBudget(maxAttempts uint32) uint32 {
 }
 
 func (s *AgentSession) checkPrePromptCompaction(run *sessionRun) {
-	messages := s.runtimeTranscript.Context().Messages()
+	messages, err := s.agentStateLLMMessages()
+	if err != nil {
+		return
+	}
 	if len(messages) == 0 {
 		return
 	}
@@ -1489,9 +1461,9 @@ func (s *AgentSession) checkPrePromptCompaction(run *sessionRun) {
 	if !ok {
 		return
 	}
-	provenance, hasProvenance := s.runtimeTranscript.AssistantProvenance()
+	provenance := terminal.AssistantProvenance()
 	currentModel := s.State().Model
-	if !hasProvenance || provenance.Provider != currentModel.Provider() || provenance.Model != currentModel.ID() {
+	if provenance.Provider != currentModel.Provider() || provenance.Model != currentModel.ID() {
 		return
 	}
 	// Pre-prompt policy deliberately never continues: the pending user prompt
@@ -1500,9 +1472,9 @@ func (s *AgentSession) checkPrePromptCompaction(run *sessionRun) {
 }
 
 // checkPostRunCompaction returns true only when overflow recovery compacted
-// successfully and the caller must Continue from the refreshed runtime
-// transcript. Threshold/successful-over-window compaction never fabricates a
-// provider continuation.
+// successfully and the caller must Continue from the Agent messages rebuilt
+// from SessionManager. Threshold/successful-over-window compaction never
+// fabricates a provider continuation.
 func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bool {
 	terminal, ok := result.Terminal()
 	if !ok {
@@ -1512,10 +1484,14 @@ func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bo
 }
 
 func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTerminal, skipAborted bool) bool {
-	if s == nil || s.compactor == nil || s.summarizer == nil || terminal == nil {
+	if s == nil || s.sessionManager == nil || s.summarizer == nil || terminal == nil {
 		return false
 	}
 	if skipAborted && terminal.FinishReason() == llm.FinishAborted {
+		return false
+	}
+	compactionBoundary, hasCompactionBoundary := s.latestCompactionBoundary()
+	if hasCompactionBoundary && !terminal.Timestamp().After(compactionBoundary) {
 		return false
 	}
 	terminalModel := s.terminalRunModel(run)
@@ -1541,9 +1517,9 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 			return false
 		}
 		// Preserve the failed assistant durably, but never include it in the
-		// retry context. Compact refreshes the runtime projection on success.
-		s.runtimeTranscript.removeLastFailure()
-		s.syncAgentMessages()
+		// retry context. Compaction rebuilds Agent messages from the durable
+		// branch on success.
+		s.removeLastFailureFromAgentState()
 		if s.runCompaction(run, CompactionContextOverflow, true, "") {
 			return true
 		}
@@ -1557,8 +1533,24 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 		return false
 	}
 
-	compact, err := session.ShouldCompact(s.runtimeTranscript.Context().Messages(), window, reserve)
-	if err != nil || !compact {
+	directContextTokens := terminal.Usage().TotalTokens()
+	contextTokens := directContextTokens
+	if terminal.FinishReason() == llm.FinishError || directContextTokens == 0 {
+		messages, err := s.agentStateLLMMessages()
+		if err != nil {
+			return false
+		}
+		estimate, err := session.EstimateContextTokens(messages)
+		if err != nil || estimate.LastUsageIndex < 0 {
+			return false
+		}
+		usageMessage := messages[estimate.LastUsageIndex]
+		if hasCompactionBoundary && !usageMessage.Timestamp().After(compactionBoundary) {
+			return false
+		}
+		contextTokens = estimate.Tokens
+	}
+	if !compactionThresholdExceeded(contextTokens, window, reserve) {
 		return false
 	}
 	s.lifecycleMu.Lock()
@@ -1572,6 +1564,28 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 	}
 	_ = s.runCompaction(run, CompactionThreshold, false, "")
 	return false
+}
+
+func (s *AgentSession) latestCompactionBoundary() (time.Time, bool) {
+	if s == nil || s.sessionManager == nil {
+		return time.Time{}, false
+	}
+	branch, err := s.sessionManager.BranchPath("")
+	if err != nil {
+		return time.Time{}, false
+	}
+	entry, ok := session.LatestCompactionEntry(branch)
+	if !ok {
+		return time.Time{}, false
+	}
+	return entry.Timestamp(), true
+}
+
+func compactionThresholdExceeded(tokens, contextWindow, reserveTokens uint64) bool {
+	if contextWindow <= reserveTokens {
+		return tokens > 0
+	}
+	return tokens > contextWindow-reserveTokens
 }
 
 func (s *AgentSession) terminalRunModel(run *sessionRun) provider.Model {
@@ -1604,7 +1618,7 @@ func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64
 // failures are surfaced as compaction_end and leave the surrounding request's
 // settled result intact.
 func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) bool {
-	if s == nil || s.runtimeTranscript == nil || s.summarizer == nil {
+	if s == nil || s.sessionManager == nil || s.summarizer == nil {
 		return false
 	}
 	s.setSessionPhase(run, PhaseCompacting)
@@ -1619,8 +1633,7 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 		// A retained-tail policy may keep the durable overflow failure beside the
 		// new checkpoint. It remains in history, but never belongs to resend
 		// context.
-		s.runtimeTranscript.removeLastFailure()
-		s.syncAgentMessages()
+		s.removeLastFailureFromAgentState()
 	}
 	s.afterCompaction(run.ctx, result, reason, willRetry)
 	s.emitCompaction(run.ctx, "compaction_end", reason, &result, false, willRetry, "")
@@ -1631,24 +1644,61 @@ var errExtensionCompactionCancelled = errors.New("extension cancelled compaction
 
 func (s *AgentSession) compactTranscript(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
 	base := sessionObservedSummarizer{session: s, run: run, reason: reason, base: s.summarizer}
-	result, err := s.runtimeTranscript.Compact(run.ctx, session.CompactRequest{
-		KeepRecentTokens: s.keepRecentTokens,
-		Instructions:     instructions,
-		Summarizer: extensionCompactionSummarizer{
-			session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base,
-		},
-	})
-	if err == nil {
-		s.syncAgentMessages()
+	input, err := s.sessionManager.PrepareCompaction(run.ctx, s.keepRecentTokens, instructions)
+	if err != nil {
+		return session.CompactResult{}, err
 	}
-	return result, err
+	summarizer := extensionCompactionSummarizer{session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base}
+	output, err := summarizer.Summarize(run.ctx, input)
+	if cause := context.Cause(run.ctx); cause != nil {
+		if err != nil {
+			return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrAppendCanceled, errors.Join(cause, err))
+		}
+		return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrAppendCanceled, cause)
+	}
+	if err != nil {
+		return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrSummaryFailed, err)
+	}
+	result, err := s.sessionManager.CommitCompaction(run.ctx, input, output)
+	if err != nil {
+		return session.CompactResult{}, err
+	}
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return session.CompactResult{}, err
+	}
+	return result, nil
 }
 
-func (s *AgentSession) syncAgentMessages() {
-	if s == nil || s.loop == nil || s.runtimeTranscript == nil {
+func (s *AgentSession) agentStateLLMMessages() ([]llm.ConversationMessage, error) {
+	if s == nil || s.loop == nil {
+		return nil, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	return agentmsg.ConvertToLLM(s.loop.State().Messages())
+}
+
+func (s *AgentSession) removeLastFailureFromAgentState() {
+	if s == nil || s.loop == nil {
 		return
 	}
-	_ = s.loop.SetMessages(s.runtimeTranscript.Context().AgentMessages())
+	messages := s.loop.State().Messages()
+	if len(messages) == 0 {
+		return
+	}
+	standard, ok := messages[len(messages)-1].(agentmsg.LLM)
+	if !ok {
+		return
+	}
+	if _, failed := standard.Conversation().(llm.AssistantFailureMessage); !failed {
+		return
+	}
+	_ = s.loop.SetMessages(messages[:len(messages)-1])
+}
+
+func (s *AgentSession) reloadAgentMessagesFromSession() error {
+	if s == nil || s.loop == nil || s.sessionManager == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	return s.loop.SetMessages(s.sessionManager.BuildContext().AgentMessages())
 }
 
 func (s *AgentSession) afterCompaction(ctx context.Context, result session.CompactResult, reason CompactionReason, willRetry bool) {
@@ -1683,8 +1733,8 @@ func (s extensionCompactionSummarizer) Summarize(ctx context.Context, input sess
 		return s.base.Summarize(ctx, input)
 	}
 	branch := []session.Entry(nil)
-	if durable, ok := s.session.transcript.(*session.Session); ok {
-		branch = durable.BranchPath()
+	if s.session.sessionManager != nil {
+		branch, _ = s.session.sessionManager.BranchPath("")
 	}
 	eventInput := input
 	eventInput.Messages = append([]llm.ConversationMessage(nil), input.Messages...)
@@ -2235,8 +2285,8 @@ func (s *AgentSession) Subscribe(observer SessionObserver) func() {
 	}
 }
 
-// Close first settles/cancels work, then detaches event delivery. It is safe
-// to call repeatedly and must run before an owning transcript is closed.
+// Close first settles/cancels work, detaches event delivery, and closes the
+// owned SessionManager. It is safe to call repeatedly.
 func (s *AgentSession) Close(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -2266,6 +2316,9 @@ func (s *AgentSession) Close(ctx context.Context) error {
 			return hookErr
 		}
 	}
+	if managerErr := s.sessionManager.Close(); managerErr != nil {
+		return managerErr
+	}
 	s.lifecycleMu.Lock()
 	s.closed = true
 	s.closing = false
@@ -2278,7 +2331,7 @@ func (s *AgentSession) Close(ctx context.Context) error {
 	if unsubscribe != nil {
 		unsubscribe()
 	}
-	return err
+	return nil
 }
 
 func cloneHeaderMap(values map[string]string) map[string]string {
@@ -2298,7 +2351,7 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	if err := s.rejectIfClosed(); err != nil {
 		return session.CompactResult{}, err
 	}
-	if s.runtimeTranscript == nil || s.summarizer == nil || s.compactor == nil {
+	if s.summarizer == nil || s.sessionManager == nil {
 		return session.CompactResult{}, ErrCompactionUnavailable
 	}
 	run, err := s.admitSessionRun(ctx)
@@ -2332,24 +2385,21 @@ func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
 	if err := s.rejectIfClosed(); err != nil {
 		return err
 	}
-	durable, ok := s.transcript.(*session.Session)
-	if !ok {
-		return fmt.Errorf("%w: transcript has no session tree", ErrInvalidConfig)
-	}
+	manager := s.sessionManager
 	run, err := s.admitSessionRun(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.finishSessionRun(run)
-	old, _ := durable.LeafID()
+	old, _ := manager.LeafID()
 	if old == id {
 		return nil
 	}
-	targetPath, err := durable.PathTo(id)
+	targetPath, err := manager.BranchPath(id)
 	if err != nil {
 		return err
 	}
-	oldPath := durable.BranchPath()
+	oldPath, _ := manager.BranchPath("")
 	commonAncestor, entriesToSummarize := treeNavigationDelta(oldPath, targetPath)
 	preparation := TreePreparation{
 		TargetID: id, OldLeafID: optionalString(old), CommonAncestorID: optionalString(commonAncestor),
@@ -2374,26 +2424,75 @@ func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
 			label = *result.Label
 		}
 	}
-	if err := durable.SelectLeaf(id); err != nil {
+	if err := manager.Branch(id); err != nil {
 		return err
 	}
 	if label != "" {
-		if _, err := durable.AppendPayload(run.ctx, session.LabelPayload{TargetID: id, Label: &label}); err != nil {
+		if _, err := manager.AppendLabelChange(run.ctx, id, &label); err != nil {
 			return err
 		}
 	}
-	refreshed := durable.BuildContext()
-	s.runtimeTranscript.mu.Lock()
-	s.runtimeTranscript.messages = refreshed.Messages()
-	s.runtimeTranscript.agentMessages = refreshed.AgentMessages()
-	s.runtimeTranscript.assistant, s.runtimeTranscript.hasAssistant = refreshed.AssistantProvenance()
-	s.runtimeTranscript.mu.Unlock()
-	s.syncAgentMessages()
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return err
+	}
 	if hook := s.hooks.SessionTree; hook != nil {
-		newLeaf, _ := durable.LeafID()
+		newLeaf, _ := manager.LeafID()
 		_ = hook(run.ctx, SessionTreeEvent{OldLeafID: optionalString(old), NewLeafID: optionalString(newLeaf)})
 	}
 	return nil
+}
+
+// ResetLeaf selects the virtual position before all entries and refreshes the
+// Agent context from SessionManager. The next prompt becomes a new root.
+func (s *AgentSession) ResetLeaf(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: nil tree context", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return err
+	}
+	run, err := s.admitSessionRun(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.finishSessionRun(run)
+	old, _ := s.sessionManager.LeafID()
+	if err := s.sessionManager.ResetLeaf(); err != nil {
+		return err
+	}
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return err
+	}
+	if hook := s.hooks.SessionTree; hook != nil {
+		_ = hook(run.ctx, SessionTreeEvent{OldLeafID: optionalString(old)})
+	}
+	return nil
+}
+
+// CreateBranchedSession asks SessionManager to replace its active durable
+// session with the selected path, then refreshes Agent state. Runtime remains
+// responsible for replacing the whole AgentSession when product UX requires a
+// separate lifecycle object.
+func (s *AgentSession) CreateBranchedSession(ctx context.Context, leafID string) (string, bool, error) {
+	if ctx == nil {
+		return "", false, fmt.Errorf("%w: nil branch context", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return "", false, err
+	}
+	run, err := s.admitSessionRun(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer s.finishSessionRun(run)
+	path, persisted, err := s.sessionManager.CreateBranchedSession(run.ctx, leafID)
+	if err != nil {
+		return "", false, err
+	}
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return "", false, err
+	}
+	return path, persisted, nil
 }
 
 func treeNavigationDelta(oldPath, targetPath []session.Entry) (string, []session.Entry) {

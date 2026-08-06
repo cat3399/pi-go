@@ -35,10 +35,10 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 	tool := &fakeTool{name: "fixture", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 		return agent.ToolOutput{Content: []llm.ToolResultContentBlock{mustTextBlock(t, "ok")}}, nil
 	}}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	var hookPartials, observerPartials []agentmsg.AssistantPartial
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, toolUse, mustTextTerminal(t, "done")), Transcript: transcript,
+		Provider: newScriptedProvider(t, toolUse, mustTextTerminal(t, "done")), SessionManager: transcript,
 		Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
 			if (event.Type == agent.MessageStartHookEvent || event.Type == agent.MessageUpdateHookEvent) && event.Message.Role() == agentmsg.RoleAssistant {
@@ -113,7 +113,7 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 	if !seen[llm.AssistantBlockThinking] || !seen[llm.AssistantBlockText] || !seen[llm.AssistantBlockToolCall] || !seenRawToolDelta {
 		t.Fatalf("streaming rich kinds = %#v rawToolDelta=%t", seen, seenRawToolDelta)
 	}
-	for _, message := range transcript.Context().AgentMessages() {
+	for _, message := range transcript.BuildContext().AgentMessages() {
 		if _, partial := message.(agentmsg.AssistantPartial); partial {
 			t.Fatal("partial assistant was persisted")
 		}
@@ -145,8 +145,8 @@ func TestTurnAndToolExecutionHooksMirrorOriginalLifecycle(t *testing.T) {
 	var turns []agent.TurnLifecycleEvent
 	var tools []agent.ToolExecutionLifecycleEvent
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider:   newScriptedProvider(t, toolUse, mustTextTerminal(t, "done")),
-		Transcript: newSession(t), Model: model, Tool: tool,
+		Provider:       newScriptedProvider(t, toolUse, mustTextTerminal(t, "done")),
+		SessionManager: newSessionManager(t), Model: model, Tool: tool,
 		Tools: []provider.ToolDefinition{definition}, ToolExecution: agent.ToolExecutionSequential,
 		Hooks: agent.Hooks{
 			Turn: func(_ context.Context, event agent.TurnLifecycleEvent) error {
@@ -234,7 +234,7 @@ func TestBeforeAgentStartReceivesRichMultiMessagePrompt(t *testing.T) {
 	}}
 	implementation := newScriptedProvider(t, mustTextTerminal(t, "done"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: newSession(t), Model: model,
+		Provider: implementation, SessionManager: newSessionManager(t), Model: model,
 		SystemPromptOptions: agent.BuildSystemPromptOptions{
 			CustomPrompt: &customPrompt, SelectedTools: selectedTools, ToolSnippets: toolSnippets,
 			PromptGuidelines: promptGuidelines, AppendSystemPrompt: &appendPrompt, CWD: "/workspace",

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -161,6 +162,51 @@ func TestRunCreatesExplicitSessionParentDirectories(t *testing.T) {
 	}
 	if _, err := os.Stat(sessionPath); err != nil {
 		t.Fatalf("explicit nested session was not created: %v", err)
+	}
+}
+
+func TestRunClosesManagerWhenAgentSessionConstructionFails(t *testing.T) {
+	workingDir := t.TempDir()
+	sessionPath := filepath.Join(workingDir, "existing.jsonl")
+	manager, err := session.OpenSessionManagerWithOptions(sessionPath, workingDir, workingDir, session.ManagerOptions{
+		NewSession: session.NewSessionOptions{ID: "construction-failure"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := llm.NewUserTextMessage("seed", appTestEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), user); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), textTerminal(t, "seeded")); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	constructionErr := errors.New("session start rejected")
+	deps := testDependencies(t, workingDir, newScriptedProvider(t), &scriptedRunner{})
+	deps.Hooks.SessionStart = func(context.Context, agent.SessionStartHookEvent) error {
+		return constructionErr
+	}
+	var stdout, stderr bytes.Buffer
+	if code := app.Run(context.Background(), deps, []string{"--print", "unused", "--session", sessionPath}, &stdout, &stderr); code != app.ExitFailure {
+		t.Fatalf("Run() exit = %d, want failure", code)
+	}
+	if !strings.Contains(stderr.String(), constructionErr.Error()) {
+		t.Fatalf("Run() stderr = %q, want construction error", stderr.String())
+	}
+
+	reopened, err := session.OpenSessionManager(sessionPath, workingDir, workingDir)
+	if err != nil {
+		t.Fatalf("manager lock leaked after AgentSession construction failure: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

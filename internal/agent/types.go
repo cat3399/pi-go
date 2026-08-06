@@ -42,8 +42,9 @@ var (
 	ErrUnsupportedToolTurn = errors.New("unsupported tool turn")
 )
 
-// Transcript is the complete session capability consumed by the coordinator.
-// The concrete session remains responsible for ordering and durability.
+// Transcript is the narrow persistence seam used by Agent-core integrations.
+// Product AgentSession does not accept this seam; it requires and owns a real
+// session.SessionManager.
 type Transcript interface {
 	Context() session.Context
 	Append(context.Context, llm.ConversationMessage, session.AppendOptions) (session.Entry, error)
@@ -54,15 +55,6 @@ type Transcript interface {
 // actually injects such a message.
 type AgentMessageTranscript interface {
 	AppendAgentMessage(context.Context, agentmsg.Message, session.AppendOptions) (session.Entry, error)
-}
-
-// ContextBuilder is implemented by Session. Keeping it optional preserves the
-// narrow transcript port used by deterministic test doubles, while production
-// turns use Session.BuildContext's immutable selected-leaf snapshot.
-type ContextBuilder interface{ BuildContext() session.Context }
-
-type sessionCompactor interface {
-	Compact(context.Context, session.CompactRequest) (session.CompactResult, error)
 }
 
 // RetryPolicy is shared with provider.ContextSummarizer so both request paths
@@ -198,7 +190,7 @@ type Config struct {
 	// sequential execution. The zero value is parallel, matching upstream.
 	ToolExecution ToolExecutionMode
 	// TransformContext is an immutable request seam. It receives a copied
-	// context projection immediately before every provider call and must return
+	// context snapshot immediately before every provider call and must return
 	// a replacement snapshot; it never mutates Agent's retained messages.
 	TransformContext      ContextTransform
 	TransformAgentContext AgentContextTransform

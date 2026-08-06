@@ -80,6 +80,14 @@ type NewSessionOptions struct {
 	ParentSession string
 }
 
+// ManagerOptions supplies deterministic clock/ID boundaries to product
+// assembly and tests without exposing the underlying Store.
+type ManagerOptions struct {
+	NewSession NewSessionOptions
+	Now        Clock
+	NewEntryID IDGenerator
+}
+
 // RecoveryResult describes an explicit, user-requested repair. Ordinary Open
 // never calls this operation: malformed history is evidence, not disposable
 // whitespace. Recovery only removes one unterminated, non-JSON final line.

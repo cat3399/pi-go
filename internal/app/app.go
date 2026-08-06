@@ -108,7 +108,7 @@ func runApplication(
 		writeDiagnostic(stderr, err)
 		return ExitFailure
 	}
-	transcript, err := openOrCreateSession(runContext, sessionPath, runtime)
+	sessionManager, err := openOrCreateSessionManager(runContext, sessionPath, runtime)
 	if err != nil {
 		if signalCode, caught := signals.exitCode(); caught {
 			return signalCode
@@ -116,15 +116,18 @@ func runApplication(
 		writeDiagnostic(stderr, err)
 		return ExitFailure
 	}
+	managerOwnedByCoordinator := false
 	defer func() {
-		if err := transcript.Close(); err != nil {
-			writeDiagnostic(stderr, fmt.Errorf("close session: %w", err))
-			if exitCode == ExitSuccess {
-				exitCode = ExitFailure
+		if !managerOwnedByCoordinator {
+			if err := sessionManager.Close(); err != nil {
+				writeDiagnostic(stderr, fmt.Errorf("close session: %w", err))
+				if exitCode == ExitSuccess {
+					exitCode = ExitFailure
+				}
 			}
 		}
 	}()
-	executor, toolDefinitions, err := runtime.executorFor(transcript.Header().WorkingDir())
+	executor, toolDefinitions, err := runtime.executorFor(sessionManager.Cwd())
 	if err != nil {
 		writeDiagnostic(stderr, fmt.Errorf("initialize session tool runtime: %w", err))
 		return ExitFailure
@@ -132,7 +135,7 @@ func runApplication(
 
 	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider:          runtime.provider,
-		Transcript:        transcript,
+		SessionManager:    sessionManager,
 		Model:             runtime.model,
 		SystemPrompt:      runtime.systemPrompt,
 		Tool:              executor,
@@ -146,6 +149,7 @@ func runApplication(
 		writeDiagnostic(stderr, fmt.Errorf("initialize agent: %w", err))
 		return ExitFailure
 	}
+	managerOwnedByCoordinator = true
 	defer func() {
 		if err := coordinator.Close(context.Background()); err != nil && exitCode == ExitSuccess {
 			writeDiagnostic(stderr, fmt.Errorf("close agent: %w", err))
@@ -197,11 +201,11 @@ func resolveSessionPath(explicit string, runtime runtimeDependencies) (string, e
 	return filepath.Clean(resolved), nil
 }
 
-func openOrCreateSession(
+func openOrCreateSessionManager(
 	ctx context.Context,
 	path string,
 	runtime runtimeDependencies,
-) (*session.Session, error) {
+) (*session.SessionManager, error) {
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, fmt.Errorf("open session %s: %w", path, cause)
 	}
@@ -211,14 +215,11 @@ func openOrCreateSession(
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("open session %s: path is not a regular file", path)
 		}
-		transcript, err := session.Open(path, session.OpenOptions{
-			Now:        runtime.sessionNow,
-			NewEntryID: runtime.newSessionEntryID,
-		})
+		manager, err := session.OpenSessionManagerWithOptions(path, filepath.Dir(path), "", session.ManagerOptions{Now: runtime.sessionNow, NewEntryID: runtime.newSessionEntryID})
 		if err != nil {
 			return nil, fmt.Errorf("open session %s: %w", path, err)
 		}
-		return transcript, nil
+		return manager, nil
 	case errors.Is(statErr, os.ErrNotExist):
 		parent := filepath.Dir(path)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -231,16 +232,15 @@ func openOrCreateSession(
 		if !runtime.sessionCreateTime.IsZero() {
 			createClock = clockBeginningWith(runtime.sessionCreateTime, runtime.sessionNow)
 		}
-		transcript, err := session.Create(path, session.CreateOptions{
-			ID:         runtime.sessionID,
-			WorkingDir: runtime.workingDir,
+		manager, err := session.OpenSessionManagerWithOptions(path, parent, runtime.workingDir, session.ManagerOptions{
+			NewSession: session.NewSessionOptions{ID: runtime.sessionID},
 			Now:        createClock,
 			NewEntryID: runtime.newSessionEntryID,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create session %s: %w", path, err)
 		}
-		return transcript, nil
+		return manager, nil
 	default:
 		return nil, fmt.Errorf("inspect session %s: %w", path, statErr)
 	}

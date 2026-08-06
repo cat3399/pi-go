@@ -35,6 +35,10 @@ var managerLineBreakPattern = regexp.MustCompile(`[\r\n]+`)
 // CreateSessionManager creates a persistent manager. Like pi, it reserves a
 // path but delays creating the JSONL until the first assistant message.
 func CreateSessionManager(cwd, sessionDir string, options NewSessionOptions) (*SessionManager, error) {
+	return CreateSessionManagerWithOptions(cwd, sessionDir, ManagerOptions{NewSession: options})
+}
+
+func CreateSessionManagerWithOptions(cwd, sessionDir string, options ManagerOptions) (*SessionManager, error) {
 	resolvedCwd, err := resolveWorkingDir(cwd)
 	if err != nil {
 		return nil, err
@@ -43,8 +47,8 @@ func CreateSessionManager(cwd, sessionDir string, options NewSessionOptions) (*S
 	if err != nil {
 		return nil, err
 	}
-	m := &SessionManager{cwd: resolvedCwd, sessionDir: dir, persist: true, runtime: normalizeRuntime(nil, nil)}
-	if err := m.startNew(options); err != nil {
+	m := &SessionManager{cwd: resolvedCwd, sessionDir: dir, persist: true, runtime: normalizeRuntime(options.Now, options.NewEntryID)}
+	if err := m.startNew(options.NewSession); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -54,6 +58,10 @@ func CreateSessionManager(cwd, sessionDir string, options NewSessionOptions) (*S
 // delayed new session at that exact path; an existing empty file is initialized
 // immediately, matching the original explicit --session behavior.
 func OpenSessionManager(path, sessionDir, cwdOverride string) (*SessionManager, error) {
+	return OpenSessionManagerWithOptions(path, sessionDir, cwdOverride, ManagerOptions{})
+}
+
+func OpenSessionManagerWithOptions(path, sessionDir, cwdOverride string, options ManagerOptions) (*SessionManager, error) {
 	resolvedPath, err := resolveSessionPath(path)
 	if err != nil {
 		return nil, err
@@ -67,7 +75,7 @@ func OpenSessionManager(path, sessionDir, cwdOverride string) (*SessionManager, 
 		return nil, fmt.Errorf("%w: resolve session directory: %v", ErrInvalidSession, err)
 	}
 	dir = filepath.Clean(dir)
-	runtime := normalizeRuntime(nil, nil)
+	runtime := normalizeRuntime(options.Now, options.NewEntryID)
 	info, statErr := os.Stat(resolvedPath)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: stat %s: %v", ErrStorage, resolvedPath, statErr)
@@ -84,7 +92,7 @@ func OpenSessionManager(path, sessionDir, cwdOverride string) (*SessionManager, 
 		if err != nil {
 			return nil, err
 		}
-		header, err := newManagerHeader(cwd, NewSessionOptions{}, runtime)
+		header, err := newManagerHeader(cwd, options.NewSession, runtime)
 		if err != nil {
 			return nil, err
 		}
@@ -102,7 +110,7 @@ func OpenSessionManager(path, sessionDir, cwdOverride string) (*SessionManager, 
 		if err != nil {
 			return nil, err
 		}
-		header, err := newManagerHeader(resolvedCwd, NewSessionOptions{}, runtime)
+		header, err := newManagerHeader(resolvedCwd, options.NewSession, runtime)
 		if err != nil {
 			return nil, err
 		}
@@ -130,6 +138,10 @@ func OpenSessionManager(path, sessionDir, cwdOverride string) (*SessionManager, 
 // InMemorySessionManager creates a manager with all normal tree/context
 // semantics and no filesystem persistence.
 func InMemorySessionManager(cwd string, options NewSessionOptions) (*SessionManager, error) {
+	return InMemorySessionManagerWithOptions(cwd, ManagerOptions{NewSession: options})
+}
+
+func InMemorySessionManagerWithOptions(cwd string, options ManagerOptions) (*SessionManager, error) {
 	if cwd == "" {
 		var err error
 		cwd, err = os.Getwd()
@@ -141,8 +153,8 @@ func InMemorySessionManager(cwd string, options NewSessionOptions) (*SessionMana
 	if err != nil {
 		return nil, err
 	}
-	runtime := normalizeRuntime(nil, nil)
-	header, err := newManagerHeader(resolvedCwd, options, runtime)
+	runtime := normalizeRuntime(options.Now, options.NewEntryID)
+	header, err := newManagerHeader(resolvedCwd, options.NewSession, runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -240,7 +252,7 @@ func (m *SessionManager) SetSessionFile(path string) error {
 	if !m.persist {
 		return m.setVolatileSessionFile(resolved)
 	}
-	next, err := OpenSessionManager(resolved, m.sessionDir, m.cwd)
+	next, err := OpenSessionManagerWithOptions(resolved, m.sessionDir, m.cwd, ManagerOptions{Now: m.runtime.now, NewEntryID: m.runtime.newEntryID})
 	if err != nil {
 		return err
 	}
@@ -490,6 +502,41 @@ func (m *SessionManager) Tree() []TreeNode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.store.Tree()
+}
+
+// PrepareCompaction captures the immutable selected-branch input consumed by
+// AgentSession's summarization orchestration. It never calls a provider or an
+// extension hook.
+func (m *SessionManager) PrepareCompaction(ctx context.Context, keepRecentTokens uint64, instructions string) (SummaryInput, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.compactionSnapshot(ctx, CompactRequest{KeepRecentTokens: keepRecentTokens, Instructions: instructions})
+}
+
+// CommitCompaction validates and persists one real summary result. Summary
+// selection, provider execution, retry, hooks, and events remain owned by
+// AgentSession, as in the original architecture.
+func (m *SessionManager) CommitCompaction(ctx context.Context, input SummaryInput, output SummaryOutput) (CompactResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return CompactResult{}, fmt.Errorf("%w: %w", ErrAppendCanceled, cause)
+	}
+	if err := validateSummaryOutput(output); err != nil {
+		return CompactResult{}, err
+	}
+	entry, err := m.store.commitCompaction(ctx, input, output)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	var estimatedTokensAfter uint64
+	if estimate, estimateErr := EstimateContextTokens(m.store.BuildContext().Messages()); estimateErr == nil {
+		estimatedTokensAfter = estimate.Tokens
+	}
+	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil
 }
 
 // LatestCompactionEntry mirrors pi's standalone helper. Callers choose whether

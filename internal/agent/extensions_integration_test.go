@@ -57,10 +57,10 @@ func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 			return agent.MessageHookResult{}, nil
 		},
 	}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "original"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model, SystemPrompt: "base", Hooks: hooks,
+		Provider: providerImpl, SessionManager: transcript, Model: model, SystemPrompt: "base", Hooks: hooks,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -89,7 +89,7 @@ func TestBeforeAgentStartAndMessageHooksMutateOneDurableRun(t *testing.T) {
 	if !reflect.DeepEqual(sequence, wantSequence) {
 		t.Fatalf("hook sequence = %v, want %v", sequence, wantSequence)
 	}
-	durable := transcript.Context().AgentMessages()
+	durable := transcript.BuildContext().AgentMessages()
 	if len(durable) != 3 || durable[0].Role() != agentmsg.RoleUser || durable[1].Role() != agentmsg.RoleCustom || durable[2].Role() != agentmsg.RoleAssistant {
 		t.Fatalf("durable roles = %#v", durable)
 	}
@@ -118,9 +118,9 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 	}
 	providerImpl := newScriptedProvider(t, mustToolUseTerminal(t, "call", "blocked-by-message-end", []byte(`{}`)))
 	tool := &fakeTool{name: "blocked-by-message-end"}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Provider: providerImpl, SessionManager: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
 			if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleAssistant {
 				return agent.MessageHookResult{}, nil
@@ -155,7 +155,7 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 	if !ok || !textOK || text.Content()[0].Text() != "tool skipped" {
 		t.Fatalf("Run terminal = %#v", terminal)
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	if len(messages) != 2 {
 		t.Fatalf("durable messages = %#v", messages)
 	}
@@ -167,13 +167,13 @@ func TestMessageEndReplacementControlsToolExecution(t *testing.T) {
 func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
 	definition, _ := provider.NewToolDefinition("identity", "fixture", false, []byte(`{"type":"object"}`))
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	tool := &fakeTool{name: "identity", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 		return agent.ToolOutput{Text: "executed"}, nil
 	}}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider:   newScriptedProvider(t, mustToolUseTerminal(t, "call", "identity", []byte(`{}`))),
-		Transcript: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Provider:       newScriptedProvider(t, mustToolUseTerminal(t, "call", "identity", []byte(`{}`))),
+		SessionManager: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
 			if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleToolResult {
 				return agent.MessageHookResult{}, nil
@@ -198,7 +198,7 @@ func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T)
 	if tool.CallCount() != 1 {
 		t.Fatalf("tool calls = %d", tool.CallCount())
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	toolResult, propagated := messages[2].(llm.ToolResultMessage)
 	if len(messages) != 4 || !propagated || toolResult.ToolCallID() != "different-call" || messages[3].Role() != llm.RoleAssistant {
 		t.Fatalf("same-role replacement did not propagate: %#v", messages)
@@ -207,10 +207,10 @@ func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T)
 
 func TestSessionMessageEndIgnoresRoleMismatch(t *testing.T) {
 	model := sessionTestModel(t)
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "done"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model,
+		Provider: providerImpl, SessionManager: transcript, Model: model,
 		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
 			if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleUser {
 				return agent.MessageHookResult{}, nil
@@ -227,7 +227,7 @@ func TestSessionMessageEndIgnoresRoleMismatch(t *testing.T) {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
 	requestMessage := providerImpl.Requests()[0].Messages()[0]
-	durableMessage := transcript.Context().Messages()[0]
+	durableMessage := transcript.BuildContext().Messages()[0]
 	if requestMessage.Role() != llm.RoleUser || durableMessage.Role() != llm.RoleUser || messageText(t, durableMessage) != "original" {
 		t.Fatalf("role mismatch propagated request=%#v durable=%#v", requestMessage, durableMessage)
 	}
@@ -236,10 +236,10 @@ func TestSessionMessageEndIgnoresRoleMismatch(t *testing.T) {
 func TestSessionSyntheticFailureUsesMessageEndReplacementAndErrorBoundary(t *testing.T) {
 	transformErr := errors.New("transform failed")
 	t.Run("replacement", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		var sequence []string
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t), Transcript: transcript, Model: sessionTestModel(t),
+			Provider: newScriptedProvider(t), SessionManager: transcript, Model: sessionTestModel(t),
 			TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 				return nil, transformErr
 			},
@@ -271,7 +271,7 @@ func TestSessionSyntheticFailureUsesMessageEndReplacementAndErrorBoundary(t *tes
 		if err != nil || !ok || !textOK || text.Content()[0].Text() != "recovered" {
 			t.Fatalf("Run terminal = (%#v, %v)", terminal, err)
 		}
-		if got := transcript.Context().Messages(); len(got) != 2 || got[1].(llm.AssistantTextMessage).Content()[0].Text() != "recovered" {
+		if got := transcript.BuildContext().Messages(); len(got) != 2 || got[1].(llm.AssistantTextMessage).Content()[0].Text() != "recovered" {
 			t.Fatalf("durable replacement = %#v", got)
 		}
 		want := []string{"message_start:user", "message_end:user", "message_start:assistant", "message_end:assistant"}
@@ -283,7 +283,7 @@ func TestSessionSyntheticFailureUsesMessageEndReplacementAndErrorBoundary(t *tes
 	t.Run("error", func(t *testing.T) {
 		hookErr := errors.New("synthetic message hook failed")
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t), Transcript: newSession(t), Model: sessionTestModel(t),
+			Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 			TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 				return nil, transformErr
 			},
@@ -310,9 +310,9 @@ func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T
 	model, _ := newTestModel("scripted", "scripted", "model")
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "must not run"))
 	cancel := true
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model,
+		Provider: providerImpl, SessionManager: transcript, Model: model,
 		Hooks: agent.Hooks{BeforeAgentStart: func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
 			return agent.BeforeAgentStartResult{Cancel: agent.HookCancel{Cancel: &cancel}}, nil
 		}},
@@ -323,24 +323,24 @@ func TestBeforeAgentStartCancellationNeedsNoReasonAndDoesNotPersist(t *testing.T
 	if _, err := runtime.Run(context.Background(), "blocked"); !errors.Is(err, agent.ErrAgentAborted) {
 		t.Fatalf("Run error = %v", err)
 	}
-	if providerImpl.CallCount() != 0 || len(transcript.Context().AgentMessages()) != 0 {
-		t.Fatalf("cancelled run called provider or persisted: calls=%d messages=%#v", providerImpl.CallCount(), transcript.Context().AgentMessages())
+	if providerImpl.CallCount() != 0 || len(transcript.BuildContext().AgentMessages()) != 0 {
+		t.Fatalf("cancelled run called provider or persisted: calls=%d messages=%#v", providerImpl.CallCount(), transcript.BuildContext().AgentMessages())
 	}
 }
 
 func TestContextHookPresencePreservesFullAgentMessages(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	opaque, err := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: "futureRole", Data: json.RawMessage(`{"role":"futureRole","timestamp":1,"opaque":true}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.AppendAgentMessage(context.Background(), opaque, sessionAppendOptions()); err != nil {
+	if _, err := transcript.AppendMessage(context.Background(), opaque); err != nil {
 		t.Fatal(err)
 	}
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "done"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model,
+		Provider: providerImpl, SessionManager: transcript, Model: model,
 		Hooks: agent.Hooks{Context: func(_ context.Context, event agent.ContextHookEvent) (agent.ContextHookResult, error) {
 			if len(event.Messages) != 2 {
 				t.Fatalf("context messages = %#v", event.Messages)
@@ -364,9 +364,9 @@ func TestContextHookPresencePreservesFullAgentMessages(t *testing.T) {
 	}
 
 	emptyProvider := newScriptedProvider(t, mustTextTerminal(t, "done"))
-	emptyTranscript := newSession(t)
+	emptyTranscript := newSessionManager(t)
 	emptyRuntime, err := agent.NewSession(agent.SessionConfig{
-		Provider: emptyProvider, Transcript: emptyTranscript, Model: model,
+		Provider: emptyProvider, SessionManager: emptyTranscript, Model: model,
 		Hooks: agent.Hooks{Context: func(context.Context, agent.ContextHookEvent) (agent.ContextHookResult, error) {
 			empty := []agentmsg.Message{}
 			return agent.ContextHookResult{Messages: &empty}, nil
@@ -405,9 +405,9 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 	secondText := []llm.ToolResultContentBlock{mustTextBlock(t, "second")}
 	markedError := true
 	clearedError := false
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Provider: providerImpl, SessionManager: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		BeforeToolCall: func(_ context.Context, event agent.BeforeToolCallContext) (agent.BeforeToolCallResult, error) {
 			if string(event.Arguments) != `{"step":1}` {
 				t.Fatalf("base before args = %s", event.Arguments)
@@ -445,7 +445,7 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 	if tool.CallCount() != 1 {
 		t.Fatalf("tool calls = %d", tool.CallCount())
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	resultMessage, ok := messages[2].(llm.ToolResultMessage)
 	if !ok || resultMessage.IsError() || len(resultMessage.Content()) != 1 || resultMessage.Content()[0].Text() != "second" {
 		t.Fatalf("durable tool result = %#v", messages[2])
@@ -468,9 +468,9 @@ func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
 	definition, _ := provider.NewToolDefinition("blocked", "fixture", false, []byte(`{"type":"object"}`))
 	providerImpl := newScriptedProvider(t, mustToolUseTerminal(t, "call", "blocked", []byte(`{}`)), mustTextTerminal(t, "done"))
 	tool := &fakeTool{name: "blocked"}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Provider: providerImpl, SessionManager: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{ToolCall: func(context.Context, agent.BeforeToolCallContext) (agent.BeforeToolCallResult, error) {
 			return agent.BeforeToolCallResult{Block: true, Reason: "denied"}, nil
 		}},
@@ -484,7 +484,7 @@ func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
 	if tool.CallCount() != 0 {
 		t.Fatalf("blocked tool executed %d times", tool.CallCount())
 	}
-	result := transcript.Context().Messages()[2].(llm.ToolResultMessage)
+	result := transcript.BuildContext().Messages()[2].(llm.ToolResultMessage)
 	if !result.IsError() || result.Content()[0].Text() != "denied" {
 		t.Fatalf("blocked result = %#v", result)
 	}
@@ -492,22 +492,22 @@ func TestToolCallHookCanBlockBeforeExecution(t *testing.T) {
 
 func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	firstMessage, _ := llm.NewUserTextMessage("first", time.UnixMilli(1))
-	first, err := transcript.Append(context.Background(), firstMessage, session.AppendOptions{})
+	first, err := transcript.AppendLLMMessage(context.Background(), firstMessage)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secondMessage, _ := llm.NewUserTextMessage("second", time.UnixMilli(2))
-	second, err := transcript.Append(context.Background(), secondMessage, session.AppendOptions{})
+	second, err := transcript.AppendLLMMessage(context.Background(), secondMessage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := transcript.SelectLeaf(first.ID()); err != nil {
+	if err := transcript.Branch(first.ID()); err != nil {
 		t.Fatal(err)
 	}
 	alternateMessage, _ := llm.NewUserTextMessage("alternate", time.UnixMilli(3))
-	alternate, err := transcript.Append(context.Background(), alternateMessage, session.AppendOptions{})
+	alternate, err := transcript.AppendLLMMessage(context.Background(), alternateMessage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	var treeBefore []agent.SessionBeforeTreeEvent
 	var treeAfter []agent.SessionTreeEvent
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: transcript, Model: model,
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model,
 		Hooks: agent.Hooks{
 			SessionStart: func(_ context.Context, event agent.SessionStartHookEvent) error {
 				lifecycle = append(lifecycle, "start:"+string(event.Reason))
@@ -554,7 +554,7 @@ func TestSessionLifecycleAndTreeHooksRunOnRealOperations(t *testing.T) {
 	if !ok || !labelOK || labelPayload.TargetID != second.ID() || labelPayload.Label == nil || *labelPayload.Label != "selected" || treeAfter[0].NewLeafID == nil || *treeAfter[0].NewLeafID != leaf.ID() {
 		t.Fatalf("tree label leaf = %#v / %#v", leaf, treeAfter[0])
 	}
-	if got := transcript.Context().Messages(); len(got) != 2 || userText(t, got[1]) != "second" {
+	if got := transcript.BuildContext().Messages(); len(got) != 2 || userText(t, got[1]) != "second" {
 		t.Fatalf("selected context = %#v", got)
 	}
 	if err := runtime.Close(context.Background()); err != nil {
@@ -571,10 +571,10 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 		ContextWindow: 100, MaxTokens: 99,
 	})
 	t.Run("manual", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		for index, text := range []string{"old one", "old two", "recent"} {
 			message, _ := llm.NewUserTextMessage(text, time.UnixMilli(int64(index+1)))
-			if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+			if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -585,7 +585,7 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 			return session.SummaryOutput{Text: "summary"}, nil
 		})
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t), Transcript: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
+			Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
 			Hooks: agent.Hooks{SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 				if event.Reason != agent.CompactionManual {
 					t.Fatalf("manual reason = %q", event.Reason)
@@ -612,9 +612,9 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 	})
 
 	t.Run("automatic threshold", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		old, _ := llm.NewUserTextMessage("old context that exceeds threshold", time.UnixMilli(1))
-		if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+		if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 			t.Fatal(err)
 		}
 		var phases []string
@@ -622,7 +622,7 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 			return session.SummaryOutput{Text: "automatic summary"}, nil
 		})
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: transcript, Model: model,
+			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: transcript, Model: model,
 			ContextWindow: 100, ContextReserve: 99, KeepRecentTokens: 1, Summarizer: summarizer,
 			Hooks: agent.Hooks{SessionBeforeCompact: func(_ context.Context, event agent.SessionBeforeCompactEvent) (agent.SessionBeforeCompactResult, error) {
 				if event.Reason == agent.CompactionThreshold {
@@ -650,11 +650,11 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 
 func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
-	newTranscript := func(t *testing.T) *session.Session {
-		transcript := newSession(t)
+	newTranscript := func(t *testing.T) *session.SessionManager {
+		transcript := newSessionManager(t)
 		for index, text := range []string{"old one", "old two", "recent"} {
 			message, _ := llm.NewUserTextMessage(text, time.UnixMilli(int64(index+1)))
-			if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+			if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -666,7 +666,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 		var summarizerCalls int
 		var after agent.SessionCompactEvent
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t), Transcript: transcript, Model: model, KeepRecentTokens: 1,
+			Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, KeepRecentTokens: 1,
 			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 				summarizerCalls++
 				return session.SummaryOutput{Text: "default must not run"}, nil
@@ -729,7 +729,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 			var settlement agent.CompactionEndEvent
 			var settled bool
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: newScriptedProvider(t), Transcript: transcript, Model: model, KeepRecentTokens: 1,
+				Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, KeepRecentTokens: 1,
 				Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 					t.Fatal("default summarizer ran after extension settlement")
 					return session.SummaryOutput{}, nil
@@ -772,7 +772,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 		var settlement agent.CompactionEndEvent
 		var settled bool
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
+			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: newSessionManager(t), Model: model,
 			ContextWindow: 1, KeepRecentTokens: 1,
 			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 				t.Fatal("automatic summarizer ran after cancellation")

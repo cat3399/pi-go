@@ -28,8 +28,8 @@ func (fn contextRetrySummarizerFunc) Summarize(ctx context.Context, input sessio
 
 func TestAgentSessionPublishesRetryOutsideCoreAgentLifecycle(t *testing.T) {
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider:   newScriptedProvider(t, sessionHTTPFailure(t, 429), mustTextTerminal(t, "recovered")),
-		Transcript: newSession(t), Model: sessionTestModel(t),
+		Provider:       newScriptedProvider(t, sessionHTTPFailure(t, 429), mustTextTerminal(t, "recovered")),
+		SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 		Now:   func() time.Time { return agentTestEpoch },
 	})
@@ -68,12 +68,12 @@ func TestAgentSessionPublishesRetryOutsideCoreAgentLifecycle(t *testing.T) {
 // first request is the Session summary, the second gets a transient 503, and
 // the third succeeds. No retry may duplicate any durable conversation entry.
 func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTranscript(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("old context ", 12), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Uint32
@@ -120,7 +120,7 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	}
 	appendMatchingAssistant(t, transcript, model)
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
+		Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 		ContextWindow: 2, ContextReserve: 1, KeepRecentTokens: 1, Summarizer: summarizer,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Millisecond, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
@@ -175,12 +175,12 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 }
 
 func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompactionLifecycle(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("historical context ", 10), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	const secretEcho = "sk-review-must-not-reach-events"
@@ -219,7 +219,7 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model,
+		Provider: implementation, SessionManager: transcript, Model: model,
 		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
@@ -248,12 +248,12 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 }
 
 func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("summary retry context ", 10), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Uint32
@@ -282,7 +282,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -319,12 +319,12 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 }
 
 func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("cancel summary context ", 10), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	const secret = "summary-cancel-provider-secret"
@@ -351,7 +351,7 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -421,9 +421,9 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 }
 
 func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, _ := llm.NewUserTextMessage(strings.Repeat("summary failure context ", 10), agentTestEpoch)
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	const secret = "summary-exhaust-provider-secret"
@@ -442,7 +442,7 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -487,9 +487,9 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 }
 
 func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, _ := llm.NewUserTextMessage(strings.Repeat("repeat overflow context ", 10), agentTestEpoch)
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Uint32
@@ -512,7 +512,7 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model,
+		Provider: implementation, SessionManager: transcript, Model: model,
 		KeepRecentTokens: 1, Summarizer: summarizer, Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
@@ -544,7 +544,7 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 
 func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T) {
 	t.Run("transient 503", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		const secret = "sk-http-body-secret"
 		var calls atomic.Uint32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -559,7 +559,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		defer server.Close()
 		model, implementation := contextRetryProvider(t, server.URL)
 		coordinator, err := agent.NewSession(agent.SessionConfig{
-			Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
+			Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 			Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 		})
 		if err != nil {
@@ -585,7 +585,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 	})
 
 	t.Run("transient exhaustion", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		const secret = "ordinary-retry-exhaust-secret"
 		var calls atomic.Uint32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -595,7 +595,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		defer server.Close()
 		model, implementation := contextRetryProvider(t, server.URL)
 		coordinator, err := agent.NewSession(agent.SessionConfig{
-			Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
+			Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 			Retry: agent.RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }},
 		})
 		if err != nil {
@@ -627,9 +627,9 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 	})
 
 	t.Run("ordinary 400", func(t *testing.T) {
-		transcript := newSession(t)
+		transcript := newSessionManager(t)
 		old, _ := llm.NewUserTextMessage(strings.Repeat("ordinary failure history ", 10), agentTestEpoch)
-		if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+		if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 			t.Fatal(err)
 		}
 		var calls atomic.Uint32
@@ -646,7 +646,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 			t.Fatal(err)
 		}
 		coordinator, err := agent.NewSession(agent.SessionConfig{
-			Provider: implementation, Transcript: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
+			Provider: implementation, SessionManager: transcript, Model: model, Summarizer: summarizer, KeepRecentTokens: 1,
 			Retry: agent.RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }}, Now: func() time.Time { return agentTestEpoch },
 		})
 		if err != nil {
@@ -693,7 +693,7 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			transcript := newSession(t)
+			transcript := newSessionManager(t)
 			var providerCalls atomic.Uint32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				providerCalls.Add(1)
@@ -704,7 +704,7 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 			var transformCalls atomic.Uint32
 			var attemptObserved atomic.Bool
 			coordinator, err := agent.NewSession(agent.SessionConfig{
-				Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
+				Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 				Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 				TransformContext: func(_ context.Context, messages []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 					if transformCalls.Add(1) == 1 {
@@ -744,7 +744,7 @@ func TestProviderRetryLifecycleClosesWhenSecondAttemptCannotDispatch(t *testing.
 }
 
 func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	var providerCalls atomic.Uint32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
@@ -755,7 +755,7 @@ func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T)
 	runContext, cancel := context.WithCancelCause(context.Background())
 	cancelCause := errors.New("cancel retry before redispatch")
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
+		Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
 		Retry: agent.RetryPolicy{
 			MaxAttempts: 2,
 			Sleep: func(context.Context, time.Duration) error {
@@ -792,7 +792,7 @@ func TestProviderRetryLifecycleClosesWhenCancelledBeforeRedispatch(t *testing.T)
 }
 
 func TestManualCompactionFailurePublishesOneSafeSettledPair(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	appendCompactionHistory(t, transcript)
 	const secret = "summarizer-secret-must-not-reach-events"
 	summarizer := contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
@@ -814,7 +814,7 @@ func TestManualCompactionFailurePublishesOneSafeSettledPair(t *testing.T) {
 }
 
 func TestManualCompactionRejectsStaleSnapshotAndPublishesSafeConflict(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	appendCompactionHistory(t, transcript)
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -849,7 +849,7 @@ func TestManualCompactionRejectsStaleSnapshotAndPublishesSafeConflict(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), newState, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), newState); err != nil {
 		t.Fatalf("append during compaction = %v", err)
 	}
 	close(release)
@@ -861,7 +861,7 @@ func TestManualCompactionRejectsStaleSnapshotAndPublishesSafeConflict(t *testing
 }
 
 func TestManualCompactionAbortPublishesSafeCancellationSettlement(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	appendCompactionHistory(t, transcript)
 	const secret = "cancelled-summary-secret"
 	entered := make(chan struct{})
@@ -920,42 +920,41 @@ func assertSummarizationRetryReason(t *testing.T, events []agentEventSnapshot, r
 	}
 }
 
-func appendCompactionHistory(t *testing.T, transcript *session.Session) {
+func appendCompactionHistory(t *testing.T, transcript *session.SessionManager) {
 	t.Helper()
 	for _, text := range []string{"old context to summarize", "recent context to retain"} {
 		message, err := llm.NewUserTextMessage(text, agentTestEpoch)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-func appendMatchingAssistant(t *testing.T, transcript *session.Session, model provider.Model) {
+func appendMatchingAssistant(t *testing.T, transcript *session.SessionManager, model provider.Model) {
 	t.Helper()
-	failure, err := llm.NewAssistantFailureMessage(
-		[]llm.TextBlock{mustTextBlock(t, "prior failure")}, llm.FinishError, "prior failure", llm.Usage{}, agentTestEpoch,
+	assistant, err := llm.NewAssistantTextMessage(
+		[]llm.TextBlock{mustTextBlock(t, "prior response")}, llm.FinishStop, mustUsage(t, model.ContextWindow(), 0), agentTestEpoch,
 		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := failure
-	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), assistant); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func newCompactionCoordinator(t *testing.T, transcript *session.Session, summarizer session.Summarizer) *agent.AgentSession {
+func newCompactionCoordinator(t *testing.T, transcript *session.SessionManager, summarizer session.Summarizer) *agent.AgentSession {
 	t.Helper()
 	model, err := newTestModel("scripted", "scripted", "compaction-fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: transcript, Model: model,
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model,
 		Summarizer: summarizer, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
@@ -977,7 +976,7 @@ func assertManualCompactionFailureLifecycle(t *testing.T, events []agentEventSna
 	}
 }
 
-func assertNoCompactionEntry(t *testing.T, transcript *session.Session) {
+func assertNoCompactionEntry(t *testing.T, transcript *session.SessionManager) {
 	t.Helper()
 	for _, entry := range transcript.Entries() {
 		if entry.Type() == "compaction" {
@@ -1002,7 +1001,7 @@ func contextRetryProvider(t *testing.T, baseURL string) (provider.Model, *provid
 	return model, implementation
 }
 
-func assertContextRetryEntries(t *testing.T, transcript *session.Session, prompt, final string, wantCompactions, wantFailures int) {
+func assertContextRetryEntries(t *testing.T, transcript *session.SessionManager, prompt, final string, wantCompactions, wantFailures int) {
 	t.Helper()
 	var users, finals, compactions, failures int
 	for _, entry := range transcript.Entries() {

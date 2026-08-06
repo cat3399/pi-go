@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -81,10 +82,10 @@ func TestOpenAIAdapterCostsSurviveAgentSessionJSONLReopen(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			transcript := newSession(t)
-			path := transcript.Path()
+			transcript := newSessionManager(t)
+			path, _ := transcript.SessionFile()
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: implementation, Transcript: transcript, Model: model,
+				Provider: implementation, SessionManager: transcript, Model: model,
 				Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 			})
 			if err != nil {
@@ -93,19 +94,19 @@ func TestOpenAIAdapterCostsSurviveAgentSessionJSONLReopen(t *testing.T) {
 			if result, err := runtime.Run(context.Background(), "priced"); err != nil || !result.Succeeded() {
 				t.Fatalf("Run = (%#v, %v)", result, err)
 			}
-			assertUsageCost(t, transcript.Context(), 20e-6, 12e-6, 32e-6)
+			assertUsageCost(t, transcript.BuildContext(), 20e-6, 12e-6, 32e-6)
 			if err := runtime.Close(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			if err := transcript.Close(); err != nil {
 				t.Fatal(err)
 			}
-			reopened, err := session.Open(path, session.OpenOptions{})
+			reopened, err := session.OpenSessionManager(path, filepath.Dir(path), "")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer reopened.Close()
-			assertUsageCost(t, reopened.Context(), 20e-6, 12e-6, 32e-6)
+			assertUsageCost(t, reopened.BuildContext(), 20e-6, 12e-6, 32e-6)
 		})
 	}
 }
@@ -208,7 +209,7 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 				t.Fatal(err)
 			}
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: implementation, Transcript: newSession(t), Model: model,
+				Provider: implementation, SessionManager: newSessionManager(t), Model: model,
 				Stream: provider.StreamOptions{
 					APIKey: "base-secret", Headers: map[string]string{"X-Base": "yes"},
 					ThinkingBudgets: map[provider.ThinkingLevel]uint64{provider.ThinkingHigh: 4096},
@@ -242,15 +243,15 @@ func TestAgentSessionResolverAndProviderHooksComposeThroughRealAdapters(t *testi
 
 func TestZeroRateAssistantCostPersistsAsKnownZero(t *testing.T) {
 	model, _ := newTestModel("scripted", "scripted", "model")
-	transcript := newSession(t)
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: transcript, Model: model})
+	transcript := newSessionManager(t)
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: transcript, Model: model})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runtime.Run(context.Background(), "go"); err != nil {
 		t.Fatal(err)
 	}
-	identity, ok := transcript.Context().AssistantProvenance()
+	identity, ok := transcript.BuildContext().AssistantProvenance()
 	if !ok || identity.Cost != session.ZeroUsageCost() {
 		t.Fatalf("zero-rate cost provenance = (%#v, %t)", identity, ok)
 	}

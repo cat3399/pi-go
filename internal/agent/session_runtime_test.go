@@ -3,6 +3,8 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -16,14 +18,6 @@ import (
 )
 
 type sessionRetrySummarizer struct{}
-
-// noProvenanceTranscript models a legacy transcript context whose durable
-// messages predate assistant provenance. Appends still go to the real Session.
-type noProvenanceTranscript struct{ *session.Session }
-
-func (t noProvenanceTranscript) Context() session.Context {
-	return session.NewContext(t.Session.Context().Messages())
-}
 
 func (sessionRetrySummarizer) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
 	return sessionRetrySummarizer{}.SummarizeWithRetryObserver(ctx, input, nil)
@@ -68,11 +62,11 @@ func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
 		}
 		return agent.ToolOutput{Text: "switched"}, nil
 	}}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	var modelEvents []agent.ModelSelectEvent
 	var thinkingEvents []agent.ThinkingLevelSelectEvent
 	runtime, err = agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: modelA, ThinkingLevel: provider.ThinkingOff,
+		Provider: providerImpl, SessionManager: transcript, Model: modelA, ThinkingLevel: provider.ThinkingOff,
 		SystemPrompt: "old system prompt", Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{
 			ModelSelect: func(_ context.Context, event agent.ModelSelectEvent) error {
@@ -120,6 +114,175 @@ func TestAgentSessionRefreshesSnapshotBetweenToolTurns(t *testing.T) {
 	}
 }
 
+func TestAgentSessionOwnsManagerPersistenceAndSessionMetadata(t *testing.T) {
+	manager := newSessionManager(t)
+	path, ok := manager.SessionFile()
+	if !ok {
+		t.Fatal("persistent manager has no reserved path")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session exists before assistant: %v", err)
+	}
+	modelA := sessionTestModel(t)
+	modelB, err := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "model-b", Reasoning: true, Input: []provider.InputKind{provider.InputText}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: manager, Model: modelA,
+		ThinkingLevel: provider.ThinkingOff, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadataEvents []string
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if value, ok := event.(agent.SessionInfoChangeEvent); ok {
+			if value.Name == nil {
+				metadataEvents = append(metadataEvents, "<cleared>")
+			} else {
+				metadataEvents = append(metadataEvents, *value.Name)
+			}
+		}
+	})
+	if err := runtime.SetSessionName(context.Background(), " named\n session "); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := runtime.SessionName(); !ok || got != "named  session" {
+		t.Fatalf("name=%q ok=%v", got, ok)
+	}
+	if len(metadataEvents) != 1 || metadataEvents[0] != "named  session" {
+		t.Fatalf("metadata events=%v", metadataEvents)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("metadata-only session was persisted: %v", err)
+	}
+	if err := runtime.SetModel(modelB); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.SetThinkingLevel(provider.ThinkingHigh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("first assistant did not flush manager: %v", err)
+	}
+	entries := manager.Entries()
+	var sessionInfo, modelChange, thinkingChange bool
+	for _, entry := range entries {
+		switch entry.Type() {
+		case "session_info":
+			sessionInfo = true
+		case "model_change":
+			modelChange = true
+		case "thinking_level_change":
+			thinkingChange = true
+		}
+	}
+	if !sessionInfo || !modelChange || !thinkingChange {
+		t.Fatalf("typed session state missing: info=%v model=%v thinking=%v", sessionInfo, modelChange, thinkingChange)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendSessionInfo(context.Background(), "after close"); !errors.Is(err, session.ErrClosed) {
+		t.Fatalf("owned manager remained writable: %v", err)
+	}
+}
+
+func TestAgentSessionMetadataModelAndThinkingEventOrderMatchesOriginal(t *testing.T) {
+	manager := newSessionManager(t)
+	reasoningModel, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "reasoning", Reasoning: true,
+		Input: []provider.InputKind{provider.InputText},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainModel, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "plain",
+		Input: []provider.InputKind{provider.InputText},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: manager, Model: reasoningModel,
+		ThinkingLevel: provider.ThinkingOff, SettlementTimeout: time.Second,
+		Hooks: agent.Hooks{
+			SessionInfoChanged: func(_ context.Context, event agent.SessionInfoChangedEvent) error {
+				order = append(order, "session_info_hook")
+				if event.Name == nil || *event.Name != "named" {
+					t.Errorf("session info hook name = %#v", event.Name)
+				}
+				return nil
+			},
+			ThinkingLevelSelect: func(_ context.Context, event agent.ThinkingLevelSelectEvent) error {
+				order = append(order, "thinking_hook")
+				stored, ok := manager.BuildContext().ThinkingLevel()
+				if !ok || stored != string(event.Level) {
+					t.Errorf("thinking hook observed durable level %q/%v, event %q", stored, ok, event.Level)
+				}
+				return nil
+			},
+			ModelSelect: func(_ context.Context, event agent.ModelSelectEvent) error {
+				order = append(order, "model_hook")
+				stored, ok := manager.BuildContext().Model()
+				if !ok || stored.Provider != event.Model.Provider() || stored.ModelID != event.Model.ID() {
+					t.Errorf("model hook observed durable selection %#v/%v, event %s/%s", stored, ok, event.Model.Provider(), event.Model.ID())
+				}
+				return nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(context.Background())
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		switch event.(type) {
+		case agent.SessionInfoChangeEvent:
+			order = append(order, "session_info_observer")
+			if name, ok := manager.SessionName(); !ok || name != "named" {
+				t.Errorf("session observer saw durable name %q/%v", name, ok)
+			}
+		case agent.ThinkingLevelChangedEvent:
+			order = append(order, "thinking_observer")
+			stored, ok := manager.BuildContext().ThinkingLevel()
+			if !ok || stored != string(runtime.ThinkingLevel()) {
+				t.Errorf("thinking observer saw durable level %q/%v, runtime %q", stored, ok, runtime.ThinkingLevel())
+			}
+		}
+	})
+
+	if err := runtime.SetSessionName(context.Background(), " named "); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(order, []string{"session_info_observer", "session_info_hook"}) {
+		t.Fatalf("session info order = %v", order)
+	}
+	order = nil
+	if err := runtime.SetThinkingLevel(provider.ThinkingHigh); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(order, []string{"thinking_observer", "thinking_hook"}) {
+		t.Fatalf("thinking selection order = %v", order)
+	}
+	order = nil
+	if err := runtime.SetModel(plainModel); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.ThinkingLevel() != provider.ThinkingOff {
+		t.Fatalf("model switch thinking level = %q, want off", runtime.ThinkingLevel())
+	}
+	if !reflect.DeepEqual(order, []string{"thinking_observer", "thinking_hook", "model_hook"}) {
+		t.Fatalf("model clamp order = %v", order)
+	}
+}
+
 func TestAgentSessionRoutesEachModelToItsRegisteredAdapter(t *testing.T) {
 	modelA, err := newTestModel("one", "api-one", "model-a")
 	if err != nil {
@@ -135,7 +298,7 @@ func TestAgentSessionRoutesEachModelToItsRegisteredAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: router, Transcript: newSession(t), Model: modelA, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: router, SessionManager: newSessionManager(t), Model: modelA, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,15 +343,15 @@ func TestAgentSessionPreservesRichToolResultWhenLegacyTextIsEmpty(t *testing.T) 
 	tool := &fakeTool{name: "rich", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 		return agent.ToolOutput{Content: []llm.ToolResultContentBlock{block}, Details: map[string]any{"kept": true}}, nil
 	}}
-	transcript := newSession(t)
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: providerImpl, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Tool: tool, Tools: []provider.ToolDefinition{definition}, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	transcript := newSessionManager(t)
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: providerImpl, SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Tool: tool, Tools: []provider.ToolDefinition{definition}, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 		t.Fatalf("run = (%#v, %v)", result, err)
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	if len(messages) != 4 {
 		t.Fatalf("messages = %d, want 4", len(messages))
 	}
@@ -204,9 +367,9 @@ func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "second"))
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: providerImpl, SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -225,7 +388,7 @@ func TestAgentSessionKeepsConversationAcrossPrompts(t *testing.T) {
 	if got := requests[1].Messages(); len(got) != 3 {
 		t.Fatalf("second request messages = %d, want prior user/assistant plus prompt", len(got))
 	}
-	for index, message := range []llm.ConversationMessage{requests[0].Messages()[0], requests[1].Messages()[2], transcript.Context().Messages()[0], transcript.Context().Messages()[2]} {
+	for index, message := range []llm.ConversationMessage{requests[0].Messages()[0], requests[1].Messages()[2], transcript.BuildContext().Messages()[0], transcript.BuildContext().Messages()[2]} {
 		content, ok := message.(llm.UserContentMessage)
 		if !ok || len(content.Content()) != 1 {
 			t.Fatalf("string prompt %d normalized to %#v", index, message)
@@ -242,7 +405,7 @@ func TestAgentSessionRunContentPreservesImageInTranscriptAndRequest(t *testing.T
 		t.Fatal(err)
 	}
 	implementation := newScriptedProvider(t, mustTextTerminal(t, "seen"))
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,9 +453,9 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 	if err := implementation.SetResponses([]provider.ScriptStep{step}); err != nil {
 		t.Fatal(err)
 	}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	var clockCalls atomic.Uint32
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time {
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time {
 		clockCalls.Add(1)
 		return agentTestEpoch
 	}, SettlementTimeout: time.Second})
@@ -339,7 +502,7 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 	if err := <-done; err != nil {
 		t.Fatalf("first RunContent = %v", err)
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	if len(messages) != 2 {
 		t.Fatalf("durable messages = %#v, want only initial user and assistant", messages)
 	}
@@ -349,17 +512,17 @@ func TestAgentSessionAdmissionRejectsConcurrentRunContentWithoutGhostMessage(t *
 }
 
 func TestAgentSessionRunMessagesAllowsEmptyBatchAgainstExistingContext(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	seed, err := llm.NewUserTextMessage("existing", agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), seed, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), seed); err != nil {
 		t.Fatal(err)
 	}
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "continued"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
+		Provider: providerImpl, SessionManager: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -388,7 +551,7 @@ func TestAgentSessionQueuesRichContentInPriorityOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	implementation := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "follow"))
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +594,7 @@ func TestAgentSessionQueueUpdatesOnlyForActualMutationAndDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, mustTextTerminal(t, "initial"), mustTextTerminal(t, "follow")), Transcript: newSession(t), Model: model,
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "initial"), mustTextTerminal(t, "follow")), SessionManager: newSessionManager(t), Model: model,
 		ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -469,7 +632,7 @@ func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), Transcript: newSession(t), Model: model,
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: newSessionManager(t), Model: model,
 		ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -499,9 +662,9 @@ func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 
 func TestAgentSessionContinuesForCustomAgentMessageQueuedAtLowAgentEnd(t *testing.T) {
 	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "first"), mustTextTerminal(t, "after custom"))
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
+		Provider: providerImpl, SessionManager: transcript, Model: sessionTestModel(t), SettlementTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -525,7 +688,7 @@ func TestAgentSessionContinuesForCustomAgentMessageQueuedAtLowAgentEnd(t *testin
 	if err != nil || !result.Succeeded() || providerImpl.CallCount() != 2 {
 		t.Fatalf("Run = (%#v, %v), calls=%d", result, err, providerImpl.CallCount())
 	}
-	messages := transcript.Context().AgentMessages()
+	messages := transcript.BuildContext().AgentMessages()
 	if len(messages) != 4 || messages[2].Role() != agentmsg.RoleCustom {
 		t.Fatalf("custom continuation messages = %#v", messages)
 	}
@@ -536,7 +699,7 @@ func TestAgentSessionEmitsOrderedLifecycleAndRejectsAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t, mustTextTerminal(t, "ok")), Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t, mustTextTerminal(t, "ok")), SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +746,7 @@ func TestAgentSessionEmitsExactToolLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, toolUse, mustTextTerminal(t, "ok")), Transcript: newSession(t),
+		Provider: newScriptedProvider(t, toolUse, mustTextTerminal(t, "ok")), SessionManager: newSessionManager(t),
 		Model: model, ThinkingLevel: provider.ThinkingOff,
 		Tool: &fakeTool{name: "echo", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 			return agent.ToolOutput{Text: "done"}, nil
@@ -612,7 +775,7 @@ func TestAgentSessionEmitsExactToolLifecycle(t *testing.T) {
 
 func TestAgentSessionSynthesizesMessageLifecycleForTerminalWithoutProgress(t *testing.T) {
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: sessionTestModel(t),
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 		ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -648,7 +811,7 @@ func TestAgentSessionResolvesStreamOptionsForEachTurnModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls []string
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: router, Transcript: newSession(t), Model: modelA, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: router, SessionManager: newSessionManager(t), Model: modelA, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		ResolveStreamOptions: func(_ context.Context, model provider.Model) (provider.StreamOptions, error) {
 			calls = append(calls, model.Provider())
 			return provider.StreamOptions{APIKey: "key-" + model.Provider(), Headers: map[string]string{"X-Provider": model.Provider()}}, nil
@@ -677,7 +840,7 @@ func TestAgentSessionResolvesStreamOptionsForEachTurnModel(t *testing.T) {
 	}
 }
 
-func TestAgentSessionPersistsRetryFailureButProjectsItOutOfRetryContext(t *testing.T) {
+func TestAgentSessionPersistsRetryFailureButRemovesItFromRetryContext(t *testing.T) {
 	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
@@ -695,21 +858,75 @@ func TestAgentSessionPersistsRetryFailureButProjectsItOutOfRetryContext(t *testi
 		t.Fatal(err)
 	}
 	implementation := newScriptedProvider(t, failed, mustTextTerminal(t, "recovered"), mustTextTerminal(t, "later"))
-	transcript := newSession(t)
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second, Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }}})
+	transcript := newSessionManager(t)
+	var retryOrdering []string
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
+		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+			standard, ok := event.Message.(agentmsg.LLM)
+			if event.Type != agent.MessageEndHookEvent || !ok {
+				return agent.MessageHookResult{}, nil
+			}
+			terminal, ok := standard.Conversation().(llm.AssistantTerminal)
+			if !ok || terminal.FinishReason() != llm.FinishStop {
+				return agent.MessageHookResult{}, nil
+			}
+			textMessage, ok := terminal.(llm.AssistantTextMessage)
+			if !ok || len(textMessage.Content()) == 0 || textMessage.Content()[0].Text() != "recovered" {
+				return agent.MessageHookResult{}, nil
+			}
+			retryOrdering = append(retryOrdering, "extension_message_end")
+			if got := len(transcript.BuildContext().Messages()); got != 2 {
+				t.Errorf("durable messages during extension message_end = %d, want user+failed assistant before append", got)
+			}
+			return agent.MessageHookResult{}, nil
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	unsubRetryOrdering := runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		switch value := event.(type) {
+		case agent.MessageEndEvent:
+			standard, ok := value.Message.(agentmsg.LLM)
+			if !ok {
+				return
+			}
+			terminal, ok := standard.Conversation().(llm.AssistantTerminal)
+			if !ok || terminal.FinishReason() != llm.FinishStop {
+				return
+			}
+			retryOrdering = append(retryOrdering, "session_message_end")
+			if got := len(transcript.BuildContext().Messages()); got != 2 {
+				t.Errorf("durable messages during successful message_end = %d, want user+failed assistant before append", got)
+			}
+			state := runtime.State().Active.Messages()
+			if len(state) != 2 {
+				t.Errorf("Agent state during successful message_end = %d, want user+successful assistant", len(state))
+			}
+		case agent.AutoRetryEndEvent:
+			retryOrdering = append(retryOrdering, "auto_retry_end")
+			if got := len(transcript.BuildContext().Messages()); got != 3 {
+				t.Errorf("durable messages during auto_retry_end = %d, want successful assistant already appended", got)
+			}
+		}
+	})
 	result, err := runtime.Run(context.Background(), "retry")
+	unsubRetryOrdering()
 	if err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
-	messages := transcript.Context().Messages()
+	messages := transcript.BuildContext().Messages()
 	if len(messages) != 3 {
 		t.Fatalf("durable messages = %#v", messages)
 	}
 	if _, ok := messages[1].(llm.AssistantFailureMessage); !ok {
 		t.Fatalf("retry failure was not persisted: %#v", messages)
+	}
+	if !reflect.DeepEqual(retryOrdering, []string{"extension_message_end", "session_message_end", "auto_retry_end"}) {
+		t.Fatalf("successful retry event ordering = %v", retryOrdering)
 	}
 	requests := implementation.Requests()
 	if len(requests) != 2 {
@@ -754,7 +971,7 @@ func TestAgentSessionProviderFailureSettlesBeforeNextPrompt(t *testing.T) {
 	}
 	providerImpl := newScriptedProvider(t, failedTerminal, mustTextTerminal(t, "recovered"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: providerImpl, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: providerImpl, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -797,7 +1014,7 @@ func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
 	if err := providerImpl.SetResponses([]provider.ScriptStep{step}); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: providerImpl, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: providerImpl, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -872,7 +1089,7 @@ func TestAgentSessionRetriesOnlyTransientHTTPFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			implementation := newScriptedProvider(t, sessionHTTPFailure(t, test.status), mustTextTerminal(t, "recovered"))
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+				Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 				Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 				Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 			})
@@ -894,7 +1111,7 @@ func TestAgentSessionRetryLifecycleAndAgentEndContinuation(t *testing.T) {
 	model := sessionTestModel(t)
 	implementation := newScriptedProvider(t, sessionHTTPFailure(t, 429), mustTextTerminal(t, "recovered"), mustTextTerminal(t, "followed"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
@@ -973,7 +1190,7 @@ func TestAgentSessionAbortAndWaitIncludeRetrySleep(t *testing.T) {
 	entered := make(chan struct{})
 	implementation := newScriptedProvider(t, sessionHTTPFailure(t, 429))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Hour, Sleep: func(ctx context.Context, _ time.Duration) error {
 			close(entered)
@@ -1012,7 +1229,7 @@ func TestAgentSessionAbortAndWaitIncludeRetrySleep(t *testing.T) {
 func TestAgentSessionRetryFinalFailureEndsAfterAgentEnd(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429), sessionHTTPFailure(t, 429)), Transcript: newSession(t),
+		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429), sessionHTTPFailure(t, 429)), SessionManager: newSessionManager(t),
 		Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
@@ -1046,7 +1263,7 @@ func TestAgentSessionRetryFinalFailureEndsAfterAgentEnd(t *testing.T) {
 func TestAgentSessionRetrySeriesSpansIntermediateFailures(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429), sessionHTTPFailure(t, 429), mustTextTerminal(t, "third")), Transcript: newSession(t),
+		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429), sessionHTTPFailure(t, 429), mustTextTerminal(t, "third")), SessionManager: newSessionManager(t),
 		Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
@@ -1090,8 +1307,8 @@ func TestAgentSessionRetryEndsOnToolUseBeforeLowAgentEnd(t *testing.T) {
 		return agent.ToolOutput{Text: "ok"}, nil
 	}}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider:   newScriptedProvider(t, sessionHTTPFailure(t, 429), mustToolUseTerminal(t, "call", "tool", []byte(`{}`)), mustTextTerminal(t, "done")),
-		Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Provider:       newScriptedProvider(t, sessionHTTPFailure(t, 429), mustToolUseTerminal(t, "call", "tool", []byte(`{}`)), mustTextTerminal(t, "done")),
+		SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
@@ -1114,24 +1331,24 @@ func TestAgentSessionRetryEndsOnToolUseBeforeLowAgentEnd(t *testing.T) {
 	}
 }
 
-func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T) {
+func TestAgentSessionPrePromptThresholdDoesNotRepeatAfterNewBoundary(t *testing.T) {
 	model := sessionTestModel(t)
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	oldUser, err := llm.NewUserTextMessage("old request", agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), oldUser, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), oldUser); err != nil {
 		t.Fatal(err)
 	}
 	oldAssistant := mustTextTerminalWithProvenance(t, "old reply", llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
-	if _, err := transcript.Append(context.Background(), oldAssistant, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), oldAssistant); err != nil {
 		t.Fatal(err)
 	}
 	var summaries atomic.Uint32
 	hookSawCompactedContext := false
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		ContextWindow: 1, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			summaries.Add(1)
@@ -1158,7 +1375,7 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 	if result, err := runtime.Run(context.Background(), "new request"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, err)
 	}
-	if summaries.Load() != 2 || !sameStrings(compactTypes, []string{"compaction_start", "compaction_end", "compaction_start", "compaction_end"}) {
+	if summaries.Load() != 1 || !sameStrings(compactTypes, []string{"compaction_start", "compaction_end"}) {
 		t.Fatalf("summaries/events = %d/%v", summaries.Load(), compactTypes)
 	}
 	if !hookSawCompactedContext {
@@ -1166,9 +1383,146 @@ func TestAgentSessionPrePromptThresholdCompactsWithoutExtraProvider(t *testing.T
 	}
 }
 
+func TestAgentSessionSkipsStalePreCompactionOverflowError(t *testing.T) {
+	boundary := agentTestEpoch.Add(time.Second)
+	manager := newBoundarySessionManager(t, boundary)
+	model := boundaryCompactionModel(t)
+	provenance := llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()}
+	user, err := llm.NewUserTextMessage("before compaction", boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEntry, err := manager.AppendLLMMessage(context.Background(), user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overflow, err := provider.NewProviderFailure(provider.ProviderFailureSpec{
+		Kind: provider.FailureContextOverflow, Message: "stale overflow", Cause: errors.New("stale overflow"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, err := llm.NewFailure("stale overflow", overflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := llm.NewAssistantFailureMessageWithFailure(nil, llm.FinishError, failure, llm.Usage{}, boundary, provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendCompaction(context.Background(), "checkpoint", userEntry.ID(), 95, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var summaries atomic.Uint32
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "after boundary")), SessionManager: manager,
+		Model: model, ThinkingLevel: provider.ThinkingOff, KeepRecentTokens: 1,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			summaries.Add(1)
+			return session.SummaryOutput{Text: "unexpected"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Run(context.Background(), "first prompt after compaction"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run() = (%#v, %v)", result, err)
+	}
+	if summaries.Load() != 0 {
+		t.Fatalf("stale overflow retriggered compaction %d times", summaries.Load())
+	}
+}
+
+func TestAgentSessionSkipsPreCompactionUsageWhenCurrentErrorNeedsFallback(t *testing.T) {
+	boundary := agentTestEpoch.Add(2 * time.Second)
+	manager := newBoundarySessionManager(t, boundary)
+	model := boundaryCompactionModel(t)
+	provenance := llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()}
+	user, err := llm.NewUserTextMessage("before compaction", boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEntry, err := manager.AppendLLMMessage(context.Background(), user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldUsage := mustUsage(t, 95, 0)
+	oldAssistant, err := llm.NewAssistantTextMessage([]llm.TextBlock{mustTextBlock(t, "old")}, llm.FinishStop, oldUsage, boundary, provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), oldAssistant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendCompaction(context.Background(), "checkpoint", userEntry.ID(), 95, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	postBoundaryFailure, err := llm.NewAssistantFailureMessage(nil, llm.FinishError, "post-boundary error", llm.Usage{}, boundary.Add(time.Millisecond), provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), postBoundaryFailure); err != nil {
+		t.Fatal(err)
+	}
+
+	var summaries atomic.Uint32
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "after fallback")), SessionManager: manager,
+		Model: model, ThinkingLevel: provider.ThinkingOff, KeepRecentTokens: 1,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			summaries.Add(1)
+			return session.SummaryOutput{Text: "unexpected"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := runtime.Run(context.Background(), "fallback prompt"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run() = (%#v, %v)", result, err)
+	}
+	if summaries.Load() != 0 {
+		t.Fatalf("pre-compaction usage retriggered threshold compaction %d times", summaries.Load())
+	}
+}
+
+func newBoundarySessionManager(t *testing.T, at time.Time) *session.SessionManager {
+	t.Helper()
+	var ids atomic.Uint64
+	manager, err := session.InMemorySessionManagerWithOptions(t.TempDir(), session.ManagerOptions{
+		NewSession: session.NewSessionOptions{ID: "boundary-session"},
+		Now:        func() time.Time { return at },
+		NewEntryID: func() (string, error) { return fmt.Sprintf("boundary-%d", ids.Add(1)), nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("SessionManager.Close() = %v", err)
+		}
+	})
+	return manager
+}
+
+func boundaryCompactionModel(t *testing.T) provider.Model {
+	t.Helper()
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "boundary-model",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 100, MaxTokens: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model
+}
+
 func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testing.T) {
 	model := sessionTestModel(t)
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	contextFailure, err := provider.NewProviderFailure(provider.ProviderFailureSpec{Kind: provider.FailureContextOverflow, Message: "overflow", Cause: errors.New("overflow")})
 	if err != nil {
 		t.Fatal(err)
@@ -1183,7 +1537,7 @@ func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testin
 	}
 	implementation := newScriptedProvider(t, failed, mustTextTerminal(t, "recovered"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: implementation, SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		ContextWindow: 1, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			return session.SummaryOutput{Text: "checkpoint"}, nil
@@ -1212,7 +1566,7 @@ func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testin
 func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, mustTextTerminal(t, "answer")), Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "answer")), SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		ContextWindow: 1, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			return session.SummaryOutput{}, errors.New("summary unavailable")
@@ -1237,18 +1591,18 @@ func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
 
 func TestAgentSessionManualCompactUsesSessionLifecycle(t *testing.T) {
 	model := sessionTestModel(t)
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	for _, text := range []string{"old", "recent"} {
 		message, err := llm.NewUserTextMessage(text, agentTestEpoch)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
 			t.Fatal(err)
 		}
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
 		KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			return session.SummaryOutput{Text: "manual checkpoint"}, nil
@@ -1276,19 +1630,19 @@ func TestAgentSessionManualCompactUsesSessionLifecycle(t *testing.T) {
 
 func TestAgentSessionManualCompactSharesGateAndAbort(t *testing.T) {
 	model := sessionTestModel(t)
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	for _, text := range []string{"old", "recent"} {
 		message, err := llm.NewUserTextMessage(text, agentTestEpoch)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		if _, err := transcript.AppendLLMMessage(context.Background(), message); err != nil {
 			t.Fatal(err)
 		}
 	}
 	entered := make(chan struct{})
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, mustTextTerminal(t, "must not run")), Transcript: transcript, Model: model,
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "must not run")), SessionManager: transcript, Model: model,
 		ThinkingLevel: provider.ThinkingOff, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(ctx context.Context, _ session.SummaryInput) (session.SummaryOutput, error) {
 			close(entered)
@@ -1320,7 +1674,7 @@ func TestAgentSessionContextCancelDuringRetryReturnsSettledResult(t *testing.T) 
 	model := sessionTestModel(t)
 	entered := make(chan struct{})
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429)), Transcript: newSession(t), Model: model,
+		Provider: newScriptedProvider(t, sessionHTTPFailure(t, 429)), SessionManager: newSessionManager(t), Model: model,
 		ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(ctx context.Context, _ time.Duration) error {
 			close(entered)
@@ -1374,7 +1728,7 @@ func TestAgentSessionCloseTimeoutKeepsClosingUntilSecondClose(t *testing.T) {
 	if err := implementation.SetResponses([]provider.ScriptStep{step}); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1430,7 +1784,7 @@ func TestAgentSessionPreflightFailureDoesNotEmitSettled(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: newScriptedProvider(t, mustTextTerminal(t, "unused")), Transcript: newSession(t), Model: model,
+				Provider: newScriptedProvider(t, mustTextTerminal(t, "unused")), SessionManager: newSessionManager(t), Model: model,
 				ThinkingLevel: provider.ThinkingOff, Now: test.cfg(), SettlementTimeout: time.Second,
 			})
 			if err != nil {
@@ -1459,7 +1813,7 @@ func TestAgentSessionSteerClockReentryDoesNotDeadlock(t *testing.T) {
 	clockEntered := make(chan struct{})
 	closed := make(chan error, 1)
 	runtimeConfig := agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		SettlementTimeout: time.Second,
 		Now: func() time.Time {
 			close(clockEntered)
@@ -1496,7 +1850,7 @@ func TestAgentSessionSteerClockReentryDoesNotDeadlock(t *testing.T) {
 func TestAgentSessionObserverSubscriptionOrder(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
 	if err != nil {
@@ -1525,13 +1879,13 @@ func TestNewSessionRejectsNilDependenciesAndInvalidRetry(t *testing.T) {
 		t.Fatalf("nil dependencies error = %v", err)
 	}
 	if _, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: model,
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: model,
 		Retry: agent.RetryPolicy{InitialDelay: -time.Second},
 	}); !errors.Is(err, agent.ErrInvalidConfig) {
 		t.Fatalf("invalid retry error = %v", err)
 	}
 	if _, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: newSession(t), Model: model, SettlementTimeout: -time.Second,
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: model, SettlementTimeout: -time.Second,
 	}); !errors.Is(err, agent.ErrInvalidConfig) {
 		t.Fatalf("negative settlement error = %v", err)
 	}
@@ -1568,15 +1922,14 @@ func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *tes
 	}{
 		{name: "same provider and model", provenance: llm.AssistantProvenance{Provider: "new", API: "scripted", Model: "model"}, has: true, wantStarts: 1},
 		{name: "old provider and model", provenance: llm.AssistantProvenance{Provider: "old", API: "scripted", Model: "old-model"}, has: true, wantStarts: 0},
-		{name: "missing provenance", wantStarts: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			transcript := newSession(t)
+			transcript := newSessionManager(t)
 			oldUser, err := llm.NewUserTextMessage("old request", agentTestEpoch)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := transcript.Append(context.Background(), oldUser, session.AppendOptions{}); err != nil {
+			if _, err := transcript.AppendLLMMessage(context.Background(), oldUser); err != nil {
 				t.Fatal(err)
 			}
 			storedProvenance := llm.AssistantProvenance{Provider: "stored", API: "scripted", Model: "stored-model"}
@@ -1584,19 +1937,15 @@ func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *tes
 				storedProvenance = test.provenance
 			}
 			storedAssistant := mustTextTerminalWithProvenance(t, "old reply", storedProvenance)
-			if _, err := transcript.Append(context.Background(), storedAssistant, session.AppendOptions{}); err != nil {
+			if _, err := transcript.AppendLLMMessage(context.Background(), storedAssistant); err != nil {
 				t.Fatal(err)
-			}
-			var durable agent.Transcript = transcript
-			if !test.has {
-				durable = noProvenanceTranscript{Session: transcript}
 			}
 			model, err := newTestModel("new", "scripted", "model")
 			if err != nil {
 				t.Fatal(err)
 			}
 			runtime, err := agent.NewSession(agent.SessionConfig{
-				Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), Transcript: durable, Model: model,
+				Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), SessionManager: transcript, Model: model,
 				ThinkingLevel: provider.ThinkingOff, ContextWindow: 1, KeepRecentTokens: 1,
 				Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 					return session.SummaryOutput{Text: "checkpoint"}, nil
@@ -1626,20 +1975,20 @@ func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *tes
 }
 
 func TestAgentSessionSummarizationRetryPayloadUsesRetryBudgetAndCompactionSource(t *testing.T) {
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage("old request", agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transcript.Append(context.Background(), old, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
 	oldAssistant := mustTextTerminalWithProvenance(t, "old reply", llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
-	if _, err := transcript.Append(context.Background(), oldAssistant, session.AppendOptions{}); err != nil {
+	if _, err := transcript.AppendLLMMessage(context.Background(), oldAssistant); err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: newScriptedProvider(t), Transcript: transcript, Model: sessionTestModel(t), ThinkingLevel: provider.ThinkingOff,
+		Provider: newScriptedProvider(t), SessionManager: transcript, Model: sessionTestModel(t), ThinkingLevel: provider.ThinkingOff,
 		Summarizer: sessionRetrySummarizer{}, KeepRecentTokens: 1, Retry: agent.RetryPolicy{MaxAttempts: 3},
 		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 	})
@@ -1680,7 +2029,7 @@ func TestAgentSessionObserverEventsDoNotShareSlices(t *testing.T) {
 	}
 	implementation := newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{"value":1}`)), mustTextTerminal(t, "done"), mustTextTerminal(t, "steered"), mustTextTerminal(t, "followed"))
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: newSession(t), Model: sessionTestModel(t), ThinkingLevel: provider.ThinkingOff,
+		Provider: implementation, SessionManager: newSessionManager(t), Model: sessionTestModel(t), ThinkingLevel: provider.ThinkingOff,
 		Tool: &fakeTool{name: "echo", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 			return agent.ToolOutput{Text: "ok"}, nil
 		}}, Tools: []provider.ToolDefinition{definition},

@@ -278,21 +278,8 @@ func (s *Session) Compact(ctx context.Context, request CompactRequest) (CompactR
 	if err != nil {
 		return CompactResult{}, fmt.Errorf("%w: %w", ErrSummaryFailed, err)
 	}
-	if !utf8.ValidString(output.Text) || strings.TrimSpace(output.Text) == "" {
-		return CompactResult{}, fmt.Errorf("%w: empty or invalid summary", ErrSummaryFailed)
-	}
-	if output.Usage != nil {
-		if err := validateUsageCost(output.Usage.Cost); err != nil {
-			return CompactResult{}, fmt.Errorf("%w: invalid summary usage: %v", ErrSummaryFailed, err)
-		}
-	}
-	if output.FromExtension {
-		if err := validateOpaqueID(output.FirstKeptEntryID, "extension compaction first kept entry id"); err != nil {
-			return CompactResult{}, fmt.Errorf("%w: %v", ErrSummaryFailed, err)
-		}
-		if len(output.Details) != 0 && !json.Valid(output.Details) {
-			return CompactResult{}, fmt.Errorf("%w: invalid extension compaction details", ErrSummaryFailed)
-		}
+	if err := validateSummaryOutput(output); err != nil {
+		return CompactResult{}, err
 	}
 	entry, err := s.commitCompaction(ctx, input, output)
 	if err != nil {
@@ -307,6 +294,26 @@ func (s *Session) Compact(ctx context.Context, request CompactRequest) (CompactR
 		estimatedTokensAfter = contextEstimate.Tokens
 	}
 	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil
+}
+
+func validateSummaryOutput(output SummaryOutput) error {
+	if !utf8.ValidString(output.Text) || strings.TrimSpace(output.Text) == "" {
+		return fmt.Errorf("%w: empty or invalid summary", ErrSummaryFailed)
+	}
+	if output.Usage != nil {
+		if err := validateUsageCost(output.Usage.Cost); err != nil {
+			return fmt.Errorf("%w: invalid summary usage: %v", ErrSummaryFailed, err)
+		}
+	}
+	if output.FromExtension {
+		if err := validateOpaqueID(output.FirstKeptEntryID, "extension compaction first kept entry id"); err != nil {
+			return fmt.Errorf("%w: %v", ErrSummaryFailed, err)
+		}
+		if len(output.Details) != 0 && !json.Valid(output.Details) {
+			return fmt.Errorf("%w: invalid extension compaction details", ErrSummaryFailed)
+		}
+	}
+	return nil
 }
 
 func (s *Session) compactionSnapshot(ctx context.Context, request CompactRequest) (SummaryInput, error) {

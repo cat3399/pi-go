@@ -84,9 +84,8 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 
 			directory := t.TempDir()
 			path := filepath.Join(directory, "live-session.jsonl")
-			transcript, err := session.Create(path, session.CreateOptions{
-				ID:         "live-deepseek-" + strings.ReplaceAll(test.name, "_", "-"),
-				WorkingDir: directory,
+			manager, err := session.OpenSessionManagerWithOptions(path, directory, directory, session.ManagerOptions{
+				NewSession: session.NewSessionOptions{ID: "live-deepseek-" + strings.ReplaceAll(test.name, "_", "-")},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -94,17 +93,17 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 
 			echo := &deepSeekLiveEchoTool{}
 			coordinator, err := agent.NewSession(agent.SessionConfig{
-				Provider:      implementation,
-				Transcript:    transcript,
-				Model:         model,
-				ThinkingLevel: test.thinkingLevel,
-				Tool:          echo,
-				Tools:         []provider.ToolDefinition{definition},
-				Stream:        provider.StreamOptions{MaxTokens: &test.maxTokens},
-				Retry:         agent.RetryPolicy{MaxAttempts: 1},
+				Provider:       implementation,
+				SessionManager: manager,
+				Model:          model,
+				ThinkingLevel:  test.thinkingLevel,
+				Tool:           echo,
+				Tools:          []provider.ToolDefinition{definition},
+				Stream:         provider.StreamOptions{MaxTokens: &test.maxTokens},
+				Retry:          agent.RetryPolicy{MaxAttempts: 1},
 			})
 			if err != nil {
-				_ = transcript.Close()
+				_ = manager.Close()
 				t.Fatal(err)
 			}
 
@@ -120,15 +119,11 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			closeContext, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			closeErr := coordinator.Close(closeContext)
 			closeCancel()
-			transcriptCloseErr := transcript.Close()
 			if runErr != nil {
 				t.Fatalf("AgentSession.Run() error: %v", runErr)
 			}
 			if closeErr != nil {
 				t.Fatalf("AgentSession.Close() error: %v", closeErr)
-			}
-			if transcriptCloseErr != nil {
-				t.Fatalf("Session.Close() error: %v", transcriptCloseErr)
 			}
 			if !result.Succeeded() {
 				terminal, _ := result.Terminal()
@@ -143,7 +138,7 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			}
 			events.assertClosed(t, result.ProviderTurns())
 
-			reopened, err := session.Open(path, session.OpenOptions{})
+			reopened, err := session.OpenSessionManager(path, directory, "")
 			if err != nil {
 				t.Fatal(err)
 			}

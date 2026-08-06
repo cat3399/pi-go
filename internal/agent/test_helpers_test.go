@@ -277,6 +277,31 @@ func newSession(t *testing.T) *session.Session {
 	return transcript
 }
 
+func newSessionManager(t *testing.T) *session.SessionManager {
+	t.Helper()
+	directory := t.TempDir()
+	var clockTick atomic.Int64
+	var id atomic.Uint64
+	manager, err := session.CreateSessionManagerWithOptions(directory, directory, session.ManagerOptions{
+		NewSession: session.NewSessionOptions{ID: "session-agent-test"},
+		Now: func() time.Time {
+			return agentTestEpoch.Add(time.Duration(clockTick.Add(1)) * time.Millisecond)
+		},
+		NewEntryID: func() (string, error) {
+			return fmt.Sprintf("entry-%d", id.Add(1)), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("session.CreateSessionManagerWithOptions() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Errorf("SessionManager.Close() error = %v", err)
+		}
+	})
+	return manager
+}
+
 func newScriptedProvider(t *testing.T, terminals ...llm.AssistantTerminal) *provider.ScriptedProvider {
 	t.Helper()
 	scripted, err := provider.NewScriptedProvider(provider.ScriptedConfig{

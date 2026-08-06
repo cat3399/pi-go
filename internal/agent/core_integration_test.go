@@ -38,7 +38,7 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	}
 	entryIDs := []string{"retry-user", "retry-failure", "retry-assistant"}
 	nextEntryID := 0
-	transcript, err := session.Open(path, session.OpenOptions{
+	transcript, err := session.OpenSessionManagerWithOptions(path, filepath.Dir(path), "", session.ManagerOptions{
 		Now: func() time.Time { return agentTestEpoch },
 		NewEntryID: func() (string, error) {
 			if nextEntryID >= len(entryIDs) {
@@ -79,7 +79,7 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model,
+		Provider: implementation, SessionManager: transcript, Model: model,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
 		Now:   func() time.Time { return agentTestEpoch },
 	})
@@ -203,9 +203,9 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 		started: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 		release: map[string]chan struct{}{"slow": make(chan struct{}), "fast": make(chan struct{})},
 	}
-	transcript := newSession(t)
+	transcript := newSessionManager(t)
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, Transcript: transcript, Model: model,
+		Provider: implementation, SessionManager: transcript, Model: model,
 		SystemPrompt: resourceSnapshot.SystemPrompt, Tool: toolRuntime, Tools: definitions,
 		Retry: agent.RetryPolicy{
 			MaxAttempts: 2,
@@ -402,7 +402,7 @@ func assertCoreIntegrationReplay(t *testing.T, raw any) {
 	}
 }
 
-func assertCoreIntegrationSession(t *testing.T, transcript *session.Session) {
+func assertCoreIntegrationSession(t *testing.T, transcript *session.SessionManager) {
 	t.Helper()
 	entries := transcript.Entries()
 	messages := transcript.BuildContext().Messages()

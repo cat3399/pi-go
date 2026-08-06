@@ -471,6 +471,41 @@ func TestSessionManagerConcurrentAppendsHaveOneDurableChain(t *testing.T) {
 	}
 }
 
+func TestSessionManagerCompactionBoundaryOnlyPreparesAndCommitsRealOutput(t *testing.T) {
+	manager, err := InMemorySessionManager(t.TempDir(), NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for index, message := range []llm.ConversationMessage{
+		mustUserMessage(t, "old question", time.UnixMilli(1)),
+		managerAssistant(t, "old answer", time.UnixMilli(2)),
+		mustUserMessage(t, "recent question", time.UnixMilli(3)),
+		managerAssistant(t, "recent answer", time.UnixMilli(4)),
+	} {
+		if _, err := manager.AppendLLMMessage(context.Background(), message); err != nil {
+			t.Fatalf("append %d: %v", index, err)
+		}
+	}
+	input, err := manager.PrepareCompaction(context.Background(), 1, "focus on files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Instructions != "focus on files" || input.FirstKeptEntryID == "" || len(input.Messages) == 0 {
+		t.Fatalf("preparation=%#v", input)
+	}
+	result, err := manager.CommitCompaction(context.Background(), input, SummaryOutput{Text: "provider-generated summary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Committed || result.Entry.Type() != "compaction" || result.Output.Text != "provider-generated summary" {
+		t.Fatalf("result=%#v", result)
+	}
+	if _, err := manager.CommitCompaction(context.Background(), input, SummaryOutput{Text: "stale"}); !errors.Is(err, ErrCompactionConflict) {
+		t.Fatalf("stale commit error=%v", err)
+	}
+}
+
 func managerAssistant(t *testing.T, text string, at time.Time) llm.AssistantTextMessage {
 	t.Helper()
 	message, err := llm.NewAssistantTextMessage(
