@@ -50,7 +50,32 @@ type SessionConfig struct {
 	// It is separate because the original setModel surface has distinct
 	// user-facing authentication errors from prompt and compaction.
 	ValidateModelSelection func(context.Context, provider.Model) error
-	Hooks                  Hooks
+	// AllModels and ScopedModels are the model-cycle inputs assembled by the
+	// product factory. They are copied on construction and never expose mutable
+	// session-owned slices to callers.
+	AllModels    []provider.Model
+	ScopedModels []ScopedModel
+	// ModelAvailable is the credential/route check used while cycling. A nil
+	// callback treats every configured model as available, matching low-level
+	// injected sessions which have already admitted their catalog.
+	ModelAvailable func(context.Context, provider.Model) (bool, error)
+	// ResolveAvailableModels refreshes the unscoped cycle list on every call,
+	// matching ModelRuntime.getAvailable(). Nil uses AllModels as a low-level
+	// static fallback.
+	ResolveAvailableModels func(context.Context) ([]provider.Model, error)
+	// DefaultThinkingLevel is the settings preference restored when switching
+	// from a non-reasoning model. Empty means pi's default (medium).
+	DefaultThinkingLevel provider.ThinkingLevel
+	// ResolveDefaultThinkingLevel reads the current effective (global merged
+	// with trusted project) setting at the instant model-switch preference is
+	// chosen. Nil uses DefaultThinkingLevel as the low-level fallback.
+	ResolveDefaultThinkingLevel func() (provider.ThinkingLevel, bool)
+	// PersistSettings writes the global default provider/model/thinking fields.
+	// AgentSession invokes it before transcript/state publication and uses its
+	// conditional undo after a definite transcript failure. Commit-unknown
+	// outcomes deliberately keep the forward setting for later reconciliation.
+	PersistSettings SettingsPersistence
+	Hooks           Hooks
 	// SessionStartEvent selects the lifecycle reason emitted after construction.
 	// Nil preserves the ordinary process-start behavior.
 	SessionStartEvent *SessionStartHookEvent
@@ -247,24 +272,41 @@ type SessionObserver func(context.Context, SessionEvent)
 // model/tool/prompt change made while tools are running applies to the next
 // request in that same run.
 type AgentSession struct {
-	mu             sync.RWMutex
-	loop           *Agent
-	sessionManager *session.SessionManager
-	model          provider.Model
-	hasModel       bool
-	thinkingLevel  provider.ThinkingLevel
-	systemPrompt   string
-	systemOptions  BuildSystemPromptOptions
-	tool           ToolExecutor
-	tools          []provider.ToolDefinition
-	beforeToolCall BeforeToolCallHook
-	afterToolCall  AfterToolCallHook
-	stream         provider.StreamOptions
-	resolveStream  func(context.Context, provider.Model) (provider.StreamOptions, error)
-	validateAccess func(context.Context, provider.Model) error
-	validateSelect func(context.Context, provider.Model) error
-	hooks          Hooks
-	noModelMessage string
+	mu sync.RWMutex
+	// controlMu serializes model/thinking read-modify-write operations after
+	// their asynchronous discovery phase. Lock order is controlMu,
+	// lifecycleMu, selectionMu, then the Agent/AgentSession state mutexes.
+	controlMu sync.Mutex
+	// selectionMu makes the duplicated AgentSession/Agent model selection a
+	// single published snapshot. Writers hold it across both copies; readers
+	// that combine or consume model/thinking state hold its read side.
+	selectionMu            sync.RWMutex
+	loop                   *Agent
+	sessionManager         *session.SessionManager
+	model                  provider.Model
+	hasModel               bool
+	thinkingLevel          provider.ThinkingLevel
+	systemPrompt           string
+	systemOptions          BuildSystemPromptOptions
+	tool                   ToolExecutor
+	tools                  []provider.ToolDefinition
+	beforeToolCall         BeforeToolCallHook
+	afterToolCall          AfterToolCallHook
+	stream                 provider.StreamOptions
+	resolveStream          func(context.Context, provider.Model) (provider.StreamOptions, error)
+	validateAccess         func(context.Context, provider.Model) error
+	validateSelect         func(context.Context, provider.Model) error
+	allModels              []provider.Model
+	scopedModels           []ScopedModel
+	modelAvailable         func(context.Context, provider.Model) (bool, error)
+	resolveAvailableModels func(context.Context) ([]provider.Model, error)
+	defaultThinking        provider.ThinkingLevel
+	resolveDefaultThinking func() (provider.ThinkingLevel, bool)
+	persistSettings        SettingsPersistence
+	appendModelControl     func(context.Context, string, string, *string) ([]session.Entry, error)
+	appendThinkingControl  func(context.Context, string) (session.Entry, error)
+	hooks                  Hooks
+	noModelMessage         string
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
 	// and post-run continuations remain active too.
@@ -353,6 +395,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if !config.ThinkingLevel.Valid() {
 		return nil, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, config.ThinkingLevel)
 	}
+	if config.DefaultThinkingLevel != "" && !config.DefaultThinkingLevel.Valid() {
+		return nil, fmt.Errorf("%w: invalid default thinking level %q", ErrInvalidConfig, config.DefaultThinkingLevel)
+	}
 	hasModel := modelPresent(config.Model)
 	if hasModel {
 		config.ThinkingLevel = config.Model.ClampThinkingLevel(config.ThinkingLevel)
@@ -391,6 +436,8 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
 		stream:        provider.CloneStreamOptions(config.Stream),
 		resolveStream: config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
+		allModels: cloneModels(config.AllModels), scopedModels: cloneScopedModels(config.ScopedModels), modelAvailable: config.ModelAvailable, resolveAvailableModels: config.ResolveAvailableModels,
+		defaultThinking: config.DefaultThinkingLevel, resolveDefaultThinking: config.ResolveDefaultThinkingLevel, persistSettings: config.PersistSettings,
 		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
 		retry:         retry,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
@@ -399,6 +446,11 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		branchSummarizer: config.BranchSummarizer, resolveBranchSummarizer: config.ResolveBranchSummarizer,
 		branchSummaryReserve: config.BranchSummaryReserveTokens,
 		summaryRetry:         config.Retry,
+	}
+	s.appendModelControl = config.SessionManager.AppendModelControlChange
+	s.appendThinkingControl = config.SessionManager.AppendThinkingLevelChange
+	if s.defaultThinking == "" || !s.defaultThinking.Valid() {
+		s.defaultThinking = provider.ThinkingMedium
 	}
 	s.settlementTimeout = config.SettlementTimeout
 	if s.settlementTimeout <= 0 {
@@ -493,11 +545,13 @@ func (s *AgentSession) requireModelAccess(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	s.selectionMu.RLock()
 	s.mu.RLock()
 	hasModel := s.hasModel
 	selected := s.model
 	validate := s.validateAccess
 	s.mu.RUnlock()
+	s.selectionMu.RUnlock()
 	if !hasModel {
 		return s.noModelSelectedError()
 	}
@@ -948,9 +1002,11 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 	if err := s.rejectIfClosed(); err != nil {
 		return TurnSnapshot{}, err
 	}
+	s.selectionMu.RLock()
 	s.mu.RLock()
 	if !s.hasModel {
 		s.mu.RUnlock()
+		s.selectionMu.RUnlock()
 		return TurnSnapshot{}, ErrNoModelSelected
 	}
 	snapshot := TurnSnapshot{
@@ -959,6 +1015,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 	}
 	resolver := s.resolveStream
 	s.mu.RUnlock()
+	s.selectionMu.RUnlock()
 	s.lifecycleMu.Lock()
 	if s.run != nil && s.run.extensionSystemPrompt != nil {
 		snapshot.SystemPrompt = *s.run.extensionSystemPrompt
@@ -987,32 +1044,34 @@ func (s *AgentSession) State() SessionState {
 	if s == nil {
 		return SessionState{Active: State{phase: PhaseIdle}}
 	}
+	// Snapshot lifecycle first, without retaining lifecycleMu while acquiring
+	// selectionMu. Selection writers take lifecycleMu before selectionMu.
+	s.lifecycleMu.Lock()
+	run := s.run
+	phase := PhaseIdle
+	if run != nil {
+		phase = run.phase
+	}
+	s.lifecycleMu.Unlock()
+
+	s.selectionMu.RLock()
 	s.mu.RLock()
 	state := SessionState{Model: s.model, HasModel: s.hasModel, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
 	s.mu.RUnlock()
-	state.Active = s.activeState()
-	return state
-}
-
-func (s *AgentSession) activeState() State {
-	if s == nil {
-		return State{phase: PhaseIdle}
-	}
-	s.lifecycleMu.Lock()
-	run := s.run
-	if run == nil {
-		s.lifecycleMu.Unlock()
-		return State{phase: PhaseIdle}
-	}
-	phase := run.phase
-	s.lifecycleMu.Unlock()
+	active := State{phase: PhaseIdle}
 	if s.loop != nil {
-		state := s.loop.State()
-		if state.Phase() != PhaseIdle {
-			return state
-		}
+		active = s.loop.State()
 	}
-	return State{phase: phase}
+	s.selectionMu.RUnlock()
+	if run != nil {
+		if active.Phase() == PhaseIdle {
+			active = State{phase: phase}
+		}
+		state.Active = active
+	} else {
+		state.Active = State{phase: PhaseIdle}
+	}
+	return state
 }
 
 func (s *AgentSession) rejectIfClosed() error {
@@ -1041,7 +1100,6 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 		return
 	}
 	s.mu.RLock()
-	thinkingLevel := s.thinkingLevel
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
 		if entry.observer != nil {
@@ -1062,8 +1120,6 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	switch kind {
 	case "agent_settled":
 		event = AgentSettledEvent{}
-	case "thinking_level_changed":
-		event = ThinkingLevelChangedEvent{Level: thinkingLevel}
 	case "queue_update":
 		queue := s.sessionQueueUpdateEvent()
 		event = queue
@@ -1080,15 +1136,65 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	}
 }
 
-func (s *AgentSession) Model() provider.Model { return s.State().Model }
-func (s *AgentSession) HasModel() bool        { return s.State().HasModel }
-func (s *AgentSession) SelectedModel() (provider.Model, bool) {
-	state := s.State()
-	return state.Model, state.HasModel
+func (s *AgentSession) emitThinkingLevelChanged(ctx context.Context, level provider.ThinkingLevel) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	observers := make([]SessionObserver, 0, len(s.observers))
+	for _, entry := range s.observers {
+		if entry.observer != nil {
+			observers = append(observers, entry.observer)
+		}
+	}
+	s.mu.RUnlock()
+	s.emitToObservers(ctx, observers, ThinkingLevelChangedEvent{Level: level})
 }
-func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel { return s.State().ThinkingLevel }
-func (s *AgentSession) SystemPrompt() string                  { return s.State().SystemPrompt }
-func (s *AgentSession) Tools() []provider.ToolDefinition      { return s.State().Tools }
+
+func (s *AgentSession) Model() provider.Model {
+	model, _, _ := s.selectionSnapshot()
+	return model
+}
+func (s *AgentSession) HasModel() bool {
+	_, hasModel, _ := s.selectionSnapshot()
+	return hasModel
+}
+func (s *AgentSession) SelectedModel() (provider.Model, bool) {
+	model, hasModel, _ := s.selectionSnapshot()
+	return model, hasModel
+}
+func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel {
+	_, _, thinking := s.selectionSnapshot()
+	return thinking
+}
+func (s *AgentSession) SystemPrompt() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.systemPrompt
+}
+func (s *AgentSession) Tools() []provider.ToolDefinition {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]provider.ToolDefinition(nil), s.tools...)
+}
+
+func (s *AgentSession) selectionSnapshot() (provider.Model, bool, provider.ThinkingLevel) {
+	if s == nil {
+		return provider.Model{}, false, ""
+	}
+	s.selectionMu.RLock()
+	s.mu.RLock()
+	model, hasModel, thinking := s.model, s.hasModel, s.thinkingLevel
+	s.mu.RUnlock()
+	s.selectionMu.RUnlock()
+	return model, hasModel, thinking
+}
 func (s *AgentSession) SessionManager() *session.SessionManager {
 	if s == nil {
 		return nil
@@ -1138,129 +1244,6 @@ func (s *AgentSession) SetSessionName(ctx context.Context, name string) error {
 	}
 	return nil
 }
-func (s *AgentSession) SetModel(model provider.Model) error {
-	return s.SetModelContext(context.Background(), model)
-}
-
-// SetModelContext validates access before publishing any state, durable entry,
-// or selection hook. SetModel remains the source-compatible synchronous form.
-func (s *AgentSession) SetModelContext(ctx context.Context, model provider.Model) error {
-	if s == nil {
-		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	if ctx == nil {
-		return fmt.Errorf("%w: nil model access context", ErrInvalidRun)
-	}
-	if err := s.rejectIfClosed(); err != nil {
-		return err
-	}
-	if _, err := provider.NewRequest(model, "", nil); err != nil {
-		return fmt.Errorf("%w: model: %w", ErrInvalidConfig, err)
-	}
-	if routes, ok := s.loop.config.provider.(provider.RouteValidator); ok && !routes.SupportsModel(model) {
-		return fmt.Errorf("%w: no provider adapter for %s/%s", ErrInvalidConfig, model.Provider(), model.API())
-	}
-	if s.validateSelect != nil {
-		if err := s.validateSelect(ctx, model); err != nil {
-			return err
-		}
-	}
-	s.lifecycleMu.Lock()
-	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
-		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
-	}
-	s.mu.Lock()
-	previous := s.model
-	hadPrevious := s.hasModel
-	previousThinking := s.thinkingLevel
-	s.model = model
-	s.hasModel = true
-	s.thinkingLevel = model.ClampThinkingLevel(s.thinkingLevel)
-	selectedThinking := s.thinkingLevel
-	s.mu.Unlock()
-	if err := s.loop.SetModel(model); err != nil {
-		s.lifecycleMu.Unlock()
-		return err
-	}
-	if err := s.loop.SetThinkingLevel(selectedThinking); err != nil {
-		s.lifecycleMu.Unlock()
-		return err
-	}
-	settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
-	defer cancel()
-	if _, err := s.sessionManager.AppendModelChange(settlement, model.Provider(), model.ID()); err != nil {
-		s.lifecycleMu.Unlock()
-		return fmt.Errorf("%w: model change: %w", ErrTranscriptCommit, err)
-	}
-	if selectedThinking != previousThinking {
-		if _, err := s.sessionManager.AppendThinkingLevelChange(settlement, string(selectedThinking)); err != nil {
-			s.lifecycleMu.Unlock()
-			return fmt.Errorf("%w: thinking level change: %w", ErrTranscriptCommit, err)
-		}
-	}
-	s.lifecycleMu.Unlock()
-	if selectedThinking != previousThinking {
-		s.emitControl(context.Background(), "thinking_level_changed")
-		if s.hooks.ThinkingLevelSelect != nil {
-			_ = s.hooks.ThinkingLevelSelect(context.Background(), ThinkingLevelSelectEvent{Level: selectedThinking, PreviousLevel: previousThinking})
-		}
-	}
-	if hook := s.hooks.ModelSelect; hook != nil && (!hadPrevious || !previous.Equal(model)) {
-		previousCopy := previous
-		var previousModel *provider.Model
-		if hadPrevious {
-			previousModel = &previousCopy
-		}
-		_ = hook(context.Background(), ModelSelectEvent{Model: model, PreviousModel: previousModel, Source: ModelSelectSet})
-	}
-	return nil
-}
-
-func (s *AgentSession) SetThinkingLevel(level provider.ThinkingLevel) error {
-	if s == nil {
-		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	if !level.Valid() {
-		return fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, level)
-	}
-	s.lifecycleMu.Lock()
-	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
-		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
-	}
-	s.mu.Lock()
-	previous := s.thinkingLevel
-	if s.hasModel {
-		s.thinkingLevel = s.model.ClampThinkingLevel(level)
-	} else {
-		s.thinkingLevel = provider.ThinkingOff
-	}
-	selected := s.thinkingLevel
-	s.mu.Unlock()
-	if err := s.loop.SetThinkingLevel(selected); err != nil {
-		s.lifecycleMu.Unlock()
-		return err
-	}
-	if selected != previous {
-		settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
-		_, persistErr := s.sessionManager.AppendThinkingLevelChange(settlement, string(selected))
-		cancel()
-		if persistErr != nil {
-			s.lifecycleMu.Unlock()
-			return fmt.Errorf("%w: thinking level change: %w", ErrTranscriptCommit, persistErr)
-		}
-	}
-	s.lifecycleMu.Unlock()
-	if selected != previous {
-		s.emitControl(context.Background(), "thinking_level_changed")
-		if hook := s.hooks.ThinkingLevelSelect; hook != nil {
-			_ = hook(context.Background(), ThinkingLevelSelectEvent{Level: selected, PreviousLevel: previous})
-		}
-	}
-	return nil
-}
-
 func (s *AgentSession) SetSystemPrompt(prompt string) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
@@ -1916,6 +1899,7 @@ func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session
 	if s == nil {
 		return nil, ErrCompactionUnavailable
 	}
+	s.selectionMu.RLock()
 	s.mu.RLock()
 	hasModel := s.hasModel
 	selected := s.model
@@ -1927,6 +1911,7 @@ func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session
 	validate := s.validateAccess
 	retry := s.summaryRetry
 	s.mu.RUnlock()
+	s.selectionMu.RUnlock()
 	if !hasModel {
 		return nil, s.noModelSelectedError()
 	}
@@ -2805,6 +2790,7 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 	if s == nil {
 		return nil, provider.Model{}, ErrBranchSummaryUnavailable
 	}
+	s.selectionMu.RLock()
 	s.mu.RLock()
 	hasModel := s.hasModel
 	selected := s.model
@@ -2818,6 +2804,7 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 	validate := s.validateAccess
 	retry := s.summaryRetry
 	s.mu.RUnlock()
+	s.selectionMu.RUnlock()
 	if resolve == nil && static != nil && !isNilInterface(static) {
 		if !hasModel {
 			return nil, provider.Model{}, s.noModelSelectedError()
@@ -2886,9 +2873,8 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 }
 
 func (s *AgentSession) hasSelectedModel() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.hasModel
+	_, hasModel, _ := s.selectionSnapshot()
+	return hasModel
 }
 
 type treeNavigationBusyError struct{}

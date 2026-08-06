@@ -185,9 +185,7 @@ func (s *AgentSession) GetContextUsage() (ContextUsage, bool, error) {
 	if s == nil {
 		return ContextUsage{}, false, nil
 	}
-	s.mu.RLock()
-	model, hasModel := s.model, s.hasModel
-	s.mu.RUnlock()
+	model, hasModel, _ := s.selectionSnapshot()
 	if !hasModel || model.ContextWindow() == 0 {
 		return ContextUsage{}, false, nil
 	}

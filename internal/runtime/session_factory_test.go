@@ -2,7 +2,10 @@ package agentruntime_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,251 @@ import (
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
+
+func TestCreateAgentSessionWiresModelCycleAndLosslessGlobalDefaults(t *testing.T) {
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+	original := []byte(`{"defaultProvider":"scripted","defaultModel":"a","defaultThinkingLevel":"high","future":{"keep":true},"retry":{"maxRetries":2,"provider":{"timeoutMs":123}}}`)
+	if err := os.WriteFile(settingsPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"b","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := factoryCatalogModel("scripted", "a")
+	b := factoryCatalogModel("scripted", "b")
+	c := factoryCatalogModel("scripted", "c")
+	cRouteAllowed := true
+	manager := factoryManager(t)
+	implementation := factoryProvider(t)
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: manager.Cwd(), AgentDir: agentDir, ModelRuntime: catalog},
+		Provider: implementation, SessionManager: manager,
+		AllModels: []model.Model{a, b}, Availability: model.Availability{
+			HasConfiguredAuth: func(providerID string) bool { return providerID == "scripted" },
+			SupportsRoute:     func(candidate model.Model) bool { return candidate.ID != "c" || cRouteAllowed },
+		},
+		ExplicitModel: &a,
+		Settings:      model.Settings{DefaultProvider: "scripted", DefaultModel: "a", DefaultThinkingLevel: provider.ThinkingHigh},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	cycled, err := created.Session.CycleModel(context.Background(), agent.CycleForward)
+	if err != nil || cycled == nil || cycled.Model.ID() != "b" || cycled.ThinkingLevel != provider.ThinkingHigh {
+		t.Fatalf("cycle = %#v, %v", cycled, err)
+	}
+	if err := created.Session.SetThinkingLevel(provider.ThinkingLow); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"c","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetModel(mustFactoryRef(t, a)); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := created.Session.CycleModel(context.Background(), agent.CycleForward)
+	if err != nil || refreshed == nil || refreshed.Model.ID() != "c" {
+		t.Fatalf("cycle after catalog reload = %#v, %v", refreshed, err)
+	}
+	created.Session.SetScopedModels([]agent.ScopedModel{{Model: mustFactoryRef(t, a)}, {Model: mustFactoryRef(t, c)}})
+	if err := created.Session.SetModel(mustFactoryRef(t, a)); err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := created.Session.CycleModel(context.Background(), agent.CycleForward)
+	if err != nil || scoped == nil || !scoped.IsScoped || scoped.Model.ID() != "c" {
+		t.Fatalf("dynamic scoped cycle after catalog reload = %#v, %v", scoped, err)
+	}
+	if err := created.Session.SetModel(mustFactoryRef(t, a)); err != nil {
+		t.Fatal(err)
+	}
+	cRouteAllowed = false
+	filtered, err := created.Session.CycleModel(context.Background(), agent.CycleForward)
+	if err != nil || filtered != nil {
+		t.Fatalf("route-filtered scoped cycle = %#v, %v", filtered, err)
+	}
+	selected, _ := created.Session.SelectedModel()
+	if !selected.Equal(mustFactoryRef(t, a)) {
+		t.Fatalf("filtered scoped cycle changed model to %s", selected.ID())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var defaultProvider, defaultModel, defaultThinking string
+	if err := json.Unmarshal(root["defaultProvider"], &defaultProvider); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(root["defaultModel"], &defaultModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(root["defaultThinkingLevel"], &defaultThinking); err != nil {
+		t.Fatal(err)
+	}
+	if defaultProvider != "scripted" || defaultModel != "a" || defaultThinking != "low" {
+		t.Fatalf("persisted defaults = %q/%q/%q", defaultProvider, defaultModel, defaultThinking)
+	}
+	var future map[string]bool
+	if err := json.Unmarshal(root["future"], &future); err != nil || len(future) != 1 || !future["keep"] {
+		t.Fatalf("unknown root field changed: %s (%v)", root["future"], err)
+	}
+	var retry map[string]json.RawMessage
+	if err := json.Unmarshal(root["retry"], &retry); err != nil {
+		t.Fatal(err)
+	}
+	var providerRetry map[string]uint64
+	if err := json.Unmarshal(retry["provider"], &providerRetry); err != nil || len(providerRetry) != 1 || providerRetry["timeoutMs"] != 123 {
+		t.Fatalf("unported nested settings changed: %s (%v)", retry["provider"], err)
+	}
+}
+
+func TestCreateAgentSessionReadsEffectiveProjectThinkingOnEveryModelSwitch(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"defaultProvider":"scripted","defaultModel":"plain","defaultThinkingLevel":"medium"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(cwd, ".pi")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "settings.json"), []byte(`{"defaultThinkingLevel":"high"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"plain","reasoning":false,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"reasoning","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := factoryCatalogModel("scripted", "plain")
+	plain.Reasoning = false
+	reasoning := factoryCatalogModel("scripted", "reasoning")
+	manager := factoryManager(t)
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: cwd, AgentDir: agentDir, ModelRuntime: catalog},
+		Provider: factoryProvider(t), SessionManager: manager,
+		AllModels: []model.Model{plain, reasoning}, Availability: availableFactoryModels(map[string]bool{"scripted": true}),
+		ExplicitModel: &plain, Settings: catalog.Snapshot().Settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	cycled, err := created.Session.CycleModel(context.Background(), agent.CycleForward)
+	if err != nil || cycled == nil || cycled.ThinkingLevel != provider.ThinkingHigh {
+		t.Fatalf("initial effective project preference = %#v, %v", cycled, err)
+	}
+	if err := created.Session.SetThinkingLevel(provider.ThinkingLow); err != nil {
+		t.Fatal(err)
+	}
+	if got := catalog.Snapshot().Settings.DefaultThinkingLevel; got != provider.ThinkingHigh {
+		t.Fatalf("effective setting after global write = %q", got)
+	}
+	global := readFactorySettings(t, filepath.Join(agentDir, "settings.json"))
+	if global.DefaultThinkingLevel != provider.ThinkingLow {
+		t.Fatalf("global thinking after direct selection = %q", global.DefaultThinkingLevel)
+	}
+	if err := created.Session.SetModel(mustFactoryRef(t, plain)); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetModel(mustFactoryRef(t, reasoning)); err != nil {
+		t.Fatal(err)
+	}
+	if got := created.Session.ThinkingLevel(); got != provider.ThinkingHigh {
+		t.Fatalf("second switch used cached global instead of project override: %q", got)
+	}
+}
+
+func TestCreateAgentSessionDefiniteTranscriptFailureRestoresExactGlobalDefaults(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	globalPath := filepath.Join(agentDir, "settings.json")
+	projectDir := filepath.Join(cwd, ".pi")
+	if err := os.WriteFile(globalPath, []byte(`{"defaultProvider":"global-provider","defaultModel":"global-model","defaultThinkingLevel":"medium"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(projectDir, "settings.json")
+	projectBytes := []byte(`{"defaultProvider":"project-provider","defaultModel":"project-model","defaultThinkingLevel":"high"}`)
+	if err := os.WriteFile(projectPath, projectBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := factoryCatalogModel("scripted", "plain")
+	plain.Reasoning = false
+	reasoning := factoryCatalogModel("scripted", "reasoning")
+	manager := factoryManager(t)
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: cwd, AgentDir: agentDir, ModelRuntime: catalog},
+		Provider: factoryProvider(t), SessionManager: manager,
+		AllModels: []model.Model{plain, reasoning}, Availability: availableFactoryModels(map[string]bool{"scripted": true}),
+		ExplicitModel: &plain, Settings: catalog.Snapshot().Settings,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.SetModel(mustFactoryRef(t, reasoning)); !errors.Is(err, agent.ErrTranscriptCommit) {
+		t.Fatalf("SetModel error = %v", err)
+	}
+	global := readFactorySettings(t, globalPath)
+	if global.DefaultProvider != "global-provider" || global.DefaultModel != "global-model" || global.DefaultThinkingLevel != provider.ThinkingMedium {
+		t.Fatalf("global defaults polluted by merged project settings: %#v", global)
+	}
+	if got, err := os.ReadFile(projectPath); err != nil || string(got) != string(projectBytes) {
+		t.Fatalf("project settings changed: %s, %v", got, err)
+	}
+	effective := catalog.Snapshot().Settings
+	if effective.DefaultProvider != "project-provider" || effective.DefaultModel != "project-model" || effective.DefaultThinkingLevel != provider.ThinkingHigh {
+		t.Fatalf("effective settings after rollback = %#v", effective)
+	}
+}
+
+func mustFactoryRef(t *testing.T, value model.Model) provider.Model {
+	t.Helper()
+	ref, err := value.Ref()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
+}
+
+func readFactorySettings(t *testing.T, path string) model.Settings {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var result model.Settings
+	_ = json.Unmarshal(root["defaultProvider"], &result.DefaultProvider)
+	_ = json.Unmarshal(root["defaultModel"], &result.DefaultModel)
+	_ = json.Unmarshal(root["defaultThinkingLevel"], &result.DefaultThinkingLevel)
+	return result
+}
 
 type factorySummarizerFunc func(context.Context, session.SummaryInput) (session.SummaryOutput, error)
 

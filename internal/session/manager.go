@@ -373,6 +373,36 @@ func (m *SessionManager) AppendModelChange(ctx context.Context, provider, modelI
 	return m.appendPayload(ctx, ModelChangePayload{Provider: provider, ModelID: modelID})
 }
 
+// AppendModelControlChange publishes the model change and its optional
+// re-clamped thinking level as one linear storage append.
+func (m *SessionManager) AppendModelControlChange(ctx context.Context, provider, modelID string, thinkingLevel *string) ([]Entry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// If an earlier assistant left this manager in its delayed volatile form,
+	// publish that existing snapshot before adding the coupled control records.
+	// A snapshot failure therefore cannot leave either new control entry in the
+	// manager while the caller rolls settings back.
+	if m.persist && !m.flushed && managerHasAssistant(m.store.Entries()) {
+		durable, err := createSessionSnapshot(m.sessionFile, m.store.Header(), m.store.Entries(), m.runtime)
+		if err != nil {
+			return nil, err
+		}
+		old := m.store
+		m.store = durable
+		m.flushed = true
+		_ = old.Close()
+	}
+	payloads := []EntryPayload{ModelChangePayload{Provider: provider, ModelID: modelID}}
+	if thinkingLevel != nil {
+		payloads = append(payloads, ThinkingLevelChangePayload{ThinkingLevel: *thinkingLevel})
+	}
+	entries, err := m.store.AppendPayloads(ctx, payloads)
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 func (m *SessionManager) AppendCompaction(ctx context.Context, summary, firstKeptEntryID string, tokensBefore uint64, details json.RawMessage, fromHook *bool, usage *CompactionUsage) (Entry, error) {
 	value, present := optionalManagerBool(fromHook)
 	return m.appendPayload(ctx, CompactionPayload{Record: CompactionRecord{Summary: summary, FirstKeptEntryID: firstKeptEntryID, TokensBefore: tokensBefore, Usage: usage}, Details: details, FromHook: value, HasFromHook: present})

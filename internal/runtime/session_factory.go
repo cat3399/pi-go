@@ -26,6 +26,7 @@ type SessionFactoryOptions struct {
 	ExplicitThinkingLevel *provider.ThinkingLevel
 	ScopedModels          []model.ScopedModel
 	Settings              model.Settings
+	PersistSettings       agent.SettingsPersistence
 	BaseConfig            agent.SessionConfig
 	SessionStartEvent     *agent.SessionStartHookEvent
 	Diagnostics           []Diagnostic
@@ -133,6 +134,41 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	config.InitializeSessionState = true
 	config.SessionStartEvent = options.SessionStartEvent
 	config.NoModelSelectedMessage = formatNoModelSelectedMessage(options.DocsDir)
+	allModels, err := catalogModelRefs(options.AllModels)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	scopedModels, err := scopedModelRefs(options.ScopedModels)
+	if err != nil {
+		return CreateResult{}, err
+	}
+	config.AllModels = allModels
+	config.ScopedModels = scopedModels
+	config.ModelAvailable = func(_ context.Context, candidate provider.Model) (bool, error) {
+		catalogModels := options.AllModels
+		if options.Services.ModelRuntime != nil {
+			catalogModels = options.Services.ModelRuntime.Snapshot().Models
+		}
+		catalog := exactCatalogModel(catalogModels, candidate.Provider(), candidate.ID())
+		return catalog != nil && options.Availability.Available(*catalog), nil
+	}
+	if options.Services.ModelRuntime != nil && config.ResolveAvailableModels == nil {
+		config.ResolveAvailableModels = func(_ context.Context) ([]provider.Model, error) {
+			available := model.FilterAvailableModels(options.Services.ModelRuntime.Snapshot().Models, options.Availability)
+			return catalogModelRefs(available)
+		}
+	}
+	config.DefaultThinkingLevel = options.Settings.DefaultThinkingLevel
+	if options.Services.ModelRuntime != nil {
+		config.ResolveDefaultThinkingLevel = func() (provider.ThinkingLevel, bool) {
+			level := options.Services.ModelRuntime.Snapshot().Settings.DefaultThinkingLevel
+			return level, level != ""
+		}
+	}
+	config.PersistSettings = options.PersistSettings
+	if config.PersistSettings == nil && options.Services.ModelRuntime != nil {
+		config.PersistSettings = runtimeSettingsPersistence(options.Services.ModelRuntime)
+	}
 
 	created, err := agent.NewSession(config)
 	if err != nil {
@@ -142,6 +178,81 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 		Session: created, Services: options.Services,
 		Diagnostics: append([]Diagnostic(nil), options.Diagnostics...), ModelFallbackMessage: fallback,
 	}, nil
+}
+
+func runtimeSettingsPersistence(runtime *model.Runtime) agent.SettingsPersistence {
+	return func(ctx context.Context, update agent.SettingsUpdate) (agent.SettingsWriteResult, error) {
+		var previous model.Settings
+		var expectedGeneration uint64
+		err := runtime.SetGlobalSettings(ctx, func(settings *model.Settings) error {
+			// SetGlobalSettings owns the runtime operation gate while invoking this
+			// callback, so the generation published by this write is exactly next.
+			expectedGeneration = runtime.Snapshot().Generation + 1
+			previous.DefaultProvider = settings.DefaultProvider
+			previous.DefaultModel = settings.DefaultModel
+			previous.DefaultThinkingLevel = settings.DefaultThinkingLevel
+			if update.DefaultProvider != nil {
+				settings.DefaultProvider = *update.DefaultProvider
+			}
+			if update.DefaultModel != nil {
+				settings.DefaultModel = *update.DefaultModel
+			}
+			if update.DefaultThinkingLevel != nil {
+				settings.DefaultThinkingLevel = *update.DefaultThinkingLevel
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, model.ErrCommitUnknown) {
+			return agent.SettingsWriteResult{}, err
+		}
+		undo := func(undoCtx context.Context) error {
+			return runtime.SetGlobalSettings(undoCtx, func(settings *model.Settings) error {
+				if runtime.Snapshot().Generation != expectedGeneration {
+					// Any intervening Runtime mutation owns the newer intent, including
+					// an ABA/same-value write which field comparison cannot detect.
+					return nil
+				}
+				// Restore only values still equal to this transaction's write.
+				// This also protects against an out-of-band file replacement which
+				// did not advance this process-local Runtime generation.
+				if update.DefaultProvider != nil && settings.DefaultProvider == *update.DefaultProvider {
+					settings.DefaultProvider = previous.DefaultProvider
+				}
+				if update.DefaultModel != nil && settings.DefaultModel == *update.DefaultModel {
+					settings.DefaultModel = previous.DefaultModel
+				}
+				if update.DefaultThinkingLevel != nil && settings.DefaultThinkingLevel == *update.DefaultThinkingLevel {
+					settings.DefaultThinkingLevel = previous.DefaultThinkingLevel
+				}
+				return nil
+			})
+		}
+		return agent.SettingsWriteResult{Undo: undo, CommitUnknown: err != nil}, err
+	}
+}
+
+func catalogModelRefs(models []model.Model) ([]provider.Model, error) {
+	result := make([]provider.Model, len(models))
+	for index, candidate := range models {
+		ref, err := candidate.Ref()
+		if err != nil {
+			return nil, fmt.Errorf("resolve catalog model %s/%s: %w", candidate.Provider, candidate.ID, err)
+		}
+		result[index] = ref
+	}
+	return result, nil
+}
+
+func scopedModelRefs(models []model.ScopedModel) ([]agent.ScopedModel, error) {
+	result := make([]agent.ScopedModel, len(models))
+	for index, candidate := range models {
+		ref, err := candidate.Model.Ref()
+		if err != nil {
+			return nil, fmt.Errorf("resolve scoped model %s/%s: %w", candidate.Model.Provider, candidate.Model.ID, err)
+		}
+		result[index] = agent.ScopedModel{Model: ref, ThinkingLevel: cloneThinkingPointer(candidate.ThinkingLevel)}
+	}
+	return result, nil
 }
 
 func branchHasThinkingEntry(manager *session.SessionManager) (bool, error) {

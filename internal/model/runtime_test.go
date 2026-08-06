@@ -522,6 +522,9 @@ func TestGlobalSettingsCancellationFaultAndPrivateAdmission(t *testing.T) {
 	if err != nil || !strings.Contains(string(content), "after") {
 		t.Fatalf("post-rename did not publish: %q, %v", content, err)
 	}
+	if got := r.Snapshot().Settings.DefaultModel; got != "after" {
+		t.Fatalf("post-rename snapshot was not reconciled forward: %q", got)
+	}
 	r.faults.afterRename = nil
 	synced := false
 	r.faults.syncDirectory = func(path string) error { synced = true; return syncModelDirectory(path) }

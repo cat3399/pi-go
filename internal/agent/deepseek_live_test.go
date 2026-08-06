@@ -74,6 +74,17 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				t.Fatal(err)
 			}
 			catalogModel := deepSeekLiveModel(test.api)
+			cycleSource := catalogModel
+			cycleSource.ID = "cycle-source-not-requested"
+			cycleSource.Name = "Cycle source (not requested)"
+			cycleSourceRef, err := cycleSource.Ref()
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalogRef, err := catalogModel.Ref()
+			if err != nil {
+				t.Fatal(err)
+			}
 			routeValidator, ok := implementation.(provider.RouteValidator)
 			if !ok {
 				t.Fatalf("concrete provider %T does not implement RouteValidator", implementation)
@@ -107,7 +118,7 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				Services:       &agentruntime.Services{CWD: directory, AgentDir: directory, ModelRuntime: modelRuntime},
 				Provider:       implementation,
 				SessionManager: manager,
-				AllModels:      []model.Model{catalogModel},
+				AllModels:      []model.Model{cycleSource, catalogModel},
 				Availability: model.Availability{
 					HasConfiguredAuth: func(providerID string) bool { return providerID == "deepseek" && apiKey != "" },
 					SupportsRoute: func(candidate model.Model) bool {
@@ -115,12 +126,15 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 						return refErr == nil && routeValidator.SupportsModel(ref)
 					},
 				},
-				ExplicitModel:         &catalogModel,
+				ExplicitModel:         &cycleSource,
 				ExplicitThinkingLevel: &test.thinkingLevel,
 				BaseConfig: agent.SessionConfig{
 					Tool: echo, Tools: []provider.ToolDefinition{definition},
 					Stream: provider.StreamOptions{MaxTokens: &test.maxTokens},
 					Retry:  agent.RetryPolicy{MaxAttempts: 1},
+					ResolveAvailableModels: func(context.Context) ([]provider.Model, error) {
+						return []provider.Model{cycleSourceRef, catalogRef}, nil
+					},
 				},
 			})
 			if err != nil {
@@ -129,6 +143,14 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 			}
 			coordinator := factoryResult.Session
 			t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
+			cycled, err := coordinator.CycleModel(context.Background(), agent.CycleForward)
+			if err != nil {
+				t.Fatalf("CycleModel() error: %v", err)
+			}
+			if cycled == nil || cycled.IsScoped || cycled.Model.Provider() != catalogModel.Provider ||
+				cycled.Model.ID() != catalogModel.ID || cycled.ThinkingLevel != test.thinkingLevel {
+				t.Fatalf("CycleModel() = %#v", cycled)
+			}
 			selected, selectedOK := coordinator.SelectedModel()
 			if !selectedOK || selected.Provider() != catalogModel.Provider || selected.ID() != catalogModel.ID || selected.API() != catalogModel.API {
 				_ = coordinator.Close(context.Background())
@@ -139,16 +161,20 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				t.Fatalf("factory thinking/fallback = %q / %#v", coordinator.ThinkingLevel(), factoryResult.ModelFallbackMessage)
 			}
 			initialEntries := manager.Entries()
-			if len(initialEntries) != 2 {
+			if len(initialEntries) != 3 {
 				_ = coordinator.Close(context.Background())
-				t.Fatalf("factory initial entries = %d, want model_change + thinking_level_change", len(initialEntries))
+				t.Fatalf("factory/cycle entries = %d, want initial model/thinking + cycled model", len(initialEntries))
 			}
 			modelChange, modelChangeOK := initialEntries[0].Payload().(session.ModelChangePayload)
 			thinkingChange, thinkingChangeOK := initialEntries[1].Payload().(session.ThinkingLevelChangePayload)
-			if !modelChangeOK || modelChange.Provider != catalogModel.Provider || modelChange.ModelID != catalogModel.ID ||
+			cycledChange, cycledChangeOK := initialEntries[2].Payload().(session.ModelChangePayload)
+			if !modelChangeOK || modelChange.Provider != cycleSource.Provider || modelChange.ModelID != cycleSource.ID ||
 				!thinkingChangeOK || thinkingChange.ThinkingLevel != string(test.thinkingLevel) {
 				_ = coordinator.Close(context.Background())
 				t.Fatalf("factory initial metadata = %#v / %#v", initialEntries[0].Payload(), initialEntries[1].Payload())
+			}
+			if !cycledChangeOK || cycledChange.Provider != catalogModel.Provider || cycledChange.ModelID != catalogModel.ID {
+				t.Fatalf("cycle metadata = %#v", initialEntries[2].Payload())
 			}
 
 			var events deepSeekLiveEvents

@@ -233,16 +233,33 @@ func (a *Agent) SetModel(model provider.Model) error {
 	return nil
 }
 
+// SetModelAndThinking publishes the coupled turn-selection snapshot under one
+// lock after validating both values. AgentSession uses this after its durable
+// control records have committed.
+func (a *Agent) SetModelAndThinking(model provider.Model, level provider.ThinkingLevel) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if _, err := provider.NewRequest(model, "", nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+	}
+	if !level.Valid() {
+		return fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, level)
+	}
+	a.mu.Lock()
+	a.model = model
+	a.hasModel = true
+	a.thinkingLevel = level
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *Agent) SetThinkingLevel(level provider.ThinkingLevel) error {
 	if a == nil || !level.Valid() {
 		return fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, level)
 	}
 	a.mu.Lock()
-	if a.hasModel {
-		a.thinkingLevel = level
-	} else {
-		a.thinkingLevel = provider.ThinkingOff
-	}
+	a.thinkingLevel = level
 	a.mu.Unlock()
 	return nil
 }

@@ -381,17 +381,21 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if err != nil {
 		return fmt.Errorf("%w: encode global settings", ErrInvalidConfig)
 	}
-	if err := atomicWrite(ctx, path, append(encoded, '\n'), "global settings.json", r.faults); err != nil {
-		return err
+	writeErr := atomicWrite(ctx, path, append(encoded, '\n'), "global settings.json", r.faults)
+	if writeErr != nil && !errors.Is(writeErr, ErrCommitUnknown) {
+		return writeErr
 	}
-	// Rebuild without recursively acquiring the operation gate.
+	// ErrCommitUnknown is only produced after the target rename. The new file is
+	// therefore the sole visible candidate even though directory durability was
+	// not acknowledged. Publish the same forward snapshot before returning the
+	// uncertainty so callers never observe file-new/snapshot-old divergence.
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	generation := r.snapshot.Generation + 1
 	r.snapshot = buildSnapshot(r.providers, cached, settings)
 	r.snapshot.Generation = generation
 	r.storeErrors = storeErrors
-	return nil
+	r.mu.Unlock()
+	return writeErr
 }
 
 func putString(root map[string]json.RawMessage, key, value string) {

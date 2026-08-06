@@ -495,6 +495,117 @@ func (s *Session) AppendPayload(ctx context.Context, payload EntryPayload) (Entr
 	return s.appendPayload(ctx, payload, nil, false)
 }
 
+// AppendPayloads atomically appends a linear batch of non-message entries.
+// The entries are encoded and published with one storage append, so callers
+// which persist coupled control state (for example model plus thinking level)
+// never expose only a prefix of the change.
+func (s *Session) AppendPayloads(ctx context.Context, payloads []EntryPayload) ([]Entry, error) {
+	if len(payloads) == 0 {
+		return []Entry{}, nil
+	}
+	for _, payload := range payloads {
+		if payload == nil {
+			return nil, fmt.Errorf("%w: nil entry payload", ErrInvalidEntry)
+		}
+		if _, ok := payload.(MessagePayload); ok {
+			return nil, fmt.Errorf("%w: message payload in batch", ErrInvalidEntry)
+		}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.acquireAppend(ctx); err != nil {
+		return nil, err
+	}
+	defer s.releaseAppend()
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ErrClosed
+	}
+	if s.poisoned {
+		s.mu.Unlock()
+		return nil, ErrPoisoned
+	}
+	entries := make([]Entry, 0, len(payloads))
+	reserved := make(map[string]struct{}, len(payloads))
+	parentID := ""
+	hasParent := s.leaf >= 0
+	if hasParent {
+		parentID = s.entries[s.leaf].id
+	}
+	appendBytes := make([]byte, 0, len(payloads)*128)
+	if s.needsSeparator {
+		appendBytes = append(appendBytes, '\n')
+	}
+	for _, payload := range payloads {
+		var entryID string
+		for attempt := 0; attempt < entryIDAttempts; attempt++ {
+			candidate, err := s.nextEntryID()
+			if err != nil {
+				s.mu.Unlock()
+				return nil, err
+			}
+			if _, duplicate := reserved[candidate]; !duplicate {
+				entryID = candidate
+				reserved[candidate] = struct{}{}
+				break
+			}
+		}
+		if entryID == "" {
+			s.mu.Unlock()
+			return nil, ErrEntryIDExhausted
+		}
+		timestamp := canonicalTime(s.runtime.now())
+		if timestamp.IsZero() || validateISOTime(timestamp) != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: invalid entry timestamp", ErrInvalidEntry)
+		}
+		raw, err := encodePayloadEntry(entryID, parentID, hasParent, timestamp, payload.CloneEntryPayload())
+		if err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: encode payload: %w", ErrInvalidEntry, err)
+		}
+		entry, err := decodeEntry(raw)
+		if err != nil {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: decode payload: %w", ErrInvalidEntry, err)
+		}
+		entries = append(entries, entry)
+		appendBytes = append(appendBytes, raw...)
+		appendBytes = append(appendBytes, '\n')
+		parentID, hasParent = entryID, true
+	}
+	s.mu.Unlock()
+
+	started, err := s.storage.append(ctx, s.path, appendBytes)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		if started {
+			s.poisoned = true
+			return nil, fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+		}
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return nil, fmt.Errorf("%w: %w", ErrAppendCanceled, err)
+		}
+		return nil, fmt.Errorf("%w: append %s: %w", ErrStorage, s.path, err)
+	}
+	for _, entry := range entries {
+		s.entries = append(s.entries, entry)
+		s.leaf = len(s.entries) - 1
+		s.byID[entry.id] = s.leaf
+	}
+	s.needsSeparator = false
+	s.generation++
+	result := make([]Entry, len(entries))
+	for index := range entries {
+		result[index] = entries[index].clone()
+	}
+	return result, nil
+}
+
 // AppendPayloadAt appends a non-message entry with an explicit parent and only
 // advances the selected leaf after the durable append succeeds. A nil parent
 // creates a root entry. It is the atomic primitive behind tree navigation.
