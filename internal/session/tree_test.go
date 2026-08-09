@@ -266,7 +266,72 @@ func TestForkFromCopiesForestAndCancellationCannotCreateTarget(t *testing.T) {
 	}
 }
 
-func TestForkFromStrictlyRejectsMalformedExternalSource(t *testing.T) {
+func TestForkAndExtractPreserveCompletePhysicalRecordWhitespace(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "whitespace-source.jsonl")
+	entryRaw := []byte(" \t" + userEntryJSON("spaced", "entry-1", "null", 1) + " \t ")
+	sourceBytes := append([]byte(testHeader+"\n"), entryRaw...)
+	sourceBytes = append(sourceBytes, '\n')
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := Open(sourcePath, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	entries := source.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("open entries = %#v", entries)
+	}
+	if !bytes.Equal(entries[0].RawJSON(), entryRaw) {
+		t.Fatalf("open physical record = %q, want %q", entries[0].RawJSON(), entryRaw)
+	}
+
+	for _, test := range []struct {
+		name string
+		run  func(string) (*Session, error)
+	}{
+		{
+			name: "fork",
+			run: func(target string) (*Session, error) {
+				return source.Fork(context.Background(), ExtractOptions{TargetPath: target, ID: "whitespace-fork", WorkingDir: directory})
+			},
+		},
+		{
+			name: "extract",
+			run: func(target string) (*Session, error) {
+				return source.ExtractBranch(context.Background(), "entry-1", ExtractOptions{TargetPath: target, ID: "whitespace-extract", WorkingDir: directory})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			targetPath := filepath.Join(directory, test.name+".jsonl")
+			copied, err := test.run(targetPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries := copied.Entries()
+			if len(entries) != 1 {
+				_ = copied.Close()
+				t.Fatalf("copied entries = %#v", entries)
+			}
+			if !bytes.Equal(entries[0].RawJSON(), entryRaw) {
+				_ = copied.Close()
+				t.Fatalf("copied physical record = %q, want %q", entries[0].RawJSON(), entryRaw)
+			}
+			if err := copied.Close(); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(targetPath)
+			if err != nil || !bytes.Contains(data, append(append([]byte{'\n'}, entryRaw...), '\n')) {
+				t.Fatalf("target physical bytes did not retain whitespace: %v / %q", err, data)
+			}
+		})
+	}
+}
+
+func TestForkFromPreservesOrphanForestSemantics(t *testing.T) {
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "malformed-source.jsonl")
 	sourceBytes := []byte(testHeader + "\n" + propertyForestEntry("broken", `"missing"`) + "\n")
@@ -274,19 +339,51 @@ func TestForkFromStrictlyRejectsMalformedExternalSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	targetPath := filepath.Join(directory, "must-not-exist.jsonl")
-	_, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "strict-fork", WorkingDir: directory})
-	if !errors.Is(err, ErrUnsupportedTree) {
-		t.Fatalf("ForkFrom malformed source error = %v, want ErrUnsupportedTree", err)
+	fork, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "compatible-fork", WorkingDir: directory})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(targetPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("malformed source created target: %v", err)
+	defer fork.Close()
+	if diagnostics := fork.LoadDiagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticOrphanParent {
+		t.Fatalf("fork orphan diagnostics = %#v", diagnostics)
+	}
+	if tree := fork.Tree(); len(tree) != 1 || tree[0].Entry.ID() != "broken" {
+		t.Fatalf("fork orphan tree = %#v", tree)
 	}
 	after, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(sourceBytes, after) {
-		t.Fatal("strict external fork changed rejected source")
+		t.Fatal("compatible external fork changed source")
+	}
+}
+
+func TestExportRefusesToSilentlyDropMalformedPhysicalRecords(t *testing.T) {
+	directory := t.TempDir()
+	sourcePath := filepath.Join(directory, "damaged-source.jsonl")
+	sourceBytes := []byte(testHeader + "\n" + propertyForestEntry("root", "null") + "\nnot-json\n")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(directory, "must-not-exist.jsonl")
+	if _, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "damaged-fork", WorkingDir: directory}); !errors.Is(err, ErrMalformedRecords) {
+		t.Fatalf("ForkFrom malformed records = %v, want ErrMalformedRecords", err)
+	}
+	if _, err := os.Stat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed export created target: %v", err)
+	}
+	manager, err := OpenSessionManager(sourcePath, directory, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, _, err := manager.CreateBranchedSession(context.Background(), "root"); !errors.Is(err, ErrMalformedRecords) {
+		t.Fatalf("CreateBranchedSession malformed records = %v, want ErrMalformedRecords", err)
+	}
+	after, err := os.ReadFile(sourcePath)
+	if err != nil || !bytes.Equal(after, sourceBytes) {
+		t.Fatalf("rejected exports changed source: %v / %q", err, after)
 	}
 }
 
@@ -417,6 +514,65 @@ func TestConcurrentAppendAndActiveForkSnapshotsAreDurablePrefixes(t *testing.T) 
 				t.Fatalf("fork snapshot is not a durable source prefix at entry %d", index)
 			}
 		}
+	}
+}
+
+func TestCompatibleTreeParentsIsLinearForLongHistory(t *testing.T) {
+	const count = 100_000
+	entries := make([]Entry, count)
+	byID := make(map[string]int, count)
+	for index := range entries {
+		id := fmt.Sprintf("entry-%06d", index)
+		entries[index] = Entry{id: id}
+		if index > 0 {
+			entries[index].parentID = entries[index-1].id
+			entries[index].hasParent = true
+		}
+		byID[id] = index
+	}
+	allocations := testing.AllocsPerRun(3, func() {
+		parents := compatibleTreeParents(entries, byID)
+		if len(parents) != count || parents[0] != -1 || parents[count-1] != count-2 {
+			panic("invalid parent projection")
+		}
+	})
+	t.Logf("compatibleTreeParents(%d) allocations: %.0f", count, allocations)
+	if allocations > 16 {
+		t.Fatalf("long linear history used %.0f allocations, want a constant-size allocation set", allocations)
+	}
+}
+
+func TestCompatibleCompactionAncestryIsLinearForDenseLongHistory(t *testing.T) {
+	const count = 100_000
+	entries := make([]Entry, count)
+	byID := make(map[string]int, count)
+	parents := make([]int, count)
+	rootID := "entry-000000"
+	for index := range entries {
+		id := fmt.Sprintf("entry-%06d", index)
+		entries[index] = Entry{id: id}
+		parents[index] = -1
+		if index > 0 {
+			entries[index].parentID = entries[index-1].id
+			entries[index].hasParent = true
+			entries[index].compaction = &CompactionRecord{FirstKeptEntryID: rootID}
+			parents[index] = index - 1
+		}
+		byID[id] = index
+	}
+	invalid := 0
+	started := time.Now()
+	allocations := testing.AllocsPerRun(3, func() {
+		invalid = 0
+		visitInvalidCompatibleCompactions(entries, byID, parents, func(int, Entry) { invalid++ })
+	})
+	elapsed := time.Since(started)
+	if invalid != 0 {
+		t.Fatalf("dense valid compactions diagnosed %d entries", invalid)
+	}
+	t.Logf("validated %d dense compactions in %s with %.0f allocations/run", count-1, elapsed, allocations)
+	if allocations > 16 {
+		t.Fatalf("dense compaction validation used %.0f allocations, want a constant-size allocation set", allocations)
 	}
 }
 

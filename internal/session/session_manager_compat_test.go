@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,10 +48,13 @@ func compatGenerateSnapshot(t *testing.T) map[string]any {
 	t.Helper()
 	root := t.TempDir()
 	return map[string]any{
-		"formatVersion":          1,
+		"formatVersion":          4,
 		"optionalAndPersistence": compatOptionalAndPersistence(t, root),
 		"treeAndSelection":       compatTreeAndSelection(t, root),
 		"branchedAndFork":        compatBranchedAndFork(t, root),
+		"reopenAndCompaction":    compatReopenAndCompaction(t, root),
+		"damagedRecovery":        compatDamagedRecovery(t, root),
+		"structuralRecovery":     compatStructuralRecovery(t, root),
 	}
 }
 
@@ -344,6 +348,193 @@ func compatBranchedAndFork(t *testing.T, root string) map[string]any {
 	}
 }
 
+func compatReopenAndCompaction(t *testing.T, root string) map[string]any {
+	t.Helper()
+	cwd := filepath.Join(root, "reopen-cwd")
+	targetCwd := filepath.Join(root, "reopen-target-cwd")
+	dir := filepath.Join(root, "reopen-sessions")
+	for _, path := range []string{cwd, targetCwd} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := CreateSessionManagerWithOptions(cwd, dir, ManagerOptions{
+		NewSession: NewSessionOptions{ID: "compat-reopen"},
+		NewEntryID: sequenceIDs("root-id", "thinking-id", "model-id", "first-assistant-id", "kept-id", "second-assistant-id", "compaction-id", "tail-id"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := newCompatIDs()
+	rootEntry := compatAppendUser(t, manager, "reopen root", 1_000)
+	ids.name(rootEntry.ID(), "root")
+	thinking, err := manager.AppendThinkingLevelChange(context.Background(), "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids.name(thinking.ID(), "thinking")
+	model, err := manager.AppendModelChange(context.Background(), "selected-provider", "selected-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids.name(model.ID(), "model")
+	firstAssistant := compatAppendAssistant(t, manager, "first answer", 2_000)
+	ids.name(firstAssistant.ID(), "first-assistant")
+	kept := compatAppendUser(t, manager, "kept question", 3_000)
+	ids.name(kept.ID(), "kept")
+	secondAssistant := compatAppendAssistant(t, manager, "second answer", 4_000)
+	ids.name(secondAssistant.ID(), "second-assistant")
+	compaction, err := manager.AppendCompaction(context.Background(), "reopen checkpoint", kept.ID(), 99, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids.name(compaction.ID(), "compaction")
+	tail := compatAppendUser(t, manager, "tail question", 5_000)
+	ids.name(tail.ID(), "tail")
+	file, ok := manager.SessionFile()
+	if !ok {
+		t.Fatal("reopen manager has no file")
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenSessionManager(file, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedLeaf, _ := reopened.LeafID()
+	reopenedContext := compatContext(reopened, ids)
+	earlier, err := reopened.ProjectContextAt(firstAssistant.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	earlierContext := compatProjectedContext(earlier, ids)
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fork, err := ForkSessionFrom(context.Background(), file, targetCwd, dir, NewSessionOptions{ID: "compat-reopen-fork"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fork.Close()
+	forkParent, hasForkParent := fork.Header().ParentSession()
+	return map[string]any{
+		"reopenedLeaf": ids.name(reopenedLeaf),
+		"reopened":     reopenedContext,
+		"earlierLeaf":  earlierContext,
+		"fork": map[string]any{
+			"headerParentIsSource": hasForkParent && compatAbs(forkParent) == compatAbs(file),
+			"context":              compatContext(fork, ids),
+			"entries":              compatEntries(compatEntryRaw(fork.Entries()), ids),
+		},
+	}
+}
+
+func compatDamagedRecovery(t *testing.T, root string) map[string]any {
+	t.Helper()
+	cwd := filepath.Join(root, "damaged-cwd")
+	dir := filepath.Join(root, "damaged-sessions")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "damaged.jsonl")
+	header, _ := json.Marshal(map[string]any{"type": "session", "version": 3, "id": "compat-damaged", "timestamp": "2026-08-09T00:00:00.000Z", "cwd": cwd})
+	rootEntry := `{"type":"message","id":"damaged-root","parentId":null,"timestamp":"2026-08-09T00:00:01.000Z","message":{"role":"user","content":"damaged root","timestamp":1000}}`
+	orphanEntry := `{"type":"message","id":"damaged-orphan","parentId":"missing-parent","timestamp":"2026-08-09T00:00:02.000Z","message":{"role":"user","content":"damaged orphan","timestamp":2000}}`
+	data := []byte("not-json-before-header\n" + string(header) + "\n" + rootEntry + "\nnot-json-middle\n" + orphanEntry + "\n{")
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := OpenSessionManager(file, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := newCompatIDs()
+	ids.name("damaged-root", "root")
+	ids.name("damaged-orphan", "orphan")
+	entries := compatEntries(compatEntryRaw(manager.Entries()), ids)
+	tree := compatTree(manager.Tree(), ids)
+	active := compatContext(manager, ids)
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSessionManager(file, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	return map[string]any{
+		"entries": entries, "tree": tree, "activeContext": active,
+		"reopenedContext": compatContext(reopened, ids),
+	}
+}
+
+func compatStructuralRecovery(t *testing.T, root string) map[string]any {
+	t.Helper()
+	cwd := filepath.Join(root, "structural-cwd")
+	dir := filepath.Join(root, "structural-sessions")
+	for _, path := range []string{cwd, dir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(dir, "structural.jsonl")
+	records := []string{
+		`{"type":"session","version":3,"id":"compat-structural","timestamp":"2026-08-09T01:00:00.000Z","cwd":` + strconv.Quote(cwd) + `}`,
+		`{"type":"message","id":"forward-child","parentId":"root","timestamp":"2026-08-09T01:00:01.000Z","message":{"role":"user","content":"forward child","timestamp":1000}}`,
+		`{"type":"message","id":"root","parentId":null,"timestamp":"2026-08-09T01:00:02.000Z","message":{"role":"user","content":"root","timestamp":2000}}`,
+		`{"type":"message","id":"legacy-assistant","parentId":"forward-child","timestamp":"2026-08-09T01:00:03.000Z","message":{"role":"assistant","content":null,"api":"openai-completions","provider":"compat-provider","model":"compat-model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"stopReason":"stop","timestamp":3000}}`,
+		`{"type":"compaction","id":"bad-compaction","parentId":"legacy-assistant","timestamp":"2026-08-09T01:00:04.000Z","summary":"damaged checkpoint","firstKeptEntryId":"missing-kept","tokensBefore":12}`,
+	}
+	prefix := []byte(strings.Join(records, "\n") + "\n")
+	tail := append([]byte(`{"type":"message","id":"utf8-tail","parentId":"bad-compaction","timestamp":"2026-08-09T01:00:05.000Z","message":{"role":"user","content":"tail `), 0xe1, 0x80, 'A')
+	tail = append(tail, []byte(` text","timestamp":5000}}`+"\n")...)
+	source := append(prefix, tail...)
+	if err := os.WriteFile(file, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := OpenSessionManager(file, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	ids := newCompatIDs()
+	ids.name("root", "root")
+	ids.name("forward-child", "forward-child")
+	ids.name("legacy-assistant", "legacy-assistant")
+	ids.name("bad-compaction", "bad-compaction")
+	ids.name("utf8-tail", "utf8-tail")
+	forward, err := manager.ProjectContextAt("forward-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := manager.ProjectContextAt("legacy-assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tailProjection, err := manager.ProjectContextAt("utf8-tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"entries":           compatEntries(compatEntryRaw(manager.Entries()), ids),
+		"forwardLeaf":       compatProjectedContext(forward, ids),
+		"legacyAssistant":   compatProjectedContext(legacy, ids),
+		"badCompactionTail": compatProjectedContext(tailProjection, ids),
+		"tree":              compatTree(manager.Tree(), ids),
+		"sourceUnchanged":   bytes.Equal(after, source),
+	}
+}
+
 func compatAppendUser(t *testing.T, manager *SessionManager, text string, timestamp int64) Entry {
 	t.Helper()
 	message, err := llm.NewUserTextMessage(text, time.UnixMilli(timestamp))
@@ -425,8 +616,14 @@ func compatEntry(entry map[string]any, ids *compatIDs) map[string]any {
 }
 
 func compatContext(manager *SessionManager, ids *compatIDs) map[string]any {
-	entries := manager.ContextEntries()
-	contextValue := manager.BuildContext()
+	return compatContextParts(manager.ContextEntries(), manager.BuildContext(), ids)
+}
+
+func compatProjectedContext(projection ContextProjection, ids *compatIDs) map[string]any {
+	return compatContextParts(projection.Entries, projection.Context, ids)
+}
+
+func compatContextParts(entries []Entry, contextValue Context, ids *compatIDs) map[string]any {
 	messages := contextValue.AgentMessages()
 	canonicalMessages := make([]map[string]any, len(messages))
 	for index, message := range messages {
@@ -620,7 +817,8 @@ func compatLoadJSONL(t *testing.T, path string) []map[string]any {
 func compatEntryRaw(entries []Entry) []map[string]any {
 	result := make([]map[string]any, len(entries))
 	for index, entry := range entries {
-		if err := json.Unmarshal(entry.RawJSON(), &result[index]); err != nil {
+		semantic, _ := replaceInvalidUTF8LikeNode(entry.RawJSON())
+		if err := json.Unmarshal(semantic, &result[index]); err != nil {
 			panic(err)
 		}
 	}

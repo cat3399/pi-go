@@ -37,7 +37,7 @@ var (
 	ErrInvalidSessionID      = errors.New("invalid session id")
 	ErrRecoveryNotApplicable = errors.New("session recovery is not applicable")
 	ErrRecoveryBackupExists  = errors.New("session recovery backup already exists")
-	ErrSessionTooLarge       = errors.New("session exceeds safety limit")
+	ErrMalformedRecords      = errors.New("session contains malformed JSONL records")
 )
 
 // ErrAtomicReplaceUnsupported reports that the host cannot replace an open
@@ -291,6 +291,7 @@ const (
 	DiagnosticUnknownMessageRole   DiagnosticCode = "unknown-message-role"
 	DiagnosticUnknownContentBlock  DiagnosticCode = "unknown-content-block"
 	DiagnosticUnprojectableMessage DiagnosticCode = "unprojectable-message"
+	DiagnosticUnprojectablePayload DiagnosticCode = "unprojectable-entry-payload"
 	DiagnosticUnsafeContentOmitted DiagnosticCode = "unsafe-content-omitted"
 )
 
@@ -302,6 +303,35 @@ type Diagnostic struct {
 	ContentIndex int
 }
 
+// LoadDiagnosticCode describes compatibility damage found while reading an
+// existing JSONL file. Current pi deliberately skips malformed physical lines,
+// replaces invalid UTF-8 in decoded strings, and keeps orphaned entries as
+// roots; pi-go follows those behaviors while making every recovery decision
+// observable instead of silently discarding evidence from the projection.
+type LoadDiagnosticCode string
+
+const (
+	LoadDiagnosticMalformedLine   LoadDiagnosticCode = "malformed-jsonl-line"
+	LoadDiagnosticOrphanParent    LoadDiagnosticCode = "orphan-parent"
+	LoadDiagnosticCompaction      LoadDiagnosticCode = "invalid-compaction-reference"
+	LoadDiagnosticUTF8Replacement LoadDiagnosticCode = "invalid-utf8-replaced"
+)
+
+// LoadDiagnostic intentionally excludes the physical line contents: callers
+// can report damage without accidentally echoing prompts, tool output, or
+// credentials. The original bytes remain untouched in the source JSONL.
+type LoadDiagnostic struct {
+	Code    LoadDiagnosticCode
+	Line    int
+	EntryID string
+	// Count is the number of occurrences represented by this record. The
+	// loader emits exact samples with Count=1. Once the per-code sample budget
+	// is exhausted, one Truncated record accumulates all remaining occurrences
+	// so hostile short-line floods remain observable without unbounded memory.
+	Count     uint64
+	Truncated bool
+}
+
 type Entry struct {
 	id           string
 	parentID     string
@@ -309,6 +339,8 @@ type Entry struct {
 	timestamp    time.Time
 	typeName     string
 	raw          []byte
+	messageRole  string
+	hasMsgRole   bool
 	message      llm.ConversationMessage
 	assistant    AssistantProvenance
 	hasAssistant bool
@@ -481,6 +513,12 @@ func (e Entry) ParentID() (string, bool) {
 	return e.parentID, e.hasParent
 }
 func (e Entry) RawJSON() []byte { return bytes.Clone(e.raw) }
+
+// MessageRole reports the role from a structurally valid message envelope,
+// independently of whether its payload can be projected into an AgentMessage.
+// This distinction matters for pi-compatible delayed persistence: an old or
+// extension-authored assistant record still makes the session durable.
+func (e Entry) MessageRole() (string, bool) { return e.messageRole, e.hasMsgRole }
 func (e Entry) Message() (llm.ConversationMessage, bool) {
 	return e.message, e.message != nil
 }
@@ -543,6 +581,33 @@ type Context struct {
 	hasThinkingLevel bool
 	model            ModelSelection
 	hasModel         bool
+}
+
+// ContextProjection is the complete semantic view for one durable tree
+// position. Entries and EntryIDs are compaction-aware and correspond exactly
+// to Context; callers such as Runtime and pi-web do not need to reimplement
+// SessionManager's branch or checkpoint rules.
+type ContextProjection struct {
+	Context  Context
+	Entries  []Entry
+	EntryIDs []string
+}
+
+func (p ContextProjection) clone() ContextProjection {
+	p.Context.messages = append([]llm.ConversationMessage(nil), p.Context.messages...)
+	p.Context.agentMessages = agentmsg.Clone(p.Context.agentMessages)
+	p.Context.diagnostics = append([]Diagnostic(nil), p.Context.diagnostics...)
+	p.Entries = cloneEntries(p.Entries)
+	p.EntryIDs = append([]string(nil), p.EntryIDs...)
+	return p
+}
+
+func cloneEntries(entries []Entry) []Entry {
+	result := make([]Entry, len(entries))
+	for index := range entries {
+		result[index] = entries[index].clone()
+	}
+	return result
 }
 
 // ModelSelection is the exact provider/model selection recorded on the active

@@ -89,14 +89,32 @@ func (s *Session) BranchPath() []Entry {
 }
 
 func (s *Session) pathLocked(index int) []Entry {
-	path := make([]Entry, 0, len(s.entries))
-	for index >= 0 {
+	indexes := s.pathIndexesLocked(index)
+	path := make([]Entry, len(indexes))
+	for position, entryIndex := range indexes {
+		path[position] = s.entries[entryIndex].clone()
+	}
+	return path
+}
+
+func (s *Session) pathIndexesLocked(index int) []int {
+	path := make([]int, 0, len(s.entries))
+	seen := make(map[int]struct{})
+	for index >= 0 && index < len(s.entries) {
+		if _, cycle := seen[index]; cycle {
+			break
+		}
+		seen[index] = struct{}{}
 		entry := s.entries[index]
-		path = append(path, entry.clone())
+		path = append(path, index)
 		if !entry.hasParent {
 			break
 		}
-		index = s.byID[entry.parentID]
+		parent, exists := s.byID[entry.parentID]
+		if !exists {
+			break
+		}
+		index = parent
 	}
 	for left, right := 0, len(path)-1; left < right; left, right = left+1, right-1 {
 		path[left], path[right] = path[right], path[left]
@@ -104,8 +122,9 @@ func (s *Session) pathLocked(index int) []Entry {
 	return path
 }
 
-// Tree returns an immutable forest in JSONL append order. Decoder validation
-// rejects duplicate, forward, broken, and cyclic parents before a Session exists.
+// Tree returns an immutable forest in JSONL append order. Compatible loading
+// accepts forward references and treats missing parents as roots, while still
+// rejecting duplicate IDs, self-parenting, and multi-entry cycles.
 func (s *Session) Tree() []TreeNode {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -127,6 +146,7 @@ func (s *Session) Tree() []TreeNode {
 		labels[payload.TargetID] = *payload.Label
 		labelTimestamps[payload.TargetID] = entry.timestamp
 	}
+	parents := compatibleTreeParents(s.entries, s.byID)
 	for index, entry := range s.entries {
 		nodes[index].Entry = entry.clone()
 		if label, ok := labels[entry.id]; ok {
@@ -135,14 +155,26 @@ func (s *Session) Tree() []TreeNode {
 			nodes[index].Label = &labelCopy
 			nodes[index].LabelTimestamp = &timestamp
 		}
-		if !entry.hasParent {
+		if parents[index] < 0 {
 			roots = append(roots, index)
 			continue
 		}
-		children[s.byID[entry.parentID]] = append(children[s.byID[entry.parentID]], index)
+		children[parents[index]] = append(children[parents[index]], index)
 	}
-	// Build bottom-up to avoid recursive traversal and remain safe for deep trees.
-	for index := len(nodes) - 1; index >= 0; index-- {
+	// Build in reverse traversal order rather than reverse JSONL order. Legacy
+	// and hand-edited files may contain a valid forward parent reference, which
+	// current pi resolves after indexing the complete file.
+	order := make([]int, 0, len(nodes))
+	stack := append([]int(nil), roots...)
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		index := stack[last]
+		stack = stack[:last]
+		order = append(order, index)
+		stack = append(stack, children[index]...)
+	}
+	for orderIndex := len(order) - 1; orderIndex >= 0; orderIndex-- {
+		index := order[orderIndex]
 		if len(children[index]) == 0 {
 			continue
 		}
@@ -161,6 +193,86 @@ func (s *Session) Tree() []TreeNode {
 		forest[index] = nodes[root]
 	}
 	return forest
+}
+
+// compatibleTreeParents preserves valid forward references, treats missing or
+// self parents as roots like pi, and deterministically breaks a multi-entry
+// cycle at its earliest physical record. Raw parentId values remain available
+// through Entry.RawJSON/ParentID; only the semantic forest edge is repaired.
+func compatibleTreeParents(entries []Entry, byID map[string]int) []int {
+	parents := make([]int, len(entries))
+	for index, entry := range entries {
+		parents[index] = -1
+		if !entry.hasParent {
+			continue
+		}
+		parent, exists := byID[entry.parentID]
+		if !exists || parent == index {
+			continue
+		}
+		parents[index] = parent
+	}
+	state := make([]uint8, len(entries))
+	positions := make([]int, len(entries))
+	for index := range positions {
+		positions[index] = -1
+	}
+	chain := make([]int, 0, len(entries))
+	for start := range entries {
+		if state[start] != 0 {
+			continue
+		}
+		chain = chain[:0]
+		current := start
+		for current >= 0 && state[current] == 0 {
+			state[current] = 1
+			positions[current] = len(chain)
+			chain = append(chain, current)
+			current = parents[current]
+		}
+		if current >= 0 && state[current] == 1 {
+			at := positions[current]
+			breakAt := chain[at]
+			for _, candidate := range chain[at+1:] {
+				if candidate < breakAt {
+					breakAt = candidate
+				}
+			}
+			parents[breakAt] = -1
+		}
+		for _, index := range chain {
+			state[index] = 2
+			positions[index] = -1
+		}
+	}
+	return parents
+}
+
+// firstParentCycle validates a functional parent graph in O(n). It returns one
+// physical entry index from the first discovered cycle, or -1 for an acyclic
+// forest. Missing parents are represented by -1 before calling this helper.
+func firstParentCycle(parents []int) int {
+	state := make([]uint8, len(parents))
+	chain := make([]int, 0, len(parents))
+	for start := range parents {
+		if state[start] != 0 {
+			continue
+		}
+		current := start
+		chain = chain[:0]
+		for current >= 0 && state[current] == 0 {
+			state[current] = 1
+			chain = append(chain, current)
+			current = parents[current]
+		}
+		if current >= 0 && state[current] == 1 {
+			return current
+		}
+		for _, index := range chain {
+			state[index] = 2
+		}
+	}
+	return -1
 }
 
 // ExtractBranch atomically creates TargetPath with a fresh v3 header and only
@@ -228,6 +340,11 @@ func (s *Session) snapshotForExport(ctx context.Context, leafID *string) (export
 	if s.poisoned {
 		return exportSnapshot{}, ErrPoisoned
 	}
+	for _, diagnostic := range s.loadDiagnostics {
+		if diagnostic.Code == LoadDiagnosticMalformedLine {
+			return exportSnapshot{}, fmt.Errorf("%w: line %d must be preserved or explicitly repaired before export", ErrMalformedRecords, diagnostic.Line)
+		}
+	}
 	var entries []Entry
 	if leafID != nil {
 		index, ok := s.byID[*leafID]
@@ -293,6 +410,10 @@ func extractWithStorage(ctx context.Context, storage sessionStorage, sourcePath 
 		data = append(data, entry.raw...)
 		data = append(data, '\n')
 	}
+	header, decoded, byID, _, diagnostics, err := decodeCompatibleSessionFile(targetPath, data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: validate extracted session: %w", ErrStorage, err)
+	}
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, fmt.Errorf("%w: %w", ErrAppendCanceled, cause)
 	}
@@ -303,14 +424,10 @@ func extractWithStorage(ctx context.Context, storage sessionStorage, sourcePath 
 		}
 		return nil, fmt.Errorf("%w: extract %s: %w", ErrStorage, targetPath, err)
 	}
-	header, decoded, byID, _, err := decodeSessionFile(targetPath, data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: validate extracted session: %w", ErrStorage, err)
-	}
 	if err := refreshSessionWriter(claim, targetPath); err != nil {
 		return nil, err
 	}
-	session := &Session{appendGate: make(chan struct{}, 1), storage: storage, path: targetPath, header: header, entries: decoded, byID: byID, leaf: len(decoded) - 1, runtime: runtime, writerClaim: claim}
+	session := &Session{appendGate: make(chan struct{}, 1), storage: storage, path: targetPath, header: header, entries: decoded, byID: byID, loadDiagnostics: diagnostics, leaf: len(decoded) - 1, runtime: runtime, writerClaim: claim}
 	claimed = false
 	return session, nil
 }

@@ -334,6 +334,49 @@ func TestSessionManagerCreateBranchedSessionRechainsLabelsAndDefers(t *testing.T
 	}
 }
 
+func TestSessionManagerBranchPreservesUnprojectablePayloadEnvelope(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "old-payload.jsonl")
+	data := []byte(`{"type":"session","version":3,"id":"old-payload","timestamp":"2026-08-09T00:00:00.000Z","cwd":"` + directory + `"}
+{"type":"message","id":"old","parentId":null,"timestamp":"2026-08-09T00:00:01.000Z","message":{"role":"user","content":17,"timestamp":1}}
+{"type":"message","id":"assistant","parentId":"old","timestamp":"2026-08-09T00:00:02.000Z","message":{"role":"assistant","content":17,"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":2}}
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := OpenSessionManager(path, directory, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	branch, err := manager.CloneBranchedSession(context.Background(), "assistant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := branch.Entries()
+	if len(entries) != 2 || len(entries[0].Diagnostics()) != 1 || entries[0].Diagnostics()[0].Code != DiagnosticUnprojectablePayload || len(entries[1].Diagnostics()) != 1 || entries[1].Diagnostics()[0].Code != DiagnosticUnprojectablePayload {
+		t.Fatalf("branched old payload = %#v", entries)
+	}
+	if role, ok := entries[1].MessageRole(); !ok || role != "assistant" {
+		t.Fatalf("unprojectable assistant envelope role = %q, %t", role, ok)
+	}
+	branchPath, ok := branch.SessionFile()
+	if _, statErr := os.Stat(branchPath); !ok || statErr != nil {
+		t.Fatalf("branched old payload was not published: %q, %t", branchPath, ok)
+	}
+	if err := branch.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenSessionManager(branchPath, directory, directory)
+	if err != nil {
+		t.Fatalf("reopen persisted unprojectable assistant branch: %v", err)
+	}
+	defer reopened.Close()
+	if reopenedEntries := reopened.Entries(); len(reopenedEntries) != 2 || len(reopenedEntries[1].Diagnostics()) != 1 {
+		t.Fatalf("reopened unprojectable assistant branch = %#v", reopenedEntries)
+	}
+}
+
 func TestSessionManagerCloneBranchedSessionPreservesTreeLabelsAndIndependentOwnership(t *testing.T) {
 	directory := t.TempDir()
 	source, err := CreateSessionManager(directory, directory, NewSessionOptions{})
@@ -484,6 +527,51 @@ func TestSessionDiscoveryContinueRecentAndListSorting(t *testing.T) {
 	defer continued.Close()
 	if path, _ := continued.SessionFile(); path != pathA {
 		t.Fatalf("continued=%q want %q", path, pathA)
+	}
+}
+
+func TestDiscoveryStopsAtFirstParsedInvalidHeaderCandidate(t *testing.T) {
+	directory := t.TempDir()
+	valid := filepath.Join(directory, "valid.jsonl")
+	validData := []byte("malformed-prefix\n" + testHeader + "\n")
+	if err := os.WriteFile(valid, validData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(directory, "invalid-first-value.jsonl")
+	invalidData := []byte("not-json\n[]\n" + testHeader + "\n")
+	if err := os.WriteFile(invalid, invalidData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidHeader := filepath.Join(directory, "invalid-header.jsonl")
+	if err := os.WriteFile(invalidHeader, []byte(`{"type":"session","version":3,"id":"bad","timestamp":"not-a-time","cwd":"/tmp"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	newer := old.Add(time.Hour)
+	if err := os.Chtimes(valid, old, old); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{invalid, invalidHeader} {
+		if err := os.Chtimes(path, newer, newer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mostRecent, err := FindMostRecentSession(directory, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mostRecent != valid {
+		t.Fatalf("discovery selected %q, want only openable %q", mostRecent, valid)
+	}
+	listed, err := ListAllSessions(directory, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Path != valid {
+		t.Fatalf("discovery list = %+v", listed)
+	}
+	if after, readErr := os.ReadFile(invalid); readErr != nil || string(after) != string(invalidData) {
+		t.Fatalf("discovery changed rejected candidate: %v", readErr)
 	}
 }
 

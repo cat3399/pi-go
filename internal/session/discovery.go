@@ -117,12 +117,19 @@ func discoverSessionHeader(path string) (discoveryHeader, bool) {
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) != 0 {
-			var header discoveryHeader
-			if json.Unmarshal(line, &header) == nil {
-				if header.Type != "session" || header.ID == "" {
+			if !json.Valid(line) {
+				// Match loadEntriesFromFile(): malformed physical records before
+				// the first parsed value are skipped.
+			} else {
+				decoded, decodeErr := decodeDiscoverableHeader(line)
+				if decodeErr != nil {
+					// Once a JSON value parses, it is the candidate header. A scalar,
+					// entry, wrong version, or incomplete header rejects the file;
+					// scanning onward would select a session Open() must reject.
 					return discoveryHeader{}, false
 				}
-				return header, true
+				parent, _ := decoded.ParentSession()
+				return discoveryHeader{Type: "session", ID: decoded.ID(), Timestamp: decoded.Timestamp().Format(time.RFC3339Nano), Cwd: decoded.WorkingDir(), ParentSession: parent}, true
 			}
 		}
 		if readErr != nil {
@@ -167,7 +174,63 @@ func ListAllSessions(sessionDir string, progress SessionListProgress) ([]Session
 		sortSessionInfos(values)
 		return values, nil
 	}
-	root := filepath.Join(defaultAgentDir(), "sessions")
+	return listAllSessionsFromAgentDir(defaultAgentDir(), progress)
+}
+
+// SessionDirForAgentDir computes the cwd-scoped session directory under one
+// explicit agentDir without consulting PI_CODING_AGENT_DIR or user home.
+func SessionDirForAgentDir(cwd, agentDir string) (string, error) {
+	resolvedCwd, err := resolveWorkingDir(cwd)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(agentDir) == "" {
+		return "", fmt.Errorf("%w: agent directory must be non-empty", ErrInvalidSession)
+	}
+	resolvedAgentDir, err := filepath.Abs(agentDir)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve agent directory: %v", ErrInvalidSession, err)
+	}
+	return defaultSessionDirPath(resolvedCwd, filepath.Clean(resolvedAgentDir)), nil
+}
+
+// ListSessionsInAgentDir discovers one cwd's sessions below an explicit
+// agentDir. It is the boundary used by Runtime/pi-web when multiple isolated
+// agent homes coexist in one process.
+func ListSessionsInAgentDir(cwd, agentDir string, progress SessionListProgress) ([]SessionInfo, error) {
+	dir, err := SessionDirForAgentDir(cwd, agentDir)
+	if err != nil {
+		return nil, err
+	}
+	values := listSessionsFromDir(dir, progress, 0, 0)
+	sortSessionInfos(values)
+	return values, nil
+}
+
+// FindMostRecentSessionInAgentDir is the explicit-agentDir counterpart to
+// ContinueRecentSession discovery. It never creates directories.
+func FindMostRecentSessionInAgentDir(cwd, agentDir string) (string, error) {
+	dir, err := SessionDirForAgentDir(cwd, agentDir)
+	if err != nil {
+		return "", err
+	}
+	return FindMostRecentSession(dir, "")
+}
+
+// ListAllSessionsInAgentDir scans every cwd bucket below an explicit agentDir.
+func ListAllSessionsInAgentDir(agentDir string, progress SessionListProgress) ([]SessionInfo, error) {
+	if strings.TrimSpace(agentDir) == "" {
+		return nil, fmt.Errorf("%w: agent directory must be non-empty", ErrInvalidSession)
+	}
+	resolved, err := filepath.Abs(agentDir)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve agent directory: %v", ErrInvalidSession, err)
+	}
+	return listAllSessionsFromAgentDir(filepath.Clean(resolved), progress)
+}
+
+func listAllSessionsFromAgentDir(agentDir string, progress SessionListProgress) ([]SessionInfo, error) {
+	root := filepath.Join(agentDir, "sessions")
 	directories, err := os.ReadDir(root)
 	if err != nil {
 		return []SessionInfo{}, nil
@@ -276,33 +339,46 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 	result := SessionInfo{Path: path, FirstMessage: "(no messages)"}
 	allMessages := make([]string, 0)
 	var lastActivity time.Time
-	scanner := bufio.NewScanner(file)
-	buffer := make([]byte, 64*1024)
-	scanner.Buffer(buffer, maxSessionLine)
+	reader := bufio.NewReaderSize(file, 64*1024)
 	headerFound := false
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	for {
+		physical, readErr := reader.ReadBytes('\n')
+		line := bytes.TrimSpace(physical)
 		if len(line) == 0 {
-			continue
+			if readErr == nil {
+				continue
+			}
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return SessionInfo{}, false
 		}
 		var object map[string]json.RawMessage
-		if json.Unmarshal(line, &object) != nil {
-			continue
+		semantic, _ := replaceInvalidUTF8LikeNode(line)
+		if json.Unmarshal(semantic, &object) != nil || object == nil {
+			if !headerFound && json.Valid(line) {
+				return SessionInfo{}, false
+			}
+			if readErr == nil {
+				continue
+			}
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return SessionInfo{}, false
 		}
 		var typeName string
 		_ = json.Unmarshal(object["type"], &typeName)
 		if !headerFound {
-			if typeName != "session" {
+			decoded, decodeErr := decodeDiscoverableHeader(line)
+			if decodeErr != nil {
 				return SessionInfo{}, false
 			}
 			headerFound = true
-			_ = json.Unmarshal(object["id"], &result.ID)
-			_ = json.Unmarshal(object["cwd"], &result.Cwd)
-			_ = json.Unmarshal(object["parentSession"], &result.ParentSessionPath)
-			result.HasParentSession = result.ParentSessionPath != ""
-			var timestamp string
-			_ = json.Unmarshal(object["timestamp"], &timestamp)
-			result.Created, _ = time.Parse(time.RFC3339, timestamp)
+			result.ID = decoded.ID()
+			result.Cwd = decoded.WorkingDir()
+			result.ParentSessionPath, result.HasParentSession = decoded.ParentSession()
+			result.Created = decoded.Timestamp()
 			continue
 		}
 		if typeName == "session_info" {
@@ -316,7 +392,13 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 			continue
 		}
 		if typeName != "message" {
-			continue
+			if readErr == nil {
+				continue
+			}
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return SessionInfo{}, false
 		}
 		result.MessageCount++
 		text, role, activity, hasContent := sessionInfoMessage(object)
@@ -332,8 +414,14 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 				result.FirstMessage = text
 			}
 		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return SessionInfo{}, false
+		}
 	}
-	if !headerFound || result.ID == "" || scanner.Err() != nil {
+	if !headerFound || result.ID == "" {
 		return SessionInfo{}, false
 	}
 	result.AllMessagesText = strings.Join(allMessages, " ")

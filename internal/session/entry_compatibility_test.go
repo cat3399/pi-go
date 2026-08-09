@@ -1,10 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -240,7 +242,7 @@ func TestAgentMessageAndBranchSettingsSurviveReopen(t *testing.T) {
 	}
 }
 
-func TestModelChangeRequiresModelID(t *testing.T) {
+func TestModelChangeMissingModelIDKeepsEnvelopeAndIsDiagnosed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "missing-model.jsonl")
 	data := `{"type":"session","version":3,"id":"s","timestamp":"2026-01-01T00:00:00.000Z","cwd":"` + dir + `"}
@@ -249,8 +251,17 @@ func TestModelChangeRequiresModelID(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, OpenOptions{}); err == nil {
-		t.Fatal("Open accepted model_change without modelId")
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	entries := session.Entries()
+	if len(entries) != 1 || entries[0].Payload() != nil || !bytes.Equal(entries[0].RawJSON(), []byte(strings.TrimSpace(strings.Split(data, "\n")[1]))) {
+		t.Fatalf("compatible model entry = %#v", entries)
+	}
+	if diagnostics := entries[0].Diagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticUnprojectablePayload {
+		t.Fatalf("compatible model diagnostics = %#v", diagnostics)
 	}
 }
 func mustSessionText(t *testing.T, text string) llm.TextBlock {

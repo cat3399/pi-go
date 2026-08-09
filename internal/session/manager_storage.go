@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -50,28 +51,29 @@ func newVolatileSession(header Header, entries []Entry, runtime runtimeConfig) *
 // in-memory manager: legacy migration is applied to the in-memory bytes, but
 // the source file is never rewritten and no durable writer is claimed.
 func loadVolatileSessionSnapshot(path string, runtime runtimeConfig) (*Session, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %v", ErrStorage, path, err)
-	}
-	if err := checkSessionLimits(data); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, path)
-	}
-	version, err := sessionVersion(data)
-	if err != nil {
-		return nil, err
-	}
-	if version < 3 {
+	header, entries, _, _, diagnostics, err := decodeCompatibleFromStorage(osSessionStorage{}, path)
+	if errors.Is(err, ErrUnsupportedVersion) {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: read %s: %v", ErrStorage, path, readErr)
+		}
+		version, versionErr := sessionVersion(data)
+		if versionErr != nil {
+			return nil, versionErr
+		}
 		data, err = migrateLegacySession(path, data, version, runtime.newEntryID)
 		if err != nil {
 			return nil, err
 		}
+		header, entries, _, _, err = decodeStructurallyCleanCompatibleSessionFile(path, bytes.Clone(data))
+		diagnostics = nil
 	}
-	header, entries, _, _, err := decodeSessionFile(path, bytes.Clone(data))
 	if err != nil {
 		return nil, err
 	}
-	return newVolatileSession(header, entries, runtime), nil
+	result := newVolatileSession(header, entries, runtime)
+	result.loadDiagnostics = append([]LoadDiagnostic(nil), diagnostics...)
+	return result, nil
 }
 
 func newManagerHeader(cwd string, options NewSessionOptions, runtime runtimeConfig) (Header, error) {
@@ -106,6 +108,20 @@ func createSessionSnapshot(path string, header Header, entries []Entry, runtime 
 	if err != nil {
 		return nil, err
 	}
+	data := append(append([]byte(nil), header.raw...), '\n')
+	for _, entry := range entries {
+		data = append(data, entry.raw...)
+		data = append(data, '\n')
+	}
+	// Validate the complete candidate before claiming or publishing its target.
+	// In particular, a compatible source may carry a diagnosed compaction whose
+	// firstKeptEntryId is not on the selected branch. Re-chaining that branch must
+	// fail with zero target-file side effects rather than leave a published file
+	// that this process refuses to own.
+	decodedHeader, decodedEntries, byID, _, err := decodeStructurallyCleanCompatibleSessionFile(resolvedPath, data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: validate session snapshot: %w", ErrStorage, err)
+	}
 	claim, err := claimSessionWriter(resolvedPath)
 	if err != nil {
 		return nil, err
@@ -116,11 +132,6 @@ func createSessionSnapshot(path string, header Header, entries []Entry, runtime 
 			releaseSessionWriter(claim)
 		}
 	}()
-	data := append(append([]byte(nil), header.raw...), '\n')
-	for _, entry := range entries {
-		data = append(data, entry.raw...)
-		data = append(data, '\n')
-	}
 	storage := osSessionStorage{}
 	created, err := storage.create(resolvedPath, data)
 	if err != nil {
@@ -128,10 +139,6 @@ func createSessionSnapshot(path string, header Header, entries []Entry, runtime 
 			return nil, fmt.Errorf("%w: %w", ErrDurabilityUnknown, err)
 		}
 		return nil, fmt.Errorf("%w: create %s: %w", ErrStorage, resolvedPath, err)
-	}
-	decodedHeader, decodedEntries, byID, _, err := decodeSessionFile(resolvedPath, data)
-	if err != nil {
-		return nil, fmt.Errorf("%w: validate session snapshot: %w", ErrStorage, err)
 	}
 	if err := refreshSessionWriter(claim, resolvedPath); err != nil {
 		return nil, err

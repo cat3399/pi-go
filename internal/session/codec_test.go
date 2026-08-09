@@ -5,8 +5,10 @@ import (
 	stdcontext "context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,32 @@ import (
 )
 
 const testHeader = `{"type":"session","version":3,"id":"session-1","timestamp":"2026-08-01T00:00:00.000Z","cwd":"/workspace"}`
+
+type closeErrorReadCloser struct {
+	io.Reader
+	err error
+}
+
+func (reader closeErrorReadCloser) Close() error { return reader.err }
+
+type closeErrorStreamingStorage struct {
+	*fakeStorage
+	data     []byte
+	closeErr error
+}
+
+func (storage closeErrorStreamingStorage) openRead(string) (io.ReadCloser, error) {
+	return closeErrorReadCloser{Reader: bytes.NewReader(storage.data), err: storage.closeErr}, nil
+}
+
+func TestCompatibleReadJoinsDecodeAndCloseFailures(t *testing.T) {
+	closeErr := errors.New("reader close failed")
+	storage := closeErrorStreamingStorage{fakeStorage: &fakeStorage{}, data: []byte("{"), closeErr: closeErr}
+	_, _, _, _, _, err := decodeCompatibleFromStorage(storage, "joined-errors.jsonl")
+	if !errors.Is(err, ErrInvalidSession) || !errors.Is(err, ErrStorage) || !errors.Is(err, closeErr) {
+		t.Fatalf("decode + close error = %v", err)
+	}
+}
 
 func TestOpenPreservesProviderOpaqueSignatures(t *testing.T) {
 	t.Parallel()
@@ -396,16 +424,10 @@ func TestOpenRejectsUnsafeInputWithoutChangingFile(t *testing.T) {
 		want error
 	}{
 		{name: "empty", data: nil, want: ErrInvalidSession},
+		{name: "valid non-object before header", data: []byte("[]\n" + testHeader + "\n"), want: ErrInvalidSession},
 		{name: "future version", data: []byte(`{"type":"session","version":4,"id":"s","timestamp":"2026-08-01T00:00:00Z","cwd":"/w"}`), want: ErrUnsupportedVersion},
-		{name: "corrupt middle", data: []byte(testHeader + "\n" + validRoot + "\nnot-json\n" + userEntryJSON("later", "entry-2", `"entry-1"`, 2) + "\n"), want: ErrInvalidEntry},
-		{name: "trailing partial", data: []byte(testHeader + "\n" + validRoot + "\n{"), want: ErrInvalidEntry},
 		{name: "duplicate id", data: []byte(testHeader + "\n" + validRoot + "\n" + userEntryJSON("again", "entry-1", `"entry-1"`, 2) + "\n"), want: ErrInvalidEntry},
-		{name: "broken parent", data: []byte(testHeader + "\n" + userEntryJSON("broken", "entry-1", `"missing"`, 1) + "\n"), want: ErrUnsupportedTree},
-		{name: "forward parent", data: []byte(testHeader + "\n" + userEntryJSON("forward", "entry-1", `"entry-2"`, 1) + "\n" + userEntryJSON("root", "entry-2", "null", 2) + "\n"), want: ErrUnsupportedTree},
 		{name: "cycle", data: []byte(testHeader + "\n" + userEntryJSON("self", "entry-1", `"entry-1"`, 1) + "\n"), want: ErrUnsupportedTree},
-		{name: "invalid utf8", data: append([]byte(testHeader+"\n"), 0xff, '\n'), want: ErrInvalidSession},
-		{name: "known malformed message", data: []byte(testHeader + "\n" + `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","timestamp":1}}` + "\n"), want: ErrInvalidEntry},
-		{name: "mismatched preserved arguments", data: []byte(testHeader + "\n" + `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"echo","arguments":{"x":1},"_piGoRawArguments":"{\"x\":2}"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1}}` + "\n"), want: ErrInvalidEntry},
 	}
 
 	for _, tt := range tests {
@@ -425,6 +447,238 @@ func TestOpenRejectsUnsafeInputWithoutChangingFile(t *testing.T) {
 				t.Fatal("Open changed rejected input")
 			}
 		})
+	}
+}
+
+func TestOpenAcceptsForwardParentAfterCompleteIndexing(t *testing.T) {
+	t.Parallel()
+	data := []byte(testHeader + "\n" +
+		userEntryJSON("child", "entry-1", `"entry-2"`, 1) + "\n" +
+		userEntryJSON("root", "entry-2", "null", 2) + "\n")
+	path := writeSessionFixtureBytes(t, data)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	branch, err := session.PathTo("entry-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entryIDs(branch); !slices.Equal(got, []string{"entry-2", "entry-1"}) {
+		t.Fatalf("forward path = %v", got)
+	}
+	if tree := session.Tree(); len(tree) != 1 || tree[0].Entry.ID() != "entry-2" || len(tree[0].Children) != 1 || tree[0].Children[0].Entry.ID() != "entry-1" {
+		t.Fatalf("forward tree = %#v", tree)
+	}
+	if after, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(after, data) {
+		t.Fatalf("forward open changed source: %v", readErr)
+	}
+}
+
+func TestOpenKeepsUsableEnvelopeWhenPayloadCannotProject(t *testing.T) {
+	t.Parallel()
+	malformedMessage := `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":17,"timestamp":1}}`
+	mismatchedArguments := `{"type":"message","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"echo","arguments":{"x":1},"_piGoRawArguments":"{\"x\":2}"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}`
+	validTail := userEntryJSON("tail", "entry-3", `"entry-2"`, 3)
+	data := []byte(testHeader + "\n" + malformedMessage + "\n" + mismatchedArguments + "\n" + validTail + "\n")
+	path := writeSessionFixtureBytes(t, data)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	entries := session.Entries()
+	if got := entryIDs(entries); !slices.Equal(got, []string{"entry-1", "entry-2", "entry-3"}) {
+		t.Fatalf("preserved envelopes = %v", got)
+	}
+	for _, entry := range entries[:2] {
+		diagnostics := entry.Diagnostics()
+		if len(diagnostics) == 0 || diagnostics[len(diagnostics)-1].Code != DiagnosticUnprojectablePayload {
+			t.Fatalf("entry %s diagnostics = %#v", entry.ID(), diagnostics)
+		}
+	}
+	if got := messageTexts(session.BuildContext().Messages()); !slices.Equal(got, []string{"tail"}) {
+		t.Fatalf("compatible context = %v", got)
+	}
+	if model, ok := session.BuildContext().Model(); !ok || model.Provider != "scripted" || model.ModelID != "scripted-1" {
+		t.Fatalf("compatible assistant model setting = %#v, %t", model, ok)
+	}
+	if after, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(after, data) {
+		t.Fatalf("payload recovery changed source: %v", readErr)
+	}
+}
+
+func TestOpenNormalizesMissingOrNullMessageContent(t *testing.T) {
+	t.Parallel()
+	user := `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","timestamp":1}}`
+	assistant := `{"type":"message","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02Z","message":{"role":"assistant","content":null,"api":"legacy","provider":"legacy","model":"legacy-1","usage":{"input":1,"output":1},"stopReason":"stop","timestamp":2}}`
+	toolResult := `{"type":"message","id":"entry-3","parentId":"entry-2","timestamp":"2026-08-01T00:00:03Z","message":{"role":"toolResult","toolCallId":"call-1","toolName":"legacy","isError":false,"timestamp":3}}`
+	data := []byte(testHeader + "\n" + user + "\n" + assistant + "\n" + toolResult + "\n")
+	path := writeSessionFixtureBytes(t, data)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	messages := session.BuildContext().Messages()
+	if len(messages) != 3 {
+		t.Fatalf("normalized messages = %#v", messages)
+	}
+	for index, entry := range session.Entries() {
+		if _, ok := entry.Message(); !ok || len(entry.Diagnostics()) != 0 {
+			t.Fatalf("entry %d was not normalized: %#v", index, entry.Diagnostics())
+		}
+	}
+	if after, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(after, data) {
+		t.Fatalf("content normalization changed source: %v", readErr)
+	}
+}
+
+func TestOpenRecoversMalformedLinesAndOrphansWithoutRewriting(t *testing.T) {
+	t.Parallel()
+	root := userEntryJSON("root", "entry-1", "null", 1)
+	orphan := userEntryJSON("orphan", "entry-2", `"missing"`, 2)
+	data := append([]byte("not-json-before-header\n"+testHeader+"\n"+root+"\nnot-json-middle\n"+orphan+"\n"), 0xff, '\n', '{')
+	path := writeSessionFixtureBytes(t, data)
+	session, err := Open(path, OpenOptions{NewEntryID: sequenceIDs("entry-3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := session.LoadDiagnostics()
+	wantCodes := []LoadDiagnosticCode{
+		LoadDiagnosticMalformedLine,
+		LoadDiagnosticMalformedLine,
+		LoadDiagnosticMalformedLine,
+		LoadDiagnosticMalformedLine,
+		LoadDiagnosticOrphanParent,
+	}
+	gotCodes := make([]LoadDiagnosticCode, len(diagnostics))
+	for index := range diagnostics {
+		gotCodes[index] = diagnostics[index].Code
+	}
+	if !slices.Equal(gotCodes, wantCodes) {
+		t.Fatalf("load diagnostics = %v, want %v (%#v)", gotCodes, wantCodes, diagnostics)
+	}
+	if got := entryIDs(session.Entries()); !slices.Equal(got, []string{"entry-1", "entry-2"}) {
+		t.Fatalf("entries = %v", got)
+	}
+	if tree := session.Tree(); len(tree) != 2 || tree[0].Entry.ID() != "entry-1" || tree[1].Entry.ID() != "entry-2" {
+		t.Fatalf("orphan forest = %#v", tree)
+	}
+	if got := messageTexts(session.BuildContext().Messages()); !slices.Equal(got, []string{"orphan"}) {
+		t.Fatalf("orphan context = %v", got)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, data) {
+		t.Fatalf("Open rewrote damaged source: %v", err)
+	}
+	if _, err := session.Append(stdcontext.Background(), mustUserMessage(t, "continued", time.UnixMilli(3)), AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := messageTexts(reopened.BuildContext().Messages()); !slices.Equal(got, []string{"orphan", "continued"}) {
+		t.Fatalf("reopened recovered context = %v", got)
+	}
+}
+
+func TestOpenReplacesInvalidUTF8InsideJSONStringWithoutDroppingEntry(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "invalid-utf8.jsonl")
+	// E1 80 followed by ASCII is one maximal ill-formed subpart in Node's
+	// StringDecoder, while independent FF starters each produce a replacement.
+	entry := append([]byte(`{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"hello `), 0xe1, 0x80, 'A', ' ', 0xff, 0xff)
+	entry = append(entry, []byte(` world","timestamp":1}}`)...)
+	source := append([]byte(testHeader+"\n"), entry...)
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := Open(path, OpenOptions{NewEntryID: sequenceIDs("entry-2")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostics := session.LoadDiagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticUTF8Replacement || diagnostics[0].Line != 2 || diagnostics[0].EntryID != "entry-1" {
+		t.Fatalf("UTF-8 diagnostics = %#v", diagnostics)
+	}
+	if got := messageTexts(session.BuildContext().Messages()); !slices.Equal(got, []string{"hello \ufffdA \ufffd\ufffd world"}) {
+		t.Fatalf("UTF-8 replacement context = %q", got)
+	}
+	if raw := session.Entries()[0].RawJSON(); !bytes.Contains(raw, []byte{0xff}) {
+		t.Fatalf("raw entry lost original byte: %q", raw)
+	}
+	if unchanged, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(unchanged, source) {
+		t.Fatalf("Open changed invalid UTF-8 source: %v", readErr)
+	}
+	if _, err := session.Append(stdcontext.Background(), mustUserMessage(t, "continued", time.UnixMilli(2)), AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	appended, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(appended[:len(source)], source) || appended[len(source)] != '\n' {
+		t.Fatal("append did not preserve invalid UTF-8 source prefix")
+	}
+	targetPath := filepath.Join(directory, "invalid-utf8-fork.jsonl")
+	fork, err := session.Fork(stdcontext.Background(), ExtractOptions{TargetPath: targetPath, ID: "utf8-fork", WorkingDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fork.Close()
+	if forkDiagnostics := fork.LoadDiagnostics(); len(forkDiagnostics) != 1 || forkDiagnostics[0].Code != LoadDiagnosticUTF8Replacement {
+		t.Fatalf("fork UTF-8 diagnostics = %#v", forkDiagnostics)
+	}
+	if got := messageTexts(fork.BuildContext().Messages()); !slices.Equal(got, []string{"hello \ufffdA \ufffd\ufffd world", "continued"}) {
+		t.Fatalf("fork UTF-8 context = %q", got)
+	}
+	if target, readErr := os.ReadFile(targetPath); readErr != nil || !bytes.Contains(target, []byte{0xff}) {
+		t.Fatalf("fork did not preserve recoverable raw record: %v", readErr)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenUTF8MaximalSubpartSpansStreamingBufferBoundary(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "utf8-boundary.jsonl")
+	prefix := []byte(`{"type":"message","id":"boundary","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"`)
+	paddingLength := sessionReadBufferSize - 1 - len(prefix)
+	if paddingLength <= 0 {
+		t.Fatal("test prefix unexpectedly exceeds streaming buffer")
+	}
+	entry := append(append([]byte(nil), prefix...), strings.Repeat("x", paddingLength)...)
+	if len(entry) != sessionReadBufferSize-1 {
+		t.Fatalf("invalid boundary setup: %d", len(entry))
+	}
+	entry = append(entry, 0xe1, 0x80, 'A')
+	entry = append(entry, []byte(`","timestamp":1}}`)...)
+	source := append(append([]byte(testHeader+"\n"), entry...), '\n')
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	texts := messageTexts(session.BuildContext().Messages())
+	if len(texts) != 1 || !strings.HasSuffix(texts[0], "\ufffdA") || strings.HasSuffix(texts[0], "\ufffd\ufffdA") {
+		t.Fatalf("cross-buffer maximal-subpart suffix = %q", texts)
+	}
+	if diagnostics := session.LoadDiagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticUTF8Replacement || diagnostics[0].Count != 1 {
+		t.Fatalf("cross-buffer UTF-8 diagnostics = %#v", diagnostics)
+	}
+	if raw := session.Entries()[0].RawJSON(); !bytes.Contains(raw, []byte{0xe1, 0x80, 'A'}) {
+		t.Fatal("cross-buffer raw record did not retain invalid source bytes")
 	}
 }
 
@@ -490,7 +744,7 @@ func TestUnknownMessageRoleIsPreservedButNotProjected(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsInvalidAssistantUsageAndCost(t *testing.T) {
+func TestOpenSupportsOldAssistantUsageAndDiagnosesUnsafeUsage(t *testing.T) {
 	t.Parallel()
 
 	base := `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"reply"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":%s,"stopReason":"stop","timestamp":1}}`
@@ -508,8 +762,24 @@ func TestOpenRejectsInvalidAssistantUsageAndCost(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := writeSessionFixture(t, testHeader+"\n"+fmt.Sprintf(base, tt.usage)+"\n")
-			if _, err := Open(path, OpenOptions{}); !errors.Is(err, ErrInvalidEntry) {
-				t.Fatalf("Open() error = %v, want ErrInvalidEntry", err)
+			session, err := Open(path, OpenOptions{})
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			defer session.Close()
+			entry := session.Entries()[0]
+			if tt.name == "missing cost" {
+				message, ok := entry.Message()
+				if !ok || len(entry.Diagnostics()) != 0 {
+					t.Fatalf("old usage projection = %#v / %#v", message, entry.Diagnostics())
+				}
+				return
+			}
+			if message, ok := entry.Message(); ok || message != nil {
+				t.Fatalf("unsafe usage projected as %#v", message)
+			}
+			if diagnostics := entry.Diagnostics(); len(diagnostics) == 0 || diagnostics[len(diagnostics)-1].Code != DiagnosticUnprojectablePayload {
+				t.Fatalf("unsafe usage diagnostics = %#v", diagnostics)
 			}
 		})
 	}

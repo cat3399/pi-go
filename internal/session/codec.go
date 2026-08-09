@@ -1,10 +1,12 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +65,190 @@ func decodeSessionFile(path string, data []byte) (Header, []Entry, map[string]in
 	return header, entries, byID, needsSeparator, nil
 }
 
+// decodeCompatibleSessionFile reads the same permissive physical JSONL stream
+// as coding-agent's loadEntriesFromFile(): blank and malformed lines are
+// skipped, and the first successfully parsed JSON value must be a valid
+// session header. Unlike upstream, every skipped or structurally detached
+// record is accounted for by bounded diagnostics. The source bytes are never
+// rewritten by this function, so compatibility recovery cannot destroy
+// forensic evidence.
+//
+// decodeSessionFile remains the fail-closed validator for freshly authored
+// canonical records. Migration, recovery, and compatible branch snapshots use
+// the structurally-clean boundary below so old payload envelopes are not
+// erased merely because Go cannot project them.
+func decodeCompatibleSessionFile(path string, data []byte) (Header, []Entry, map[string]int, bool, []LoadDiagnostic, error) {
+	return decodeCompatibleSessionReader(path, bytes.NewReader(data))
+}
+
+// decodeStructurallyCleanCompatibleSessionFile accepts pi-compatible legacy
+// payloads but rejects any recovery of the physical stream or parent graph.
+// It is the pre-publication boundary for migrations, repairs, and snapshots:
+// old payload envelopes survive, while damaged candidate structure never does.
+func decodeStructurallyCleanCompatibleSessionFile(path string, data []byte) (Header, []Entry, map[string]int, bool, error) {
+	header, entries, byID, needsSeparator, diagnostics, err := decodeCompatibleSessionFile(path, data)
+	if err != nil {
+		return Header{}, nil, nil, false, err
+	}
+	if len(diagnostics) == 0 {
+		return header, entries, byID, needsSeparator, nil
+	}
+	diagnostic := diagnostics[0]
+	kind := ErrInvalidSession
+	switch diagnostic.Code {
+	case LoadDiagnosticOrphanParent:
+		kind = ErrUnsupportedTree
+	case LoadDiagnosticCompaction:
+		kind = ErrInvalidEntry
+	}
+	return Header{}, nil, nil, false, parseError(kind, path, diagnostic.Line, "candidate requires compatibility recovery: "+string(diagnostic.Code), nil)
+}
+
+func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Entry, map[string]int, bool, []LoadDiagnostic, error) {
+	var header Header
+	entries := make([]Entry, 0)
+	byID := make(map[string]int)
+	lineByID := make(map[string]int)
+	diagnostics := make([]LoadDiagnostic, 0)
+	diagnosticCounts := make(map[LoadDiagnosticCode]uint64)
+	diagnosticSummaries := make(map[LoadDiagnosticCode]int)
+	addDiagnostic := func(diagnostic LoadDiagnostic) {
+		diagnostics = appendBoundedLoadDiagnostic(diagnostics, diagnosticCounts, diagnosticSummaries, diagnostic)
+	}
+	haveHeader := false
+	lineNumber := 0
+	sawBytes := false
+	lastTerminated := false
+	reader := bufio.NewReaderSize(source, sessionReadBufferSize)
+
+	for {
+		line, readErr := nextStreamedJSONLine(reader)
+		if readErr != nil {
+			return Header{}, nil, nil, false, diagnostics, fmt.Errorf("%w: read %s: %v", ErrStorage, path, readErr)
+		}
+		if !line.exists {
+			break
+		}
+		lineNumber++
+		sawBytes = true
+		lastTerminated = line.terminated
+		if line.blank {
+			continue
+		}
+		if line.malformed {
+			addDiagnostic(LoadDiagnostic{Code: LoadDiagnosticMalformedLine, Line: lineNumber})
+			continue
+		}
+		if !haveHeader {
+			version, versionErr := compatibleHeaderVersion(line.raw)
+			if versionErr != nil {
+				return Header{}, nil, nil, false, diagnostics, parseError(ErrInvalidSession, path, lineNumber, "invalid header", versionErr)
+			}
+			if version != 3 {
+				return Header{}, nil, nil, false, diagnostics, parseError(ErrUnsupportedVersion, path, lineNumber, "unsupported session version", fmt.Errorf("version %d", version))
+			}
+			decoded, replacedUTF8, err := decodeCompatibleHeader(line.raw)
+			if err != nil {
+				return Header{}, nil, nil, false, diagnostics, parseError(ErrInvalidSession, path, lineNumber, "invalid header", err)
+			}
+			if replacedUTF8 {
+				addDiagnostic(LoadDiagnostic{Code: LoadDiagnosticUTF8Replacement, Line: lineNumber})
+			}
+			header = decoded
+			haveHeader = true
+			continue
+		}
+
+		entry, replacedUTF8, err := decodeCompatibleEntry(line.raw)
+		if err != nil {
+			return Header{}, nil, nil, false, diagnostics, parseError(ErrInvalidEntry, path, lineNumber, "invalid entry envelope", err)
+		}
+		if _, duplicate := byID[entry.id]; duplicate {
+			return Header{}, nil, nil, false, diagnostics, parseError(ErrInvalidEntry, path, lineNumber, "duplicate entry id", nil)
+		}
+		if replacedUTF8 {
+			addDiagnostic(LoadDiagnostic{Code: LoadDiagnosticUTF8Replacement, Line: lineNumber, EntryID: entry.id})
+		}
+		byID[entry.id] = len(entries)
+		lineByID[entry.id] = lineNumber
+		entries = append(entries, entry)
+	}
+
+	if !haveHeader {
+		return Header{}, nil, nil, false, diagnostics, fmt.Errorf("%w: %s: missing header", ErrInvalidSession, path)
+	}
+	parents := make([]int, len(entries))
+	for index := range parents {
+		parents[index] = -1
+	}
+	for index, entry := range entries {
+		if !entry.hasParent {
+			continue
+		}
+		parentIndex, exists := byID[entry.parentID]
+		if !exists {
+			addDiagnostic(LoadDiagnostic{Code: LoadDiagnosticOrphanParent, Line: lineByID[entry.id], EntryID: entry.id})
+			continue
+		}
+		if parentIndex == index {
+			return Header{}, nil, nil, false, diagnostics, parseError(ErrUnsupportedTree, path, lineByID[entry.id], "entry cannot parent itself", nil)
+		}
+		parents[index] = parentIndex
+	}
+	if cycleEntry := firstParentCycle(parents); cycleEntry >= 0 {
+		return Header{}, nil, nil, false, diagnostics, parseError(ErrUnsupportedTree, path, lineByID[entries[cycleEntry].id], "entry parent cycle", nil)
+	}
+	visitInvalidCompatibleCompactions(entries, byID, parents, func(_ int, entry Entry) {
+		addDiagnostic(LoadDiagnostic{Code: LoadDiagnosticCompaction, Line: lineByID[entry.id], EntryID: entry.id})
+	})
+	needsSeparator := sawBytes && !lastTerminated
+	return header, entries, byID, needsSeparator, diagnostics, nil
+}
+
+const maxLoadDiagnosticSamplesPerCode = 16
+
+// appendBoundedLoadDiagnostic retains exact early samples while collapsing a
+// hostile tail into one count-bearing record per code. The represented total
+// is always the sum of Count, and storage is bounded by the finite diagnostic
+// code set rather than the number of damaged physical lines.
+func appendBoundedLoadDiagnostic(records []LoadDiagnostic, counts map[LoadDiagnosticCode]uint64, summaries map[LoadDiagnosticCode]int, diagnostic LoadDiagnostic) []LoadDiagnostic {
+	seen := counts[diagnostic.Code]
+	counts[diagnostic.Code] = seen + 1
+	diagnostic.Count = 1
+	if seen < maxLoadDiagnosticSamplesPerCode {
+		return append(records, diagnostic)
+	}
+	if index, exists := summaries[diagnostic.Code]; exists {
+		records[index].Count++
+		return records
+	}
+	// Line identifies the first occurrence whose detailed sample was omitted.
+	// EntryID is intentionally cleared: the aggregate can represent many IDs.
+	diagnostic.EntryID = ""
+	diagnostic.Truncated = true
+	summaries[diagnostic.Code] = len(records)
+	return append(records, diagnostic)
+}
+
+func compatibleHeaderVersion(raw []byte) (int, error) {
+	semantic, _ := replaceInvalidUTF8LikeNode(raw)
+	object, err := decodeObject(semantic)
+	if err != nil {
+		return 0, err
+	}
+	typeName, err := requiredString(object, "type")
+	if err != nil || typeName != "session" {
+		return 0, fmt.Errorf("first record is not a session header")
+	}
+	version := 1
+	if encoded, exists := object["version"]; exists {
+		if err := json.Unmarshal(encoded, &version); err != nil || version < 1 {
+			return 0, fmt.Errorf("invalid session version")
+		}
+	}
+	return version, nil
+}
+
 type physicalLine struct {
 	number int
 	data   []byte
@@ -86,7 +272,45 @@ func physicalLines(data []byte) []physicalLine {
 }
 
 func decodeHeader(raw []byte) (Header, error) {
-	object, err := decodeObject(raw)
+	if !utf8.Valid(raw) {
+		return Header{}, fmt.Errorf("invalid UTF-8 header")
+	}
+	return decodeHeaderWithRaw(raw, bytes.Clone(raw))
+}
+
+func decodeCompatibleHeader(raw []byte) (Header, bool, error) {
+	semantic, replaced := replaceInvalidUTF8LikeNode(raw)
+	header, err := decodeHeaderWithRaw(semantic, raw)
+	return header, replaced, err
+}
+
+func decodeDiscoverableHeader(raw []byte) (Header, error) {
+	version, err := compatibleHeaderVersion(raw)
+	if err != nil || version > 3 {
+		if err == nil {
+			err = fmt.Errorf("unsupported session version %d", version)
+		}
+		return Header{}, err
+	}
+	if version == 3 {
+		header, _, err := decodeCompatibleHeader(raw)
+		return header, err
+	}
+	semantic, _ := replaceInvalidUTF8LikeNode(raw)
+	object, err := decodeObject(semantic)
+	if err != nil {
+		return Header{}, err
+	}
+	object["version"] = json.RawMessage("3")
+	normalized, err := json.Marshal(object)
+	if err != nil {
+		return Header{}, err
+	}
+	return decodeHeaderWithRaw(normalized, raw)
+}
+
+func decodeHeaderWithRaw(semantic, retainedRaw []byte) (Header, error) {
+	object, err := decodeObject(semantic)
 	if err != nil {
 		return Header{}, err
 	}
@@ -132,11 +356,24 @@ func decodeHeader(raw []byte) (Header, error) {
 		}
 		parentSession, hasParentSession = value, true
 	}
-	return Header{id: id, workingDir: workingDir, parentSession: parentSession, hasParentSession: hasParentSession, timestamp: timestamp, raw: bytes.Clone(raw)}, nil
+	return Header{id: id, workingDir: workingDir, parentSession: parentSession, hasParentSession: hasParentSession, timestamp: timestamp, raw: retainedRaw}, nil
 }
 
 func decodeEntry(raw []byte) (Entry, error) {
-	object, err := decodeObject(raw)
+	if !utf8.Valid(raw) {
+		return Entry{}, fmt.Errorf("invalid UTF-8 entry")
+	}
+	return decodeEntryWithMode(raw, bytes.Clone(raw), false)
+}
+
+func decodeCompatibleEntry(raw []byte) (Entry, bool, error) {
+	semantic, replaced := replaceInvalidUTF8LikeNode(raw)
+	entry, err := decodeEntryWithMode(semantic, raw, true)
+	return entry, replaced, err
+}
+
+func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, error) {
+	object, err := decodeObject(semantic)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -170,19 +407,40 @@ func decodeEntry(raw []byte) (Entry, error) {
 		hasParent: hasParent,
 		timestamp: timestamp,
 		typeName:  typeName,
-		raw:       bytes.Clone(raw),
+		raw:       retainedRaw,
 	}
 	if typeName == "message" {
 		messageRaw, exists := object["message"]
-		if !exists {
+		if !exists || bytes.Equal(bytes.TrimSpace(messageRaw), []byte("null")) {
+			if compatible {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				return entry, nil
+			}
 			return Entry{}, fmt.Errorf("message entry is missing message")
+		}
+		if compatible {
+			messageRaw = normalizeCompatibleMessage(messageRaw, timestamp)
+		}
+		if messageObject, objectErr := decodeObject(messageRaw); objectErr == nil {
+			if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
+				entry.messageRole = role
+				entry.hasMsgRole = true
+			}
+		}
+		entry.assistant, entry.hasAssistant, err = decodeAssistantProvenance(messageRaw)
+		if err != nil && !compatible {
+			return Entry{}, err
+		}
+		if err != nil {
+			entry.assistant = AssistantProvenance{}
+			entry.hasAssistant = false
 		}
 		entry.message, entry.diagnostics, err = decodeMessage(id, messageRaw)
 		if err != nil {
-			return Entry{}, err
-		}
-		entry.assistant, entry.hasAssistant, err = decodeAssistantProvenance(messageRaw)
-		if err != nil {
+			if compatible {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				return entry, nil
+			}
 			return Entry{}, err
 		}
 		if entry.message != nil {
@@ -192,8 +450,20 @@ func decodeEntry(raw []byte) (Entry, error) {
 			}
 			entry.payload = MessagePayload{Message: wrapped}
 		} else {
+			messageObject, _ := decodeObject(messageRaw)
+			role, _ := requiredString(messageObject, "role")
+			if role == "user" || role == "assistant" || role == "toolResult" {
+				if compatible {
+					entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				}
+				return entry, nil
+			}
 			message, messageErr := decodeCodingAgentMessage(messageRaw)
 			if messageErr != nil {
+				if compatible {
+					entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+					return entry, nil
+				}
 				return Entry{}, messageErr
 			}
 			if message != nil {
@@ -203,14 +473,25 @@ func decodeEntry(raw []byte) (Entry, error) {
 	} else if typeName == "compaction" {
 		compaction, err := decodeCompactionRecord(object)
 		if err != nil {
+			if compatible {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				return entry, nil
+			}
 			return Entry{}, err
 		}
 		entry.compaction = &compaction
 		_, hasFromHook := object["fromHook"]
 		entry.payload = CompactionPayload{Record: compaction, Details: bytes.Clone(object["details"]), FromHook: decodeOptionalBool(object, "fromHook"), HasFromHook: hasFromHook}
 	} else {
+		if compatible && typeName == "custom_message" {
+			object = normalizeCompatibleCustomMessage(object)
+		}
 		payload, payloadErr := decodeKnownEntryPayload(typeName, object, timestamp)
 		if payloadErr != nil {
+			if compatible {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				return entry, nil
+			}
 			return Entry{}, payloadErr
 		}
 		if payload != nil {
@@ -220,6 +501,99 @@ func decodeEntry(raw []byte) (Entry, error) {
 		}
 	}
 	return entry, nil
+}
+
+func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) []byte {
+	object, err := decodeObject(raw)
+	if err != nil {
+		return raw
+	}
+	role, err := requiredString(object, "role")
+	if err != nil {
+		return raw
+	}
+	changed := false
+	if role == "user" || role == "assistant" || role == "toolResult" {
+		if content, exists := object["content"]; !exists || bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
+			object["content"] = json.RawMessage("[]")
+			changed = true
+		}
+	}
+	if timestamp, exists := object["timestamp"]; !exists || bytes.Equal(bytes.TrimSpace(timestamp), []byte("null")) {
+		object["timestamp"] = json.RawMessage(strconv.FormatInt(entryTimestamp.UnixMilli(), 10))
+		changed = true
+	}
+	if role == "assistant" {
+		changed = normalizeCompatibleAssistantUsage(object) || changed
+	}
+	if !changed {
+		return raw
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) bool {
+	rawUsage, exists := message["usage"]
+	changed := false
+	if !exists || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
+		rawUsage = json.RawMessage("{}")
+		changed = true
+	}
+	usage, err := decodeObject(rawUsage)
+	if err != nil {
+		return false
+	}
+	zero := json.RawMessage("0")
+	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite"} {
+		if _, exists := usage[key]; !exists {
+			usage[key] = zero
+			changed = true
+		}
+	}
+	rawCost, exists := usage["cost"]
+	if !exists || bytes.Equal(bytes.TrimSpace(rawCost), []byte("null")) {
+		rawCost = json.RawMessage("{}")
+		changed = true
+	}
+	cost, err := decodeObject(rawCost)
+	if err == nil {
+		for _, key := range []string{"input", "output", "cacheRead", "cacheWrite", "total"} {
+			if _, exists := cost[key]; !exists {
+				cost[key] = zero
+				changed = true
+			}
+		}
+		if changed {
+			if encoded, marshalErr := json.Marshal(cost); marshalErr == nil {
+				usage["cost"] = encoded
+			}
+		}
+	}
+	if changed {
+		encoded, marshalErr := json.Marshal(usage)
+		if marshalErr != nil {
+			return false
+		}
+		message["usage"] = encoded
+	}
+	return changed
+}
+
+func normalizeCompatibleCustomMessage(object map[string]json.RawMessage) map[string]json.RawMessage {
+	content, exists := object["content"]
+	if exists && !bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
+		return object
+	}
+	clone := make(map[string]json.RawMessage, len(object)+1)
+	for key, value := range object {
+		clone[key] = value
+	}
+	clone["content"] = json.RawMessage("[]")
+	return clone
 }
 
 func decodeCodingAgentMessage(raw []byte) (agentmsg.Message, error) {
@@ -370,34 +744,124 @@ func decodeCompactionUsage(raw []byte) (CompactionUsage, error) {
 }
 
 func validateCompactionEntries(entries []Entry, byID map[string]int) error {
-	for index := range entries {
-		entry := entries[index]
+	parents := make([]int, len(entries))
+	for index := range parents {
+		parents[index] = -1
+		if entries[index].hasParent {
+			parents[index] = byID[entries[index].parentID]
+		}
+	}
+	forest := buildParentForestIndex(parents)
+	for index, entry := range entries {
 		if entry.compaction == nil {
 			continue
 		}
-		if !entry.hasParent {
-			return fmt.Errorf("compaction %q must have a parent", entry.id)
+		if err := validateIndexedCompactionEntry(index, entry, byID, forest, true); err != nil {
+			return err
 		}
-		firstIndex, exists := byID[entry.compaction.FirstKeptEntryID]
-		if !exists || firstIndex >= index {
-			return fmt.Errorf("compaction %q first kept entry is not earlier", entry.id)
+	}
+	return nil
+}
+
+func visitInvalidCompatibleCompactions(entries []Entry, byID map[string]int, parents []int, visit func(index int, entry Entry)) {
+	forest := buildParentForestIndex(parents)
+	for index, entry := range entries {
+		if entry.compaction == nil {
+			continue
 		}
-		ancestor := byID[entry.parentID]
-		found := false
-		for {
-			if ancestor == firstIndex {
-				found = true
-				break
+		if err := validateIndexedCompactionEntry(index, entry, byID, forest, false); err != nil {
+			visit(index, entry)
+		}
+	}
+}
+
+type parentForestIndex struct {
+	enter []int
+	leave []int
+}
+
+// buildParentForestIndex assigns one Euler interval per node. The caller has
+// already rejected cycles, so construction is O(n) and every subsequent
+// ancestor query is O(1), including histories with a compaction at every node.
+func buildParentForestIndex(parents []int) parentForestIndex {
+	n := len(parents)
+	childCounts := make([]int, n)
+	for _, parent := range parents {
+		if parent >= 0 && parent < n {
+			childCounts[parent]++
+		}
+	}
+	offsets := make([]int, n+1)
+	for index, count := range childCounts {
+		offsets[index+1] = offsets[index] + count
+	}
+	children := make([]int, offsets[n])
+	next := append([]int(nil), offsets[:n]...)
+	for child, parent := range parents {
+		if parent < 0 || parent >= n {
+			continue
+		}
+		children[next[parent]] = child
+		next[parent]++
+	}
+	type frame struct {
+		node int
+		next int
+	}
+	result := parentForestIndex{enter: make([]int, n), leave: make([]int, n)}
+	stack := make([]frame, 0, n)
+	timer := 0
+	for root, parent := range parents {
+		if parent >= 0 && parent < n {
+			continue
+		}
+		result.enter[root] = timer
+		timer++
+		stack = append(stack, frame{node: root, next: offsets[root]})
+		for len(stack) > 0 {
+			top := &stack[len(stack)-1]
+			end := offsets[top.node+1]
+			if top.next < end {
+				child := children[top.next]
+				top.next++
+				result.enter[child] = timer
+				timer++
+				stack = append(stack, frame{node: child, next: offsets[child]})
+				continue
 			}
-			parent := entries[ancestor]
-			if !parent.hasParent {
-				break
-			}
-			ancestor = byID[parent.parentID]
+			result.leave[top.node] = timer
+			stack = stack[:len(stack)-1]
 		}
-		if !found {
-			return fmt.Errorf("compaction %q first kept entry is outside its parent branch", entry.id)
-		}
+	}
+	return result
+}
+
+func (forest parentForestIndex) isAncestor(ancestor, node int) bool {
+	return ancestor >= 0 && node >= 0 && ancestor < len(forest.enter) && node < len(forest.enter) &&
+		forest.enter[ancestor] <= forest.enter[node] && forest.enter[node] < forest.leave[ancestor]
+}
+
+func validateIndexedCompactionEntry(index int, entry Entry, byID map[string]int, forest parentForestIndex, requireEarlier bool) error {
+	if entry.compaction == nil {
+		return nil
+	}
+	indexed, entryExists := byID[entry.id]
+	if !entryExists || indexed != index {
+		return fmt.Errorf("compaction %q is not indexed", entry.id)
+	}
+	if !entry.hasParent {
+		return fmt.Errorf("compaction %q must have a parent", entry.id)
+	}
+	firstIndex, exists := byID[entry.compaction.FirstKeptEntryID]
+	if !exists || (requireEarlier && firstIndex >= index) {
+		return fmt.Errorf("compaction %q first kept entry is not earlier", entry.id)
+	}
+	parentIndex, parentExists := byID[entry.parentID]
+	if !parentExists {
+		return fmt.Errorf("compaction %q parent is missing", entry.id)
+	}
+	if !forest.isAncestor(firstIndex, parentIndex) {
+		return fmt.Errorf("compaction %q first kept entry is outside its parent branch", entry.id)
 	}
 	return nil
 }
@@ -1251,7 +1715,7 @@ func decodeMessageTimestamp(object map[string]json.RawMessage) (time.Time, error
 }
 
 func decodeObject(raw []byte) (map[string]json.RawMessage, error) {
-	if len(raw) == 0 || !utf8.Valid(raw) {
+	if len(raw) == 0 {
 		return nil, fmt.Errorf("invalid JSON object")
 	}
 	var object map[string]json.RawMessage

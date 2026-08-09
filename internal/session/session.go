@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,20 +33,21 @@ type runtimeConfig struct {
 }
 
 type Session struct {
-	mu             sync.RWMutex
-	appendGate     chan struct{}
-	storage        sessionStorage
-	path           string
-	header         Header
-	entries        []Entry
-	byID           map[string]int
-	leaf           int
-	generation     uint64
-	needsSeparator bool
-	runtime        runtimeConfig
-	poisoned       bool
-	closed         bool
-	writerClaim    *writerClaim
+	mu              sync.RWMutex
+	appendGate      chan struct{}
+	storage         sessionStorage
+	path            string
+	header          Header
+	entries         []Entry
+	byID            map[string]int
+	loadDiagnostics []LoadDiagnostic
+	leaf            int
+	generation      uint64
+	needsSeparator  bool
+	runtime         runtimeConfig
+	poisoned        bool
+	closed          bool
+	writerClaim     *writerClaim
 }
 
 func Create(path string, options CreateOptions) (*Session, error) {
@@ -155,27 +157,28 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 			releaseSessionWriter(claim)
 		}
 	}()
-	data, err := storage.read(resolvedPath)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %w", ErrStorage, resolvedPath, err)
-	}
-	if err := checkSessionLimits(data); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, resolvedPath)
-	}
-	version, err := sessionVersion(data)
-	if err != nil {
-		return nil, err
-	}
-	if version < 3 {
-		migrated, err := migrateLegacySession(resolvedPath, data, version, normalizeRuntime(options.Now, options.NewEntryID).newEntryID)
-		if err != nil {
-			return nil, err
+	header, entries, byID, needsSeparator, loadDiagnostics, err := decodeCompatibleFromStorage(storage, resolvedPath)
+	if errors.Is(err, ErrUnsupportedVersion) {
+		data, readErr := storage.read(resolvedPath)
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: read %s: %w", ErrStorage, resolvedPath, readErr)
+		}
+		version, versionErr := sessionVersion(data)
+		if versionErr != nil {
+			return nil, versionErr
+		}
+		migrated, migrateErr := migrateLegacySession(resolvedPath, data, version, normalizeRuntime(options.Now, options.NewEntryID).newEntryID)
+		if migrateErr != nil {
+			return nil, migrateErr
 		}
 		// Migration is pure, but it is not trusted merely because it encoded.
-		// Validate the exact candidate against every current v3 invariant before
-		// any rename can replace evidence from the legacy source.
-		if _, _, _, _, err := decodeSessionFile(resolvedPath, migrated); err != nil {
-			return nil, err
+		// Validate the exact candidate's envelope/graph before publication while
+		// retaining payload compatibility with the same v3 loader used after a
+		// reopen. Official pi v1/v2 assistant records predate cost/totalTokens and
+		// may omit content; those are valid migration inputs, not graph damage.
+		migratedHeader, migratedEntries, migratedByID, migratedNeedsSeparator, validationErr := decodeStructurallyCleanCompatibleSessionFile(resolvedPath, migrated)
+		if validationErr != nil {
+			return nil, validationErr
 		}
 		if err := storage.validateReplace(resolvedPath); err != nil {
 			return nil, err
@@ -203,9 +206,10 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 			// be statted or locked; never return a writable aggregate.
 			return nil, fmt.Errorf("%w: adopt migrated session identity: %w", ErrDurabilityUnknown, err)
 		}
-		data = migrated
+		header, entries, byID, needsSeparator = migratedHeader, migratedEntries, migratedByID, migratedNeedsSeparator
+		loadDiagnostics = nil
+		err = nil
 	}
-	header, entries, byID, needsSeparator, err := decodeSessionFile(resolvedPath, data)
 	if err != nil {
 		return nil, err
 	}
@@ -217,19 +221,50 @@ func openWithStorage(storage sessionStorage, path string, options OpenOptions) (
 		leaf = len(entries) - 1
 	}
 	session := &Session{
-		appendGate:     make(chan struct{}, 1),
-		storage:        storage,
-		path:           resolvedPath,
-		header:         header,
-		entries:        entries,
-		byID:           byID,
-		leaf:           leaf,
-		needsSeparator: needsSeparator,
-		runtime:        normalizeRuntime(options.Now, options.NewEntryID),
-		writerClaim:    claim,
+		appendGate:      make(chan struct{}, 1),
+		storage:         storage,
+		path:            resolvedPath,
+		header:          header,
+		entries:         entries,
+		byID:            byID,
+		loadDiagnostics: loadDiagnostics,
+		leaf:            leaf,
+		needsSeparator:  needsSeparator,
+		runtime:         normalizeRuntime(options.Now, options.NewEntryID),
+		writerClaim:     claim,
 	}
 	claimed = false
 	return session, nil
+}
+
+type sessionStreamingReader interface {
+	openRead(path string) (io.ReadCloser, error)
+}
+
+func decodeCompatibleFromStorage(storage sessionStorage, path string) (Header, []Entry, map[string]int, bool, []LoadDiagnostic, error) {
+	if streaming, ok := storage.(sessionStreamingReader); ok {
+		reader, err := streaming.openRead(path)
+		if err != nil {
+			return Header{}, nil, nil, false, nil, fmt.Errorf("%w: read %s: %v", ErrStorage, path, err)
+		}
+		header, entries, byID, needsSeparator, diagnostics, decodeErr := decodeCompatibleSessionReader(path, reader)
+		closeErr := reader.Close()
+		if decodeErr != nil {
+			if closeErr != nil {
+				decodeErr = errors.Join(decodeErr, fmt.Errorf("%w: close %s after failed read: %w", ErrStorage, path, closeErr))
+			}
+			return Header{}, nil, nil, false, diagnostics, decodeErr
+		}
+		if closeErr != nil {
+			return Header{}, nil, nil, false, diagnostics, fmt.Errorf("%w: close %s after read: %w", ErrStorage, path, closeErr)
+		}
+		return header, entries, byID, needsSeparator, diagnostics, nil
+	}
+	data, err := storage.read(path)
+	if err != nil {
+		return Header{}, nil, nil, false, nil, fmt.Errorf("%w: read %s: %v", ErrStorage, path, err)
+	}
+	return decodeCompatibleSessionFile(path, data)
 }
 
 func (s *Session) Path() string {
@@ -252,6 +287,16 @@ func (s *Session) Entries() []Entry {
 		entries[index] = entry.clone()
 	}
 	return entries
+}
+
+// LoadDiagnostics reports compatibility recovery performed while opening the
+// physical JSONL. It is empty for files authored entirely by the current
+// writer. The result is immutable, never contains source line contents, and
+// uses Count/Truncated aggregation after a bounded number of exact samples.
+func (s *Session) LoadDiagnostics() []LoadDiagnostic {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]LoadDiagnostic(nil), s.loadDiagnostics...)
 }
 
 func (s *Session) LeafID() (string, bool) {
@@ -278,74 +323,59 @@ func (s *Session) BuildContext() Context {
 }
 
 func (s *Session) buildContextLocked() Context {
-	if s.leaf < 0 {
+	return s.buildContextAtLocked(s.leaf)
+}
+
+// projectContextAt is the Store-side snapshot primitive behind
+// SessionManager.ProjectContextAt. The manager remains the public owner of
+// branch/context semantics.
+func (s *Session) projectContextAt(leafID string) (ContextProjection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	index, ok := s.byID[leafID]
+	if !ok {
+		return ContextProjection{}, fmt.Errorf("%w: %s", ErrEntryNotFound, leafID)
+	}
+	pathIndexes := s.pathIndexesLocked(index)
+	entries := make([]Entry, len(pathIndexes))
+	for position, entryIndex := range pathIndexes {
+		entries[position] = s.entries[entryIndex].clone()
+	}
+	entries = managerContextEntries(entries)
+	ids := make([]string, len(entries))
+	for index := range entries {
+		ids[index] = entries[index].ID()
+	}
+	return ContextProjection{Context: s.buildContextAtLocked(index), Entries: entries, EntryIDs: ids}, nil
+}
+
+func (s *Session) buildContextAtLocked(leaf int) Context {
+	if leaf < 0 {
 		return Context{thinkingLevel: "off", hasThinkingLevel: true}
 	}
-
-	path := make([]int, 0, len(s.entries))
-	current := s.leaf
-	for current >= 0 {
-		path = append(path, current)
-		entry := s.entries[current]
-		if !entry.hasParent {
-			break
-		}
-		current = s.byID[entry.parentID]
-	}
-
-	compactionIndex := -1
-	for index := 0; index < len(path); index++ {
-		entry := s.entries[path[index]]
-		if entry.compaction != nil {
-			compactionIndex = index
-			break
-		}
-	}
+	path := s.pathIndexesLocked(leaf)
 
 	// Settings are not conversation messages, but they are branch state. Scan
 	// the whole selected path first so compaction cannot accidentally erase the
 	// current selection.
 	context := Context{thinkingLevel: "off", hasThinkingLevel: true}
-	for index := len(path) - 1; index >= 0; index-- {
-		applyContextSettings(&context, s.entries[path[index]])
+	for _, entryIndex := range path {
+		applyContextSettings(&context, s.entries[entryIndex])
 	}
-	if compactionIndex >= 0 {
-		compaction := s.entries[path[compactionIndex]]
-		summary, err := llm.NewUserTextMessage(CompactionSummaryPrefix+compaction.compaction.Summary+CompactionSummarySuffix, compaction.timestamp)
-		if err == nil {
-			context.messages = append(context.messages, summary)
-			checkpoint, checkpointErr := agentmsg.NewCompactionSummary(agentmsg.CompactionSummary{Summary: compaction.compaction.Summary, TokensBefore: compaction.compaction.TokensBefore, At: compaction.timestamp})
-			if checkpointErr == nil {
-				context.agentMessages = append(context.agentMessages, checkpoint)
-			}
-		}
-		firstKeptIndex := -1
-		for index := 0; index < len(path); index++ {
-			if s.entries[path[index]].id == compaction.compaction.FirstKeptEntryID {
-				firstKeptIndex = index
-				break
-			}
-		}
-		// path is leaf-to-root. From firstKept down to the leaf this includes the
-		// retained pre-checkpoint segment and post-checkpoint successors; only the
-		// checkpoint record itself is replaced by the summary above.
-		for index := firstKeptIndex; index >= 0; index-- {
-			if index == compactionIndex {
-				continue
-			}
-			entry := s.entries[path[index]]
-			appendEntryToContext(&context, entry)
-			if entry.hasAssistant {
-				context.assistant = entry.assistant
-				context.hasAssistant = true
+	for _, entryIndex := range contextProjectionIndexes(path, s.entries) {
+		entry := s.entries[entryIndex]
+		if entry.compaction != nil {
+			summary, err := llm.NewUserTextMessage(CompactionSummaryPrefix+entry.compaction.Summary+CompactionSummarySuffix, entry.timestamp)
+			if err == nil {
+				context.messages = append(context.messages, summary)
+				checkpoint, checkpointErr := agentmsg.NewCompactionSummary(agentmsg.CompactionSummary{Summary: entry.compaction.Summary, TokensBefore: entry.compaction.TokensBefore, At: entry.timestamp})
+				if checkpointErr == nil {
+					context.agentMessages = append(context.agentMessages, checkpoint)
+				}
 			}
 			context.diagnostics = append(context.diagnostics, entry.diagnostics...)
+			continue
 		}
-		return context
-	}
-
-	for index := len(path) - 1; index >= 0; index-- {
-		entry := s.entries[path[index]]
 		appendEntryToContext(&context, entry)
 		if entry.hasAssistant {
 			context.assistant = entry.assistant
@@ -354,6 +384,39 @@ func (s *Session) buildContextLocked() Context {
 		context.diagnostics = append(context.diagnostics, entry.diagnostics...)
 	}
 	return context
+}
+
+// contextProjectionIndexes is the single compaction projection algorithm used
+// by Context, ContextEntries, and arbitrary-leaf queries. The path is in
+// root-to-leaf order. Even when a damaged firstKeptEntryId is not found, the
+// latest compaction and every post-compaction entry remain visible, matching
+// coding-agent's buildContextEntries().
+func contextProjectionIndexes(path []int, entries []Entry) []int {
+	latest := -1
+	firstKept := ""
+	for position, entryIndex := range path {
+		if compaction := entries[entryIndex].compaction; compaction != nil {
+			latest = position
+			firstKept = compaction.FirstKeptEntryID
+		}
+	}
+	if latest < 0 {
+		return append([]int(nil), path...)
+	}
+	result := make([]int, 0, len(path)-latest+1)
+	result = append(result, path[latest])
+	foundFirstKept := false
+	for position := 0; position < latest; position++ {
+		entryIndex := path[position]
+		if entries[entryIndex].id == firstKept {
+			foundFirstKept = true
+		}
+		if foundFirstKept {
+			result = append(result, entryIndex)
+		}
+	}
+	result = append(result, path[latest+1:]...)
+	return result
 }
 
 func appendEntryToContext(context *Context, entry Entry) {

@@ -10,53 +10,19 @@ import (
 	"unicode/utf8"
 )
 
-// These bounds are deliberately above the upstream large-session fixture but
-// keep an accidental pipe, sparse file, or hostile JSONL from consuming an
-// unbounded amount of memory during an Open or migration rewrite.
-const (
-	maxSessionBytes = 64 << 20
-	maxSessionLines = 1_000_000
-	maxSessionLine  = 4 << 20
-)
-
-func checkSessionLimits(data []byte) error {
-	if len(data) > maxSessionBytes {
-		return fmt.Errorf("%w: %d bytes exceeds %d", ErrSessionTooLarge, len(data), maxSessionBytes)
-	}
-	lines := 0
-	start := 0
-	for start < len(data) {
-		lines++
-		if lines > maxSessionLines {
-			return fmt.Errorf("%w: more than %d records", ErrSessionTooLarge, maxSessionLines)
-		}
-		end := bytes.IndexByte(data[start:], '\n')
-		if end < 0 {
-			end = len(data) - start
-		} else {
-			end++
-		}
-		if end > maxSessionLine {
-			return fmt.Errorf("%w: line %d exceeds %d bytes", ErrSessionTooLarge, lines, maxSessionLine)
-		}
-		start += end
-	}
-	return nil
-}
-
 // sessionVersion identifies only a rigorously shaped coding-agent header. It
 // intentionally does not guess based on an entry: a malformed/future file is
 // rejected before a migration writer can touch it.
 func sessionVersion(data []byte) (int, error) {
-	if err := checkSessionLimits(data); err != nil {
-		return 0, err
-	}
 	for _, line := range physicalLines(data) {
 		if len(bytes.TrimSpace(line.data)) == 0 {
 			continue
 		}
 		if !utf8.Valid(line.data) {
-			return 0, parseError(ErrInvalidSession, "session", line.number, "record is not valid UTF-8", nil)
+			continue
+		}
+		if !json.Valid(line.data) {
+			continue
 		}
 		object, err := decodeObject(line.data)
 		if err != nil {
@@ -230,7 +196,7 @@ func migrateV2Message(entry map[string]json.RawMessage) {
 	}
 	message, err := decodeObject(raw)
 	if err != nil {
-		return // v3 strict validation reports the malformed known payload later.
+		return // Compatible v3 projection retains and diagnoses this payload.
 	}
 	role, err := requiredString(message, "role")
 	if err == nil && role == "hookMessage" {
@@ -265,9 +231,6 @@ func recoverTrailingPartialWithStorage(storage sessionStorage, path string) (Rec
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("%w: read %s: %w", ErrStorage, resolved, err)
 	}
-	if err := checkSessionLimits(data); err != nil {
-		return RecoveryResult{}, err
-	}
 	if len(data) == 0 || data[len(data)-1] == '\n' {
 		return RecoveryResult{}, ErrRecoveryNotApplicable
 	}
@@ -278,7 +241,7 @@ func recoverTrailingPartialWithStorage(storage sessionStorage, path string) (Rec
 		return RecoveryResult{}, ErrRecoveryNotApplicable
 	}
 	prefix := data[:start]
-	if _, _, _, _, err := decodeSessionFile(resolved, prefix); err != nil {
+	if _, _, _, _, err := decodeStructurallyCleanCompatibleSessionFile(resolved, prefix); err != nil {
 		return RecoveryResult{}, fmt.Errorf("%w: prefix is not a complete v3 session: %w", ErrRecoveryNotApplicable, err)
 	}
 	backup := backupName(resolved)

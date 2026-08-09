@@ -32,9 +32,6 @@ func TestWindowsIdentityAndReplacementContractOnly(t *testing.T) {
 	if gotLength != 1 {
 		t.Fatalf("Windows identity lock length = %d, want 1", gotLength)
 	}
-	if gotOffset <= maxSessionBytes {
-		t.Fatalf("Windows identity lock offset %d overlaps admitted session data", gotOffset)
-	}
 
 	replacement := sessionWindowsReplacementHandleSpec()
 	wantAccess := windowsGenericRead | windowsGenericWrite | windowsDeleteAccess

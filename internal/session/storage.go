@@ -22,6 +22,8 @@ type sessionStorage interface {
 
 type osSessionStorage struct{}
 
+func (osSessionStorage) openRead(path string) (io.ReadCloser, error) { return os.Open(path) }
+
 type rewriteTemporary interface {
 	io.Writer
 	Name() string
@@ -60,13 +62,6 @@ func (osSessionStorage) validateReplace(path string) error {
 }
 
 func (osSessionStorage) read(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxSessionBytes {
-		return nil, fmt.Errorf("%w: %d bytes exceeds %d", ErrSessionTooLarge, info.Size(), maxSessionBytes)
-	}
 	return os.ReadFile(path)
 }
 

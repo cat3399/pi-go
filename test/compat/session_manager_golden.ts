@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+	buildContextEntries,
+	buildSessionContext,
 	SessionManager,
 	type SessionEntry,
 	type SessionInfo,
@@ -138,6 +140,19 @@ const canonicalContext = (manager: SessionManager, ids: CanonicalIds): JsonObjec
 	return {
 		entryPath: manager.buildContextEntries().map((entry) => ids.name(entry.id)),
 		entryTypes: manager.buildContextEntries().map((entry) => entry.type),
+		messages: context.messages.map((message) => canonicalAgentMessage(message as unknown as JsonObject, ids)),
+		thinkingLevel: context.thinkingLevel,
+		model: context.model,
+	};
+};
+
+const canonicalContextAt = (manager: SessionManager, leafId: string, ids: CanonicalIds): JsonObject => {
+	const entries = manager.getEntries();
+	const contextEntries = buildContextEntries(entries, leafId);
+	const context = buildSessionContext(entries, leafId);
+	return {
+		entryPath: contextEntries.map((entry) => ids.name(entry.id)),
+		entryTypes: contextEntries.map((entry) => entry.type),
 		messages: context.messages.map((message) => canonicalAgentMessage(message as unknown as JsonObject, ids)),
 		thinkingLevel: context.thinkingLevel,
 		model: context.model,
@@ -390,13 +405,181 @@ const branchedAndForkScenario = async (root: string): Promise<JsonObject> => {
 	};
 };
 
+const reopenAndCompactionScenario = (root: string): JsonObject => {
+	const cwd = join(root, "reopen-cwd");
+	const targetCwd = join(root, "reopen-target-cwd");
+	const dir = join(root, "reopen-sessions");
+	mkdirSync(cwd, { recursive: true });
+	mkdirSync(targetCwd, { recursive: true });
+	const manager = SessionManager.create(cwd, dir, { id: "compat-reopen" });
+	const ids = new CanonicalIds();
+	const rootId = manager.appendMessage(userMessage("reopen root", 1_000));
+	ids.name(rootId, "root");
+	const thinkingId = manager.appendThinkingLevelChange("high");
+	ids.name(thinkingId, "thinking");
+	const modelId = manager.appendModelChange("selected-provider", "selected-model");
+	ids.name(modelId, "model");
+	const firstAssistantId = manager.appendMessage(assistantMessage("first answer", 2_000));
+	ids.name(firstAssistantId, "first-assistant");
+	const keptId = manager.appendMessage(userMessage("kept question", 3_000));
+	ids.name(keptId, "kept");
+	const secondAssistantId = manager.appendMessage(assistantMessage("second answer", 4_000));
+	ids.name(secondAssistantId, "second-assistant");
+	const compactionId = manager.appendCompaction("reopen checkpoint", keptId, 99);
+	ids.name(compactionId, "compaction");
+	const tailId = manager.appendMessage(userMessage("tail question", 5_000));
+	ids.name(tailId, "tail");
+	const file = manager.getSessionFile();
+	assert(file);
+
+	const reopened = SessionManager.open(file, dir);
+	const fork = SessionManager.forkFrom(file, targetCwd, dir, { id: "compat-reopen-fork" });
+	const forkHeader = fork.getHeader();
+	assert(forkHeader);
+	return {
+		reopenedLeaf: ids.name(reopened.getLeafId()),
+		reopened: canonicalContext(reopened, ids),
+		earlierLeaf: canonicalContextAt(reopened, firstAssistantId, ids),
+		fork: {
+			headerParentIsSource: resolve(forkHeader.parentSession ?? "") === resolve(file),
+			context: canonicalContext(fork, ids),
+			entries: canonicalEntries(
+				fork.getEntries().map((entry) => JSON.parse(JSON.stringify(entry)) as JsonObject),
+				ids,
+			),
+		},
+	};
+};
+
+const damagedRecoveryScenario = (root: string): JsonObject => {
+	const cwd = join(root, "damaged-cwd");
+	const dir = join(root, "damaged-sessions");
+	mkdirSync(cwd, { recursive: true });
+	mkdirSync(dir, { recursive: true });
+	const file = join(dir, "damaged.jsonl");
+	const header = { type: "session", version: 3, id: "compat-damaged", timestamp: "2026-08-09T00:00:00.000Z", cwd };
+	const rootEntry = {
+		type: "message",
+		id: "damaged-root",
+		parentId: null,
+		timestamp: "2026-08-09T00:00:01.000Z",
+		message: userMessage("damaged root", 1_000),
+	};
+	const orphanEntry = {
+		type: "message",
+		id: "damaged-orphan",
+		parentId: "missing-parent",
+		timestamp: "2026-08-09T00:00:02.000Z",
+		message: userMessage("damaged orphan", 2_000),
+	};
+	writeFileSync(
+		file,
+		`not-json-before-header\n${JSON.stringify(header)}\n${JSON.stringify(rootEntry)}\nnot-json-middle\n${JSON.stringify(orphanEntry)}\n{`,
+	);
+	const manager = SessionManager.open(file, dir);
+	const reopened = SessionManager.open(file, dir);
+	const ids = new CanonicalIds();
+	ids.name(rootEntry.id, "root");
+	ids.name(orphanEntry.id, "orphan");
+	return {
+		entries: canonicalEntries(
+			manager.getEntries().map((entry) => JSON.parse(JSON.stringify(entry)) as JsonObject),
+			ids,
+		),
+		tree: canonicalTree(manager.getTree(), ids),
+		activeContext: canonicalContext(manager, ids),
+		reopenedContext: canonicalContext(reopened, ids),
+	};
+};
+
+const structuralRecoveryScenario = (root: string): JsonObject => {
+	const cwd = join(root, "structural-cwd");
+	const dir = join(root, "structural-sessions");
+	mkdirSync(cwd, { recursive: true });
+	mkdirSync(dir, { recursive: true });
+	const file = join(dir, "structural.jsonl");
+	const records = [
+		{ type: "session", version: 3, id: "compat-structural", timestamp: "2026-08-09T01:00:00.000Z", cwd },
+		{
+			type: "message",
+			id: "forward-child",
+			parentId: "root",
+			timestamp: "2026-08-09T01:00:01.000Z",
+			message: userMessage("forward child", 1_000),
+		},
+		{
+			type: "message",
+			id: "root",
+			parentId: null,
+			timestamp: "2026-08-09T01:00:02.000Z",
+			message: userMessage("root", 2_000),
+		},
+		{
+			type: "message",
+			id: "legacy-assistant",
+			parentId: "forward-child",
+			timestamp: "2026-08-09T01:00:03.000Z",
+			message: {
+				role: "assistant",
+				content: null,
+				api: "openai-completions",
+				provider: "compat-provider",
+				model: "compat-model",
+				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+				stopReason: "stop",
+				timestamp: 3_000,
+			},
+		},
+		{
+			type: "compaction",
+			id: "bad-compaction",
+			parentId: "legacy-assistant",
+			timestamp: "2026-08-09T01:00:04.000Z",
+			summary: "damaged checkpoint",
+			firstKeptEntryId: "missing-kept",
+			tokensBefore: 12,
+		},
+	];
+	const prefix = Buffer.from(`${records.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+	const tailPrefix = Buffer.from(
+		'{"type":"message","id":"utf8-tail","parentId":"bad-compaction","timestamp":"2026-08-09T01:00:05.000Z","message":{"role":"user","content":"tail ',
+		"utf8",
+	);
+	const tailSuffix = Buffer.from(' text","timestamp":5000}}\n', "utf8");
+	// Distinguishes Node's maximal-subpart decoding from Go's byte-at-a-time
+	// encoding/json replacement: E1 80 + ASCII becomes one U+FFFD followed by A.
+	const source = Buffer.concat([prefix, tailPrefix, Buffer.from([0xe1, 0x80, 0x41]), tailSuffix]);
+	writeFileSync(file, source);
+	const manager = SessionManager.open(file, dir);
+	const ids = new CanonicalIds();
+	ids.name("root", "root");
+	ids.name("forward-child", "forward-child");
+	ids.name("legacy-assistant", "legacy-assistant");
+	ids.name("bad-compaction", "bad-compaction");
+	ids.name("utf8-tail", "utf8-tail");
+	return {
+		entries: canonicalEntries(
+			manager.getEntries().map((entry) => JSON.parse(JSON.stringify(entry)) as JsonObject),
+			ids,
+		),
+		forwardLeaf: canonicalContextAt(manager, "forward-child", ids),
+		legacyAssistant: canonicalContextAt(manager, "legacy-assistant", ids),
+		badCompactionTail: canonicalContextAt(manager, "utf8-tail", ids),
+		tree: canonicalTree(manager.getTree(), ids),
+		sourceUnchanged: readFileSync(file).equals(source),
+	};
+};
+
 const generate = async (): Promise<JsonObject> => {
 	const root = mkdtempSync(join(tmpdir(), "pi-go-session-compat-"));
 	return {
-		formatVersion: 1,
+		formatVersion: 4,
 		optionalAndPersistence: await optionalAndPersistenceScenario(root),
 		treeAndSelection: treeAndSelectionScenario(root),
 		branchedAndFork: await branchedAndForkScenario(root),
+		reopenAndCompaction: reopenAndCompactionScenario(root),
+		damagedRecovery: damagedRecoveryScenario(root),
+		structuralRecovery: structuralRecoveryScenario(root),
 	};
 };
 
@@ -419,4 +602,7 @@ const main = async (): Promise<void> => {
 	process.stdout.write(encoded);
 };
 
-await main();
+void main().catch((error: unknown) => {
+	console.error(error);
+	process.exitCode = 1;
+});

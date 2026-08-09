@@ -216,6 +216,11 @@ func (m *SessionManager) Entries() []Entry {
 	defer m.mu.RUnlock()
 	return m.store.Entries()
 }
+func (m *SessionManager) LoadDiagnostics() []LoadDiagnostic {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.LoadDiagnostics()
+}
 func (m *SessionManager) SessionFile() (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -344,7 +349,7 @@ func (m *SessionManager) appendAndFlush(ctx context.Context, appendFn func(*Sess
 
 func managerHasAssistant(entries []Entry) bool {
 	for _, entry := range entries {
-		if message, ok := entry.AgentMessage(); ok && message.Role() == agentmsg.RoleAssistant {
+		if role, ok := entry.MessageRole(); ok && entry.Type() == "message" && role == string(agentmsg.RoleAssistant) {
 			return true
 		}
 	}
@@ -553,6 +558,14 @@ func (m *SessionManager) BuildContext() Context {
 	defer m.mu.RUnlock()
 	return m.store.BuildContext()
 }
+
+// ProjectContextAt exposes one arbitrary leaf's compaction-aware semantic
+// context without moving the manager's append position.
+func (m *SessionManager) ProjectContextAt(leafID string) (ContextProjection, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.store.projectContextAt(leafID)
+}
 func (m *SessionManager) Tree() []TreeNode {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -621,27 +634,19 @@ func LatestCompactionEntry(entries []Entry) (Entry, bool) {
 }
 
 func managerContextEntries(path []Entry) []Entry {
-	latest := -1
-	var firstKept string
-	for index, entry := range path {
-		if compaction, ok := entry.Compaction(); ok {
-			latest, firstKept = index, compaction.FirstKeptEntryID
-		}
+	indexes := make([]int, len(path))
+	for index := range indexes {
+		indexes[index] = index
 	}
-	if latest < 0 {
-		return path
+	projected := contextProjectionIndexes(indexes, path)
+	result := make([]Entry, len(projected))
+	for index, entryIndex := range projected {
+		// path already consists of immutable snapshots (BranchPath/PathTo or
+		// projectContextAt's explicit clone). Avoid duplicating every retained
+		// raw JSON record a second time for the semantic projection.
+		result[index] = path[entryIndex]
 	}
-	result := []Entry{path[latest]}
-	keep := false
-	for index := 0; index < latest; index++ {
-		if path[index].ID() == firstKept {
-			keep = true
-		}
-		if keep {
-			result = append(result, path[index])
-		}
-	}
-	return append(result, path[latest+1:]...)
+	return result
 }
 
 // BranchWithSummary consumes an actual summary produced by AgentSession or an
@@ -704,6 +709,11 @@ func (m *SessionManager) cloneBranchedManagerLocked(ctx context.Context, leafID 
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAppendCanceled, cause)
+	}
+	for _, diagnostic := range m.store.LoadDiagnostics() {
+		if diagnostic.Code == LoadDiagnosticMalformedLine {
+			return nil, fmt.Errorf("%w: line %d must be preserved or explicitly repaired before branch extraction", ErrMalformedRecords, diagnostic.Line)
+		}
 	}
 	path, err := m.store.PathTo(leafID)
 	if err != nil {
@@ -828,7 +838,8 @@ func reparentManagerEntry(entry Entry, parentID string, hasParent bool) (Entry, 
 	if err != nil {
 		return Entry{}, fmt.Errorf("%w: encode branch entry: %v", ErrInvalidEntry, err)
 	}
-	return decodeEntry(raw)
+	decoded, _, err := decodeCompatibleEntry(raw)
+	return decoded, err
 }
 
 func nextManagerEntryID(runtime runtimeConfig, existing map[string]struct{}) (string, error) {

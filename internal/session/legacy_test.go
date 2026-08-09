@@ -8,6 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,6 +125,107 @@ func TestOpenMigratesV2WithoutChangingExistingIDs(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesOfficialLegacyAssistantPayloadCompatibilityAndReopens(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		header         string
+		entryEnvelope  string
+		content        string
+		wantContentKey bool
+	}{
+		{
+			name:          "v1 missing content",
+			header:        `{"type":"session","id":"old-v1","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}`,
+			entryEnvelope: `{"type":"message","timestamp":"2025-01-01T00:00:01Z",`,
+		},
+		{
+			name:           "v2 null content",
+			header:         `{"type":"session","version":2,"id":"old-v2","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}`,
+			entryEnvelope:  `{"type":"message","id":"assistant-v2","parentId":null,"timestamp":"2025-01-01T00:00:01Z",`,
+			content:        `"content":null,`,
+			wantContentKey: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "legacy-assistant.jsonl")
+			// This usage shape is copied from pi's current migration fixture: it
+			// predates both totalTokens and the nested cost object.
+			assistant := test.entryEnvelope + `"message":{"role":"assistant",` + test.content + `"api":"test","provider":"test","model":"test","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"stopReason":"stop","timestamp":2}}`
+			legacy := []byte(test.header + "\n" + assistant + "\n")
+			if err := os.WriteFile(path, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			volatilePath := filepath.Join(directory, "legacy-assistant-volatile.jsonl")
+			if err := os.WriteFile(volatilePath, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			volatile, err := loadVolatileSessionSnapshot(volatilePath, normalizeRuntime(nil, sequenceIDs("assistant-v1")))
+			if err != nil {
+				t.Fatalf("load compatible legacy assistant in memory: %v", err)
+			}
+			volatileEntries := volatile.Entries()
+			if len(volatileEntries) != 1 || len(volatileEntries[0].Diagnostics()) != 0 {
+				_ = volatile.Close()
+				t.Fatalf("volatile legacy entries = %#v", volatileEntries)
+			}
+			if role, ok := volatileEntries[0].MessageRole(); !ok || role != "assistant" {
+				_ = volatile.Close()
+				t.Fatalf("volatile legacy role = %q, %t", role, ok)
+			}
+			if err := volatile.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if unchanged, readErr := os.ReadFile(volatilePath); readErr != nil || !bytes.Equal(unchanged, legacy) {
+				t.Fatalf("volatile migration changed source: %v", readErr)
+			}
+			opened, err := Open(path, OpenOptions{NewEntryID: sequenceIDs("assistant-v1")})
+			if err != nil {
+				t.Fatalf("migrate compatible legacy assistant: %v", err)
+			}
+			entries := opened.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("migrated entries = %#v", entries)
+			}
+			if role, ok := entries[0].MessageRole(); !ok || role != "assistant" {
+				t.Fatalf("migrated message role = %q, %t", role, ok)
+			}
+			if _, ok := entries[0].Message(); !ok || len(entries[0].Diagnostics()) != 0 {
+				t.Fatalf("legacy assistant was not compatibly projected: %#v", entries[0].Diagnostics())
+			}
+			raw := entries[0].RawJSON()
+			if bytes.Contains(raw, []byte(`"totalTokens"`)) || bytes.Contains(raw, []byte(`"cost"`)) {
+				t.Fatalf("migration fabricated legacy usage fields in retained raw: %s", raw)
+			}
+			if got := bytes.Contains(raw, []byte(`"content"`)); got != test.wantContentKey {
+				t.Fatalf("retained content presence = %t, want %t: %s", got, test.wantContentKey, raw)
+			}
+			if err := opened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			migrated, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path, OpenOptions{})
+			if err != nil {
+				t.Fatalf("reopen migrated compatible payload: %v", err)
+			}
+			if second := reopened.Entries(); len(second) != 1 || len(second[0].Diagnostics()) != 0 {
+				_ = reopened.Close()
+				t.Fatalf("reopened entries = %#v", second)
+			}
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			afterReopen, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(afterReopen, migrated) {
+				t.Fatalf("reopen rewrote migrated legacy payload: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenMigratesV1CompactionIndexToParentPathID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v1-compaction.jsonl")
 	data := []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
@@ -162,8 +266,9 @@ func TestLegacyMigrationRejectsMixedOrMalformedInputWithoutOverwrite(t *testing.
 
 func TestLegacyMigrationValidatesCandidateBeforeOverwrite(t *testing.T) {
 	for name, original := range map[string][]byte{
-		"v1 malformed message": []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
-			`{"type":"message","timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","timestamp":1}}` + "\n"),
+		"v1 malformed physical line": []byte("not-json\n" + `{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n"),
+		"v1 missing entry timestamp": []byte(`{"type":"session","id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
+			`{"type":"message","message":{"role":"user","timestamp":1}}` + "\n"),
 		"v2 broken parent": []byte(`{"type":"session","version":2,"id":"old","timestamp":"2026-08-01T00:00:00Z","cwd":"/workspace"}` + "\n" +
 			`{"type":"future","id":"orphan","parentId":"missing","timestamp":"2026-08-01T00:00:01Z"}` + "\n"),
 	} {
@@ -261,8 +366,16 @@ func TestRecoverTrailingPartialRequiresExplicitBackupThenReopens(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, OpenOptions{}); !errors.Is(err, ErrInvalidEntry) {
-		t.Fatalf("ordinary Open partial = %v, want invalid entry", err)
+	opened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("ordinary Open partial = %v, want compatible read", err)
+	}
+	diagnostics := opened.LoadDiagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticMalformedLine {
+		t.Fatalf("ordinary Open diagnostics = %#v", diagnostics)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
 	}
 	unchanged, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(unchanged, original) {
@@ -289,6 +402,32 @@ func TestRecoverTrailingPartialRequiresExplicitBackupThenReopens(t *testing.T) {
 	defer session.Close()
 	if _, err := RecoverTrailingPartial(path); !errors.Is(err, ErrWriterActive) {
 		t.Fatalf("recovery during active Open = %v, want writer active", err)
+	}
+}
+
+func TestRecoverTrailingPartialAcceptsCompatibleOldPayloadPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-payload-partial.jsonl")
+	oldAssistant := `{"type":"message","id":"old-assistant","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","content":null,"api":"test","provider":"test","model":"test","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0},"stopReason":"stop","timestamp":2}}`
+	prefix := []byte(testHeader + "\n" + oldAssistant + "\n")
+	original := append(append([]byte(nil), prefix...), '{')
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecoverTrailingPartial(path); err != nil {
+		t.Fatalf("recover compatible old-payload prefix: %v", err)
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(repaired, prefix) {
+		t.Fatalf("repaired compatible prefix = %q, %v", repaired, err)
+	}
+	reopened, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	entries := reopened.Entries()
+	if len(entries) != 1 || len(entries[0].Diagnostics()) != 0 {
+		t.Fatalf("recovered old payload entries = %#v", entries)
 	}
 }
 
@@ -503,15 +642,110 @@ func runWriterClaimHelper(t *testing.T, path, want string) {
 	}
 }
 
-func TestSessionAdmissionLimitsAreExplicit(t *testing.T) {
-	tooLong := bytes.Repeat([]byte{'x'}, maxSessionLine+1)
-	if err := checkSessionLimits(tooLong); !errors.Is(err, ErrSessionTooLarge) {
-		t.Fatalf("long line = %v, want session-too-large", err)
+func TestSessionAdmissionAcceptsLinesBeyondFormerPiGoLimit(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "large-line.jsonl")
+	payload := strings.Repeat("x", 4<<20+1)
+	data := testHeader + "\n" + `{"type":"future","id":"large","parentId":null,"timestamp":"2026-08-01T00:00:01Z","payload":` + strconv.Quote(payload) + "}\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	tooManyLines := bytes.Repeat([]byte("\n"), maxSessionLines+1)
-	if err := checkSessionLimits(tooManyLines); !errors.Is(err, ErrSessionTooLarge) {
-		t.Fatalf("many lines = %v, want session-too-large", err)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("Open() rejected a line accepted by current pi: %v", err)
 	}
+	defer session.Close()
+	if entries := session.Entries(); len(entries) != 1 || entries[0].ID() != "large" {
+		t.Fatalf("large-line entries = %#v", entries)
+	}
+}
+
+func TestOpenStreamsSparseMalformedTailWithBoundedWorkingMemory(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "sparse-tail.jsonl")
+	// The bad line begins with a complete JSON value. The trailing non-space is
+	// enough to reject it; the remaining sparse extent must be drained without
+	// retaining either the first value or the tail.
+	prefix := []byte(testHeader + "\n{}x")
+	if err := os.WriteFile(path, prefix, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const sparseTailBytes = int64(96 << 20)
+	if err := os.Truncate(path, int64(len(prefix))+sparseTailBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	session, err := Open(path, OpenOptions{})
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if diagnostics := session.LoadDiagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticMalformedLine || diagnostics[0].Line != 2 {
+		t.Fatalf("sparse-tail diagnostics = %#v", diagnostics)
+	}
+	// A whole-file read necessarily allocates at least the 96 MiB logical file.
+	// The streaming decoder retains only its 1 MiB read buffer plus decoded
+	// records; leave generous headroom for the runtime and filesystem wrappers.
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("streamed %d-byte sparse tail with %d bytes of total allocation", sparseTailBytes, allocated)
+	if allocated >= 32<<20 {
+		t.Fatalf("streaming sparse open allocated %d bytes", allocated)
+	}
+}
+
+func TestOpenAggregatesMalformedShortLineFloodWithBoundedRetainedMemory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "malformed-flood.jsonl")
+	const malformedLines = 250_000
+	data := make([]byte, 0, len(testHeader)+1+malformedLines*2)
+	data = append(data, testHeader...)
+	data = append(data, '\n')
+	data = append(data, strings.Repeat("x\n", malformedLines)...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data = nil
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	diagnostics := session.LoadDiagnostics()
+	if len(diagnostics) != maxLoadDiagnosticSamplesPerCode+1 {
+		t.Fatalf("bounded diagnostics length = %d, want %d: %#v", len(diagnostics), maxLoadDiagnosticSamplesPerCode+1, diagnostics)
+	}
+	var represented uint64
+	for index, diagnostic := range diagnostics {
+		if diagnostic.Code != LoadDiagnosticMalformedLine || diagnostic.Count == 0 {
+			t.Fatalf("diagnostic %d = %#v", index, diagnostic)
+		}
+		represented += diagnostic.Count
+	}
+	summary := diagnostics[len(diagnostics)-1]
+	if !summary.Truncated || summary.Line != maxLoadDiagnosticSamplesPerCode+2 || summary.Count != malformedLines-maxLoadDiagnosticSamplesPerCode {
+		t.Fatalf("malformed summary = %#v", summary)
+	}
+	if represented != malformedLines {
+		t.Fatalf("represented malformed count = %d, want %d", represented, malformedLines)
+	}
+	retained := uint64(0)
+	if after.HeapAlloc > before.HeapAlloc {
+		retained = after.HeapAlloc - before.HeapAlloc
+	}
+	t.Logf("retained %d bytes for %d malformed physical lines in %d diagnostics", retained, malformedLines, len(diagnostics))
+	if retained >= 4<<20 {
+		t.Fatalf("malformed diagnostic flood retained %d bytes", retained)
+	}
+	runtime.KeepAlive(session)
 }
 
 func FuzzMigrateLegacySessionNeverPanics(f *testing.F) {

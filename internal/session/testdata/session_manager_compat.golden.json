@@ -1,5 +1,5 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 4,
   "optionalAndPersistence": {
     "delayedPersistence": {
       "existsAfterCreate": false,
@@ -960,5 +960,500 @@
         "allMessagesText": "forest root forest answer main branch selected branch"
       }
     ]
+  },
+  "reopenAndCompaction": {
+    "reopenedLeaf": "tail",
+    "reopened": {
+      "entryPath": [
+        "compaction",
+        "kept",
+        "second-assistant",
+        "tail"
+      ],
+      "entryTypes": [
+        "compaction",
+        "message",
+        "message",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "compactionSummary",
+          "summary": "reopen checkpoint",
+          "tokensBefore": 99
+        },
+        {
+          "role": "user",
+          "text": "kept question"
+        },
+        {
+          "role": "assistant",
+          "text": "second answer"
+        },
+        {
+          "role": "user",
+          "text": "tail question"
+        }
+      ],
+      "thinkingLevel": "high",
+      "model": {
+        "provider": "compat-provider",
+        "modelId": "compat-model"
+      }
+    },
+    "earlierLeaf": {
+      "entryPath": [
+        "root",
+        "thinking",
+        "model",
+        "first-assistant"
+      ],
+      "entryTypes": [
+        "message",
+        "thinking_level_change",
+        "model_change",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "reopen root"
+        },
+        {
+          "role": "assistant",
+          "text": "first answer"
+        }
+      ],
+      "thinkingLevel": "high",
+      "model": {
+        "provider": "compat-provider",
+        "modelId": "compat-model"
+      }
+    },
+    "fork": {
+      "headerParentIsSource": true,
+      "context": {
+        "entryPath": [
+          "compaction",
+          "kept",
+          "second-assistant",
+          "tail"
+        ],
+        "entryTypes": [
+          "compaction",
+          "message",
+          "message",
+          "message"
+        ],
+        "messages": [
+          {
+            "role": "compactionSummary",
+            "summary": "reopen checkpoint",
+            "tokensBefore": 99
+          },
+          {
+            "role": "user",
+            "text": "kept question"
+          },
+          {
+            "role": "assistant",
+            "text": "second answer"
+          },
+          {
+            "role": "user",
+            "text": "tail question"
+          }
+        ],
+        "thinkingLevel": "high",
+        "model": {
+          "provider": "compat-provider",
+          "modelId": "compat-model"
+        }
+      },
+      "entries": [
+        {
+          "type": "message",
+          "id": "root",
+          "parentId": null,
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "reopen root",
+            "timestamp": 1000
+          }
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "thinking",
+          "parentId": "root",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "model_change",
+          "id": "model",
+          "parentId": "thinking",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "provider": "selected-provider",
+          "modelId": "selected-model"
+        },
+        {
+          "type": "message",
+          "id": "first-assistant",
+          "parentId": "model",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "assistant",
+            "text": "first answer",
+            "timestamp": 2000,
+            "provider": "compat-provider",
+            "model": "compat-model"
+          }
+        },
+        {
+          "type": "message",
+          "id": "kept",
+          "parentId": "first-assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "kept question",
+            "timestamp": 3000
+          }
+        },
+        {
+          "type": "message",
+          "id": "second-assistant",
+          "parentId": "kept",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "assistant",
+            "text": "second answer",
+            "timestamp": 4000,
+            "provider": "compat-provider",
+            "model": "compat-model"
+          }
+        },
+        {
+          "type": "compaction",
+          "id": "compaction",
+          "parentId": "second-assistant",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "summary": "reopen checkpoint",
+          "firstKeptEntryId": "kept",
+          "tokensBefore": 99
+        },
+        {
+          "type": "message",
+          "id": "tail",
+          "parentId": "compaction",
+          "timestamp": {
+            "present": true,
+            "isoMilliseconds": true
+          },
+          "message": {
+            "role": "user",
+            "text": "tail question",
+            "timestamp": 5000
+          }
+        }
+      ]
+    }
+  },
+  "damagedRecovery": {
+    "entries": [
+      {
+        "type": "message",
+        "id": "root",
+        "parentId": null,
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "damaged root",
+          "timestamp": 1000
+        }
+      },
+      {
+        "type": "message",
+        "id": "orphan",
+        "parentId": "auto-1",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "damaged orphan",
+          "timestamp": 2000
+        }
+      }
+    ],
+    "tree": [
+      {
+        "id": "root",
+        "type": "message",
+        "label": null,
+        "hasLabelTimestamp": false,
+        "children": []
+      },
+      {
+        "id": "orphan",
+        "type": "message",
+        "label": null,
+        "hasLabelTimestamp": false,
+        "children": []
+      }
+    ],
+    "activeContext": {
+      "entryPath": [
+        "orphan"
+      ],
+      "entryTypes": [
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "damaged orphan"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": null
+    },
+    "reopenedContext": {
+      "entryPath": [
+        "orphan"
+      ],
+      "entryTypes": [
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "damaged orphan"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": null
+    }
+  },
+  "structuralRecovery": {
+    "entries": [
+      {
+        "type": "message",
+        "id": "forward-child",
+        "parentId": "root",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "forward child",
+          "timestamp": 1000
+        }
+      },
+      {
+        "type": "message",
+        "id": "root",
+        "parentId": null,
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "root",
+          "timestamp": 2000
+        }
+      },
+      {
+        "type": "message",
+        "id": "legacy-assistant",
+        "parentId": "forward-child",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "assistant",
+          "text": "",
+          "timestamp": 3000,
+          "provider": "compat-provider",
+          "model": "compat-model"
+        }
+      },
+      {
+        "type": "compaction",
+        "id": "bad-compaction",
+        "parentId": "legacy-assistant",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "summary": "damaged checkpoint",
+        "firstKeptEntryId": "auto-1",
+        "tokensBefore": 12
+      },
+      {
+        "type": "message",
+        "id": "utf8-tail",
+        "parentId": "bad-compaction",
+        "timestamp": {
+          "present": true,
+          "isoMilliseconds": true
+        },
+        "message": {
+          "role": "user",
+          "text": "tail �A text",
+          "timestamp": 5000
+        }
+      }
+    ],
+    "forwardLeaf": {
+      "entryPath": [
+        "root",
+        "forward-child"
+      ],
+      "entryTypes": [
+        "message",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "root"
+        },
+        {
+          "role": "user",
+          "text": "forward child"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": null
+    },
+    "legacyAssistant": {
+      "entryPath": [
+        "root",
+        "forward-child",
+        "legacy-assistant"
+      ],
+      "entryTypes": [
+        "message",
+        "message",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "text": "root"
+        },
+        {
+          "role": "user",
+          "text": "forward child"
+        },
+        {
+          "role": "assistant",
+          "text": ""
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": {
+        "provider": "compat-provider",
+        "modelId": "compat-model"
+      }
+    },
+    "badCompactionTail": {
+      "entryPath": [
+        "bad-compaction",
+        "utf8-tail"
+      ],
+      "entryTypes": [
+        "compaction",
+        "message"
+      ],
+      "messages": [
+        {
+          "role": "compactionSummary",
+          "summary": "damaged checkpoint",
+          "tokensBefore": 12
+        },
+        {
+          "role": "user",
+          "text": "tail �A text"
+        }
+      ],
+      "thinkingLevel": "off",
+      "model": {
+        "provider": "compat-provider",
+        "modelId": "compat-model"
+      }
+    },
+    "tree": [
+      {
+        "id": "root",
+        "type": "message",
+        "label": null,
+        "hasLabelTimestamp": false,
+        "children": [
+          {
+            "id": "forward-child",
+            "type": "message",
+            "label": null,
+            "hasLabelTimestamp": false,
+            "children": [
+              {
+                "id": "legacy-assistant",
+                "type": "message",
+                "label": null,
+                "hasLabelTimestamp": false,
+                "children": [
+                  {
+                    "id": "bad-compaction",
+                    "type": "compaction",
+                    "label": null,
+                    "hasLabelTimestamp": false,
+                    "children": [
+                      {
+                        "id": "utf8-tail",
+                        "type": "message",
+                        "label": null,
+                        "hasLabelTimestamp": false,
+                        "children": []
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "sourceUnchanged": true
   }
 }

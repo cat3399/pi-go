@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -380,7 +381,7 @@ func TestRepeatedCompactionUsesLatestCheckpointAndNewTail(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsCompactionOutsideParentPath(t *testing.T) {
+func TestOpenReportsCompactionOutsideParentPathWithoutRewriting(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "invalid-compaction.jsonl")
@@ -389,12 +390,65 @@ func TestOpenRejectsCompactionOutsideParentPath(t *testing.T) {
 {"type":"message","id":"sibling","parentId":"root","timestamp":"2026-08-02T00:00:02Z","message":{"role":"user","content":[{"type":"text","text":"sibling"}],"timestamp":2}}
 {"type":"message","id":"other","parentId":"root","timestamp":"2026-08-02T00:00:03Z","message":{"role":"user","content":[{"type":"text","text":"other"}],"timestamp":3}}
 {"type":"compaction","id":"badcompact","parentId":"other","timestamp":"2026-08-02T00:00:04Z","summary":"x","firstKeptEntryId":"sibling","tokensBefore":1}
+{"type":"message","id":"tail","parentId":"badcompact","timestamp":"2026-08-02T00:00:05Z","message":{"role":"user","content":[{"type":"text","text":"tail survives"}],"timestamp":5}}
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(path, OpenOptions{}); !errors.Is(err, ErrInvalidEntry) {
-		t.Fatalf("Open invalid compaction = %v, want ErrInvalidEntry", err)
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatalf("Open invalid compaction = %v", err)
+	}
+	defer session.Close()
+	diagnostics := session.LoadDiagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != LoadDiagnosticCompaction || diagnostics[0].EntryID != "badcompact" {
+		t.Fatalf("invalid compaction diagnostics = %#v", diagnostics)
+	}
+	projection, err := session.projectContextAt("tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entryIDs(projection.Entries); !slices.Equal(got, []string{"badcompact", "tail"}) {
+		t.Fatalf("invalid compaction entries = %v", got)
+	}
+	if got := messageTexts(projection.Context.Messages()); !slices.Equal(got, []string{CompactionSummaryPrefix + "x" + CompactionSummarySuffix, "tail survives"}) {
+		t.Fatalf("invalid compaction context = %v", got)
+	}
+}
+
+func TestCreateBranchedSessionInvalidCompactionLeavesNoPublishedCandidate(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "source.jsonl")
+	data := []byte(`{"type":"session","version":3,"id":"bad-branch","timestamp":"2026-08-02T00:00:00Z","cwd":"` + directory + `"}
+{"type":"message","id":"root","parentId":null,"timestamp":"2026-08-02T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"root"}],"timestamp":1}}
+{"type":"message","id":"sibling","parentId":"root","timestamp":"2026-08-02T00:00:02Z","message":{"role":"user","content":[{"type":"text","text":"sibling"}],"timestamp":2}}
+{"type":"message","id":"other","parentId":"root","timestamp":"2026-08-02T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"other"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":3}}
+{"type":"compaction","id":"badcompact","parentId":"other","timestamp":"2026-08-02T00:00:04Z","summary":"x","firstKeptEntryId":"sibling","tokensBefore":1}
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := OpenSessionManager(path, directory, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	before, err := filepath.Glob(filepath.Join(directory, "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.CreateBranchedSession(context.Background(), "badcompact"); err == nil {
+		t.Fatal("CreateBranchedSession accepted an invalid compaction candidate")
+	}
+	after, err := filepath.Glob(filepath.Join(directory, "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before, after) {
+		t.Fatalf("failed branch published residual file: before=%v after=%v", before, after)
+	}
+	if got, _ := manager.LeafID(); got != "badcompact" {
+		t.Fatalf("failed branch moved source leaf to %q", got)
 	}
 }
 
