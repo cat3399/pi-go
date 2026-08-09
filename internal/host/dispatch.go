@@ -49,6 +49,42 @@ func (h *Host) Dispatch(ctx context.Context, command Command) (CommandResult, er
 			return nil, err
 		}
 		return ReloadResult{}, nil
+	case SteerCommand:
+		return h.dispatchSteer(command)
+	case FollowUpCommand:
+		return h.dispatchFollowUp(command)
+	case SetModelCommand:
+		return h.dispatchSetModel(ctx, command)
+	case ForkCommand:
+		return h.dispatchFork(ctx, command)
+	case NavigateTreeCommand:
+		return h.dispatchNavigateTree(ctx, command)
+	case SetThinkingLevelCommand:
+		return h.dispatchSetThinkingLevel(command)
+	case CompactCommand:
+		return h.dispatchCompact(ctx, command)
+	case AbortCompactionCommand:
+		return h.dispatchAbortCompaction()
+	case SetSessionNameCommand:
+		return h.dispatchSetSessionName(ctx, command)
+	case GetSessionStatsCommand:
+		return h.dispatchGetSessionStats()
+	case GetLastAssistantTextCommand:
+		return h.dispatchGetLastAssistantText()
+	case SetAutoCompactionCommand:
+		return h.dispatchSetAutoCompaction(command)
+	case SetAutoRetryCommand:
+		return h.dispatchSetAutoRetry(command)
+	case GetToolsCommand:
+		return h.dispatchGetTools()
+	case SetToolsCommand:
+		return h.dispatchSetTools(command)
+	case BashCommand:
+		return h.dispatchBash(ctx, command)
+	case AbortBashCommand:
+		return h.dispatchAbortBash()
+	case GetCommandsCommand:
+		return h.dispatchGetCommands()
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrInvalidCommand, command.Type())
 	}

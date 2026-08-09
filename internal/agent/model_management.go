@@ -271,6 +271,19 @@ func (s *AgentSession) availableModels(ctx context.Context) ([]provider.Model, e
 	return available, nil
 }
 
+// AvailableModels exposes the same dynamically resolved, availability-filtered
+// catalog used by model cycling. Hosts use this boundary for set_model and
+// model listing instead of reaching into a concrete ModelRuntime service.
+func (s *AgentSession) AvailableModels(ctx context.Context) ([]provider.Model, error) {
+	if s == nil {
+		return nil, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil model availability context", ErrInvalidRun)
+	}
+	return s.availableModels(ctx)
+}
+
 func nextScopedModel(models []ScopedModel, current provider.Model, direction ModelCycleDirection) ScopedModel {
 	index := 0
 	for candidateIndex, candidate := range models {

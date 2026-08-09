@@ -3,6 +3,8 @@ package host_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/cat3399/pi-go/internal/host"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
@@ -25,7 +28,61 @@ type hostHarness struct {
 	host           *host.Host
 }
 
+type hostToolExecutor struct{}
+
+func (hostToolExecutor) Name() string { return "host-tools" }
+func (hostToolExecutor) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	return agent.ToolOutput{Text: "ok"}, nil
+}
+
+type hostSummarizer struct {
+	started chan struct{}
+	wait    bool
+}
+
+func (s hostSummarizer) Summarize(ctx context.Context, _ session.SummaryInput) (session.SummaryOutput, error) {
+	if s.started != nil {
+		close(s.started)
+	}
+	if s.wait {
+		<-ctx.Done()
+		return session.SummaryOutput{}, context.Cause(ctx)
+	}
+	return session.SummaryOutput{Text: "host checkpoint"}, nil
+}
+
+type hostBashExecutor struct {
+	started chan struct{}
+	wait    bool
+}
+
+func (e hostBashExecutor) ExecuteBash(ctx context.Context, command string, onChunk func(string)) (agent.BashResult, error) {
+	if e.started != nil {
+		close(e.started)
+	}
+	if onChunk != nil {
+		onChunk("chunk:" + command)
+	}
+	if e.wait {
+		<-ctx.Done()
+		return agent.BashResult{Output: "partial"}, context.Cause(ctx)
+	}
+	code := 0
+	return agent.BashResult{Output: "output:" + command, ExitCode: &code}, nil
+}
+
 func newHostHarness(t *testing.T, steps ...provider.ScriptStep) *hostHarness {
+	return newHostHarnessWithOptions(t, hostHarnessOptions{}, steps...)
+}
+
+type hostHarnessOptions struct {
+	Models            []provider.Model
+	Configure         func(*agent.SessionConfig)
+	ConfigureServices func(string, *agentruntime.Services)
+	SetupManager      func(*session.SessionManager)
+}
+
+func newHostHarnessWithOptions(t *testing.T, harnessOptions hostHarnessOptions, steps ...provider.ScriptStep) *hostHarness {
 	t.Helper()
 	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return hostTestEpoch }})
 	if err != nil {
@@ -34,29 +91,45 @@ func newHostHarness(t *testing.T, steps ...provider.ScriptStep) *hostHarness {
 	if err := implementation.SetResponses(steps); err != nil {
 		t.Fatal(err)
 	}
-	model, err := provider.NewModel(provider.ModelSpec{
-		Provider: "scripted", API: "scripted", ID: "host-model", Name: "Host Model",
-		Input: []provider.InputKind{provider.InputText, provider.InputImage}, ContextWindow: 16_000, MaxTokens: 1_000,
-	})
-	if err != nil {
-		t.Fatal(err)
+	models := append([]provider.Model(nil), harnessOptions.Models...)
+	if len(models) == 0 {
+		model, err := provider.NewModel(provider.ModelSpec{
+			Provider: "scripted", API: "scripted", ID: "host-model", Name: "Host Model",
+			Input: []provider.InputKind{provider.InputText, provider.InputImage}, ContextWindow: 16_000, MaxTokens: 1_000,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		models = []provider.Model{model}
 	}
+	model := models[0]
 	cwd := t.TempDir()
 	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if harnessOptions.SetupManager != nil {
+		harnessOptions.SetupManager(manager)
+	}
 	factory := func(_ context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
-		coordinator, err := agent.NewSession(agent.SessionConfig{
+		config := agent.SessionConfig{
 			Provider: implementation, SessionManager: options.SessionManager, Model: model,
+			AllModels:     append([]provider.Model(nil), models...),
 			ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return hostTestEpoch }, SettlementTimeout: time.Second,
-		})
+		}
+		if harnessOptions.Configure != nil {
+			harnessOptions.Configure(&config)
+		}
+		coordinator, err := agent.NewSession(config)
 		if err != nil {
 			return agentruntime.CreateResult{}, err
 		}
+		services := &agentruntime.Services{CWD: options.SessionManager.Cwd(), AgentDir: cwd, Provider: implementation}
+		if harnessOptions.ConfigureServices != nil {
+			harnessOptions.ConfigureServices(options.SessionManager.Cwd(), services)
+		}
 		return agentruntime.CreateResult{
-			Session:  coordinator,
-			Services: &agentruntime.Services{CWD: options.SessionManager.Cwd(), AgentDir: cwd, Provider: implementation},
+			Session: coordinator, Services: services,
 		}, nil
 	}
 	runtime, err := agentruntime.Create(context.Background(), factory, agentruntime.InitialOptions{
@@ -340,6 +413,377 @@ func TestHostTracksRuntimeReplacementAsOneIdentityAndEventSequence(t *testing.T)
 	}
 }
 
+func TestHostSteerAndFollowUpPreserveRichQueuedInput(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	step, err := provider.FactoryResponseStep(func(ctx context.Context, _ provider.Request, _ uint64) (llm.AssistantTerminal, error) {
+		close(started)
+		select {
+		case <-release:
+			return hostTextTerminal(t, "done"), nil
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := newHostHarness(t, step)
+	if _, err := harness.host.Dispatch(context.Background(), host.PromptCommand{Message: "start"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("prompt did not start")
+	}
+	image, err := llm.NewImageDataBlock("image/png", []byte{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := harness.host.Dispatch(context.Background(), host.SteerCommand{Message: "now", Images: []llm.ImageBlock{image}}); err != nil {
+		t.Fatal(err)
+	} else if _, ok := result.(host.SteerResult); !ok {
+		t.Fatalf("steer result = %T", result)
+	}
+	if result, err := harness.host.Dispatch(context.Background(), host.FollowUpCommand{Message: "later"}); err != nil {
+		t.Fatal(err)
+	} else if _, ok := result.(host.FollowUpResult); !ok {
+		t.Fatalf("follow_up result = %T", result)
+	}
+	state, err := harness.host.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingMessageCount != 2 || !reflect.DeepEqual(state.QueuedMessages.Steering, []string{"now"}) || !reflect.DeepEqual(state.QueuedMessages.FollowUp, []string{"later"}) {
+		t.Fatalf("queued command state = %#v", state.QueuedMessages)
+	}
+	if len(state.QueuedMessages.SteeringMessages) != 1 {
+		t.Fatalf("rich steering queue = %#v", state.QueuedMessages.SteeringMessages)
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.ClearQueueCommand{}); err != nil {
+		t.Fatal(err)
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := harness.runtime.Session().WaitForIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostModelThinkingPolicyAndToolCommands(t *testing.T) {
+	modelA, err := provider.NewModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "model-a", Name: "A", Reasoning: true,
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 16_000, MaxTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelB, err := provider.NewModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "model-b", Name: "B", Reasoning: true,
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 16_000, MaxTokens: 1_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTool, err := provider.NewToolDefinition("first", "First tool", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondTool, err := provider.NewToolDefinition("second", "Second tool", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness := newHostHarnessWithOptions(t, hostHarnessOptions{
+		Models: []provider.Model{modelA, modelB},
+		Configure: func(config *agent.SessionConfig) {
+			config.Tool = hostToolExecutor{}
+			config.Tools = []provider.ToolDefinition{firstTool}
+			config.AllTools = []provider.ToolDefinition{firstTool, secondTool}
+		},
+	})
+
+	modelResult, err := harness.host.Dispatch(context.Background(), host.SetModelCommand{Provider: "scripted", ModelID: "model-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, ok := modelResult.(host.SetModelResult)
+	if !ok || !selected.Model.Equal(modelB) {
+		t.Fatalf("set_model result = %#v", modelResult)
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.SetThinkingLevelCommand{Level: provider.ThinkingHigh}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.SetAutoCompactionCommand{Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.SetAutoRetryCommand{Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := harness.host.State()
+	if err != nil || !state.Model.Equal(modelB) || state.ThinkingLevel != provider.ThinkingHigh || state.AutoCompactionEnabled || state.AutoRetryEnabled {
+		t.Fatalf("selected controls = (%#v, %v)", state, err)
+	}
+
+	toolsResult, err := harness.host.Dispatch(context.Background(), host.GetToolsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := toolsResult.(host.GetToolsResult).Tools
+	if len(tools) != 2 || !tools[0].Active || tools[1].Active {
+		t.Fatalf("initial tools = %#v", tools)
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.SetToolsCommand{ToolNames: []string{"missing", "second", "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	toolsResult, err = harness.host.Dispatch(context.Background(), host.GetToolsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = toolsResult.(host.GetToolsResult).Tools
+	if tools[0].Active || !tools[1].Active || !reflect.DeepEqual(harness.runtime.Session().ActiveToolNames(), []string{"second"}) {
+		t.Fatalf("updated tools = %#v / %v", tools, harness.runtime.Session().ActiveToolNames())
+	}
+	if _, err := harness.host.Dispatch(context.Background(), host.SetModelCommand{Provider: "scripted", ModelID: "missing"}); err == nil || err.Error() != "Model not found: scripted/missing" {
+		t.Fatalf("missing model error = %v", err)
+	}
+}
+
+func TestHostSessionInspectionNameNavigationAndForkCommands(t *testing.T) {
+	t.Run("inspection and navigation", func(t *testing.T) {
+		harness := newHostHarness(t, mustFixedStep(t, hostTextTerminal(t, "answer")))
+		if _, err := harness.runtime.Session().Prompt(context.Background(), "question"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := harness.host.Dispatch(context.Background(), host.SetSessionNameCommand{Name: "  Named Session  "}); err != nil {
+			t.Fatal(err)
+		}
+		statsResult, err := harness.host.Dispatch(context.Background(), host.GetSessionStatsCommand{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stats := statsResult.(host.GetSessionStatsResult)
+		if stats.SessionName == nil || *stats.SessionName != "Named Session" || stats.Stats.UserMessages != 1 || stats.Stats.AssistantMessages != 1 {
+			t.Fatalf("session stats = %#v", stats)
+		}
+		textResult, err := harness.host.Dispatch(context.Background(), host.GetLastAssistantTextCommand{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		last := textResult.(host.GetLastAssistantTextResult)
+		if last.Text == nil || *last.Text != "answer" {
+			t.Fatalf("last assistant text = %#v", last)
+		}
+		userID := firstUserEntryID(t, harness.runtime.Session().SessionManager())
+		navigation, err := harness.host.Dispatch(context.Background(), host.NavigateTreeCommand{TargetID: userID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		navigated := navigation.(host.NavigateTreeResult)
+		if navigated.Cancelled || navigated.Aborted || navigated.EditorText == nil || *navigated.EditorText != "question" {
+			t.Fatalf("navigate_tree result = %#v", navigated)
+		}
+		if _, err := harness.host.Dispatch(context.Background(), host.SetSessionNameCommand{Name: "   "}); err == nil || err.Error() != "Session name cannot be empty" {
+			t.Fatalf("empty session name error = %v", err)
+		}
+	})
+
+	t.Run("fork replaces the bound runtime session", func(t *testing.T) {
+		harness := newHostHarness(t, mustFixedStep(t, hostTextTerminal(t, "answer")))
+		if _, err := harness.runtime.Session().Prompt(context.Background(), "fork me"); err != nil {
+			t.Fatal(err)
+		}
+		oldID := harness.runtime.Session().SessionManager().SessionID()
+		userID := firstUserEntryID(t, harness.runtime.Session().SessionManager())
+		result, err := harness.host.Dispatch(context.Background(), host.ForkCommand{EntryID: userID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		forked := result.(host.ForkResult)
+		if forked.Cancelled || forked.SelectedText == nil || *forked.SelectedText != "fork me" || forked.SessionID == nil || *forked.SessionID == oldID {
+			t.Fatalf("fork result = %#v", forked)
+		}
+		state, err := harness.host.State()
+		if err != nil || state.SessionID != *forked.SessionID || state.MessageCount != 0 {
+			t.Fatalf("forked state = (%#v, %v)", state, err)
+		}
+	})
+}
+
+func TestHostCompactionCommandsExposeManualActivityAndAbort(t *testing.T) {
+	setup := func(t *testing.T) func(*session.SessionManager) {
+		return func(manager *session.SessionManager) {
+			for _, text := range []string{"old", "recent"} {
+				message, err := llm.NewUserTextMessage(text, hostTestEpoch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := manager.AppendLLMMessage(context.Background(), message); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	t.Run("success", func(t *testing.T) {
+		harness := newHostHarnessWithOptions(t, hostHarnessOptions{
+			SetupManager: setup(t),
+			Configure: func(config *agent.SessionConfig) {
+				config.KeepRecentTokens = 1
+				config.KeepRecentTokensSet = true
+				config.Summarizer = hostSummarizer{}
+			},
+		})
+		result, err := harness.host.Dispatch(context.Background(), host.CompactCommand{CustomInstructions: "focus"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		compacted := result.(host.CompactResult)
+		if !compacted.Result.Committed || compacted.Result.Output.Text != "host checkpoint" {
+			t.Fatalf("compact result = %#v", compacted)
+		}
+	})
+
+	t.Run("abort", func(t *testing.T) {
+		started := make(chan struct{})
+		harness := newHostHarnessWithOptions(t, hostHarnessOptions{
+			SetupManager: setup(t),
+			Configure: func(config *agent.SessionConfig) {
+				config.KeepRecentTokens = 1
+				config.KeepRecentTokensSet = true
+				config.Summarizer = hostSummarizer{started: started, wait: true}
+			},
+		})
+		done := make(chan error, 1)
+		go func() {
+			_, compactErr := harness.host.Dispatch(context.Background(), host.CompactCommand{})
+			done <- compactErr
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("compaction did not reach summarizer")
+		}
+		state, err := harness.host.State()
+		if err != nil || !state.IsCompacting || state.IsStreaming || state.Phase != agent.PhaseCompacting {
+			t.Fatalf("manual compaction state = (%#v, %v)", state, err)
+		}
+		if _, err := harness.host.Dispatch(context.Background(), host.AbortCompactionCommand{}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("aborted compaction unexpectedly succeeded")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("aborted compaction did not settle")
+		}
+	})
+}
+
+func TestHostBashCommandsUseSessionExecutionAndEvents(t *testing.T) {
+	t.Run("execute", func(t *testing.T) {
+		harness := newHostHarnessWithOptions(t, hostHarnessOptions{Configure: func(config *agent.SessionConfig) {
+			config.StandaloneBash = hostBashExecutor{}
+		}})
+		events := make(chan host.Event, 8)
+		unsubscribe := harness.host.Subscribe(func(_ context.Context, event host.Event) { events <- event })
+		defer unsubscribe()
+		executionID := "bash-1"
+		result, err := harness.host.Dispatch(context.Background(), host.BashCommand{Command: "pwd", ExecutionID: &executionID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bashResult := result.(host.BashResult).Result
+		if bashResult.Output != "output:pwd" || bashResult.ExitCode == nil || *bashResult.ExitCode != 0 {
+			t.Fatalf("bash result = %#v", bashResult)
+		}
+		event := waitHostEvent(t, events, func(event host.Event) bool {
+			wrapped, ok := event.Value.(host.AgentSessionEvent)
+			return ok && wrapped.Event.Type() == agent.BashExecutionUpdateEventType
+		})
+		update := event.Value.(host.AgentSessionEvent).Event.(agent.BashExecutionUpdateEvent)
+		if update.ID == nil || *update.ID != executionID || update.Delta != "chunk:pwd" {
+			t.Fatalf("bash update = %#v", update)
+		}
+		state, err := harness.host.State()
+		if err != nil || state.MessageCount != 1 || state.IsBashRunning {
+			t.Fatalf("bash state = (%#v, %v)", state, err)
+		}
+	})
+
+	t.Run("abort", func(t *testing.T) {
+		started := make(chan struct{})
+		harness := newHostHarnessWithOptions(t, hostHarnessOptions{Configure: func(config *agent.SessionConfig) {
+			config.StandaloneBash = hostBashExecutor{started: started, wait: true}
+		}})
+		done := make(chan struct {
+			result host.CommandResult
+			err    error
+		}, 1)
+		go func() {
+			result, err := harness.host.Dispatch(context.Background(), host.BashCommand{Command: "long"})
+			done <- struct {
+				result host.CommandResult
+				err    error
+			}{result: result, err: err}
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("bash did not start")
+		}
+		if state, err := harness.host.State(); err != nil || !state.IsBashRunning {
+			t.Fatalf("active bash state = (%#v, %v)", state, err)
+		}
+		if _, err := harness.host.Dispatch(context.Background(), host.AbortBashCommand{}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				t.Fatal(outcome.err)
+			}
+			bashResult := outcome.result.(host.BashResult).Result
+			if !bashResult.Cancelled || bashResult.ExitCode != nil {
+				t.Fatalf("cancelled bash result = %#v", bashResult)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("bash abort did not settle")
+		}
+	})
+}
+
+func TestHostGetCommandsProjectsPromptAndSkillResources(t *testing.T) {
+	harness := newHostHarnessWithOptions(t, hostHarnessOptions{
+		ConfigureServices: func(cwd string, services *agentruntime.Services) {
+			writeHostFile(t, filepath.Join(cwd, "prompts", "review.md"), "---\ndescription: Review files\n---\nreview $1")
+			writeHostFile(t, filepath.Join(cwd, "skills", "audit", "SKILL.md"), "---\nname: audit\ndescription: Audit project\n---\naudit")
+			resources, err := resource.New(resource.Config{CWD: cwd, AgentDir: cwd})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := resources.Reload(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			services.ResourceService = resources
+		},
+	})
+	result, err := harness.host.Dispatch(context.Background(), host.GetCommandsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := result.(host.GetCommandsResult).Commands
+	if len(commands) != 2 || commands[0].Name != "review" || commands[0].Source != host.CommandSourcePrompt || commands[0].Description != "Review files" ||
+		commands[1].Name != "skill:audit" || commands[1].Source != host.CommandSourceSkill || commands[1].Description != "Audit project" {
+		t.Fatalf("commands = %#v", commands)
+	}
+	if commands[0].SourceInfo.Path == "" || commands[0].SourceInfo.Scope != resource.ScopeUser || commands[1].SourceInfo.Path == "" {
+		t.Fatalf("command source info = %#v", commands)
+	}
+}
+
 func TestHostDisposeRejectsLaterCommands(t *testing.T) {
 	harness := newHostHarness(t)
 	if err := harness.host.Dispose(context.Background()); err != nil {
@@ -348,5 +792,36 @@ func TestHostDisposeRejectsLaterCommands(t *testing.T) {
 	_, err := harness.host.Dispatch(context.Background(), host.GetStateCommand{})
 	if !errors.Is(err, host.ErrClosed) {
 		t.Fatalf("dispatch after dispose error = %v", err)
+	}
+}
+
+func mustFixedStep(t *testing.T, terminal llm.AssistantTerminal) provider.ScriptStep {
+	t.Helper()
+	step, err := provider.FixedResponseStep(terminal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return step
+}
+
+func firstUserEntryID(t *testing.T, manager *session.SessionManager) string {
+	t.Helper()
+	for _, entry := range manager.Entries() {
+		message, ok := entry.Message()
+		if ok && message.Role() == llm.RoleUser {
+			return entry.ID()
+		}
+	}
+	t.Fatal("session has no user entry")
+	return ""
+}
+
+func writeHostFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
