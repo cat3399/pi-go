@@ -79,6 +79,33 @@ type ProductionConfig struct {
 	BashMaxOutputBytes    int
 }
 
+// ProductionPaths is the normalized filesystem scope shared by long-lived
+// product surfaces before they open any AgentSession. Resolving these paths is
+// read-only; it does not create an agent directory or session.
+type ProductionPaths struct {
+	WorkingDir string
+	AgentDir   string
+}
+
+// ResolveProductionPaths exposes production's canonical cwd/agent-dir rules to
+// in-process surfaces such as WebUI. This prevents each surface from inventing
+// its own PI_CODING_AGENT_DIR or relative-path behavior.
+func ResolveProductionPaths(config ProductionConfig) (ProductionPaths, error) {
+	workingDir, err := resolveWorkingDirectory(config.WorkingDir)
+	if err != nil {
+		return ProductionPaths{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
+	}
+	environment := config.Environment
+	if environment == nil {
+		environment = os.Environ()
+	}
+	agentDir, err := resolveProductionAgentDir(config.AgentDir, workingDir, environmentMap(environment))
+	if err != nil {
+		return ProductionPaths{}, err
+	}
+	return ProductionPaths{WorkingDir: workingDir, AgentDir: agentDir}, nil
+}
+
 // RunProduction admits product-facing model/auth flags, resolves the fixed
 // OpenAI production configuration, and then executes the exact same lifecycle
 // path as Run. Static argument/path assembly happens first; cwd-bound services
@@ -106,10 +133,11 @@ func assembleProductionRuntime(
 	if cause := context.Cause(ctx); cause != nil {
 		return runtimeDependencies{}, fmt.Errorf("production assembly cancelled: %w", cause)
 	}
-	workingDir, err := resolveWorkingDirectory(config.WorkingDir)
+	paths, err := ResolveProductionPaths(config)
 	if err != nil {
-		return runtimeDependencies{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
+		return runtimeDependencies{}, err
 	}
+	workingDir := paths.WorkingDir
 	environment := config.Environment
 	if environment == nil {
 		environment = os.Environ()
@@ -117,10 +145,7 @@ func assembleProductionRuntime(
 		environment = append([]string(nil), environment...)
 	}
 	ambientEnvironment := environmentMap(environment)
-	agentDir, err := resolveProductionAgentDir(config.AgentDir, workingDir, ambientEnvironment)
-	if err != nil {
-		return runtimeDependencies{}, err
-	}
+	agentDir := paths.AgentDir
 	sessionClock := config.SessionNow
 	if sessionClock == nil {
 		sessionClock = time.Now

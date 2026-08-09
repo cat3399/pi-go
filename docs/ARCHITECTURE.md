@@ -36,7 +36,12 @@ resource/tool 管理和 `agent_settled` 等产品语义。
 
 ```mermaid
 flowchart TB
-    Host["In-process host"] --> Runtime["Application Runtime"]
+    TUI["TUI surface"] --> Host["Application Host"]
+    Web["WebUI surface"] --> Host
+    GUI["Future GUI surface"] --> Host
+    RPC["RPC / automation adapter"] -.-> Host
+    Host --> Supervisor["Session supervisor"]
+    Supervisor --> Runtime["Application Runtime"]
     Runtime --> Services["Model / Settings / Auth / Resource"]
     Runtime --> Session["AgentSession"]
     Session --> Agent["Agent"]
@@ -45,12 +50,12 @@ flowchart TB
     Agent --> Loop["AgentLoop"]
     Loop --> Provider["Provider contract"]
     Loop --> Tools["Tool runtime"]
-    Transport["JSONL RPC / HTTP adapter"] -.-> Host
-    Web["pi-web"] -.-> Transport
 ```
 
-外部 transport 只驱动 Host/Runtime，不拥有第二套 Agent 状态。HTTP、SSE 或 JSONL 只是编码
-方式，不能在传输层重新实现 queue、retry、compaction 或 session 行为。
+Surface 和外部 transport 只驱动 Host/Runtime，不拥有第二套 Agent 状态。HTTP、SSE、进程内
+调用或 JSONL 只是接入方式，不能在接入层重新实现 queue、retry、compaction 或 session 行为。
+Session supervisor 是多会话生命周期的目标层，不把多个 Runtime 合成一个可变全局状态；每个
+活动会话仍由自己的 Runtime/AgentSession 权威拥有。
 
 ## 分层职责
 
@@ -116,6 +121,23 @@ Host 在 Runtime 之上提供 transport-neutral 边界：
 - active operation、flush 和 shutdown 顺序。
 
 Transport adapter 只进行 framing、字段兼容和连接管理。
+
+### Surface 与 Session Supervisor
+
+TUI、WebUI 和未来 GUI 是 Application Host 的独立 surface adapter：
+
+- 共用强类型 command、query、event 和 capability contract；
+- 只保留滚动、面板、窗口、选中标签等瞬时呈现状态；
+- 不读取 session 文件推导实时 Agent 状态；
+- 可以按各自媒介投影、合并或编码事件，但不能改变 durable 或 canonical 事件语义；
+- 不要求共用按钮、对话框、主题或其他最低公分母 UI 抽象。
+
+多会话 surface 通过 Session supervisor 持有 Host/Runtime 句柄并统一收束生命周期。TUI 可以只
+暴露单会话体验，WebUI/GUI 可以多标签，但底层 Agent 行为和状态所有权不分叉。
+
+各 surface 采用独立 composition root 和构建目标。默认核心构建不导入 Web/GUI 包；可选资源
+只进入对应二进制。JSONL RPC 保留为外部自动化和兼容验收 transport，不作为进程内产品 surface
+之间的桥。
 
 ## 核心不变量
 

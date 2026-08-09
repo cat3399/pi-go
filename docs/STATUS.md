@@ -12,8 +12,10 @@ AgentSession 已组合 SessionManager，生产入口没有使用 scripted/fake P
 AgentLoop、stateful Agent 和当前生产版 SessionManager 的主体完成度较高；AgentSession 与
 Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验收。
 
-当前处于“继续补齐产品级 AgentSession，同时让 pi-web 通过已完成的 Runtime 边界开始真实
-适配，并执行跨实现整体验收”的阶段。
+当前并行推进两条长期工作：继续关闭产品级 AgentSession 差异，以及在同一 Go Application
+Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经完成：静态 pi-web 前端由
+`cmd/pi-go-web` 嵌入，HTTP/SSE 直接调用进程内 Supervisor/Host/Runtime。此前 Next → JSONL RPC
+接入只保留为可行性记录，不再作为产品架构扩展。
 
 ## 已实现
 
@@ -93,11 +95,16 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - canonical AgentMessage/ToolResult/usage/event wire 与长期 stdio JSONL transport 已实现；
   `cmd/pi-go-rpc` 使用生产 assembly 打开或恢复 Runtime，并在 EOF/signal 时等待已接纳命令和
   Host 生命周期完整收束。
-- Host 尚未覆盖原版 RPC 的全部辅助命令（例如 cycle/list/new/switch/clone/entries/tree/messages），
-  也没有进程内多 session registry；当前 pi-web adapter 采用一个 Go 进程对应一个权威 Runtime。
-- pi-web 已有 opt-in 的 Go Agent backend：服务端只负责进程、request correlation、SSE event
-  转发和 registry，不再构建 TypeScript AgentSession。session 浏览、model/auth 配置等外围服务
-  仍使用现有 TypeScript 实现；自动命名和 extension UI/loader 尚未接入 Go backend。
+- Host 尚未覆盖原版 RPC 的全部辅助命令（例如 cycle/list/new/switch/clone/entries/tree/messages）；
+  WebUI 所需的多 session registry 已由 `internal/webui.Supervisor` 实现，每个会话仍持有独立
+  Runtime/Host，不合并 Agent 状态。
+- 已完成的 pi-web opt-in Go backend 证明 Next → `pi-go-rpc` → Agent tool-loop 可以真实工作，
+  但它只是迁移验证，不是后续产品路径；不再围绕该 adapter 补功能或做性能优化。
+- 原生 `pi-go-web` 已完成静态资源装配、进程内 Session supervisor、共享 Host JSON projection、
+  Agent command API、SSE、session list/restore/context/tree/state/rename、基础 models 与 cwd API。
+  DeepSeek V4 Flash 已通过一次真实 `read` 工具短程验收。
+- WebUI 仍缺 files/Git/worktree、models/auth 配置管理、session delete/export/auto-name、前端 capability
+  禁用和插件/skills 管理；这些 API 返回结构化 unsupported，详细账本见 `docs/WEBUI.md`。
 
 ### 整体验收
 
@@ -113,16 +120,24 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ## 验证基线
 
-最近一次完整审计通过：
+最近一次本地完整审计通过：
 
 - `go test ./...`
 - `go test -race ./...`
 - `go vet ./...`
 - `go build ./...`
+- `./scripts/build-webui.sh`（包含静态前端构建与 tagged Go build）
 - `git diff --check`
-- SessionManager TypeScript/Go golden check
-- DeepSeek V4 Flash 的 OpenAI Responses、Chat Completions、Anthropic Messages 三协议真实
-  Agent tool-loop，以及 pi-web adapter → `pi-go-rpc` → read tool 的只读端到端验证
+- SessionManager TypeScript/Go golden check；
+- WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
+- 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。
+
+已完成的大模块 live 验收包括 DeepSeek V4 Flash 的 OpenAI Responses、Chat Completions、Anthropic
+Messages 三协议真实 Agent tool-loop，以及原生 `pi-go-web` HTTP/SSE → Host → Runtime → `read` 工具的
+短程只读任务。旧 pi-web adapter 验证只作为历史可行性证据，不计入当前产品路径。
 
 远端 Provider 测试为显式 opt-in，无凭据时跳过。生产代码未发现静态模型回复或 fake tool
 result 冒充真实实现。
+
+后续验证默认使用单元/集成测试和短程只读任务；只有完成一个高内聚大模块后才进行 DeepSeek
+真实验收，避免用模型网络延迟替代本地反馈循环。

@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -710,6 +711,101 @@ func TestOpenAICompletionsPreservesIncomingReasoningButRejectsSSEError(t *testin
 	failed, ok = terminal.(llm.AssistantFailureMessage)
 	if !ok || failed.ErrorMessage() != "upstream failed" {
 		t.Fatalf("replay terminal=%T/%q", terminal, failed.ErrorMessage())
+	}
+}
+
+func TestOpenAICompletionsClassifiesMidStreamReadFailureAsTransport(t *testing.T) {
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &responsesFailingBody{
+		prefix: bytes.NewReader([]byte(completionsSSE(
+			map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "partial"}, "finish_reason": nil}}},
+		))),
+		err: io.ErrUnexpectedEOF,
+	}
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "key",
+		Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       body,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	if got, want := eventKinds(events), []string{"start", "text_start", "text_delta", "error"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events=%v, want %v", got, want)
+	}
+	failed, ok := terminal.(llm.AssistantFailureMessage)
+	if !ok {
+		t.Fatalf("terminal=%T", terminal)
+	}
+	var classified *provider.ProviderFailure
+	if !errors.As(failed.Failure().Cause(), &classified) {
+		t.Fatalf("failure cause=%T/%v", failed.Failure().Cause(), failed.Failure().Cause())
+	}
+	if classified.Kind() != provider.FailureTransport || !provider.IsTransientFailure(classified) {
+		t.Fatalf("failure kind/transient=%s/%t", classified.Kind(), provider.IsTransientFailure(classified))
+	}
+	if body.closes.Load() != 1 {
+		t.Fatalf("body closes=%d, want 1", body.closes.Load())
+	}
+}
+
+func TestOpenAICompletionsClassifiesPrematureEOFAsTransport(t *testing.T) {
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := &responsesFailingBody{
+		prefix: bytes.NewReader([]byte(completionsSSE(
+			map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "partial"}, "finish_reason": nil}}},
+		))),
+		err: io.EOF,
+	}
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "key",
+		Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       body,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	failed, ok := terminal.(llm.AssistantFailureMessage)
+	if !ok {
+		t.Fatalf("terminal=%T", terminal)
+	}
+	var classified *provider.ProviderFailure
+	if !errors.As(failed.Failure().Cause(), &classified) {
+		t.Fatalf("failure cause=%T/%v", failed.Failure().Cause(), failed.Failure().Cause())
+	}
+	if classified.Kind() != provider.FailureTransport || !provider.IsTransientFailure(classified) {
+		t.Fatalf("failure kind/transient=%s/%t", classified.Kind(), provider.IsTransientFailure(classified))
+	}
+	if body.closes.Load() != 1 {
+		t.Fatalf("body closes=%d, want 1", body.closes.Load())
 	}
 }
 

@@ -127,6 +127,120 @@ func TestCoreIntegrationOpensLegacyContextForProductionRetry(t *testing.T) {
 	}
 }
 
+func TestCoreIntegrationRetriesChatCompletionsDropAfterToolResult(t *testing.T) {
+	var requestMu sync.Mutex
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode chat completions request: %v", err)
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		requestMu.Lock()
+		payloads = append(payloads, payload)
+		requestNumber := len(payloads)
+		requestMu.Unlock()
+
+		switch requestNumber {
+		case 1:
+			w.Header().Set("Content-Type", "text/event-stream")
+			encoded, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"tool_calls": []any{map[string]any{
+					"index": 0, "id": "call-inspect", "type": "function",
+					"function": map[string]any{"name": "inspect", "arguments": "{}"},
+				}}}, "finish_reason": "tool_calls",
+			}}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", encoded)
+		case 2:
+			dropContextSSE(t, w)
+		case 3:
+			w.Header().Set("Content-Type", "text/event-stream")
+			encoded, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"content": "recovered after drop"}, "finish_reason": "stop",
+			}}})
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", encoded)
+		default:
+			t.Errorf("unexpected chat completions request %d", requestNumber)
+			http.Error(w, "unexpected fixture request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "fixture-chat",
+		BaseURL: server.URL + "/v1", ContextWindow: 4096, MaxTokens: 512,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: server.URL + "/v1", APIKey: "fixture-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := provider.NewToolDefinition(
+		"inspect", "Return deterministic local information.", false,
+		[]byte(`{"type":"object","additionalProperties":false,"properties":{}}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := &fakeTool{name: "inspect", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+		return agent.ToolOutput{Text: "inspect result"}, nil
+	}}
+	transcript := newSessionManager(t)
+	coordinator, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: transcript, Model: model,
+		SystemPrompt: "Use the inspection tool.", Tool: tool, Tools: []provider.ToolDefinition{definition},
+		Retry: agent.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
+		Now:   func() time.Time { return agentTestEpoch },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retryStarts, retryEnds int
+	unsubscribe := coordinator.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		switch event.(type) {
+		case agent.AutoRetryStartEvent:
+			retryStarts++
+		case agent.AutoRetryEndEvent:
+			retryEnds++
+		}
+	})
+	result, err := coordinator.Run(context.Background(), "inspect this machine")
+	unsubscribe()
+	if err != nil || !result.Succeeded() {
+		t.Fatalf("chat completions retry run = (%#v, %v)", result, err)
+	}
+	terminal, ok := result.Terminal()
+	textTerminal, textOK := terminal.(llm.AssistantTextMessage)
+	if !ok || !textOK || onlyText(t, textTerminal.Content()) != "recovered after drop" {
+		t.Fatalf("chat completions terminal = %#v", terminal)
+	}
+	if tool.CallCount() != 1 || retryStarts != 1 || retryEnds != 1 {
+		t.Fatalf("tool/retry counts = %d/%d/%d", tool.CallCount(), retryStarts, retryEnds)
+	}
+
+	requestMu.Lock()
+	requests := append([]map[string]any(nil), payloads...)
+	requestMu.Unlock()
+	if len(requests) != 3 {
+		t.Fatalf("chat completions requests = %d, want 3", len(requests))
+	}
+	for index := 1; index < len(requests); index++ {
+		encoded, err := json.Marshal(requests[index]["messages"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire := string(encoded)
+		if !strings.Contains(wire, `"role":"tool"`) || !strings.Contains(wire, "inspect result") {
+			t.Fatalf("request %d lost tool-result context: %s", index+1, wire)
+		}
+	}
+}
+
 // This is the final local production-shape oracle across trusted resources,
 // Responses rich/tool replay, parallel Agent execution, durable Session state,
 // and a transient provider retry. The failed attempt must reconstruct the

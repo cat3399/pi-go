@@ -1301,9 +1301,16 @@ func (s *openAICompletionsStream) Next() (llm.StreamEvent, error) {
 				if s.sawFinish || !completionsSupportsFinishReason(s.model) {
 					return s.settle()
 				}
-				return s.failure(&completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: stream ended before [DONE]", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions stream ended before [DONE]"})
+				return s.failure(&completionsFailureSpec{kind: FailureTransport, cause: fmt.Errorf("%w: stream ended before [DONE]", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions stream ended before [DONE]"})
 			}
-			return s.failure(&completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: read SSE: %w", ErrOpenAICompletionsStream, err), message: "OpenAI Chat Completions stream failed"})
+			if cause := context.Cause(s.ctx); cause != nil {
+				return s.failure(s.cancelled(cause))
+			}
+			kind := FailureTransport
+			if errors.Is(err, errResponsesEventTooLarge) {
+				kind = FailureInvalidResponse
+			}
+			return s.failure(&completionsFailureSpec{kind: kind, cause: fmt.Errorf("%w: read SSE: %w", ErrOpenAICompletionsStream, err), message: "OpenAI Chat Completions stream failed"})
 		}
 		if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
 			if !s.sawFinish && completionsSupportsFinishReason(s.model) {

@@ -35,13 +35,18 @@ compaction、会话树和 Runtime replacement 生命周期均有真实实现。�
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
 项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension runtime 重建、
-standalone bash 的 `user_bash` Host hook 集成、provider/model/auth breadth、原版 RPC 的辅助命令、
-多 session registry，以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、跨 session
+standalone bash 的 `user_bash` Host hook 集成、provider/model/auth breadth、原版 RPC 的辅助命令，
+以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、跨 session
 replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展 UI 外的全部直接 Agent 命令；
 `prompt` 按原版 preflight 时点异步确认。
 
-`cmd/pi-go-rpc` 已提供长期 stdio JSONL Runtime，pi-web 可以通过薄进程 adapter 选择它作为
-Agent 核心。`cmd/pi-go -p` 仍是一次性 headless 诊断入口。
+`cmd/pi-go-rpc` 已提供长期 stdio JSONL Runtime，用于协议验证、自动化和跨实现验收；它不再是
+WebUI 的长期产品内核路径。`cmd/pi-go -p` 仍是一次性 headless 诊断入口。
+
+长期产品形态是一个 transport-neutral Application Host，以及按需编译的 TUI、WebUI 和未来
+GUI surface。每个 surface 只拥有呈现状态，通过同一套 command/query/event 边界驱动权威
+`Runtime → AgentSession → Agent → AgentLoop`。首个原生 WebUI 主链已经由可选的 `pi-go-web`
+进程内承载，不经过 Next Server 或 JSONL 子进程。
 
 ## JSONL Agent Host
 
@@ -53,6 +58,34 @@ go build -o /path/to/pi-go-rpc ./cmd/pi-go-rpc
 每行输入一个带可选 `id` 的 JSON command；response 与原版 AgentSession event 逐行输出。
 也可以用 `--session` 恢复现有 JSONL，会话、模型、工具、队列、retry、compaction 和 fork 等
 行为仍由同一个 `Runtime → AgentSession → Agent` 调用链拥有，RPC 层不维护影子状态。
+
+该入口是受支持的外部 transport 和测试工具，不是 WebUI 内部架构。产品 surface 应在各自
+composition root 中直接装配 Application Host。
+
+## 可选 Surface
+
+- 默认核心构建不依赖 WebUI 或未来 GUI；
+- WebUI 作为独立 `cmd/pi-go-web` 目标构建，静态前端只进入该二进制；
+- TUI、WebUI、GUI 共享 Agent/Application 能力，不共享渲染抽象；
+- 浏览器前端可以继续使用适合 DOM 的 TypeScript/React，生产服务端和 Agent 运行时只使用 Go。
+
+构建和运行当前原生 WebUI：
+
+```sh
+./scripts/build-webui.sh
+./bin/pi-go-web --cwd /path/to/project
+```
+
+默认监听 `127.0.0.1:30141`。可使用 `--listen`、`--agent-dir` 和 `--docs-dir` 覆盖装配路径。
+`build-webui.sh` 在本地生成被 Git 忽略的 `web/out`，再用 `pi_go_webui` build tag 把它嵌入
+可选二进制。默认 `go build ./...`/`go test ./...` 不需要这些产物；最终二进制运行时也不需要
+Next Server、Node 或 `pi-go-rpc` 子进程。
+
+当前已真实支持 Agent chat/SSE、会话 list/restore/context/tree/state/rename、基础模型枚举/选择和
+CWD 入口。files/Git/worktree、models/auth 配置、session export/delete/auto-name、插件和 skills
+管理仍明确未实现，详见能力账本。
+
+详见 [Surface 架构](docs/SURFACES.md) 与 [WebUI 能力状态](docs/WEBUI.md)。
 
 ## 范围
 
@@ -68,6 +101,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build ./...
+./scripts/build-webui.sh
 git diff --check
 ```
 
@@ -78,3 +112,5 @@ git diff --check
 - [核心架构](docs/ARCHITECTURE.md)
 - [当前状态](docs/STATUS.md)
 - [后续计划](docs/ROADMAP.md)
+- [Surface 架构](docs/SURFACES.md)
+- [WebUI 能力账本](docs/WEBUI.md)

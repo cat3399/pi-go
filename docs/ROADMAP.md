@@ -76,21 +76,46 @@
 
 只有这一阶段通过后，内部 Agent 重写才算完成。
 
-## 第五阶段：接入 pi-web（已启动）
+## 第五阶段：统一 Surface 架构与原生 WebUI（进行中）
 
-长期 JSONL Runtime 和 pi-web 薄进程 adapter 已落地并可 opt-in 使用。下一步按 pi-web 的真实
-需求补充辅助 command、恢复/切换场景和 Provider/model/auth breadth，逐步替换服务端直接使用的
-TypeScript Agent 核心。pi-web 继续负责 HTTP/SSE、连接恢复和 UI 投影，不保留第二套 Agent
-状态或产品策略。
+Next → `pi-go-rpc` 接入已经完成可行性验证，不再作为产品兼容层继续开发。长期目标是在 pi-go
+仓库内提供可选编译的 `pi-go-web`，直接进程内装配 Host/Runtime，并为 TUI、WebUI 和未来 GUI
+建立同一套 Application contract。
+
+已完成：
+
+1. 固化共享 Host JSON command/result/event projection 与多 Session supervisor，不建立 UI 影子状态；
+2. 以现有 pi-web 为基准迁移布局、主题、响应式样式和静态资源，并通过静态构建；
+3. 接通 Agent chat、SSE、session browsing/restore/context/tree/state/rename 与基础 model discovery/selection；
+4. 使用 DeepSeek V4 Flash 完成真实 `read` 工具短程验收。
+
+后续按高内聚模块推进：
+
+1. files/file-index/preview/watch/upload 与 Git status/diff；
+2. worktree 和目录选择；
+3. models-config/auth/provider 管理；
+4. session export/auto-name/delete/thinking block 延迟读取；
+5. 前端 capability gating，再逐步处理明确暂缓的插件、extension custom UI 和 skills 管理。
+
+持续约束：Go HTTP/SSE 必须直接调用 Host，浏览器事件投影不改变 canonical Agent 语义；静态
+前端只嵌入可选 Web 二进制，默认核心构建不包含 Web 资源。
+
+视觉完成和能力完成分开记录。未实现能力必须在 capability manifest 和 `docs/WEBUI.md` 中可见，
+API 返回结构化 unsupported；前端禁用状态是当前明确待办，禁止用占位响应、假 session、假模型
+或静态效果制造完成错觉。
 
 参考：
 
-- `../pi-web/lib/pi-types.ts`
-- `../pi-web/lib/rpc-manager.ts`
-- `../pi-web/lib/session-reader.ts`
-- `../pi-web/hooks/useAgentSession.ts`
-- `../pi-web/app/api/models/`
-- `../pi-web/app/api/auth/`
+- `../pi-web/app/globals.css`
+- `../pi-web/components/`
+- `../pi-web/hooks/`
+- `../pi-web/app/api/`
+- `internal/host/`
+- `internal/runtime/`
 
-完成目标是让主要改动集中在 pi-web 的服务端启动和 transport adapter，React 交互逻辑无需
-为 Go 后端重写。
+## 验证节奏
+
+- 每个小改动使用本地单元测试、HTTP fixture、浏览器构建检查和短程任务；
+- 一个高内聚大模块完整闭环后，再使用 DeepSeek 做真实只读验收；
+- 大模块验收同时检查 UI、HTTP/SSE、Host event、session JSONL 和 shutdown，不把模型返回一段
+  文本当作整体完成证明。
