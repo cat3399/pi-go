@@ -199,6 +199,45 @@ func TestRuntimeNewSessionLifecycleOrderingAndSetup(t *testing.T) {
 	}
 }
 
+func TestRuntimeReloadRebindsSameSessionBeforeReloadStart(t *testing.T) {
+	cwd := t.TempDir()
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	h := newRuntimeHarness(t, agent.Hooks{
+		SessionShutdown: func(_ context.Context, event agent.SessionShutdownHookEvent) error {
+			order = append(order, "shutdown:"+string(event.Reason))
+			return nil
+		},
+		SessionStart: func(_ context.Context, event agent.SessionStartHookEvent) error {
+			if event.Reason != agent.SessionStartup {
+				order = append(order, "start:"+string(event.Reason))
+			}
+			return nil
+		},
+	})
+	runtime := createRuntime(t, h, manager, cwd)
+	current := runtime.Session()
+	runtime.SetRebindSession(func(_ context.Context, rebound *agent.AgentSession) error {
+		if rebound != current || rebound != runtime.Session() {
+			t.Fatal("reload replaced the AgentSession")
+		}
+		order = append(order, "rebind")
+		return nil
+	})
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"shutdown:reload", "rebind", "start:reload"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("reload order = %v, want %v", order, want)
+	}
+	if runtime.Session() != current || h.createCall != 1 {
+		t.Fatalf("reload reconstructed session: current=%p reloaded=%p factory calls=%d", current, runtime.Session(), h.createCall)
+	}
+}
+
 func TestRuntimeCancellationRunsBeforeForkValidationAndAllocation(t *testing.T) {
 	cwd := t.TempDir()
 	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})

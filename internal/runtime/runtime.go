@@ -208,6 +208,31 @@ func (r *Runtime) SetBeforeSessionInvalidate(callback func()) {
 	r.mu.Unlock()
 }
 
+// Reload refreshes the current AgentSession in place. The runtime operation
+// gate serializes it with new/resume/fork/import/dispose, while rebind runs at
+// AgentSession's original before-session-start boundary.
+func (r *Runtime) Reload(ctx context.Context) error {
+	if r == nil {
+		return errors.New("agent runtime is disposed")
+	}
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	ctx = normalizeContext(ctx)
+	current, _, err := r.current()
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	rebind := r.rebindSession
+	r.mu.RUnlock()
+	return current.Reload(ctx, agent.ReloadOptions{BeforeSessionStart: func(reloadCtx context.Context) error {
+		if rebind == nil {
+			return nil
+		}
+		return rebind(reloadCtx, current)
+	}})
+}
+
 func (r *Runtime) SwitchSession(ctx context.Context, sessionPath string, options SwitchOptions) (ReplacementResult, error) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()

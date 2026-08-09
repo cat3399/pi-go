@@ -46,7 +46,12 @@ type SessionConfig struct {
 	// AgentSession lifecycle. It rebuilds the prompt when active tools change
 	// and expands skill/template commands after extension command/input
 	// preflight and before message construction.
-	Resources      SessionResources
+	Resources SessionResources
+	// ReloadRuntime refreshes settings/catalog state owned outside AgentSession.
+	// AgentSession invokes it after session_shutdown(reload) and before queue
+	// modes/resources are refreshed. Nil leaves low-level injected sessions with
+	// resource-only reload behavior.
+	ReloadRuntime  func(context.Context) error
 	BeforeToolCall BeforeToolCallHook
 	AfterToolCall  AfterToolCallHook
 	Stream         provider.StreamOptions
@@ -159,11 +164,17 @@ type SummarizerResolveRequest struct {
 // RuntimeControlSettings is the effective settings view used by controls that
 // original AgentSession reads dynamically from SettingsManager.
 type RuntimeControlSettings struct {
-	SteeringMode          QueueMode
-	FollowUpMode          QueueMode
-	AutoCompactionEnabled bool
-	AutoRetryEnabled      bool
-	Retry                 RetryPolicy
+	SteeringMode               QueueMode
+	FollowUpMode               QueueMode
+	AutoCompactionEnabled      bool
+	AutoRetryEnabled           bool
+	Retry                      RetryPolicy
+	CompactionReserveTokens    uint64
+	CompactionReserveSet       bool
+	CompactionKeepRecentTokens uint64
+	CompactionKeepRecentSet    bool
+	BranchSummaryReserveTokens uint64
+	BranchSummaryReserveSet    bool
 }
 
 // SessionState is a copy-only view of the mutable product configuration.
@@ -314,6 +325,7 @@ type AgentSession struct {
 	sessionManager         *session.SessionManager
 	systemOptions          BuildSystemPromptOptions
 	resources              SessionResources
+	reloadRuntime          func(context.Context) error
 	toolExecutor           ToolExecutor
 	toolRegistry           map[string]provider.ToolDefinition
 	toolOrder              []string
@@ -346,6 +358,10 @@ type AgentSession struct {
 	// standaloneMutation reserves the idle transcript while an extension custom
 	// message is durably appended without triggering an agent turn.
 	standaloneMutation bool
+	// reloading gates the in-place product refresh without occupying run, so an
+	// active agent turn may continue while settings/resources are rebuilt.
+	reloading  bool
+	reloadDone chan struct{}
 	// idleWait is the shared idle-generation latch. A run admitted from an
 	// agent_settled callback joins the same generation, so callers that began
 	// waiting on the preceding run do not return until the replacement run also
@@ -516,7 +532,8 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	config.Hooks = hooks
 	s := &AgentSession{
 		sessionManager: config.SessionManager, systemOptions: systemOptions,
-		resources: config.Resources, toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
+		resources: config.Resources, reloadRuntime: config.ReloadRuntime,
+		toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
 		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
 		stream:         provider.CloneStreamOptions(config.Stream),
 		resolveStream:  config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
@@ -1390,6 +1407,15 @@ func (s *AgentSession) SetTools(executor ToolExecutor, tools []provider.ToolDefi
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.setTools(executor, tools)
+}
+
+func (s *AgentSession) setTools(executor ToolExecutor, tools []provider.ToolDefinition) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
 	if len(tools) != 0 && isNilInterface(executor) {
 		return fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
 	}
@@ -1462,6 +1488,15 @@ func (s *AgentSession) ActiveToolNames() []string {
 // are ignored, duplicates are collapsed, and the effective system prompt and
 // provider-visible definitions are published as one turn snapshot.
 func (s *AgentSession) SetActiveToolsByName(names []string) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.setActiveToolsByName(names)
+}
+
+func (s *AgentSession) setActiveToolsByName(names []string) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
@@ -3173,6 +3208,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	}()
 	s.closing = true
 	run := s.run
+	reloadDone := s.reloadDone
 	var idle chan struct{}
 	var cancelRetry context.CancelCauseFunc
 	busy := run != nil || s.standaloneMutation
@@ -3194,6 +3230,13 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	if busy {
 		select {
 		case <-idle:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
+	if reloadDone != nil {
+		select {
+		case <-reloadDone:
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		}

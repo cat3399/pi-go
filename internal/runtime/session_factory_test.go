@@ -207,6 +207,44 @@ func TestCreateAgentSessionRuntimeControlsUseEffectiveProjectSettingsAndWriteOnl
 	}
 }
 
+func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing.T) {
+	manager := factoryManager(t)
+	agentDir := t.TempDir()
+	settingsPath := filepath.Join(agentDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","compaction":{"enabled":true,"reserveTokens":1000,"keepRecentTokens":500},"branchSummary":{"reserveTokens":250},"retry":{"enabled":true,"maxRetries":1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: manager.Cwd()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := factoryCatalogModel("scripted", "reload-settings")
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{CWD: manager.Cwd(), AgentDir: agentDir, ModelRuntime: catalog},
+		Provider: factoryProvider(t), SessionManager: manager, AllModels: []model.Model{selected}, ExplicitModel: &selected,
+		Availability: availableFactoryModels(map[string]bool{"scripted": true}), Settings: catalog.Snapshot().Settings,
+		BaseConfig: agent.SessionConfig{Retry: agent.RetryPolicy{MaxAttempts: 2}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	beforeGeneration := catalog.Snapshot().Generation
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"all","followUpMode":"all","compaction":{"enabled":false,"reserveTokens":2000,"keepRecentTokens":750},"branchSummary":{"reserveTokens":400},"retry":{"enabled":false,"maxRetries":3}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := catalog.Snapshot()
+	if snapshot.Generation != beforeGeneration+1 || created.Session.SteeringMode() != agent.QueueAll || created.Session.FollowUpMode() != agent.QueueAll ||
+		created.Session.AutoCompactionEnabled() || created.Session.AutoRetryEnabled() || snapshot.Settings.Compaction.ReserveTokensOrDefault() != 2000 ||
+		snapshot.Settings.Compaction.KeepRecentTokensOrDefault() != 750 || snapshot.Settings.BranchSummary.ReserveTokensOrDefault() != 400 {
+		t.Fatalf("reloaded runtime = generation %d settings %#v controls %s/%s compact=%t retry=%t", snapshot.Generation, snapshot.Settings,
+			created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
+	}
+}
+
 func TestRuntimeControlDefiniteSettingsFailureDoesNotPublishState(t *testing.T) {
 	manager := factoryManager(t)
 	selected := factoryCatalogModel("scripted", "settings-failure")

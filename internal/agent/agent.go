@@ -386,6 +386,16 @@ func (a *Agent) Reset() {
 
 func (a *Agent) SetSteeringMode(mode QueueMode) error { return a.setQueueMode(mode, true) }
 func (a *Agent) SetFollowUpMode(mode QueueMode) error { return a.setQueueMode(mode, false) }
+func (a *Agent) setQueueModes(steering, followUp QueueMode) error {
+	if a == nil || !validQueueMode(steering) || !validQueueMode(followUp) {
+		return fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
+	}
+	a.mu.Lock()
+	a.steeringMode = steering
+	a.followUpMode = followUp
+	a.mu.Unlock()
+	return nil
+}
 func (a *Agent) SteeringMode() QueueMode {
 	if a == nil {
 		return 0
@@ -403,7 +413,7 @@ func (a *Agent) FollowUpMode() QueueMode {
 	return a.followUpMode
 }
 func (a *Agent) setQueueMode(mode QueueMode, steering bool) error {
-	if a == nil || (mode != QueueOneAtATime && mode != QueueAll) {
+	if a == nil || !validQueueMode(mode) {
 		return fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
 	}
 	a.mu.Lock()

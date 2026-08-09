@@ -37,10 +37,12 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - input handler 的有序 transform/handled/error isolation，以及流式 prompt 的 steer/follow-up 投递；
 - custom message 的空闲持久化、`triggerTurn`、运行中 steer/follow-up 和 `deliverAs: nextTurn` 调度；
 - 展开或 transform 后的真实输入进入 before-agent hook、Provider 和持久化会话。
+- 原位 reload 已按 `session_shutdown → settings → queue/runtime settings → resources →
+  active tools/system prompt → rebind → session_start` 顺序实现，并保留运行中请求的 turn snapshot。
 
 ### Runtime、Provider、工具和服务
 
-- create/switch/new/fork/import/dispose replacement 生命周期；
+- create/switch/new/fork/import/dispose replacement 生命周期，以及不替换 AgentSession 的 Runtime reload；
 - OpenAI Responses 与 Chat Completions 的真实 HTTP adapter；
 - bash/read/write/edit/grep/find/ls 七个真实本地工具；
 - settings、auth、model、resource、prompt、skills 和 trust 基础服务；
@@ -58,7 +60,9 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ### 产品级 AgentSession
 
-- 缺少 settings/resources/providers/tools/queue modes 的完整 reload。
+- settings、resources、queue/retry/compaction 参数及 active tools/system prompt 的 reload 已接入；
+  Provider reset 暂按当前阶段约定后置，动态 extension/tool runtime 重建、flag 保留和扩展资源二次发现
+  仍未实现，因此尚不能称为原版完整 reload。
 - 缺少 standalone bash 及其流式更新、abort 和 BashExecution session 记录。
 - extension-neutral command/input 契约已经接入 AgentSession；完整 JS extension loader、动态失效与
   command context actions 属于后续 Runtime/扩展宿主工作。

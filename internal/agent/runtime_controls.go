@@ -28,6 +28,12 @@ func (s *AgentSession) resolvedRuntimeSettings() RuntimeControlSettings {
 	settings.AutoCompactionEnabled = s.compactionEnabled
 	settings.AutoRetryEnabled = s.retryEnabled
 	settings.Retry = s.retryPolicy
+	settings.CompactionReserveTokens = s.contextReserve
+	settings.CompactionReserveSet = true
+	settings.CompactionKeepRecentTokens = s.keepRecentTokens
+	settings.CompactionKeepRecentSet = s.keepRecentSet
+	settings.BranchSummaryReserveTokens = s.branchSummaryReserve
+	settings.BranchSummaryReserveSet = true
 	resolve := s.resolveRuntimeSettings
 	s.mu.RUnlock()
 	if resolve != nil {

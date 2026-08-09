@@ -128,6 +128,9 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	if config.Resources == nil && options.Services.ResourceService != nil {
 		config.Resources = newSessionResources(options.Services.ResourceService)
 	}
+	if config.ReloadRuntime == nil && options.Services.ModelRuntime != nil {
+		config.ReloadRuntime = options.Services.ModelRuntime.Reload
+	}
 	config.Model = provider.Model{}
 	config.ThinkingLevel = provider.ThinkingOff
 	if selected != nil {
@@ -198,9 +201,12 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 			followUp, _ := queueModeFromSetting(settings.FollowUpModeOrDefault())
 			return agent.RuntimeControlSettings{
 				SteeringMode: steering, FollowUpMode: followUp,
-				AutoCompactionEnabled: settings.Compaction.EnabledOrDefault(),
-				AutoRetryEnabled:      settings.Retry.EnabledOrDefault(),
-				Retry:                 retryPolicyFromSettings(settings.Retry, baseRetry),
+				AutoCompactionEnabled:   settings.Compaction.EnabledOrDefault(),
+				AutoRetryEnabled:        settings.Retry.EnabledOrDefault(),
+				Retry:                   retryPolicyFromSettings(settings.Retry, baseRetry),
+				CompactionReserveTokens: settings.Compaction.ReserveTokensOrDefault(), CompactionReserveSet: true,
+				CompactionKeepRecentTokens: settings.Compaction.KeepRecentTokensOrDefault(), CompactionKeepRecentSet: true,
+				BranchSummaryReserveTokens: settings.BranchSummary.ReserveTokensOrDefault(), BranchSummaryReserveSet: true,
 			}
 		}
 	}
