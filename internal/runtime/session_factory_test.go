@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -204,6 +205,44 @@ func TestCreateAgentSessionRuntimeControlsUseEffectiveProjectSettingsAndWriteOnl
 	if steering != model.QueueModeAll || follow != model.QueueModeOneAtATime || compactionEnabled || retryEnabled || maxRetries != 2 ||
 		string(compaction["future"]) != `"keep"` || string(retry["future"]) != `"keep"` || root["unknown"] == nil {
 		t.Fatalf("global controls write = %s", data)
+	}
+}
+
+func TestCreateAgentSessionWiresStandaloneBashService(t *testing.T) {
+	manager := factoryManager(t)
+	selected := factoryCatalogModel("scripted", "standalone-bash")
+	var executed string
+	executor := factoryStandaloneBashFunc(func(_ context.Context, command string, onChunk func(string)) (agent.BashResult, error) {
+		executed = command
+		onChunk("wired")
+		code := 0
+		return agent.BashResult{Output: "wired", ExitCode: &code}, nil
+	})
+	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
+		Services: &agentruntime.Services{
+			CWD: manager.Cwd(), AgentDir: t.TempDir(), StandaloneBash: executor,
+		},
+		Provider: factoryProvider(t), SessionManager: manager, ExplicitModel: &selected,
+		Availability: availableFactoryModels(map[string]bool{"scripted": true}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	result, err := created.Session.ExecuteBash(context.Background(), "printf wired", nil, agent.ExecuteBashOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executed != "printf wired" || result.Output != "wired" || result.ExitCode == nil || *result.ExitCode != 0 {
+		t.Fatalf("factory standalone bash = command %q, result %#v", executed, result)
+	}
+	messages := manager.BuildContext().AgentMessages()
+	if len(messages) != 1 {
+		t.Fatalf("factory bash messages = %#v", messages)
+	}
+	message, ok := messages[0].(agentmsg.BashExecution)
+	if !ok || message.Command != "printf wired" || message.Output != "wired" {
+		t.Fatalf("factory bash record = %#v", messages[0])
 	}
 }
 
@@ -419,6 +458,12 @@ type factorySummarizerFunc func(context.Context, session.SummaryInput) (session.
 
 func (f factorySummarizerFunc) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
 	return f(ctx, input)
+}
+
+type factoryStandaloneBashFunc func(context.Context, string, func(string)) (agent.BashResult, error)
+
+func (f factoryStandaloneBashFunc) ExecuteBash(ctx context.Context, command string, onChunk func(string)) (agent.BashResult, error) {
+	return f(ctx, command, onChunk)
 }
 
 func factoryCatalogModel(providerID, id string) model.Model {

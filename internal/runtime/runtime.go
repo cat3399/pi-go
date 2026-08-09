@@ -49,6 +49,7 @@ type Services struct {
 	Provider        provider.Provider
 	Tool            agent.ToolExecutor
 	Tools           []provider.ToolDefinition
+	StandaloneBash  agent.StandaloneBashExecutor
 }
 
 type CreateOptions struct {

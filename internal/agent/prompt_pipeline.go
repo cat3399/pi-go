@@ -508,7 +508,34 @@ func (s *AgentSession) appendPendingNextTurn(message agentmsg.Message) error {
 	return nil
 }
 
-func (s *AgentSession) reserveStandaloneMutation() (func(), error) {
+type standaloneReservation struct {
+	session *AgentSession
+	done    chan struct{}
+}
+
+func (r *standaloneReservation) finish(settling bool) {
+	if r == nil || r.session == nil || r.done == nil {
+		return
+	}
+	s := r.session
+	completed := false
+	s.lifecycleMu.Lock()
+	if s.standaloneMutation && s.standaloneDone == r.done {
+		s.standaloneMutation = false
+		s.standaloneDone = nil
+		if settling {
+			s.settlingCallbacks++
+		}
+		close(r.done)
+		completed = true
+	}
+	s.lifecycleMu.Unlock()
+	if completed && !settling {
+		s.resolveSessionIdle()
+	}
+}
+
+func (s *AgentSession) reserveStandaloneMutation() (*standaloneReservation, error) {
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
 		s.lifecycleMu.Unlock()
@@ -518,17 +545,14 @@ func (s *AgentSession) reserveStandaloneMutation() (func(), error) {
 		s.lifecycleMu.Unlock()
 		return nil, ErrBusy
 	}
+	done := make(chan struct{})
 	s.standaloneMutation = true
+	s.standaloneDone = done
 	if s.idleWait == nil {
 		s.idleWait = make(chan struct{})
 	}
 	s.lifecycleMu.Unlock()
-	return func() {
-		s.lifecycleMu.Lock()
-		s.standaloneMutation = false
-		s.lifecycleMu.Unlock()
-		s.resolveSessionIdle()
-	}, nil
+	return &standaloneReservation{session: s, done: done}, nil
 }
 
 func (s *AgentSession) emitStandaloneMessage(ctx context.Context, message agentmsg.Message) {
@@ -545,14 +569,14 @@ func (s *AgentSession) emitStandaloneMessage(ctx context.Context, message agentm
 }
 
 func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agentmsg.Custom) (Result, error) {
-	release, err := s.reserveStandaloneMutation()
+	reservation, err := s.reserveStandaloneMutation()
 	if err != nil {
 		return Result{}, err
 	}
 	reserved := true
 	defer func() {
 		if reserved {
-			release()
+			reservation.finish(false)
 		}
 	}()
 	if _, err := s.sessionManager.AppendCustomMessage(ctx, message); err != nil {
@@ -568,10 +592,7 @@ func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agent
 	// message listener may synchronously start a prompt that already sees the
 	// committed custom context, while WaitForIdle remains attached until all
 	// callbacks (and any reentrant replacement run) finish.
-	s.lifecycleMu.Lock()
-	s.standaloneMutation = false
-	s.settlingCallbacks++
-	s.lifecycleMu.Unlock()
+	reservation.finish(true)
 	reserved = false
 	defer func() {
 		s.lifecycleMu.Lock()

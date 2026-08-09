@@ -39,6 +39,7 @@ var (
 	ErrModelAccess              = errors.New("model access unavailable")
 	ErrCompactionUnavailable    = errors.New("agent compaction is not configured")
 	ErrBranchSummaryUnavailable = errors.New("agent branch summarization is not configured")
+	ErrBashUnavailable          = errors.New("agent standalone bash is not configured")
 	ErrInvalidExtensionResult   = errors.New("invalid extension hook result")
 	ErrRetryPolicy              = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the

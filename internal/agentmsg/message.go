@@ -137,7 +137,7 @@ type BashExecution struct {
 }
 
 func NewBashExecution(value BashExecution) (BashExecution, error) {
-	if !utf8.ValidString(value.Command) || !utf8.ValidString(value.Output) || !utf8.ValidString(value.FullOutputPath) || strings.TrimSpace(value.Command) == "" {
+	if !utf8.ValidString(value.Command) || !utf8.ValidString(value.Output) || !utf8.ValidString(value.FullOutputPath) {
 		return BashExecution{}, fmt.Errorf("invalid bash execution message")
 	}
 	if value.ExitCode != nil {

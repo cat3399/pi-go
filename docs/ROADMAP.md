@@ -31,7 +31,7 @@
 
 - prompt/templates/skills/commands；
 - tool registry、active tools、system prompt 和 reload；
-- standalone bash、model/thinking 和 session 产品操作。
+- standalone bash 的 Host/settings 集成、model/thinking 和 session 产品操作。
 
 参考：
 

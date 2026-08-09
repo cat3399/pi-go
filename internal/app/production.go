@@ -171,7 +171,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		ShellPath: p.config.BashShellPath, ArtifactDirectory: p.config.BashArtifactDirectory,
 		MaxOutputLines: p.config.BashMaxOutputLines, MaxOutputBytes: p.config.BashMaxOutputBytes,
 	}
-	executor, definitions, resourceTools, err := buildProductionToolRuntime(toolOptions)
+	executor, definitions, resourceTools, standaloneBash, err := buildProductionToolRuntime(toolOptions)
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
 	}
@@ -274,7 +274,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	services := &agentruntime.Services{
 		CWD: cwd, AgentDir: p.agentDir, ModelRuntime: catalog, ResourceService: resources,
-		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...),
+		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
 	}
 	stream, err := productionProviderStreamOptions(snapshot.Settings, options.SessionManager.SessionID())
 	if err != nil {

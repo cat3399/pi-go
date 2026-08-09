@@ -37,6 +37,8 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - input handler 的有序 transform/handled/error isolation，以及流式 prompt 的 steer/follow-up 投递；
 - custom message 的空闲持久化、`triggerTurn`、运行中 steer/follow-up 和 `deliverAs: nextTurn` 调度；
 - 展开或 transform 后的真实输入进入 before-agent hook、Provider 和持久化会话。
+- standalone bash 已接入真实 shell backend，支持 sanitized 流式更新、并发执行/全量 abort、
+  `!`/`!!` context 可见性、截断产物和有序 `BashExecution` 持久化；shutdown 会先取消并等待执行落盘。
 - 原位 reload 已按 `session_shutdown → settings → queue/runtime settings → resources →
   active tools/system prompt → rebind → session_start` 顺序实现，并保留运行中请求的 turn snapshot。
 
@@ -63,7 +65,8 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - settings、resources、queue/retry/compaction 参数及 active tools/system prompt 的 reload 已接入；
   Provider reset 暂按当前阶段约定后置，动态 extension/tool runtime 重建、flag 保留和扩展资源二次发现
   仍未实现，因此尚不能称为原版完整 reload。
-- 缺少 standalone bash 及其流式更新、abort 和 BashExecution session 记录。
+- standalone bash 的 AgentSession 核心已实现；外层 Runtime/Host 仍缺 `user_bash` hook dispatch，
+  production settings 尚未把 `shellPath`/`shellCommandPrefix` 动态注入执行器，reload 也尚未重建 shell/tool runtime。
 - extension-neutral command/input 契约已经接入 AgentSession；完整 JS extension loader、动态失效与
   command context actions 属于后续 Runtime/扩展宿主工作。
 

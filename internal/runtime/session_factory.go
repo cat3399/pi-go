@@ -131,6 +131,9 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	if config.ReloadRuntime == nil && options.Services.ModelRuntime != nil {
 		config.ReloadRuntime = options.Services.ModelRuntime.Reload
 	}
+	if config.StandaloneBash == nil && options.Services.StandaloneBash != nil {
+		config.StandaloneBash = options.Services.StandaloneBash
+	}
 	config.Model = provider.Model{}
 	config.ThinkingLevel = provider.ThinkingOff
 	if selected != nil {

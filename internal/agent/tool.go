@@ -51,6 +51,22 @@ func (e *BashExecutor) Execute(
 	return ToolOutput{Text: result.Text()}, err
 }
 
+// ExecuteBash exposes the same configured process backend through the
+// user-initiated standalone contract. The tool package owns shell and output
+// semantics; AgentSession owns events, cancellation tracking, and transcript
+// ordering.
+func (e *BashExecutor) ExecuteBash(ctx context.Context, command string, onChunk func(string)) (BashResult, error) {
+	if e == nil || e.bash == nil {
+		return BashResult{}, errors.New("bash tool is not configured")
+	}
+	result, err := e.bash.ExecuteStandalone(ctx, command, onChunk)
+	converted := BashResult{
+		Output: result.Output, ExitCode: result.ExitCode, Cancelled: result.Cancelled,
+		Truncated: result.Truncated, FullOutputPath: result.FullOutputPath,
+	}
+	return cloneBashResult(converted), err
+}
+
 type toolPanicError struct {
 	value string
 	stack []byte

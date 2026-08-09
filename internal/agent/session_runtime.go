@@ -51,10 +51,19 @@ type SessionConfig struct {
 	// AgentSession invokes it after session_shutdown(reload) and before queue
 	// modes/resources are refreshed. Nil leaves low-level injected sessions with
 	// resource-only reload behavior.
-	ReloadRuntime  func(context.Context) error
-	BeforeToolCall BeforeToolCallHook
-	AfterToolCall  AfterToolCallHook
-	Stream         provider.StreamOptions
+	ReloadRuntime func(context.Context) error
+	// StandaloneBash is the user-initiated !/!! execution port. It is distinct
+	// from Tool because its result is a BashExecution AgentMessage, non-zero exit
+	// codes are data, and output is streamed through session events.
+	StandaloneBash StandaloneBashExecutor
+	// BashCommandPrefix is prepended to the executed command but not the command
+	// stored in BashExecution history. ResolveBashCommandPrefix provides the
+	// live SettingsManager-style production path when configured.
+	BashCommandPrefix        string
+	ResolveBashCommandPrefix func() string
+	BeforeToolCall           BeforeToolCallHook
+	AfterToolCall            AfterToolCallHook
+	Stream                   provider.StreamOptions
 	// ResolveStreamOptions resolves credentials and request headers for the
 	// model selected by a concrete turn. It is invoked outside session locks.
 	ResolveStreamOptions func(context.Context, provider.Model) (provider.StreamOptions, error)
@@ -326,6 +335,9 @@ type AgentSession struct {
 	systemOptions          BuildSystemPromptOptions
 	resources              SessionResources
 	reloadRuntime          func(context.Context) error
+	standaloneBash         StandaloneBashExecutor
+	bashCommandPrefix      string
+	resolveBashPrefix      func() string
 	toolExecutor           ToolExecutor
 	toolRegistry           map[string]provider.ToolDefinition
 	toolOrder              []string
@@ -358,6 +370,15 @@ type AgentSession struct {
 	// standaloneMutation reserves the idle transcript while an extension custom
 	// message is durably appended without triggering an agent turn.
 	standaloneMutation bool
+	standaloneDone     chan struct{}
+	// bashRecordMu linearizes completion-order persistence with low Agent run
+	// starts. bashMu independently owns all concurrently executing shell jobs.
+	bashRecordMu sync.Mutex
+	pendingBash  []agentmsg.BashExecution
+	bashMu       sync.Mutex
+	bashNextID   uint64
+	bashRuns     map[uint64]context.CancelCauseFunc
+	bashIdle     chan struct{}
 	// reloading gates the in-place product refresh without occupying run, so an
 	// active agent turn may continue while settings/resources are rebuilt.
 	reloading  bool
@@ -413,6 +434,7 @@ type sessionRun struct {
 	terminalModel                provider.Model
 	started                      bool
 	extensionSystemPrompt        *string
+	agentRunActive               bool
 	branchSummary                bool
 	branchCancellation           *runCancellation
 	finishOnce                   sync.Once
@@ -451,6 +473,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	}
 	if config.ContextWindow != 0 && config.Summarizer == nil && config.ResolveSummarizer == nil {
 		return nil, fmt.Errorf("%w: automatic compaction requires summarizer", ErrInvalidConfig)
+	}
+	if !utf8.ValidString(config.BashCommandPrefix) || strings.IndexByte(config.BashCommandPrefix, 0) >= 0 {
+		return nil, fmt.Errorf("%w: bash command prefix is invalid", ErrInvalidConfig)
 	}
 	activeTools, toolRegistry, toolOrder, err := buildToolCatalog(config.Tools, config.AllTools, config.ActiveToolNames)
 	if err != nil {
@@ -533,6 +558,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	s := &AgentSession{
 		sessionManager: config.SessionManager, systemOptions: systemOptions,
 		resources: config.Resources, reloadRuntime: config.ReloadRuntime,
+		standaloneBash: config.StandaloneBash, bashCommandPrefix: config.BashCommandPrefix, resolveBashPrefix: config.ResolveBashCommandPrefix,
 		toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
 		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
 		stream:         provider.CloneStreamOptions(config.Stream),
@@ -1685,7 +1711,15 @@ func (s *AgentSession) runSession(
 	if err != nil {
 		return Result{}, err
 	}
-	defer s.settleSessionRun(run)
+	defer func() {
+		runErr = joinBashSettlementError(runErr, s.settleSessionRun(run))
+	}()
+	// A prior run normally flushes these in its settlement path. Retrying here
+	// preserves coding-agent's explicit pre-prompt flush after a transient
+	// transcript failure without allowing the new low Agent run to overtake it.
+	if err := s.flushPendingBashMessages(run.ctx); err != nil {
+		return Result{}, err
+	}
 	if err := s.requireModelAccess(run.ctx); err != nil {
 		if cause := context.Cause(run.ctx); cause != nil {
 			return Result{}, cause
@@ -1757,7 +1791,9 @@ func (s *AgentSession) runSession(
 	if prePromptCheck {
 		s.setSessionPhase(run, PhaseProvider)
 	}
-	result, runErr = begin(run.ctx, input, extra)
+	result, runErr = s.runLowAgent(run, func() (Result, error) {
+		return begin(run.ctx, input, extra)
+	})
 	result = accumulate(result)
 	for runErr == nil {
 		if cause := context.Cause(run.ctx); cause != nil {
@@ -1820,15 +1856,17 @@ func (s *AgentSession) runSession(
 					return result, nil
 				}
 			} else {
-				s.setSessionPhase(run, PhaseProvider)
-				result, runErr = s.loop.Continue(run.ctx)
+				result, runErr = s.runLowAgent(run, func() (Result, error) {
+					return s.loop.Continue(run.ctx)
+				})
 				result = accumulate(result)
 				continue
 			}
 		}
 		if s.checkPostRunCompaction(run, result) {
-			s.setSessionPhase(run, PhaseProvider)
-			result, runErr = s.loop.Continue(run.ctx)
+			result, runErr = s.runLowAgent(run, func() (Result, error) {
+				return s.loop.Continue(run.ctx)
+			})
 			result = accumulate(result)
 			continue
 		}
@@ -1849,8 +1887,9 @@ func (s *AgentSession) runSession(
 			run.acceptingQueues = true
 		}
 		s.lifecycleMu.Unlock()
-		s.setSessionPhase(run, PhaseProvider)
-		result, runErr = s.loop.Continue(run.ctx)
+		result, runErr = s.runLowAgent(run, func() (Result, error) {
+			return s.loop.Continue(run.ctx)
+		})
 		result = accumulate(result)
 	}
 	return result, runErr
@@ -2735,21 +2774,6 @@ func (s *AgentSession) finishSessionRun(run *sessionRun) {
 	s.resolveSessionIdle()
 }
 
-// beginSessionSettlement publishes the visible idle state before invoking
-// agent_settled callbacks, while retaining the current idle generation until
-// every callback returns. A reentrant prompt can therefore be admitted without
-// releasing waiters that observed the preceding run.
-func (s *AgentSession) beginSessionSettlement(run *sessionRun) bool {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.run != run {
-		return false
-	}
-	s.run = nil
-	s.settlingCallbacks++
-	return true
-}
-
 func (s *AgentSession) completeSessionRun(run *sessionRun) {
 	if run == nil {
 		return
@@ -2791,20 +2815,36 @@ func (s *AgentSession) resolveSessionIdle() {
 // AgentSession contract. Waiters that observed the old run are released only
 // after all synchronous settled callbacks return, while a callback itself may
 // immediately start a new prompt against the now-idle session.
-func (s *AgentSession) settleSessionRun(run *sessionRun) {
+func (s *AgentSession) settleSessionRun(run *sessionRun) error {
 	if run == nil {
-		return
+		return nil
 	}
 	s.setSessionPhase(run, PhaseSettling)
 	started := s.sessionRunStarted(run)
 	messages := s.sessionRunCommittedAgentMessages(run)
-	if !s.beginSessionSettlement(run) {
-		return
+	// Keep the Bash completion gate across the final pending-message drain and
+	// the isStreaming -> idle transition. The TypeScript implementation does
+	// both synchronously in _runAgentPrompt's finally block; without this gate a
+	// concurrently completing Bash command could enqueue after the final drain
+	// and remain stranded until another prompt.
+	s.bashRecordMu.Lock()
+	flushErr := s.flushPendingBashMessagesLocked(run.ctx)
+	s.lifecycleMu.Lock()
+	if s.run != run {
+		s.lifecycleMu.Unlock()
+		s.bashRecordMu.Unlock()
+		return flushErr
 	}
+	run.agentRunActive = false
+	s.run = nil
+	s.settlingCallbacks++
+	s.lifecycleMu.Unlock()
+	s.bashRecordMu.Unlock()
 	defer s.endSessionSettlement(run)
 	if started {
 		s.emitAgentSettled(run.ctx, messages)
 	}
+	return flushErr
 }
 
 func providerFailureFromTerminalForSession(result Result) *provider.ProviderFailure {
@@ -3223,6 +3263,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	// Shutdown is the owning-lifecycle cancellation boundary. Unlike public
 	// Abort it must stop every session phase, including compaction and branch
 	// summarization, before invalidating the manager.
+	bashDone := s.abortBashExecutions()
 	if cancelRetry != nil {
 		cancelRetry(errRetryCancelled)
 	}
@@ -3240,6 +3281,19 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		}
+	}
+	if bashDone != nil {
+		select {
+		case <-bashDone:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
+	if err := s.flushPendingBashMessages(ctx); err != nil {
+		s.lifecycleMu.Lock()
+		s.closing = false
+		s.lifecycleMu.Unlock()
+		return err
 	}
 	if s.hooks.SessionShutdown != nil {
 		if hookErr := s.hooks.SessionShutdown(ctx, cloneSessionShutdownHookEvent(options.Event)); hookErr != nil {
