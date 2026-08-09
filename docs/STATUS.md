@@ -1,63 +1,98 @@
 # 当前状态
 
-本文是 2026-08-06 的工作树实现快照。
+本文只描述当前代码事实，不记录历史迁移过程。
 
-## 总体结论
+## 总体判断
 
-P1 AgentLoop 与 P2 stateful Agent 已完成职责收口。当前执行链只有一套 Provider/Tool 核心：
-`AgentSession → Agent → AgentLoop`。AgentSession 负责 durable session、retry、compaction 与
-产品配置；Agent 只负责内存状态、监听器、队列和 active run；AgentLoop 负责单次调用中的
-Provider streaming、工具执行和 turn lifecycle。
+pi-go 已经不是原型。真实生产路径为：
 
-首期整体仍未完成。独立 P3 SessionManager 的代码层已经建立，但尚未由 AgentSession 组合，
-也尚未通过 TypeScript/Go 共用 fixture 的最终验收。下一优先级是完成这两项边界后推进 P4；
-RPC 与 pi-web 接入不在当前里程碑。
+`Runtime → AgentSession → Agent → AgentLoop → Provider/Tools`
 
-## 当前实现
+AgentSession 已组合 SessionManager，生产入口没有使用 scripted/fake Provider 冒充真实模型。
+AgentLoop、stateful Agent 和当前生产版 SessionManager 的主体完成度较高；AgentSession 与
+Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验收。
 
-| 区域 | 当前实现事实 |
-| --- | --- |
-| 流式执行 | text/thinking/tool stream、连续 tool loop、多工具并行或顺序调度、取消与 settlement |
-| 富内容 | rich user input、image content、rich tool result/details 和队列输入已经进入核心类型与测试路径 |
-| 动态运行 | 每个 provider turn 获取 snapshot；model、thinking、system prompt 和 tools 可在 tool chain 间变化 |
-| 控制策略 | continue、steering/follow-up queue、retry 与 compaction 的主要机制已经存在 |
-| Provider | deterministic fake、OpenAI Responses、OpenAI Chat Completions，以及 reasoning/tool replay 支持 |
-| Session 存储 | JSONL v3、锁与原子追加、恢复、tree/branch/fork、compaction、legacy/unknown raw 保护 |
-| SessionManager | 已独立实现 create/open/continue/in-memory/list、typed append、leaf/tree/context、label/name、branch/fork 与延迟落盘；尚未接入 AgentSession |
-| Agent 核心 | P1/P2 已收口；唯一执行核心、stateful lifecycle、queue、abort、动态 turn snapshot 已有对照测试 |
-| 产品基础 | `AgentSession` 已承接持久化、队列、重试、压缩和动态配置，但 P4 完整产品组合语义尚未验收 |
-| 工具与服务 | bash/read/write/edit/grep/find/ls，API key/OAuth，settings/model/resource/prompt 加载 |
-| 诊断入口 | `cmd/pi-go -p` 可组装当前 production path 并执行一次 headless prompt |
+当前处于“补齐产品级 AgentSession 和 Runtime 边界，然后执行跨实现整体验收”的阶段。
 
-## 当前边界
+## 已实现
 
-`internal/agent.AgentLoop` 现在是可直接运行的单次 run 纯内存内核，不依赖 Transcript、
-Session、settings、app 或持久化回调。它已覆盖 text/thinking/tool streaming、rich
-ToolResult、多轮 tool loop、顺序/并行调度、steering/follow-up、完整 `prepareNextTurn`
-replacement、`shouldStopAfterTurn`、动态 API key、provider failure 和原版 lifecycle 顺序。
-工具参数严格按 prepare、JSON Schema 转换/验证、before、execute 排序；before 可原地修改或
-替换已验证参数，替换值不会被二次 schema 校验。并行批次按源顺序 preflight、按完成顺序
-发出 tool end、按源顺序生成 ToolResult。
+### AgentLoop 与 Agent
 
-LLM 消息层现在能保留 `FinishLength + toolCall`，stream、JSONL 与重新计价不会把 stop reason
-改写成 toolUse。AgentLoop 和现有 Agent 都会为该消息中的每个 call 生成明确失败结果，不调用
-before/execute/after，并继续下一 provider turn。
+- text/thinking/tool streaming 和 multi-turn tool loop；
+- 并行/顺序工具调度、rich ToolResult、usage/cost 和错误结果；
+- dynamic per-turn snapshot、prepare-next-turn 和 graceful stop；
+- AgentState、prompt/continue、listener、abort/wait；
+- steering/follow-up 队列和 delivery mode。
 
-stateful Agent 已完全通过 AgentLoop 执行。prompt admission、空消息批次、listener failure 的
-synthetic lifecycle、string prompt 的 content-block 形状、steering/follow-up mode、active
-cancellation signal、动态 API key/convertToLlm，以及 before/message mutation seam 均有行为
-测试。Agent 不依赖 Transcript，也不拥有 retry 或 compaction。
+### Session 与 AgentSession
 
-P3 当前剩余的是原版共用 fixture 验收，以及让 P4 AgentSession 真正组合 SessionManager，
-不能继续直接把底层 Store 当成产品 session 服务。P4 的完整组合语义和后续长期
-transport-neutral Runtime 仍未完成。RPC、pi-web、TUI 与 provider breadth 不是当前里程碑。
+- JSONL v3、typed entry、tree/context、branch/fork 和恢复；
+- compaction、branch summary、model/thinking change、name/label/custom data；
+- AgentSession 持久化、retry、Retry-After、overflow recovery；
+- manual/auto compaction、tree navigation、model/thinking 控制；
+- stats、context usage、last assistant text 和 runtime policy controls。
 
-另有一个 opt-in DeepSeek V4 Flash live test，使用现有 OpenAI Responses 与 Chat Completions
-adapter 真实覆盖 streaming、工具闭环和 JSONL 重开；无 `DEEPSEEK_API_KEY` 时跳过，不以 fake
-结果替代 live 验收。实测中发现并按原版补齐了 Chat Completions 的 DeepSeek thinking wire
-映射。该测试不表示 model catalog 或 Provider breadth 已完成。
+### Runtime、Provider、工具和服务
 
-## 当前验证状态
+- create/switch/new/fork/import/dispose replacement 生命周期；
+- OpenAI Responses 与 Chat Completions 的真实 HTTP adapter；
+- bash/read/write/edit/grep/find/ls 七个真实本地工具；
+- settings、auth、model、resource、prompt、skills 和 trust 基础服务；
+- deterministic fake、fault injection 和本地 HTTP fixture 测试设施。
 
-当前工作树已通过 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go build ./...`
-和 `git diff --check`。
+## 尚未对齐
+
+### Agent 状态与事件
+
+- AgentSession 与 Agent 仍重复保存部分运行配置，尚未完全收敛到单一事实源。
+- `agent_settled` 发出时 session 仍处于 settling/busy。
+- Continue 的部分 queue drain 路径、非 assistant hook/event 顺序、branch-summary phase 和少数
+  产品事件尚未与原版完全一致。
+
+### 产品级 AgentSession
+
+- all-tools registry、active-tools 和 system prompt 联动重建不完整。
+- prompt template、skills/commands 和 input preprocessing 尚未统一进入 AgentSession。
+- 缺少 settings/resources/providers/tools/queue modes 的完整 reload。
+- 缺少 standalone bash、流式更新、abort 和 BashExecution session 记录。
+
+### Provider、Model、Auth 和内置工具
+
+- production 仅支持两个 OpenAI API dialect；完整 provider catalog/composition 尚未实现。
+- models.json override、provider auth/status/login 和部分 stream options 尚未完整生效。
+- production 尚未注册原版独立的 `openai-codex` provider 和
+  `openai-codex-responses` adapter。
+- read image、edit normalization、glob/gitignore 等工具行为仍有差异。
+- SessionManager 对坏行、orphan 和文件大小使用更严格策略，尚未完成兼容决策验收。
+
+### Runtime 与外部边界
+
+- 尚无统一 command dispatch、权威 state snapshot、canonical wire DTO 和单一有序 event stream。
+- 当前 CLI 只执行一次 prompt 后退出，没有长期 JSONL RPC host。
+- pi-web 仍在服务端直接使用 TypeScript AgentSession、SessionManager、model 和 auth 服务。
+
+### 整体验收
+
+当前跨实现 golden 主要覆盖 SessionManager 的少量场景。尚未共同验证：
+
+- 连续对话与 rich input；
+- queue、retry、abort 和 compaction 竞争；
+- model/thinking/tools/reload；
+- fork、tree、reopen 和损坏恢复；
+- 完整 event、usage/cost、错误分类和 session JSONL。
+
+在这些场景通过前，不能称为“完整 Agent 重写”。
+
+## 验证基线
+
+最近一次完整审计通过：
+
+- `go test ./...`
+- `go test -race ./...`
+- `go vet ./...`
+- `go build ./...`
+- `git diff --check`
+- SessionManager TypeScript/Go golden check
+
+远端 Provider 测试为显式 opt-in，无凭据时跳过。生产代码未发现静态模型回复或 fake tool
+result 冒充真实实现。

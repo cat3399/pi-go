@@ -1,62 +1,66 @@
 # pi-go
 
-pi-go 的目标是用 Go 完整重写 [pi](https://github.com/cat3399/pi) 的 Agent Runtime。
-完成后的 Go package 应提供与原版 Pi package 等价的能力、分层、行为和数据结构；
-pi-web 只需对进程启动与传输适配做少量调整，不需要迁就一个能力缩水的后端。
+pi-go 的目标是用 Go 忠实重写 [pi](https://github.com/cat3399/pi) 的 Agent Runtime。
+目标不是实现一个思路相近的 agent，而是保留原版的能力、分层、状态所有权、事件时序和
+可观察行为。
 
-产品运行时只使用 Go，不嵌入、代理或 fallback 到 TypeScript 版 Pi。原版源码与测试是
-兼容性基准；Go 可以采用更合适的类型、并发和资源管理方式，但不能因此删除能力、压扁
-架构层次或改变可观察语义。
+Go 可以采用符合语言习惯的类型、并发和资源管理方式，但不能以此为理由压平架构、删除
+能力或让调用方补偿核心行为。产品运行时只使用 Go，不嵌入、代理或 fallback 到 TypeScript
+版 pi。
 
-## 首期目标
+## 兼容基线
 
-当前首期只完成内部 Agent Runtime：
+当前产品行为以原版实际使用的调用链为基准：
 
-- 对齐原版 `AgentLoop`、`Agent`、`SessionManager`、`AgentSession` 与应用 Runtime 的职责；
-- 对齐 Model、AgentMessage、ToolResult、session entry、event 与 hook 等核心契约；
-- 把 retry、compaction、queue、动态配置、工具执行和持久化接入同一条产品调用链；
-- 提供可由 Go 代码直接驱动的长期 runtime，并用端到端场景证明行为完整。
+`AgentSessionRuntime → AgentSession → Agent → runAgentLoop → SessionManager`
 
-JSONL RPC、pi-web 接入和 TUI 都不属于当前里程碑。RPC 的实现可以后置，但它未来需要
-暴露的状态、命令结果和事件语义必须在内部核心阶段形成，避免传输层反向塑造 Agent。
-Provider 的数量也可以后置；完整 `Model` 结构和厂商无关的 Provider contract 不能后置。
+原版 `packages/agent` 中的新 `AgentHarness` 与这条生产链并存；在 coding-agent 完成迁移
+之前，pi-go 继续以生产链及其测试为主要兼容目标，同时跟踪 Harness 中已经稳定的新契约。
 
-这是快速重构期。仓库现有的内部 package、文件布局和旧文档不构成兼容性约束；如果它们
-偏离原版架构，应直接重组或替换，而不是围绕旧实现做最小补丁。
+完成度按以下证据判断：
+
+1. 原版实际源码和测试；
+2. TypeScript/Go 共用的行为 fixture；
+3. pi-web 的真实调用需求；
+4. pi-go 代码和测试。
 
 ## 当前状态
 
-P1 AgentLoop 与 P2 stateful Agent 已收口：`AgentLoop` 是唯一的 Provider/Tool 执行核心；
-`Agent` 只持有内存状态、监听器、队列和 active run，并以 AgentLoop 完成 prompt、continue、
-streaming、工具链和 settlement。持久化、retry 与 compaction 位于 `AgentSession` 边界，不在
-Agent 内形成第二套执行路径。
+pi-go 已经贯通真实生产链：
 
-独立 `SessionManager` 已实现原版主要 P3 生命周期、typed entry、tree/context、listing、
-branch/fork、name/label 和首个 assistant 延迟落盘语义。它尚未接入 `AgentSession`，P3 也尚未
-通过 TypeScript/Go 共用 fixture 的最终验收；当前下一优先级是先关闭这两项边界，再推进 P4
-完整装配与组合场景。内部 Runtime 尚未达到首期总验收条件。
+`Runtime → AgentSession → Agent → AgentLoop → Provider/Tools`
 
-现有 `cmd/pi-go -p` 是诊断入口，不代表产品 Runtime 已完成。更精确的实现盘点和已知测试
-基线见 [当前状态](docs/STATUS.md)。
+AgentSession 已组合 SessionManager，AgentLoop、stateful Agent、JSONL session、retry、
+compaction、会话树和 Runtime replacement 生命周期均有真实实现。普通生产入口使用真实
+HTTP Provider 和本地工具，deterministic fake 仅用于测试。
+
+项目仍未达到完整移植验收。当前主要缺口是产品级 AgentSession 行为、system prompt 与
+active tools/reload、独立 bash、provider/model/auth 组合、统一 command/state/event 边界，
+以及完整的 TypeScript/Go 跨实现验收。
+
+`cmd/pi-go -p` 是一次性 headless 诊断入口，不代表长期 Runtime 或 pi-web 接入已经完成。
+
+## 范围
+
+TUI、主题、JS extension loader、插件管理和其他纯交互外围可以后置。与 Agent 架构相交的
+hook、custom message/session entry、skills、prompt templates、resource trust 和动态工具
+契约不能因此省略。
 
 ## 开发检查
 
 ```sh
 gofmt -w <changed-go-files>
 go test ./...
+go test -race ./...
 go vet ./...
 go build ./...
+git diff --check
 ```
 
-涉及 agent、streaming、session、tool 并发或取消时，还应运行相关 race test。普通测试默认
-使用 deterministic fake，不依赖真实 credential、网络或 TypeScript runtime；需要证明真实
-模型链路时，使用显式 opt-in live test，不能用 fake 的通过结果替代。
+真实 Provider 测试必须显式 opt-in；fake 或本地 HTTP fixture 的通过不能替代 live 验收。
 
 ## 文档
 
-- [核心架构](docs/ARCHITECTURE.md)：目标分层、职责和兼容性边界。
-- [实现路线](docs/ROADMAP.md)：内部核心优先的阶段与验收门槛。
-- [当前状态](docs/STATUS.md)：当前实现事实、主要差距和验证基线。
-
-这些文档只保留当前有效的开发契约，不维护历史迁移台账。完成度由代码、测试和完整行为
-场景证明，不由文件数量或文档中的勾选项证明。
+- [核心架构](docs/ARCHITECTURE.md)
+- [当前状态](docs/STATUS.md)
+- [后续计划](docs/ROADMAP.md)
