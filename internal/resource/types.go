@@ -122,6 +122,38 @@ type Config struct {
 	MaxFileBytes, MaxPromptBytes                int64
 }
 
+func cloneBuildSystemPromptOptions(options BuildSystemPromptOptions) BuildSystemPromptOptions {
+	options.CustomPrompt = cloneString(options.CustomPrompt)
+	if options.SelectedTools != nil {
+		options.SelectedTools = append([]string{}, options.SelectedTools...)
+	}
+	if options.ToolSnippets != nil {
+		cloned := make(map[string]string, len(options.ToolSnippets))
+		for name, snippet := range options.ToolSnippets {
+			cloned[name] = snippet
+		}
+		options.ToolSnippets = cloned
+	}
+	if options.PromptGuidelines != nil {
+		options.PromptGuidelines = append([]string{}, options.PromptGuidelines...)
+	}
+	if options.ContextFiles != nil {
+		options.ContextFiles = append([]Instruction{}, options.ContextFiles...)
+	}
+	if options.Skills != nil {
+		options.Skills = append([]Skill{}, options.Skills...)
+	}
+	return options
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func validateConfig(c Config) (Config, error) {
 	if c.Tools != nil {
 		tools := make([]Tool, len(c.Tools))

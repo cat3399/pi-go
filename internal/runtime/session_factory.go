@@ -122,6 +122,12 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	config := options.BaseConfig
 	config.Provider = options.Provider
 	config.SessionManager = options.SessionManager
+	if config.AllTools == nil && options.Services.Tools != nil {
+		config.AllTools = append([]provider.ToolDefinition(nil), options.Services.Tools...)
+	}
+	if config.Resources == nil && options.Services.ResourceService != nil {
+		config.Resources = newSessionResources(options.Services.ResourceService)
+	}
 	config.Model = provider.Model{}
 	config.ThinkingLevel = provider.ThinkingOff
 	if selected != nil {

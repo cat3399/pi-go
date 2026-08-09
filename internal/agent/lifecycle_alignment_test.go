@@ -452,8 +452,11 @@ func TestAgentSessionShutdownDuringLaterTurnRefreshSettlesStartedTurn(t *testing
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("second-turn shutdown lifecycle = %v, want %v", got, want)
 	}
-	if implementation.CallCount() != 1 || resolves.Load() != 2 {
-		t.Fatalf("provider/resolve calls = %d/%d, want 1/2", implementation.CallCount(), resolves.Load())
+	// Pi enters the provider one final time with the already-aborted signal so
+	// the stream produces the canonical aborted assistant message for this
+	// started turn instead of synthesizing one above the provider boundary.
+	if implementation.CallCount() != 2 || resolves.Load() != 2 {
+		t.Fatalf("provider/resolve calls = %d/%d, want 2/2", implementation.CallCount(), resolves.Load())
 	}
 	steering, followUp := coordinator.Queues()
 	if len(steering) != 0 || len(followUp) != 0 {

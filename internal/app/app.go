@@ -12,7 +12,6 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
-	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
@@ -154,14 +153,7 @@ func runApplication(
 		return ExitFailure
 	}
 	prompt := parsed.prompt
-	if services := productRuntime.Services(); services != nil && services.ResourceService != nil {
-		snapshot, snapshotErr := services.ResourceService.Snapshot()
-		if snapshotErr != nil {
-			writeDiagnostic(stderr, fmt.Errorf("runtime resources unavailable: %w", snapshotErr))
-			return ExitFailure
-		}
-		prompt = resource.ExpandTemplate(prompt, snapshot.Templates)
-	} else if runtime.expandPrompt != nil {
+	if services := productRuntime.Services(); (services == nil || services.ResourceService == nil) && runtime.expandPrompt != nil {
 		prompt = runtime.expandPrompt(prompt)
 	}
 

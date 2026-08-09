@@ -450,12 +450,20 @@ type Hooks struct {
 
 func cloneBuildSystemPromptOptions(value BuildSystemPromptOptions) BuildSystemPromptOptions {
 	value.CustomPrompt = cloneStringPointer(value.CustomPrompt)
-	value.SelectedTools = append([]string(nil), value.SelectedTools...)
+	if value.SelectedTools != nil {
+		value.SelectedTools = append([]string{}, value.SelectedTools...)
+	}
 	value.ToolSnippets = cloneStringValues(value.ToolSnippets)
-	value.PromptGuidelines = append([]string(nil), value.PromptGuidelines...)
+	if value.PromptGuidelines != nil {
+		value.PromptGuidelines = append([]string{}, value.PromptGuidelines...)
+	}
 	value.AppendSystemPrompt = cloneStringPointer(value.AppendSystemPrompt)
-	value.ContextFiles = append([]SystemPromptContextFile(nil), value.ContextFiles...)
-	value.Skills = append([]SystemPromptSkill(nil), value.Skills...)
+	if value.ContextFiles != nil {
+		value.ContextFiles = append([]SystemPromptContextFile{}, value.ContextFiles...)
+	}
+	if value.Skills != nil {
+		value.Skills = append([]SystemPromptSkill{}, value.Skills...)
+	}
 	for index := range value.Skills {
 		value.Skills[index].SourceInfo.BaseDir = cloneStringPointer(value.Skills[index].SourceInfo.BaseDir)
 	}

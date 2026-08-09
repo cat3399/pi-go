@@ -35,10 +35,20 @@ type SessionConfig struct {
 	// callers leave those fields unset.
 	SystemPromptOptions BuildSystemPromptOptions
 	Tool                ToolExecutor
-	Tools               []provider.ToolDefinition
-	BeforeToolCall      BeforeToolCallHook
-	AfterToolCall       AfterToolCallHook
-	Stream              provider.StreamOptions
+	// Tools is the initially active provider-visible set. AllTools retains the
+	// complete registry so tools can be enabled later without reconstructing
+	// the executor. A nil AllTools keeps low-level callers source-compatible by
+	// treating Tools as both the registry and active set.
+	Tools           []provider.ToolDefinition
+	AllTools        []provider.ToolDefinition
+	ActiveToolNames []string
+	// Resources is the last-healthy resource snapshot owned through the
+	// AgentSession lifecycle. It rebuilds the prompt when active tools change
+	// and expands skill/template commands before message construction.
+	Resources      SessionResources
+	BeforeToolCall BeforeToolCallHook
+	AfterToolCall  AfterToolCallHook
+	Stream         provider.StreamOptions
 	// ResolveStreamOptions resolves credentials and request headers for the
 	// model selected by a concrete turn. It is invoked outside session locks.
 	ResolveStreamOptions func(context.Context, provider.Model) (provider.StreamOptions, error)
@@ -302,6 +312,10 @@ type AgentSession struct {
 	loop                   *Agent
 	sessionManager         *session.SessionManager
 	systemOptions          BuildSystemPromptOptions
+	resources              SessionResources
+	toolExecutor           ToolExecutor
+	toolRegistry           map[string]provider.ToolDefinition
+	toolOrder              []string
 	beforeToolCall         BeforeToolCallHook
 	afterToolCall          AfterToolCallHook
 	stream                 provider.StreamOptions
@@ -413,6 +427,11 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.ContextWindow != 0 && config.Summarizer == nil && config.ResolveSummarizer == nil {
 		return nil, fmt.Errorf("%w: automatic compaction requires summarizer", ErrInvalidConfig)
 	}
+	activeTools, toolRegistry, toolOrder, err := buildToolCatalog(config.Tools, config.AllTools, config.ActiveToolNames)
+	if err != nil {
+		return nil, err
+	}
+	config.Tools = activeTools
 	if len(config.Tools) != 0 && isNilInterface(config.Tool) {
 		return nil, fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
 	}
@@ -469,12 +488,21 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 			systemOptions.SelectedTools[index] = definition.Name()
 		}
 	}
+	if config.Resources != nil {
+		prompt, options, resourceErr := config.Resources.BuildSystemPrompt(toolDefinitionNames(config.Tools))
+		if resourceErr != nil {
+			return nil, fmt.Errorf("%w: build system prompt from resources: %w", ErrInvalidConfig, resourceErr)
+		}
+		config.SystemPrompt = prompt
+		systemOptions = cloneBuildSystemPromptOptions(options)
+	}
 	hooks := config.Hooks
 	hooks.MessageHandlers = append([]MessageHook(nil), config.Hooks.MessageHandlers...)
 	hooks.ToolResultHandlers = append([]AfterToolCallHook(nil), config.Hooks.ToolResultHandlers...)
 	config.Hooks = hooks
 	s := &AgentSession{
 		sessionManager: config.SessionManager, systemOptions: systemOptions,
+		resources: config.Resources, toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
 		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
 		stream:         provider.CloneStreamOptions(config.Stream),
 		resolveStream:  config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
@@ -1348,32 +1376,154 @@ func (s *AgentSession) SetTools(executor ToolExecutor, tools []provider.ToolDefi
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	state := s.State()
-	if state.HasModel {
-		if _, err := provider.NewRequestWithOptions(state.Model, state.SystemPrompt, nil, provider.RequestOptions{Tools: tools, ThinkingLevel: state.ThinkingLevel}); err != nil {
-			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
-		}
-	}
 	if len(tools) != 0 && isNilInterface(executor) {
 		return fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
 	}
+	selected, registry, order, err := buildToolCatalog(tools, tools, nil)
+	if err != nil {
+		return err
+	}
 	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	if err := s.loop.SetTools(executor, tools); err != nil {
-		s.lifecycleMu.Unlock()
+	s.selectionMu.Lock()
+	defer s.selectionMu.Unlock()
+	state := s.loop.State()
+	prompt := state.SystemPrompt()
+	options := s.systemPromptOptions()
+	options.SelectedTools = toolDefinitionNames(selected)
+	s.mu.RLock()
+	resources := s.resources
+	s.mu.RUnlock()
+	if resources != nil {
+		prompt, options, err = resources.BuildSystemPrompt(options.SelectedTools)
+		if err != nil {
+			return fmt.Errorf("%w: rebuild system prompt: %w", ErrInvalidConfig, err)
+		}
+	}
+	if state.HasModel() {
+		if _, err := provider.NewRequestWithOptions(state.Model(), prompt, nil, provider.RequestOptions{Tools: selected, ThinkingLevel: state.ThinkingLevel()}); err != nil {
+			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
+		}
+	}
+	if err := s.loop.setPromptAndTools(prompt, executor, selected); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.systemOptions.SelectedTools = make([]string, len(tools))
-	for index, definition := range tools {
-		s.systemOptions.SelectedTools[index] = definition.Name()
-	}
+	s.systemOptions = cloneBuildSystemPromptOptions(options)
+	s.toolExecutor = executor
+	s.toolRegistry = registry
+	s.toolOrder = order
 	s.mu.Unlock()
-	s.lifecycleMu.Unlock()
 	return nil
+}
+
+// AllTools returns the complete configured registry in stable registration
+// order. It is independent from the provider-visible active set.
+func (s *AgentSession) AllTools() []provider.ToolDefinition {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	tools := make([]provider.ToolDefinition, 0, len(s.toolOrder))
+	for _, name := range s.toolOrder {
+		if definition, exists := s.toolRegistry[name]; exists {
+			tools = append(tools, definition)
+		}
+	}
+	s.mu.RUnlock()
+	return tools
+}
+
+func (s *AgentSession) ActiveToolNames() []string {
+	if s == nil || s.loop == nil {
+		return nil
+	}
+	return toolDefinitionNames(s.loop.State().Tools())
+}
+
+// SetActiveToolsByName mirrors pi's registry-based tool switch: unknown names
+// are ignored, duplicates are collapsed, and the effective system prompt and
+// provider-visible definitions are published as one turn snapshot.
+func (s *AgentSession) SetActiveToolsByName(names []string) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed || s.closing {
+		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
+	}
+	s.selectionMu.Lock()
+	defer s.selectionMu.Unlock()
+	s.mu.RLock()
+	selected := selectToolDefinitions(s.toolRegistry, names)
+	resources := s.resources
+	executor := s.toolExecutor
+	s.mu.RUnlock()
+	state := s.loop.State()
+	prompt := state.SystemPrompt()
+	options := s.systemPromptOptions()
+	options.SelectedTools = toolDefinitionNames(selected)
+	var err error
+	if resources != nil {
+		prompt, options, err = resources.BuildSystemPrompt(options.SelectedTools)
+		if err != nil {
+			return fmt.Errorf("%w: rebuild system prompt: %w", ErrInvalidConfig, err)
+		}
+	}
+	if state.HasModel() {
+		if _, err := provider.NewRequestWithOptions(state.Model(), prompt, nil, provider.RequestOptions{Tools: selected, ThinkingLevel: state.ThinkingLevel()}); err != nil {
+			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
+		}
+	}
+	if err := s.loop.setPromptAndTools(prompt, executor, selected); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.systemOptions = cloneBuildSystemPromptOptions(options)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *AgentSession) expandPromptInput(prompt string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	s.mu.RLock()
+	resources := s.resources
+	s.mu.RUnlock()
+	if resources == nil {
+		return prompt, nil
+	}
+	expanded, err := resources.ExpandPromptInput(prompt)
+	if err != nil {
+		return "", fmt.Errorf("%w: expand prompt resources: %w", ErrInvalidRun, err)
+	}
+	return expanded, nil
+}
+
+func (s *AgentSession) expandUserContentInput(content []llm.UserContentBlock) ([]llm.UserContentBlock, error) {
+	expanded := append([]llm.UserContentBlock(nil), content...)
+	for index, block := range expanded {
+		text, ok := block.(llm.TextBlock)
+		if !ok {
+			continue
+		}
+		value, err := s.expandPromptInput(text.Text())
+		if err != nil {
+			return nil, err
+		}
+		replacement, err := llm.NewTextBlock(value)
+		if err != nil {
+			return nil, fmt.Errorf("%w: expanded prompt content: %w", ErrInvalidRun, err)
+		}
+		expanded[index] = replacement
+		break
+	}
+	return expanded, nil
 }
 
 func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
@@ -1383,12 +1533,16 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	expanded, err := s.expandPromptInput(prompt)
+	if err != nil {
+		return Result{}, err
+	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		timestamp, err := s.loop.now()
 		if err != nil {
 			return sessionPromptInput{}, err
 		}
-		text, err := llm.NewTextBlock(prompt)
+		text, err := llm.NewTextBlock(expanded)
 		if err != nil {
 			return sessionPromptInput{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
 		}
@@ -1400,7 +1554,7 @@ func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
 		if err != nil {
 			return sessionPromptInput{}, err
 		}
-		return sessionPromptInput{Text: prompt, Messages: []agentmsg.Message{wrapper}}, nil
+		return sessionPromptInput{Text: expanded, Messages: []agentmsg.Message{wrapper}}, nil
 	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
 		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
 	})
@@ -1418,7 +1572,10 @@ func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContent
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	input := append([]llm.UserContentBlock(nil), content...)
+	input, err := s.expandUserContentInput(content)
+	if err != nil {
+		return Result{}, err
+	}
 	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
 		timestamp, err := s.loop.now()
 		if err != nil {
@@ -2704,11 +2861,15 @@ func (s *AgentSession) enqueueText(prompt string, steering bool) error {
 	if s == nil || s.loop == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	expanded, err := s.expandPromptInput(prompt)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidQueueMessage, err)
+	}
 	timestamp, err := s.loop.now() // injected clock stays outside lifecycleMu
 	if err != nil {
 		return err
 	}
-	text, err := llm.NewTextBlock(prompt)
+	text, err := llm.NewTextBlock(expanded)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
 	}
@@ -2723,11 +2884,15 @@ func (s *AgentSession) enqueueContent(content []llm.UserContentBlock, steering b
 	if s == nil || s.loop == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	expanded, err := s.expandUserContentInput(content)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidQueueMessage, err)
+	}
 	timestamp, err := s.loop.now() // injected clock stays outside lifecycleMu
 	if err != nil {
 		return err
 	}
-	message, err := llm.NewUserContentMessage(content, timestamp)
+	message, err := llm.NewUserContentMessage(expanded, timestamp)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidQueueMessage, err)
 	}

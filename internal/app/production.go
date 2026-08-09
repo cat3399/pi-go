@@ -166,9 +166,20 @@ type productionRuntimePlan struct {
 
 func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 	cwd := options.SessionManager.Cwd()
+	toolOptions := tool.BashOptions{
+		WorkingDir: cwd, Environment: append([]string(nil), p.environment...), Runner: p.config.BashRunner,
+		ShellPath: p.config.BashShellPath, ArtifactDirectory: p.config.BashArtifactDirectory,
+		MaxOutputLines: p.config.BashMaxOutputLines, MaxOutputBytes: p.config.BashMaxOutputBytes,
+	}
+	executor, definitions, resourceTools, err := buildProductionToolRuntime(toolOptions)
+	if err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
+	}
+	activeToolNames := defaultActiveToolNames()
+	activeDefinitions := selectProductionToolDefinitions(definitions, activeToolNames)
 	resources, err := resource.New(resource.Config{
 		CWD: cwd, AgentDir: p.agentDir,
-		Tools: []resource.Tool{{Name: tool.BashToolName, Snippet: "Execute a shell command in the current working directory."}},
+		Tools: resourceTools, SelectedTools: activeToolNames,
 	})
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize trusted prompt assets: %w", ErrInvalidProductionConfig, err)
@@ -261,15 +272,6 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	for _, diagnostic := range scope.Diagnostics {
 		diagnostics = append(diagnostics, agentruntime.Diagnostic{Kind: agentruntime.DiagnosticWarning, Message: diagnostic.Message})
 	}
-	toolOptions := tool.BashOptions{
-		WorkingDir: cwd, Environment: append([]string(nil), p.environment...), Runner: p.config.BashRunner,
-		ShellPath: p.config.BashShellPath, ArtifactDirectory: p.config.BashArtifactDirectory,
-		MaxOutputLines: p.config.BashMaxOutputLines, MaxOutputBytes: p.config.BashMaxOutputBytes,
-	}
-	executor, definitions, err := buildProductionToolRuntime(toolOptions)
-	if err != nil {
-		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
-	}
 	services := &agentruntime.Services{
 		CWD: cwd, AgentDir: p.agentDir, ModelRuntime: catalog, ResourceService: resources,
 		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...),
@@ -297,7 +299,8 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		AllModels: snapshot.Models, Availability: availability, ExplicitModel: explicit,
 		ExplicitThinkingLevel: explicitThinking, ScopedModels: scope.ScopedModels, Settings: snapshot.Settings,
 		BaseConfig: agent.SessionConfig{
-			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: definitions, Stream: stream,
+			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: activeDefinitions,
+			AllTools: definitions, ActiveToolNames: activeToolNames, Stream: stream,
 			CompactionEnabled: &compactionEnabled,
 			ContextReserve:    snapshot.Settings.Compaction.ReserveTokensOrDefault(),
 			KeepRecentTokens:  snapshot.Settings.Compaction.KeepRecentTokensOrDefault(),

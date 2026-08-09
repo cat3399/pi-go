@@ -146,24 +146,28 @@ func decodeFrontmatterValue(node *yaml.Node, resolving map[*yaml.Node]bool) (any
 }
 
 func assemble(c Config, snapshot Snapshot) (string, error) {
+	options := buildSystemPromptOptions(c, snapshot)
+	prompt := BuildSystemPrompt(options)
+	if c.MaxPromptBytes > 0 && int64(len(prompt)) > c.MaxPromptBytes {
+		return "", fmt.Errorf("%w: assembled system prompt", ErrTooLarge)
+	}
+	return prompt, nil
+}
+
+func buildSystemPromptOptions(c Config, snapshot Snapshot) BuildSystemPromptOptions {
 	selected := c.SelectedTools
-	if selected == nil && c.Tools != nil {
-		selected = make([]string, 0, len(c.Tools))
-		for _, candidate := range c.Tools {
-			selected = append(selected, candidate.Name)
-		}
+	if selected == nil {
+		selected = []string{"read", "bash", "edit", "write"}
 	}
 	snippets := make(map[string]string, len(c.Tools))
-	var guidelines []string
-	active := make(map[string]struct{}, len(selected))
-	for _, name := range selected {
-		active[name] = struct{}{}
-	}
+	toolGuidelines := make(map[string][]string, len(c.Tools))
 	for _, candidate := range c.Tools {
 		snippets[candidate.Name] = candidate.Snippet
-		if _, ok := active[candidate.Name]; ok {
-			guidelines = append(guidelines, candidate.PromptGuidelines...)
-		}
+		toolGuidelines[candidate.Name] = candidate.PromptGuidelines
+	}
+	var guidelines []string
+	for _, name := range selected {
+		guidelines = append(guidelines, toolGuidelines[name]...)
 	}
 	var custom *string
 	basePrompt := snapshot.BaseSystemPrompt
@@ -174,16 +178,12 @@ func assemble(c Config, snapshot Snapshot) (string, error) {
 		value := basePrompt
 		custom = &value
 	}
-	prompt := BuildSystemPrompt(BuildSystemPromptOptions{
+	return BuildSystemPromptOptions{
 		CustomPrompt: custom, SelectedTools: selected, ToolSnippets: snippets, PromptGuidelines: guidelines,
 		AppendSystemPrompt: strings.Join(snapshot.AppendSystem, "\n\n"), CWD: c.CWD,
 		ContextFiles: snapshot.Instructions, Skills: snapshot.Skills,
 		ReadmePath: c.ReadmePath, DocsPath: c.DocsPath, ExamplesPath: c.ExamplesPath,
-	})
-	if c.MaxPromptBytes > 0 && int64(len(prompt)) > c.MaxPromptBytes {
-		return "", fmt.Errorf("%w: assembled system prompt", ErrTooLarge)
 	}
-	return prompt, nil
 }
 
 type BuildSystemPromptOptions struct {

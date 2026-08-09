@@ -14,6 +14,7 @@ import (
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/tool"
@@ -142,7 +143,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	factory := func(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 		toolOptions := bashOptions
 		toolOptions.WorkingDir = options.SessionManager.Cwd()
-		executor, definitions, err := buildProductionToolRuntime(toolOptions)
+		executor, definitions, _, err := buildProductionToolRuntime(toolOptions)
 		if err != nil {
 			return agentruntime.CreateResult{}, fmt.Errorf("initialize session tool runtime: %w", err)
 		}
@@ -216,35 +217,64 @@ func resolveWorkingDirectory(path string) (string, error) {
 	return resolved, nil
 }
 
-func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, []provider.ToolDefinition, error) {
+func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, error) {
 	bash, err := tool.NewBash(options)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	filesystem, err := tool.NewFilesystemSuite(tool.FilesystemOptions{WorkingDir: options.WorkingDir})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	registry, err := tool.NewBuiltInRegistry(bash, filesystem)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	executor, err := agent.NewRegistryExecutor(registry)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	specifications := registry.Specifications()
 	definitions := make([]provider.ToolDefinition, len(specifications))
+	resourceTools := make([]resource.Tool, len(specifications))
 	for index, specification := range specifications {
 		definition, err := provider.NewToolDefinition(
 			specification.Name(), specification.Description(), specification.Strict(), specification.ParametersJSON(),
 		)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		definitions[index] = definition
+		resourceTools[index] = resource.Tool{
+			Name: specification.Name(), Snippet: specification.PromptSnippet(), PromptGuidelines: specification.PromptGuidelines(),
+		}
 	}
-	return executor, definitions, nil
+	return executor, definitions, resourceTools, nil
+}
+
+func defaultActiveToolNames() []string {
+	return []string{tool.ReadToolName, tool.BashToolName, tool.EditToolName, tool.WriteToolName}
+}
+
+func selectProductionToolDefinitions(all []provider.ToolDefinition, names []string) []provider.ToolDefinition {
+	registry := make(map[string]provider.ToolDefinition, len(all))
+	for _, definition := range all {
+		registry[definition.Name()] = definition
+	}
+	selected := make([]provider.ToolDefinition, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		definition, exists := registry[name]
+		if !exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		selected = append(selected, definition)
+	}
+	return selected
 }
 
 func isNilInterface(value any) bool {

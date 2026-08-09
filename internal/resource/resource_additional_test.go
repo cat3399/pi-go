@@ -456,7 +456,10 @@ func TestPromptAssemblyPreservesToolOrderOmitsTemplatesAndEscapesSkills(t *testi
 			{Source: Source{Path: "/skill", Scope: ScopeGlobal}, Name: "visible", Description: "use <this> & that"},
 		},
 	}
-	prompt, err := assemble(Config{CWD: `C:\work`, Tools: []Tool{{Name: "z", Snippet: "last"}, {Name: "a", Snippet: "first"}}, MaxPromptBytes: 4096}, snapshot)
+	prompt, err := assemble(Config{
+		CWD: `C:\work`, Tools: []Tool{{Name: "z", Snippet: "last"}, {Name: "a", Snippet: "first"}},
+		SelectedTools: []string{"z", "a"}, MaxPromptBytes: 4096,
+	}, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}

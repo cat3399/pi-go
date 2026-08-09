@@ -308,6 +308,25 @@ func (a *Agent) SetTools(executor ToolExecutor, tools []provider.ToolDefinition)
 	return nil
 }
 
+// setPromptAndTools publishes the coupled prompt/tool turn snapshot under one
+// lock. AgentSession validates and renders both values before calling it, so a
+// provider turn can never observe a new tool set with the previous prompt (or
+// the reverse).
+func (a *Agent) setPromptAndTools(prompt string, executor ToolExecutor, tools []provider.ToolDefinition) error {
+	if a == nil {
+		return fmt.Errorf("%w: nil agent", ErrInvalidRun)
+	}
+	if len(tools) != 0 && isNilInterface(executor) {
+		return fmt.Errorf("%w: advertised tools require an executor", ErrInvalidConfig)
+	}
+	a.mu.Lock()
+	a.systemPrompt = prompt
+	a.tool = executor
+	a.tools = append([]provider.ToolDefinition(nil), tools...)
+	a.mu.Unlock()
+	return nil
+}
+
 func (a *Agent) SetMessages(messages []agentmsg.Message) error {
 	if a == nil {
 		return fmt.Errorf("%w: nil agent", ErrInvalidRun)

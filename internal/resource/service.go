@@ -49,6 +49,48 @@ func (s *Service) Snapshot() (Snapshot, error) {
 	return s.snapshot.clone(), nil
 }
 
+// BuildSystemPromptForTools rebuilds the effective prompt from the last
+// healthy resource snapshot and the supplied active tool set. Resource
+// discovery remains immutable between reloads; changing active tools therefore
+// cannot accidentally re-read partially written project files.
+func (s *Service) BuildSystemPromptForTools(selectedTools []string) (string, BuildSystemPromptOptions, error) {
+	if s == nil {
+		return "", BuildSystemPromptOptions{}, ErrUnavailable
+	}
+	snapshot, err := s.Snapshot()
+	if err != nil {
+		return "", BuildSystemPromptOptions{}, err
+	}
+	config := s.config
+	if selectedTools == nil {
+		config.SelectedTools = nil
+	} else {
+		config.SelectedTools = append([]string{}, selectedTools...)
+	}
+	// SystemPrompt is the previously rendered result. BaseSystemPrompt is the
+	// actual custom prompt source and must be the only input to a rebuild.
+	snapshot.SystemPrompt = ""
+	options := buildSystemPromptOptions(config, snapshot)
+	prompt := BuildSystemPrompt(options)
+	if config.MaxPromptBytes > 0 && int64(len(prompt)) > config.MaxPromptBytes {
+		return "", BuildSystemPromptOptions{}, fmt.Errorf("%w: assembled system prompt", ErrTooLarge)
+	}
+	return prompt, cloneBuildSystemPromptOptions(options), nil
+}
+
+// ExpandInput applies the current skill-command and prompt-template snapshot
+// in the same order as AgentSession.prompt in the original implementation.
+func (s *Service) ExpandInput(text string) (string, error) {
+	if s == nil {
+		return "", ErrUnavailable
+	}
+	snapshot, err := s.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	return ExpandPromptInput(text, snapshot), nil
+}
+
 // Reload constructs everything off-lock. A failed reload leaves the last
 // healthy snapshot observable, while an initial failure has no snapshot.
 func (s *Service) Reload(ctx context.Context) error {

@@ -30,7 +30,10 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - compaction、branch summary、model/thinking change、name/label/custom data；
 - AgentSession 持久化、retry、Retry-After、overflow recovery；
 - manual/auto compaction、tree navigation、model/thinking 控制；
-- stats、context usage、last assistant text 和 runtime policy controls。
+- stats、context usage、last assistant text 和 runtime policy controls；
+- 完整 built-in tool registry 与独立 active tool set，默认启用 read/bash/edit/write；
+- active tools、provider-visible schemas 和 system prompt 的原子联动更新；
+- prompt template 与 `/skill:*` 在 AgentSession 输入边界展开，展开结果进入 hook、Provider 和持久化会话。
 
 ### Runtime、Provider、工具和服务
 
@@ -44,26 +47,27 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ### Agent 状态与事件
 
-- AgentSession 与 Agent 仍重复保存部分运行配置，尚未完全收敛到单一事实源。
-- `agent_settled` 发出时 session 仍处于 settling/busy。
-- Continue 的部分 queue drain 路径、非 assistant hook/event 顺序、branch-summary phase 和少数
-  产品事件尚未与原版完全一致。
+- Agent 已是 model/thinking/system prompt/active tools/messages 的运行时唯一事实源；AgentSession
+  只保留完整工具目录和构建 system prompt 所需的产品元数据。
+- `agent_settled` 回调观察到的是 idle session，并允许立即开始下一次 prompt。
+- 仍需通过跨实现用例继续验证 queue、abort、retry、compaction、branch-summary 和扩展回调的
+  完整组合顺序。
 
 ### 产品级 AgentSession
 
-- all-tools registry、active-tools 和 system prompt 联动重建不完整。
-- prompt template、skills/commands 和 input preprocessing 尚未统一进入 AgentSession。
+- extension commands 和 input hook 尚未进入统一 prompt preprocessing；template 与 skills 已接入。
 - 缺少 settings/resources/providers/tools/queue modes 的完整 reload。
-- 缺少 standalone bash、流式更新、abort 和 BashExecution session 记录。
+- 缺少 standalone bash 及其流式更新、abort 和 BashExecution session 记录。
+- custom message 的 `triggerTurn`/`deliverAs: nextTurn` 产品调度仍不完整。
 
 ### Provider、Model、Auth 和内置工具
 
-- production 仅支持两个 OpenAI API dialect；完整 provider catalog/composition 尚未实现。
-- models.json override、provider auth/status/login 和部分 stream options 尚未完整生效。
-- production 尚未注册原版独立的 `openai-codex` provider 和
-  `openai-codex-responses` adapter。
-- read image、edit normalization、glob/gitignore 等工具行为仍有差异。
-- SessionManager 对坏行、orphan 和文件大小使用更严格策略，尚未完成兼容决策验收。
+- production 已支持 OpenAI Responses、OpenAI Chat Completions、OpenAI Codex Responses
+  （含 WebSocket）和 Anthropic Messages；完整 provider catalog/composition 暂不在当前阶段处理。
+- provider auth/status/login、动态模型目录和原版全部 API dialect 仍未齐全。
+- read image、edit normalization、grep/find/ls、glob/gitignore 已有真实实现和 upstream fixture；
+  仍需更多跨平台与跨实现验收。
+- SessionManager 已容忍坏行和 orphan，并有 TypeScript golden；复杂损坏恢复仍需扩大共同语料。
 
 ### Runtime 与外部边界
 

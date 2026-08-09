@@ -115,7 +115,7 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 		t.Fatalf("payload input = %#v", request.payload["input"])
 	}
 	system, ok := input[0].(map[string]any)
-	if !ok || system["role"] != "system" || !strings.Contains(system["content"].(string), "<available_tools>") {
+	if !ok || system["role"] != "developer" || !strings.Contains(system["content"].(string), "Available tools:") {
 		t.Fatalf("system prompt = %#v", input[0])
 	}
 	user, ok := input[1].(map[string]any)
@@ -382,12 +382,13 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 			t.Fatalf("request %d parallel_tool_calls = %#v, want true", requestIndex+1, payload["parallel_tool_calls"])
 		}
 		tools, ok := payload["tools"].([]any)
-		if !ok || len(tools) != 7 {
+		if !ok || len(tools) != 4 {
 			t.Fatalf("request %d tools = %#v", requestIndex+1, payload["tools"])
 		}
+		wantToolNames := []string{"read", "bash", "edit", "write"}
 		for toolIndex, raw := range tools {
 			tool, ok := raw.(map[string]any)
-			if !ok || tool["strict"] != false {
+			if !ok || tool["name"] != wantToolNames[toolIndex] || tool["strict"] != false {
 				t.Fatalf("request %d tool %d strict = %#v, want false", requestIndex+1, toolIndex, raw)
 			}
 		}
@@ -396,7 +397,7 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 	if !ok || len(input) != 6 {
 		t.Fatalf("second request input = %#v", received[1]["input"])
 	}
-	if system, ok := input[0].(map[string]any); !ok || system["role"] != "system" || !strings.Contains(system["content"].(string), "<available_tools>") {
+	if system, ok := input[0].(map[string]any); !ok || system["role"] != "developer" || !strings.Contains(system["content"].(string), "Available tools:") {
 		t.Fatalf("second request system prompt = %#v", input[0])
 	}
 	wantReplay := []struct {
@@ -572,8 +573,8 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools, ok := snapshot.payload["tools"].([]any)
-	if !ok || len(tools) != 7 {
-		t.Fatalf("tools = %#v, want seven production definitions", snapshot.payload["tools"])
+	if !ok || len(tools) != 4 {
+		t.Fatalf("tools = %#v, want four default production definitions", snapshot.payload["tools"])
 	}
 	encodedPayload, err := json.Marshal(snapshot.payload)
 	if err != nil {
@@ -1223,31 +1224,35 @@ func TestRunProductionIgnoresUnknownModelsJSONFields(t *testing.T) {
 	}
 }
 
-func TestRunProductionResourceFailureOccursAfterSessionSelectionWithoutNetwork(t *testing.T) {
+func TestRunProductionNormalizesInvalidUTF8InGlobalSystemPrompt(t *testing.T) {
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()
-	// Invalid global data is a configuration error. A project copy would be
-	// ignored without a durable trust decision, but global data is already in
-	// the user's trusted agent directory and must not be silently omitted.
+	// Node's UTF-8 file reads replace malformed byte sequences. The Go resource
+	// loader must preserve that behavior instead of rejecting the prompt before
+	// the provider request.
 	if err := os.WriteFile(filepath.Join(agentDir, "SYSTEM.md"), []byte{0xff}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sessionParent := filepath.Join(workingDir, "must-not-exist")
-	doer := &countingProductionDoer{}
-	config := productionTestConfig(workingDir, agentDir, []string{"OPENAI_API_KEY=secret"})
-	config.OpenAIHTTPClient = doer
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	sessionParent := filepath.Join(workingDir, "session-parent")
+	config := productionTestConfig(workingDir, agentDir, nil)
 	var stdout, stderr bytes.Buffer
 	code := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(sessionParent, "session.jsonl"),
 	}, &stdout, &stderr)
-	if code != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "trusted prompt assets") {
+	if code != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != customModelWarning("gpt-test") {
 		t.Fatalf("RunProduction() = %d, %q, %q", code, stdout.String(), stderr.String())
 	}
-	if doer.calls.Load() != 0 {
-		t.Fatalf("resource service failure reached network")
+	input := capture.snapshot().payload["input"].([]any)
+	system := input[0].(map[string]any)["content"].(string)
+	if !strings.Contains(system, "�") {
+		t.Fatalf("normalized system prompt = %q", system)
 	}
 	if _, err := os.Stat(sessionParent); err != nil {
-		t.Fatalf("session-first startup did not prepare session tree: %v", err)
+		t.Fatalf("session startup did not prepare session tree: %v", err)
 	}
 }
 
@@ -1288,7 +1293,7 @@ func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
 	}
 }
 
-func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
+func TestRunProductionRejectsFutureTrustValueBeforeProviderAccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("existing persistent trust is deliberately fail-closed on Windows")
 	}
@@ -1308,25 +1313,19 @@ func TestRunProductionFutureTrustValueStopsParentAuthorization(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentDir, "trust.json"), []byte(trust), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "ok")
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	doer := &countingProductionDoer{}
+	writeModelsJSON(t, agentDir, "https://example.invalid/v1", stringPointer("fixture-key"), nil)
+	config := productionTestConfig(workingDir, agentDir, nil)
+	config.OpenAIHTTPClient = doer
 	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+	code := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai/gpt-test", "-p", "ordinary prompt", "--session", filepath.Join(workingDir, "result.jsonl"),
 	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
+	if code != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "must be true, false, or null") {
 		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
 	}
-	input := capture.snapshot().payload["input"].([]any)
-	system := input[0].(map[string]any)["content"].(string)
-	if strings.Contains(system, "project must stay unauthorized") {
-		t.Fatalf("future trust value inherited parent authorization: %q", system)
-	}
-	userContent := input[1].(map[string]any)["content"].([]any)
-	if userContent[0].(map[string]any)["text"] != "ordinary prompt" {
-		t.Fatalf("ordinary prompt changed: %#v", input[1])
+	if doer.calls.Load() != 0 {
+		t.Fatalf("invalid trust value reached provider")
 	}
 }
 
@@ -1369,6 +1368,51 @@ func TestRunProductionExpandsAdmittedPromptTemplateForRequest(t *testing.T) {
 	stored, ok := messages[0].(llm.UserContentMessage)
 	if !ok || len(stored.Content()) != 1 || stored.Content()[0].(llm.TextBlock).Text() != "review file.go all" {
 		t.Fatalf("durable expanded prompt = %#v", messages)
+	}
+}
+
+func TestRunProductionExpandsSkillInsideAgentSessionAndAdvertisesIt(t *testing.T) {
+	workingDir := t.TempDir()
+	agentDir := t.TempDir()
+	skillPath := filepath.Join(agentDir, "skills", "review", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillPath, []byte("---\nname: review\ndescription: Review a change\n---\nInspect the requested change."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capture := &capturedProductionRequest{}
+	server := newProductionTextServer(t, capture, "ok")
+	defer server.Close()
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
+	path := filepath.Join(workingDir, "skill.jsonl")
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+		"--model", "openai/gpt-test", "-p", "/skill:review file.go", "--session", path,
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
+		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
+	}
+	input := capture.snapshot().payload["input"].([]any)
+	system := input[0].(map[string]any)["content"].(string)
+	if !strings.Contains(system, `<available_skills>`) || !strings.Contains(system, "Review a change") {
+		t.Fatalf("system prompt skills = %q", system)
+	}
+	content := input[1].(map[string]any)["content"].([]any)
+	expanded := content[0].(map[string]any)["text"].(string)
+	if !strings.Contains(expanded, `<skill name="review" location="`+skillPath+`">`) ||
+		!strings.Contains(expanded, "Inspect the requested change.\n</skill>\n\nfile.go") {
+		t.Fatalf("provider skill prompt = %q", expanded)
+	}
+	transcript, err := session.Open(path, session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transcript.Close()
+	messages := transcript.Context().Messages()
+	stored, ok := messages[0].(llm.UserContentMessage)
+	if !ok || stored.Content()[0].(llm.TextBlock).Text() != expanded {
+		t.Fatalf("durable skill prompt = %#v", messages)
 	}
 }
 

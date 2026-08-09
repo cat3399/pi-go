@@ -317,14 +317,12 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 				// provider request it controls. In particular, a slow credential
 				// refresh cannot fail between turns before turn_start or strand
 				// already-drained queued user messages outside a complete turn.
-				if cause := context.Cause(ctx); cause != nil {
-					return result, cause
-				}
+				// Deliberately continue through this boundary after cancellation.
+				// Pi performs one final stream call with the aborted signal after an
+				// interrupted tool batch; that call produces the provider's canonical
+				// aborted assistant message and completes the turn transcript.
 				prepareContext := agentLoopProviderTurnContext{Turn: turn, Context: cloneAgentLoopContext(current)}
 				update, prepareErr := l.config.prepareProviderTurn(ctx, prepareContext)
-				if cause := context.Cause(ctx); cause != nil {
-					return result, cause
-				}
 				if prepareErr != nil {
 					return result, prepareErr
 				}
