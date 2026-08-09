@@ -228,6 +228,16 @@ type SessionQueueUpdateEvent struct {
 	SteeringMessages []llm.ConversationMessage
 	FollowUpMessages []llm.ConversationMessage
 }
+
+// QueueState is a copy-only view of AgentSession's pending product queues.
+// The text fields match coding-agent's public queue contract; the rich fields
+// retain Go's image/content messages without forcing a transport to lose them.
+type QueueState struct {
+	Steering         []string
+	FollowUp         []string
+	SteeringMessages []llm.ConversationMessage
+	FollowUpMessages []llm.ConversationMessage
+}
 type ThinkingLevelChangedEvent struct{ Level provider.ThinkingLevel }
 type AutoRetryStartEvent struct {
 	Attempt      uint32
@@ -1259,6 +1269,21 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	if event != nil {
 		s.emitToObservers(ctx, observers, event)
 	}
+}
+
+func (s *AgentSession) emitQueueUpdate(ctx context.Context, event SessionQueueUpdateEvent) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	observers := make([]SessionObserver, 0, len(s.observers))
+	for _, entry := range s.observers {
+		if entry.observer != nil {
+			observers = append(observers, entry.observer)
+		}
+	}
+	s.mu.RUnlock()
+	s.emitToObservers(ctx, observers, event)
 }
 
 func (s *AgentSession) emitAgentSettled(ctx context.Context, messages []agentmsg.Message) {
@@ -2998,6 +3023,21 @@ func (s *AgentSession) RichQueues() (steering, followUp []llm.ConversationMessag
 	}
 	return s.loop.RichQueues()
 }
+
+// PendingQueue returns both the original text projection and the lossless rich
+// messages currently waiting for steering or follow-up delivery.
+func (s *AgentSession) PendingQueue() QueueState {
+	if s == nil || s.loop == nil {
+		return QueueState{}
+	}
+	steering, followUp := s.RichQueues()
+	return newQueueState(steering, followUp)
+}
+
+func (s *AgentSession) PendingMessageCount() int {
+	queue := s.PendingQueue()
+	return len(queue.SteeringMessages) + len(queue.FollowUpMessages)
+}
 func (s *AgentSession) SteeringMode() QueueMode {
 	if s == nil || s.loop == nil {
 		return 0
@@ -3023,19 +3063,27 @@ func sessionQueueUpdateEventFromAgent(value QueueUpdateEvent) SessionQueueUpdate
 }
 
 func newSessionQueueUpdateEvent(steering, followUp []llm.ConversationMessage) SessionQueueUpdateEvent {
-	event := SessionQueueUpdateEvent{
+	queue := newQueueState(steering, followUp)
+	return SessionQueueUpdateEvent{
+		Steering: queue.Steering, FollowUp: queue.FollowUp,
+		SteeringMessages: queue.SteeringMessages, FollowUpMessages: queue.FollowUpMessages,
+	}
+}
+
+func newQueueState(steering, followUp []llm.ConversationMessage) QueueState {
+	queue := QueueState{
 		SteeringMessages: append([]llm.ConversationMessage(nil), steering...),
 		FollowUpMessages: append([]llm.ConversationMessage(nil), followUp...),
 		Steering:         make([]string, len(steering)),
 		FollowUp:         make([]string, len(followUp)),
 	}
 	for index, message := range steering {
-		event.Steering[index] = queuedMessageText(message)
+		queue.Steering[index] = queuedMessageText(message)
 	}
 	for index, message := range followUp {
-		event.FollowUp[index] = queuedMessageText(message)
+		queue.FollowUp[index] = queuedMessageText(message)
 	}
-	return event
+	return queue
 }
 
 func queuedMessageText(message llm.ConversationMessage) string {
@@ -3062,6 +3110,29 @@ func (s *AgentSession) ClearFollowUpQueue() {
 }
 func (s *AgentSession) ClearAllQueues() {
 	s.clearQueues(func() { s.loop.ClearAllQueues() })
+}
+
+// ClearQueue is coding-agent's complete queue recall operation. The Agent
+// snapshots and clears queued and already-staged delivery messages under one
+// lock, preventing a concurrent turn drain from losing a recalled message.
+// Like the original, this always emits an empty queue_update, including when
+// there was nothing to clear.
+func (s *AgentSession) ClearQueue() QueueState {
+	if s == nil || s.loop == nil {
+		return QueueState{}
+	}
+	s.lifecycleMu.Lock()
+	if s.closed || s.closing {
+		s.lifecycleMu.Unlock()
+		return QueueState{}
+	}
+	steeringMessages, followUpMessages := s.loop.clearAllQueues()
+	s.lifecycleMu.Unlock()
+	steering, _ := agentmsg.ConvertToLLM(steeringMessages)
+	followUp, _ := agentmsg.ConvertToLLM(followUpMessages)
+	cleared := newQueueState(steering, followUp)
+	s.emitQueueUpdate(context.Background(), newSessionQueueUpdateEvent(nil, nil))
+	return cleared
 }
 
 func (s *AgentSession) clearQueues(clear func()) {

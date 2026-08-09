@@ -1329,16 +1329,28 @@ func (a *Agent) HasQueuedMessages() bool {
 func (a *Agent) ClearSteeringQueue() { a.clearQueue(true) }
 func (a *Agent) ClearFollowUpQueue() { a.clearQueue(false) }
 func (a *Agent) ClearAllQueues() {
+	_, _ = a.clearAllQueues()
+}
+
+// clearAllQueues snapshots and clears both pending queues under one Agent
+// lock. queueDelivery is included because those messages have been selected
+// for a turn but have not reached message_start yet, so coding-agent still
+// exposes them as pending and clearQueue must be able to recall them.
+func (a *Agent) clearAllQueues() (steering, followUp []agentmsg.Message) {
 	if a == nil {
-		return
+		return nil, nil
 	}
 	a.mu.Lock()
+	steering, followUp = a.richQueueMessagesLocked()
+	steering, followUp = agentmsg.Clone(steering), agentmsg.Clone(followUp)
 	a.steeringQueue, a.followUpQueue = nil, nil
 	if a.active != nil {
 		a.active.queueDelivery = nil
 	}
 	a.mu.Unlock()
+	return steering, followUp
 }
+
 func (a *Agent) clearQueue(steering bool) {
 	if a == nil {
 		return

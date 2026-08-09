@@ -626,6 +626,53 @@ func TestAgentSessionQueueUpdatesOnlyForActualMutationAndDrain(t *testing.T) {
 	}
 }
 
+func TestAgentSessionClearQueueReturnsRecalledMessagesAndAlwaysPublishesEmptyQueue(t *testing.T) {
+	model, err := newTestModel("scripted", "scripted", "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: model,
+		ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Steer("steer one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.FollowUp("follow one"); err != nil {
+		t.Fatal(err)
+	}
+	if count := runtime.PendingMessageCount(); count != 2 {
+		t.Fatalf("pending message count = %d", count)
+	}
+	var updates []agent.SessionQueueUpdateEvent
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if update, ok := event.(agent.SessionQueueUpdateEvent); ok {
+			updates = append(updates, update)
+		}
+	})
+
+	cleared := runtime.ClearQueue()
+	if len(cleared.Steering) != 1 || cleared.Steering[0] != "steer one" ||
+		len(cleared.FollowUp) != 1 || cleared.FollowUp[0] != "follow one" ||
+		len(cleared.SteeringMessages) != 1 || len(cleared.FollowUpMessages) != 1 {
+		t.Fatalf("cleared queue = %#v", cleared)
+	}
+	if count := runtime.PendingMessageCount(); count != 0 {
+		t.Fatalf("pending message count after clear = %d", count)
+	}
+	if len(updates) != 1 || len(updates[0].Steering) != 0 || len(updates[0].FollowUp) != 0 {
+		t.Fatalf("clear queue updates = %#v", updates)
+	}
+
+	empty := runtime.ClearQueue()
+	if len(empty.Steering) != 0 || len(empty.FollowUp) != 0 || len(updates) != 2 {
+		t.Fatalf("empty clear = %#v, updates = %#v", empty, updates)
+	}
+}
+
 func TestAgentSessionEmitsQueueDrainBeforeQueuedMessageLifecycle(t *testing.T) {
 	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
