@@ -119,6 +119,12 @@ func (e *RegistryExecutor) Name() string { return "registry" }
 func (e *RegistryExecutor) Supports(name string) bool {
 	return e != nil && e.registry != nil && e.registry.Supports(name)
 }
+func (e *RegistryExecutor) PrepareArguments(name string, arguments any) (any, error) {
+	if e == nil || e.registry == nil {
+		return arguments, errors.New("tool registry is not configured")
+	}
+	return e.registry.PrepareArguments(name, arguments)
+}
 func (e *RegistryExecutor) ToolExecutionMode(name string) (ToolExecutionMode, bool) {
 	if e == nil || e.registry == nil {
 		return 0, false
@@ -140,7 +146,9 @@ func (e *RegistryExecutor) ExecuteNamed(ctx context.Context, name string, argume
 		return ToolOutput{Text: "Tool registry is not configured"}, errors.New("tool registry is not configured")
 	}
 	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
-	return ToolOutput{Text: result.Text, Details: result.Details}, err
+	return ToolOutput{
+		Text: result.Text, Content: append([]llm.ToolResultContentBlock(nil), result.Content...), Details: result.Details,
+	}, err
 }
 
 func NewFilesystemExecutor(registry *tool.Registry) (*FilesystemExecutor, error) {
@@ -156,6 +164,12 @@ func NewFilesystemExecutor(registry *tool.Registry) (*FilesystemExecutor, error)
 func (e *FilesystemExecutor) Name() string { return "filesystem" }
 func (e *FilesystemExecutor) Supports(name string) bool {
 	return e != nil && e.registry != nil && e.registry.Supports(name)
+}
+func (e *FilesystemExecutor) PrepareArguments(name string, arguments any) (any, error) {
+	if e == nil || e.registry == nil {
+		return arguments, errors.New("filesystem tools are not configured")
+	}
+	return e.registry.PrepareArguments(name, arguments)
 }
 func (e *FilesystemExecutor) ToolExecutionMode(name string) (ToolExecutionMode, bool) {
 	if e == nil || e.registry == nil {
@@ -178,7 +192,9 @@ func (e *FilesystemExecutor) ExecuteNamed(ctx context.Context, name string, argu
 		return ToolOutput{Text: "Filesystem tools are not configured"}, errors.New("filesystem tools are not configured")
 	}
 	result, err := e.registry.ExecuteJSON(ctx, name, arguments)
-	return ToolOutput{Text: result.Text, Details: result.Details}, err
+	return ToolOutput{
+		Text: result.Text, Content: append([]llm.ToolResultContentBlock(nil), result.Content...), Details: result.Details,
+	}, err
 }
 
 func normalizeToolOutcome(output ToolOutput, err error) (ToolOutput, error) {

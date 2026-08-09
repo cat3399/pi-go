@@ -587,6 +587,7 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 	tool := &fakeTool{name: "echo"}
 	var legacyTurns []uint32
 	var callbacks []agent.AgentLoopTurnContext
+	var runtime *agent.Agent
 	runtime, err := agent.New(agent.Config{
 		Provider: providerImpl, Model: firstModel, ThinkingLevel: provider.ThinkingLow,
 		SystemPrompt: "initial-system", Tool: tool, Tools: []provider.ToolDefinition{definition},
@@ -607,6 +608,9 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 			callbacks = append(callbacks, input)
 			if len(input.ToolResults) == 0 {
 				return nil, nil
+			}
+			if err := runtime.Steer("queued-after-prepare"); err != nil {
+				return nil, err
 			}
 			replacement := input.Context
 			replacement.SystemPrompt = "full-system"
@@ -641,7 +645,8 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 	second := requests[1]
 	secondMessages := second.Messages()
 	if !second.Model().Equal(nextModel) || second.ThinkingLevel() != provider.ThinkingHigh || second.SystemPrompt() != "full-system" ||
-		len(secondMessages) != 4 || messageText(t, secondMessages[len(secondMessages)-1]) != "full-context" {
+		len(secondMessages) != 5 || messageText(t, secondMessages[len(secondMessages)-2]) != "full-context" ||
+		messageText(t, secondMessages[len(secondMessages)-1]) != "queued-after-prepare" {
 		t.Fatalf("second request = model %q thinking %q system %q messages %#v", second.Model().ID(), second.ThinkingLevel(), second.SystemPrompt(), secondMessages)
 	}
 	if _, ok := callbacks[1].Message.(llm.AssistantTextMessage); !ok || len(callbacks[1].ToolResults) != 0 {

@@ -92,6 +92,11 @@ type AgentLoopTurnUpdate struct {
 
 type AgentLoopEventSink func(context.Context, AgentEvent) error
 type AgentLoopMessageSource func(context.Context) ([]agentmsg.Message, error)
+type agentLoopProviderTurnContext struct {
+	Turn    uint32
+	Context AgentLoopContext
+}
+type agentLoopPrepareProviderTurn func(context.Context, agentLoopProviderTurnContext) (*AgentLoopTurnUpdate, error)
 type AgentLoopPrepareNextTurn func(context.Context, AgentLoopTurnContext) (*AgentLoopTurnUpdate, error)
 type AgentLoopShouldStopAfterTurn func(context.Context, AgentLoopTurnContext) (bool, error)
 type AgentLoopConvertToLLM func(context.Context, []agentmsg.Message) ([]llm.ConversationMessage, error)
@@ -116,6 +121,11 @@ type AgentLoopConfig struct {
 	GetAPIKey           AgentLoopAPIKey
 	GetSteeringMessages AgentLoopMessageSource
 	GetFollowUpMessages AgentLoopMessageSource
+	// prepareProviderTurn refreshes request-scoped runtime values after this
+	// turn's turn_start and queued user delivery, immediately before invoking
+	// the provider. It is distinct from the upstream after-turn
+	// PrepareNextTurn contract below.
+	prepareProviderTurn agentLoopPrepareProviderTurn
 	PrepareNextTurn     AgentLoopPrepareNextTurn
 	ShouldStopAfterTurn AgentLoopShouldStopAfterTurn
 	Emit                AgentLoopEventSink
@@ -302,7 +312,37 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 				newMessages = append(newMessages, agentmsg.CloneOne(processed))
 			}
 			pending = nil
-
+			if l.config.prepareProviderTurn != nil {
+				// Turn-scoped configuration is resolved at the same boundary as the
+				// provider request it controls. In particular, a slow credential
+				// refresh cannot fail between turns before turn_start or strand
+				// already-drained queued user messages outside a complete turn.
+				if cause := context.Cause(ctx); cause != nil {
+					return result, cause
+				}
+				prepareContext := agentLoopProviderTurnContext{Turn: turn, Context: cloneAgentLoopContext(current)}
+				update, prepareErr := l.config.prepareProviderTurn(ctx, prepareContext)
+				if cause := context.Cause(ctx); cause != nil {
+					return result, cause
+				}
+				if prepareErr != nil {
+					return result, prepareErr
+				}
+				if update != nil {
+					if update.Context != nil {
+						current = cloneAgentLoopContext(*update.Context)
+					}
+					if update.Model != nil {
+						invocation.model = *update.Model
+					}
+					if update.ThinkingLevel != nil {
+						invocation.thinkingLevel = *update.ThinkingLevel
+					}
+					if update.Stream != nil {
+						invocation.stream = provider.CloneStreamOptions(*update.Stream)
+					}
+				}
+			}
 			terminal, err := l.streamAssistant(ctx, invocation, turn, &current)
 			if err != nil {
 				return result, err
@@ -513,6 +553,11 @@ func (l *AgentLoop) streamAssistant(ctx context.Context, invocation *agentLoopIn
 	if err != nil {
 		return nil, err
 	}
+	if !started {
+		if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: wrapped}); err != nil {
+			return nil, err
+		}
+	}
 	processed, err := l.processMessage(ctx, wrapped)
 	if err != nil {
 		return nil, err
@@ -526,11 +571,6 @@ func (l *AgentLoop) streamAssistant(ctx context.Context, invocation *agentLoopIn
 		return nil, fmt.Errorf("%w: processed assistant message is not terminal", ErrInvariant)
 	}
 	current.Messages = append(current.Messages, processed)
-	if !started {
-		if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: processed}); err != nil {
-			return nil, err
-		}
-	}
 	if err := l.emit(ctx, MessageEndEvent{RunID: l.config.RunID, Turn: turn, Message: processed, Model: request.Model()}); err != nil {
 		return nil, err
 	}
@@ -555,6 +595,11 @@ func (l *AgentLoop) emitProviderFailure(ctx context.Context, turn uint32, curren
 	if err != nil {
 		return nil, err
 	}
+	if !started {
+		if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: wrapped}); err != nil {
+			return nil, err
+		}
+	}
 	processed, err := l.processMessage(ctx, wrapped)
 	if err != nil {
 		return nil, err
@@ -568,11 +613,6 @@ func (l *AgentLoop) emitProviderFailure(ctx context.Context, turn uint32, curren
 		return nil, fmt.Errorf("%w: processed assistant message is not terminal", ErrInvariant)
 	}
 	current.Messages = append(current.Messages, processed)
-	if !started {
-		if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: processed}); err != nil {
-			return nil, err
-		}
-	}
 	if err := l.emit(ctx, MessageEndEvent{RunID: l.config.RunID, Turn: turn, Message: processed, Model: model}); err != nil {
 		return nil, err
 	}
@@ -941,11 +981,15 @@ func (l *AgentLoop) emitToolEnd(ctx context.Context, turn uint32, outcome loopTo
 	return l.emit(ctx, ToolExecutionEndEvent{RunID: l.config.RunID, Turn: turn, ToolCallID: outcome.call.ID(), ToolName: outcome.call.Name(), Arguments: outcome.call.ArgumentsJSON(), Result: cloneToolOutput(outcome.output), IsError: outcome.err != nil, Err: outcome.err})
 }
 func (l *AgentLoop) emitMessage(ctx context.Context, turn uint32, message agentmsg.Message) (agentmsg.Message, error) {
-	processed, err := l.processMessage(ctx, message)
-	if err != nil {
+	// The public start boundary observes the message as it entered the loop.
+	// coding-agent's message_end hook may replace the same-role finalized
+	// message afterwards; that replacement belongs to message_end, retained
+	// context, and the provider request that follows, not to message_start.
+	if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: agentmsg.CloneOne(message)}); err != nil {
 		return nil, err
 	}
-	if err := l.emit(ctx, MessageStartEvent{RunID: l.config.RunID, Turn: turn, Message: agentmsg.CloneOne(processed)}); err != nil {
+	processed, err := l.processMessage(ctx, message)
+	if err != nil {
 		return nil, err
 	}
 	if err := l.emit(ctx, MessageEndEvent{RunID: l.config.RunID, Turn: turn, Message: agentmsg.CloneOne(processed)}); err != nil {
@@ -1013,4 +1057,27 @@ func cloneAgentLoopContext(value AgentLoopContext) AgentLoopContext {
 }
 func cloneAgentLoopTurnContext(message llm.AssistantTerminal, results []agentmsg.Message, current AgentLoopContext, newMessages []agentmsg.Message) AgentLoopTurnContext {
 	return AgentLoopTurnContext{Message: message, ToolResults: agentmsg.Clone(results), Context: cloneAgentLoopContext(current), NewMessages: agentmsg.Clone(newMessages)}
+}
+func cloneAgentLoopTurnUpdate(value *AgentLoopTurnUpdate) *AgentLoopTurnUpdate {
+	if value == nil {
+		return nil
+	}
+	cloned := &AgentLoopTurnUpdate{}
+	if value.Context != nil {
+		context := cloneAgentLoopContext(*value.Context)
+		cloned.Context = &context
+	}
+	if value.Model != nil {
+		model := *value.Model
+		cloned.Model = &model
+	}
+	if value.ThinkingLevel != nil {
+		thinking := *value.ThinkingLevel
+		cloned.ThinkingLevel = &thinking
+	}
+	if value.Stream != nil {
+		stream := provider.CloneStreamOptions(*value.Stream)
+		cloned.Stream = &stream
+	}
+	return cloned
 }

@@ -39,6 +39,7 @@ var (
 	ErrModelAccess              = errors.New("model access unavailable")
 	ErrCompactionUnavailable    = errors.New("agent compaction is not configured")
 	ErrBranchSummaryUnavailable = errors.New("agent branch summarization is not configured")
+	ErrInvalidExtensionResult   = errors.New("invalid extension hook result")
 	ErrRetryPolicy              = provider.ErrInvalidRetryPolicy
 	// ErrUnsupportedToolTurn is retained for source compatibility with the
 	// v0.1 internal implementation; v0.2 no longer returns it for batches.
@@ -119,12 +120,11 @@ type AfterToolCallContext struct {
 	IsError   bool
 }
 type AfterToolCallResult struct {
-	Content        *[]llm.ToolResultContentBlock
-	Details        *any
-	IsError        *bool
-	Usage          *llm.Usage
-	AddedToolNames *[]string
-	Terminate      *bool
+	Content   *[]llm.ToolResultContentBlock
+	Details   *any
+	IsError   *bool
+	Usage     *llm.Usage
+	Terminate *bool
 }
 type BeforeToolCallHook func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
 type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
@@ -185,6 +185,14 @@ type NamedToolExecutor interface {
 	ExecuteNamed(context.Context, string, []byte, func(ToolUpdate)) (ToolOutput, error)
 }
 
+// NamedToolArgumentPreparer is the optional execution-port extension used by
+// tools whose provider arguments need a compatibility transform before JSON
+// Schema validation. Preparation is selected by the advertised tool name so a
+// registry remains the single owner of both the schema and its transform.
+type NamedToolArgumentPreparer interface {
+	PrepareArguments(string, any) (any, error)
+}
+
 // ToolExecutionOverride is optionally implemented by a registry adapter. A
 // sequential tool makes its entire assistant batch sequential: source-order
 // dependencies must never race merely because neighbouring tools are safe.
@@ -225,23 +233,18 @@ type Config struct {
 	// fields for every provider request. AgentSession uses this narrower legacy
 	// snapshot seam for its dynamic product configuration.
 	PrepareTurn PrepareTurn
-	// PrepareNextTurn is the stateful Agent's full after-turn boundary. When
-	// combined with PrepareTurn, its non-nil fields override the legacy
-	// snapshot update for the same turn.
+	// PrepareNextTurn is the stateful Agent's full upstream after-turn boundary.
+	// It runs after turn_end even when no provider request follows, and its
+	// context update is visible to ShouldStopAfterTurn. When combined with
+	// PrepareTurn, its non-nil fields override the legacy snapshot update for an
+	// actual following provider request.
 	PrepareNextTurn AgentLoopPrepareNextTurn
 	Now             func() time.Time
 }
 
 type runtimeConfig struct {
 	provider              provider.Provider
-	model                 provider.Model
-	hasModel              bool
-	thinkingLevel         provider.ThinkingLevel
-	systemPrompt          string
 	stream                provider.StreamOptions
-	tool                  ToolExecutor
-	toolName              string
-	tools                 []provider.ToolDefinition
 	beforeToolCall        BeforeToolCallHook
 	afterToolCall         AfterToolCallHook
 	messageEnd            MessageEndHook
@@ -255,6 +258,20 @@ type runtimeConfig struct {
 	getAPIKey             AgentLoopAPIKey
 	steeringMode          QueueMode
 	followUpMode          QueueMode
+}
+
+// validatedConfig exists only during construction. Keeping bootstrap state
+// separate from runtimeConfig prevents Agent.config from retaining stale
+// model/prompt/tool copies after Agent becomes their single mutable owner.
+type validatedConfig struct {
+	policy        runtimeConfig
+	model         provider.Model
+	hasModel      bool
+	thinkingLevel provider.ThinkingLevel
+	systemPrompt  string
+	tool          ToolExecutor
+	toolName      string
+	tools         []provider.ToolDefinition
 }
 
 // ToolExecutionMode controls one assistant message's complete tool batch.
@@ -331,9 +348,9 @@ func modelPresent(value provider.Model) bool {
 	return value.Provider() != "" || value.API() != "" || value.ID() != ""
 }
 
-func validateConfig(config Config) (runtimeConfig, error) {
+func validateConfig(config Config) (validatedConfig, error) {
 	if isNilInterface(config.Provider) {
-		return runtimeConfig{}, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
+		return validatedConfig{}, fmt.Errorf("%w: provider is required", ErrInvalidConfig)
 	}
 	hasModel := modelPresent(config.Model)
 	if hasModel {
@@ -341,7 +358,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 			Tools:                  config.Tools,
 			AllowParallelToolCalls: false,
 		}); err != nil {
-			return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+			return validatedConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 		}
 	}
 
@@ -353,10 +370,10 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		var err error
 		toolName, err = configuredToolName(configuredTool)
 		if err != nil {
-			return runtimeConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
+			return validatedConfig{}, fmt.Errorf("%w: %w", ErrInvalidConfig, err)
 		}
 		if !utf8.ValidString(toolName) || strings.TrimSpace(toolName) == "" {
-			return runtimeConfig{}, fmt.Errorf("%w: tool name must be non-empty valid UTF-8", ErrInvalidConfig)
+			return validatedConfig{}, fmt.Errorf("%w: tool name must be non-empty valid UTF-8", ErrInvalidConfig)
 		}
 	}
 
@@ -365,7 +382,7 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		toolExecution = ToolExecutionParallel
 	}
 	if toolExecution != ToolExecutionParallel && toolExecution != ToolExecutionSequential {
-		return runtimeConfig{}, fmt.Errorf("%w: invalid tool execution mode", ErrInvalidConfig)
+		return validatedConfig{}, fmt.Errorf("%w: invalid tool execution mode", ErrInvalidConfig)
 	}
 	steeringMode := config.SteeringMode
 	if steeringMode == 0 {
@@ -377,14 +394,14 @@ func validateConfig(config Config) (runtimeConfig, error) {
 	}
 	if (steeringMode != QueueOneAtATime && steeringMode != QueueAll) ||
 		(followUpMode != QueueOneAtATime && followUpMode != QueueAll) {
-		return runtimeConfig{}, fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
+		return validatedConfig{}, fmt.Errorf("%w: invalid queue mode", ErrInvalidConfig)
 	}
 	thinkingLevel := config.ThinkingLevel
 	if thinkingLevel == "" {
 		thinkingLevel = provider.ThinkingOff
 	}
 	if !thinkingLevel.Valid() {
-		return runtimeConfig{}, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, thinkingLevel)
+		return validatedConfig{}, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, thinkingLevel)
 	}
 	if !hasModel {
 		thinkingLevel = provider.ThinkingOff
@@ -394,29 +411,19 @@ func validateConfig(config Config) (runtimeConfig, error) {
 		now = time.Now
 	}
 
-	return runtimeConfig{
-		provider:              config.Provider,
-		model:                 config.Model,
-		hasModel:              hasModel,
-		thinkingLevel:         thinkingLevel,
-		systemPrompt:          config.SystemPrompt,
-		stream:                provider.CloneStreamOptions(config.Stream),
-		tool:                  configuredTool,
-		toolName:              toolName,
-		tools:                 append([]provider.ToolDefinition(nil), config.Tools...),
-		beforeToolCall:        config.BeforeToolCall,
-		afterToolCall:         config.AfterToolCall,
-		messageEnd:            config.MessageEnd,
-		prepareTurn:           config.PrepareTurn,
-		prepareNextTurn:       config.PrepareNextTurn,
-		now:                   now,
-		toolExecution:         toolExecution,
-		transformContext:      config.TransformContext,
-		transformAgentContext: config.TransformAgentContext,
-		convertToLLM:          config.ConvertToLLM,
-		getAPIKey:             config.GetAPIKey,
-		steeringMode:          steeringMode,
-		followUpMode:          followUpMode,
+	return validatedConfig{
+		policy: runtimeConfig{
+			provider: config.Provider, stream: provider.CloneStreamOptions(config.Stream),
+			beforeToolCall: config.BeforeToolCall, afterToolCall: config.AfterToolCall,
+			messageEnd: config.MessageEnd, prepareTurn: config.PrepareTurn, prepareNextTurn: config.PrepareNextTurn,
+			now: now, toolExecution: toolExecution,
+			transformContext: config.TransformContext, transformAgentContext: config.TransformAgentContext,
+			convertToLLM: config.ConvertToLLM, getAPIKey: config.GetAPIKey,
+			steeringMode: steeringMode, followUpMode: followUpMode,
+		},
+		model: config.Model, hasModel: hasModel, thinkingLevel: thinkingLevel,
+		systemPrompt: config.SystemPrompt, tool: configuredTool, toolName: toolName,
+		tools: append([]provider.ToolDefinition(nil), config.Tools...),
 	}, nil
 }
 
@@ -640,8 +647,10 @@ type ToolExecutionEndEvent struct {
 	Err        error
 }
 type QueueUpdateEvent struct {
-	RunID uint64
-	Turn  uint32
+	RunID            uint64
+	Turn             uint32
+	SteeringMessages []agentmsg.Message
+	FollowUpMessages []agentmsg.Message
 }
 type CompactionStartEvent struct {
 	RunID     uint64
@@ -816,7 +825,11 @@ func cloneAgentEvent(event AgentEvent) AgentEvent {
 
 func cloneAgentControlEvent(event AgentControlEvent) AgentControlEvent {
 	switch value := event.(type) {
-	case QueueUpdateEvent, CompactionStartEvent,
+	case QueueUpdateEvent:
+		value.SteeringMessages = agentmsg.Clone(value.SteeringMessages)
+		value.FollowUpMessages = agentmsg.Clone(value.FollowUpMessages)
+		return value
+	case CompactionStartEvent,
 		ProviderRetryScheduledEvent, ProviderRetryAttemptEvent, ProviderRetryFinishedEvent,
 		SummarizationRetryScheduledEvent, SummarizationRetryAttemptEvent, SummarizationRetryFinishedEvent:
 		return value

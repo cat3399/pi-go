@@ -8,6 +8,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
@@ -158,6 +159,17 @@ type MessageHookResult struct {
 }
 type MessageHook func(context.Context, MessageHookEvent) (MessageHookResult, error)
 
+// ExtensionErrorEvent is the transport-neutral projection of pi's extension
+// runner error report. ExtensionPath belongs to a future loader; HandlerIndex
+// still identifies the failing callback deterministically within this host's
+// ordered hook chain.
+type ExtensionErrorEvent struct {
+	Event        string
+	HandlerIndex int
+	Cause        error
+}
+type ExtensionErrorHook func(context.Context, ExtensionErrorEvent)
+
 type ToolExecutionLifecycleType string
 
 const (
@@ -203,26 +215,71 @@ type ThinkingLevelSelectEvent struct {
 type ThinkingLevelSelectHook func(context.Context, ThinkingLevelSelectEvent) error
 
 func (s *AgentSession) messageEndTransform(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
-	if s == nil || s.hooks.Message == nil {
+	if s == nil {
 		return nil, nil
 	}
-	// Provider streaming already emitted assistant message_start. Initial user,
-	// injected custom, and tool-result messages reach their first observable
-	// boundary here, immediately before message_end and persistence.
-	if message.Role() != agentmsg.RoleAssistant || s.beginAssistantHookMessage() {
-		_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: MessageStartHookEvent, Message: agentmsg.CloneOne(message)})
+	// message_start is dispatched from the real low-level start event. This
+	// transform runs only after Agent state contains the finalized message and
+	// is therefore the faithful message_end replacement boundary.
+	current := agentmsg.CloneOne(message)
+	modified := false
+	for index, hook := range s.messageHooks() {
+		result, err := callMessageHook(hook, ctx, MessageHookEvent{Type: MessageEndHookEvent, Message: agentmsg.CloneOne(current)})
+		if err != nil {
+			s.reportExtensionError(ctx, string(MessageEndHookEvent), index, err)
+			continue
+		}
+		if result.Cancel.Cancelled() {
+			s.reportExtensionError(ctx, string(MessageEndHookEvent), index, fmt.Errorf("%w: message_end does not support cancellation", ErrInvalidExtensionResult))
+			continue
+		}
+		if result.Message == nil {
+			continue
+		}
+		if isNilInterface(result.Message) || result.Message.Role() != current.Role() || isAssistantPartialMessage(result.Message) {
+			s.reportExtensionError(ctx, string(MessageEndHookEvent), index, fmt.Errorf("%w: message_end handlers must return a finalized message with the same role", ErrInvalidExtensionResult))
+			continue
+		}
+		current = agentmsg.CloneOne(result.Message)
+		modified = true
 	}
-	result, err := s.hooks.Message(ctx, MessageHookEvent{Type: MessageEndHookEvent, Message: agentmsg.CloneOne(message)})
-	if err != nil {
-		return nil, err
+	if !modified {
+		return nil, nil
 	}
-	if result.Cancel.Cancelled() {
-		return nil, ErrAgentAborted
+	return current, nil
+}
+
+func (s *AgentSession) messageHooks() []MessageHook {
+	if s == nil {
+		return nil
 	}
-	if result.Message != nil && result.Message.Role() != message.Role() {
-		return agentmsg.CloneOne(message), nil
+	capacity := len(s.hooks.MessageHandlers)
+	if s.hooks.Message != nil {
+		capacity++
 	}
-	return agentmsg.CloneOne(result.Message), nil
+	result := make([]MessageHook, 0, capacity)
+	if s.hooks.Message != nil {
+		result = append(result, s.hooks.Message)
+	}
+	result = append(result, s.hooks.MessageHandlers...)
+	return result
+}
+
+func callMessageHook(hook MessageHook, ctx context.Context, event MessageHookEvent) (result MessageHookResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("message hook panicked: %s", safeValueText(recovered))
+		}
+	}()
+	return hook(ctx, event)
+}
+
+func (s *AgentSession) reportExtensionError(ctx context.Context, event string, handlerIndex int, cause error) {
+	if s == nil || s.hooks.ExtensionError == nil || cause == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	s.hooks.ExtensionError(ctx, ExtensionErrorEvent{Event: event, HandlerIndex: handlerIndex, Cause: cause})
 }
 
 type SessionStartHookEvent struct {
@@ -366,20 +423,29 @@ type Hooks struct {
 	Agent                 AgentLifecycleHook
 	Turn                  TurnLifecycleHook
 	Message               MessageHook
-	ToolExecution         ToolExecutionLifecycleHook
-	ModelSelect           ModelSelectHook
-	ThinkingLevelSelect   ThinkingLevelSelectHook
-	ToolCall              BeforeToolCallHook
-	ToolResult            AfterToolCallHook
-	SessionStart          SessionStartHook
-	SessionInfoChanged    SessionInfoChangedHook
-	SessionShutdown       SessionShutdownHook
-	SessionBeforeCompact  SessionBeforeCompactHook
-	SessionCompact        SessionCompactHook
-	SessionBeforeTree     SessionBeforeTreeHook
-	SessionTree           SessionTreeHook
-	SessionBeforeSwitch   SessionBeforeSwitchHook
-	SessionBeforeFork     SessionBeforeForkHook
+	// MessageHandlers follow Message in registration order. The slice models
+	// the original runner's multiple callbacks while Message preserves the
+	// existing single-host adapter surface.
+	MessageHandlers     []MessageHook
+	ExtensionError      ExtensionErrorHook
+	ToolExecution       ToolExecutionLifecycleHook
+	ModelSelect         ModelSelectHook
+	ThinkingLevelSelect ThinkingLevelSelectHook
+	ToolCall            BeforeToolCallHook
+	ToolResult          AfterToolCallHook
+	// ToolResultHandlers follow ToolResult in registration order. Each handler
+	// is isolated like the upstream extension runner: failures are reported and
+	// later handlers still receive the last valid result snapshot.
+	ToolResultHandlers   []AfterToolCallHook
+	SessionStart         SessionStartHook
+	SessionInfoChanged   SessionInfoChangedHook
+	SessionShutdown      SessionShutdownHook
+	SessionBeforeCompact SessionBeforeCompactHook
+	SessionCompact       SessionCompactHook
+	SessionBeforeTree    SessionBeforeTreeHook
+	SessionTree          SessionTreeHook
+	SessionBeforeSwitch  SessionBeforeSwitchHook
+	SessionBeforeFork    SessionBeforeForkHook
 }
 
 func cloneBuildSystemPromptOptions(value BuildSystemPromptOptions) BuildSystemPromptOptions {
@@ -489,14 +555,63 @@ func composeAfterToolHooks(first, second AfterToolCallHook) AfterToolCallHook {
 		if b.Usage == nil {
 			b.Usage = a.Usage
 		}
-		if b.AddedToolNames == nil {
-			b.AddedToolNames = a.AddedToolNames
-		}
 		if b.Terminate == nil {
 			b.Terminate = a.Terminate
 		}
 		return b, nil
 	}
+}
+
+func (s *AgentSession) toolResultTransform() AfterToolCallHook {
+	hooks := make([]AfterToolCallHook, 0, 1+len(s.hooks.ToolResultHandlers))
+	if s.hooks.ToolResult != nil {
+		hooks = append(hooks, s.hooks.ToolResult)
+	}
+	hooks = append(hooks, s.hooks.ToolResultHandlers...)
+	if len(hooks) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, event AfterToolCallContext) (AfterToolCallResult, error) {
+		combined := AfterToolCallResult{}
+		for index, hook := range hooks {
+			patch, err := callAfterToolCallHook(hook, ctx, event)
+			if err != nil {
+				s.reportExtensionError(ctx, "tool_result", index, err)
+				continue
+			}
+			event = applyAfterToolPatch(event, patch)
+			combined = mergeAfterToolPatch(combined, patch)
+		}
+		return combined, nil
+	}
+}
+
+func callAfterToolCallHook(hook AfterToolCallHook, ctx context.Context, event AfterToolCallContext) (result AfterToolCallResult, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("tool_result hook panicked: %s", safeValueText(recovered))
+		}
+	}()
+	return hook(ctx, event)
+}
+
+func mergeAfterToolPatch(current, next AfterToolCallResult) AfterToolCallResult {
+	if next.Content != nil {
+		current.Content = next.Content
+	}
+	if next.Details != nil {
+		current.Details = next.Details
+	}
+	if next.IsError != nil {
+		current.IsError = next.IsError
+	}
+	if next.Usage != nil {
+		current.Usage = next.Usage
+	}
+	if next.Terminate != nil {
+		current.Terminate = next.Terminate
+	}
+	return current
 }
 
 func applyAfterToolPatch(event AfterToolCallContext, patch AfterToolCallResult) AfterToolCallContext {
@@ -510,9 +625,6 @@ func applyAfterToolPatch(event AfterToolCallContext, patch AfterToolCallResult) 
 	if patch.Usage != nil {
 		usage := *patch.Usage
 		event.Result.Usage = &usage
-	}
-	if patch.AddedToolNames != nil {
-		event.Result.AddedToolNames = append([]string(nil), (*patch.AddedToolNames)...)
 	}
 	if patch.Terminate != nil {
 		event.Result.Terminate = *patch.Terminate

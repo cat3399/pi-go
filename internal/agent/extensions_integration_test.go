@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,8 +172,12 @@ func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T)
 	tool := &fakeTool{name: "identity", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 		return agent.ToolOutput{Text: "executed"}, nil
 	}}
+	providerImpl := newScriptedProvider(t,
+		mustToolUseTerminal(t, "call", "identity", []byte(`{}`)),
+		mustTextTerminal(t, "continued after repaired history"),
+	)
 	runtime, err := agent.NewSession(agent.SessionConfig{
-		Provider:       newScriptedProvider(t, mustToolUseTerminal(t, "call", "identity", []byte(`{}`))),
+		Provider:       providerImpl,
 		SessionManager: transcript, Model: model, Tool: tool, Tools: []provider.ToolDefinition{definition},
 		Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
 			if event.Type != agent.MessageEndHookEvent || event.Message.Role() != agentmsg.RoleToolResult {
@@ -190,13 +195,23 @@ func TestMessageEndSameRoleToolResultIdentityReplacementPropagates(t *testing.T)
 		t.Fatal(err)
 	}
 	result, err := runtime.Run(context.Background(), "go")
-	terminal, ok := result.Terminal()
-	failure, failed := terminal.(llm.AssistantFailureMessage)
-	if err != nil || !ok || !failed || !errors.Is(failure.Failure().Cause(), provider.ErrInvalidRequest) {
-		t.Fatalf("Run terminal=%T cause=%v error=%v, want downstream invalid request", terminal, failure.Failure().Cause(), err)
+	if err != nil || !result.Succeeded() || providerImpl.CallCount() != 2 {
+		t.Fatalf("Run = (%#v, %v), provider calls=%d", result, err, providerImpl.CallCount())
 	}
 	if tool.CallCount() != 1 {
 		t.Fatalf("tool calls = %d", tool.CallCount())
+	}
+	var reachedProvider bool
+	for _, message := range providerImpl.Requests()[1].Messages() {
+		switch value := message.(type) {
+		case llm.ToolResultMessage:
+			reachedProvider = reachedProvider || value.ToolCallID() == "different-call"
+		case llm.ToolResultContentMessage:
+			reachedProvider = reachedProvider || value.ToolCallID() == "different-call"
+		}
+	}
+	if !reachedProvider {
+		t.Fatalf("same-role replacement did not reach next provider request: %#v", providerImpl.Requests()[1].Messages())
 	}
 	messages := transcript.BuildContext().Messages()
 	toolResult, propagated := messages[2].(llm.ToolResultMessage)
@@ -230,6 +245,94 @@ func TestSessionMessageEndIgnoresRoleMismatch(t *testing.T) {
 	durableMessage := transcript.BuildContext().Messages()[0]
 	if requestMessage.Role() != llm.RoleUser || durableMessage.Role() != llm.RoleUser || messageText(t, durableMessage) != "original" {
 		t.Fatalf("role mismatch propagated request=%#v durable=%#v", requestMessage, durableMessage)
+	}
+}
+
+func TestSessionMessageEndChainReportsErrorsAndContinuesCurrentMessage(t *testing.T) {
+	providerImpl := newScriptedProvider(t, mustTextTerminal(t, "original"))
+	transcript := newSessionManager(t)
+	hookErr := errors.New("first extension failed")
+	var reports []agent.ExtensionErrorEvent
+	replaceAssistant := func(t *testing.T, message agentmsg.Message, text string) agentmsg.Message {
+		t.Helper()
+		original := message.(agentmsg.LLM).Conversation().(llm.AssistantTextMessage)
+		replacement, err := llm.NewAssistantTextMessage(
+			[]llm.TextBlock{mustTextBlock(t, text)}, original.FinishReason(), original.Usage(), original.Timestamp(), original.AssistantProvenance(),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrapped, err := agentmsg.NewLLM(replacement)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wrapped
+	}
+	assistantEnd := func(event agent.MessageHookEvent) bool {
+		return event.Type == agent.MessageEndHookEvent && event.Message.Role() == agentmsg.RoleAssistant
+	}
+	assistantText := func(t *testing.T, message agentmsg.Message) string {
+		t.Helper()
+		return message.(agentmsg.LLM).Conversation().(llm.AssistantTextMessage).Content()[0].Text()
+	}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: providerImpl, SessionManager: transcript, Model: sessionTestModel(t),
+		Hooks: agent.Hooks{
+			MessageHandlers: []agent.MessageHook{
+				func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+					if !assistantEnd(event) {
+						return agent.MessageHookResult{}, nil
+					}
+					return agent.MessageHookResult{Message: replaceAssistant(t, event.Message, "first replacement")}, nil
+				},
+				func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+					if !assistantEnd(event) {
+						return agent.MessageHookResult{}, nil
+					}
+					if got := assistantText(t, event.Message); got != "first replacement" {
+						t.Fatalf("handler after replacement saw %q", got)
+					}
+					return agent.MessageHookResult{}, hookErr
+				},
+				func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+					if !assistantEnd(event) {
+						return agent.MessageHookResult{}, nil
+					}
+					wrong, createErr := llm.NewUserTextMessage("wrong role", event.Message.Timestamp())
+					if createErr != nil {
+						return agent.MessageHookResult{}, createErr
+					}
+					wrapped, createErr := agentmsg.NewLLM(wrong)
+					return agent.MessageHookResult{Message: wrapped}, createErr
+				},
+				func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+					if !assistantEnd(event) {
+						return agent.MessageHookResult{}, nil
+					}
+					if got := assistantText(t, event.Message); got != "first replacement" {
+						t.Fatalf("invalid replacement changed current message to %q", got)
+					}
+					return agent.MessageHookResult{Message: replaceAssistant(t, event.Message, "final replacement")}, nil
+				},
+			},
+			ExtensionError: func(_ context.Context, event agent.ExtensionErrorEvent) { reports = append(reports, event) },
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runtime.Run(context.Background(), "go")
+	terminal, ok := result.Terminal()
+	text, textOK := terminal.(llm.AssistantTextMessage)
+	if err != nil || !ok || !textOK || text.Content()[0].Text() != "final replacement" {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	if len(reports) != 2 || reports[0].HandlerIndex != 1 || !errors.Is(reports[0].Cause, hookErr) ||
+		reports[1].HandlerIndex != 2 || !errors.Is(reports[1].Cause, agent.ErrInvalidExtensionResult) {
+		t.Fatalf("extension reports = %#v", reports)
+	}
+	if got := transcript.BuildContext().AgentMessages(); len(got) != 2 || assistantText(t, got[1]) != "final replacement" {
+		t.Fatalf("durable messages = %#v", got)
 	}
 }
 
@@ -280,25 +383,39 @@ func TestSessionSyntheticFailureUsesMessageEndReplacementAndErrorBoundary(t *tes
 		}
 	})
 
-	t.Run("error", func(t *testing.T) {
+	t.Run("error is reported and original failure is retained", func(t *testing.T) {
 		hookErr := errors.New("synthetic message hook failed")
+		var reports []agent.ExtensionErrorEvent
+		transcript := newSessionManager(t)
 		runtime, err := agent.NewSession(agent.SessionConfig{
-			Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+			Provider: newScriptedProvider(t), SessionManager: transcript, Model: sessionTestModel(t),
 			TransformContext: func(context.Context, []llm.ConversationMessage) ([]llm.ConversationMessage, error) {
 				return nil, transformErr
 			},
-			Hooks: agent.Hooks{Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
-				if event.Type == agent.MessageEndHookEvent && event.Message.Role() == agentmsg.RoleAssistant {
-					return agent.MessageHookResult{}, hookErr
-				}
-				return agent.MessageHookResult{}, nil
-			}},
+			Hooks: agent.Hooks{
+				Message: func(_ context.Context, event agent.MessageHookEvent) (agent.MessageHookResult, error) {
+					if event.Type == agent.MessageEndHookEvent && event.Message.Role() == agentmsg.RoleAssistant {
+						return agent.MessageHookResult{}, hookErr
+					}
+					return agent.MessageHookResult{}, nil
+				},
+				ExtensionError: func(_ context.Context, event agent.ExtensionErrorEvent) { reports = append(reports, event) },
+			},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := runtime.Run(context.Background(), "go"); !errors.Is(err, hookErr) {
-			t.Fatalf("Run error = %v", err)
+		result, err := runtime.Run(context.Background(), "go")
+		terminal, ok := result.Terminal()
+		failure, failureOK := terminal.(llm.AssistantFailureMessage)
+		if err != nil || !ok || !failureOK || !errors.Is(failure.Failure().Cause(), agent.ErrContextTransform) {
+			t.Fatalf("Run = (%#v, %v)", result, err)
+		}
+		if len(reports) != 1 || reports[0].Event != string(agent.MessageEndHookEvent) || !errors.Is(reports[0].Cause, hookErr) {
+			t.Fatalf("extension reports = %#v", reports)
+		}
+		if got := transcript.BuildContext().Messages(); len(got) != 2 {
+			t.Fatalf("original failure not persisted = %#v", got)
 		}
 		if runtime.State().Active.Phase() != agent.PhaseIdle {
 			t.Fatalf("hook error left phase %s", runtime.State().Active.Phase())
@@ -397,7 +514,7 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 		if string(arguments) != `{"step":3}` {
 			t.Fatalf("tool arguments = %s", arguments)
 		}
-		return agent.ToolOutput{Text: "tool"}, nil
+		return agent.ToolOutput{Text: "tool", AddedToolNames: []string{"original-added"}}, nil
 	}}
 	step2 := json.RawMessage(`{"step":2}`)
 	step3 := json.RawMessage(`{"step":3}`)
@@ -415,7 +532,7 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 			return agent.BeforeToolCallResult{Arguments: &step2}, nil
 		},
 		AfterToolCall: func(_ context.Context, event agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
-			if event.Result.Text != "tool" || event.IsError {
+			if event.Result.Text != "tool" || event.IsError || !reflect.DeepEqual(event.Result.AddedToolNames, []string{"original-added"}) {
 				t.Fatalf("base after event = %#v", event)
 			}
 			return agent.AfterToolCallResult{Content: &firstText, IsError: &markedError}, nil
@@ -428,7 +545,8 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 				return agent.BeforeToolCallResult{Arguments: &step3}, nil
 			},
 			ToolResult: func(_ context.Context, event agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
-				if !event.IsError || len(event.Result.Content) != 1 || event.Result.Content[0].(llm.TextBlock).Text() != "first" {
+				if !event.IsError || len(event.Result.Content) != 1 || event.Result.Content[0].(llm.TextBlock).Text() != "first" ||
+					!reflect.DeepEqual(event.Result.AddedToolNames, []string{"original-added"}) {
 					t.Fatalf("chained after event = %#v", event)
 				}
 				return agent.AfterToolCallResult{Content: &secondText, IsError: &clearedError}, nil
@@ -447,7 +565,8 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 	}
 	messages := transcript.BuildContext().Messages()
 	resultMessage, ok := messages[2].(llm.ToolResultMessage)
-	if !ok || resultMessage.IsError() || len(resultMessage.Content()) != 1 || resultMessage.Content()[0].Text() != "second" {
+	if !ok || resultMessage.IsError() || len(resultMessage.Content()) != 1 || resultMessage.Content()[0].Text() != "second" ||
+		!reflect.DeepEqual(resultMessage.AddedToolNames(), []string{"original-added"}) {
 		t.Fatalf("durable tool result = %#v", messages[2])
 	}
 	requests := providerImpl.Requests()
@@ -460,6 +579,160 @@ func TestToolHooksChainMutationsBeforeExecutionAndPersistence(t *testing.T) {
 		// The assistant source message remains immutable; only execution and the
 		// associated result use the hook-mutated arguments.
 		t.Fatalf("assistant source arguments changed = %s", sourceCall.ArgumentsJSON())
+	}
+}
+
+func TestToolResultExtensionFailuresAreReportedAndDoNotReplaceSuccess(t *testing.T) {
+	for _, panicHook := range []bool{false, true} {
+		name := "error"
+		if panicHook {
+			name = "panic"
+		}
+		t.Run(name, func(t *testing.T) {
+			toolContentText := func(content []llm.ToolResultContentBlock) string {
+				var text strings.Builder
+				for _, block := range content {
+					if value, ok := block.(llm.TextBlock); ok {
+						text.WriteString(value.Text())
+					}
+				}
+				return text.String()
+			}
+			model, _ := newTestModel("scripted", "scripted", "model")
+			definition, err := provider.NewToolDefinition("stable", "fixture", false, []byte(`{"type":"object"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			providerImpl := newScriptedProvider(t,
+				mustToolUseTerminal(t, "call", "stable", []byte(`{}`)),
+				mustTextTerminal(t, "done"),
+			)
+			originalDetails := map[string]any{"stage": "original"}
+			originalContent := []llm.ToolResultContentBlock{mustTextBlock(t, "original")}
+			tool := &fakeTool{name: "stable", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+				return agent.ToolOutput{Content: originalContent, Details: originalDetails, AddedToolNames: []string{"lazy"}}, nil
+			}}
+			failureErr := errors.New("tool_result handler failed")
+			firstContent := []llm.ToolResultContentBlock{mustTextBlock(t, "first")}
+			badContent := []llm.ToolResultContentBlock{mustTextBlock(t, "must be ignored")}
+			finalContent := []llm.ToolResultContentBlock{mustTextBlock(t, "final")}
+			var reports []agent.ExtensionErrorEvent
+			var calls []string
+			var executionEnd *agent.ToolExecutionEndEvent
+			var messageEnd llm.ConversationMessage
+			transcript := newSessionManager(t)
+			runtime, err := agent.NewSession(agent.SessionConfig{
+				Provider: providerImpl, SessionManager: transcript, Model: model,
+				Tool: tool, Tools: []provider.ToolDefinition{definition}, ToolExecution: agent.ToolExecutionSequential,
+				Hooks: agent.Hooks{
+					ToolResult: func(_ context.Context, event agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+						calls = append(calls, "h1")
+						if event.IsError || toolContentText(event.Result.Content) != "original" ||
+							!reflect.DeepEqual(event.Result.Details, originalDetails) || !reflect.DeepEqual(event.Result.AddedToolNames, []string{"lazy"}) {
+							t.Errorf("h1 saw %#v", event)
+						}
+						return agent.AfterToolCallResult{Content: &firstContent}, nil
+					},
+					ToolResultHandlers: []agent.AfterToolCallHook{
+						func(context.Context, agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+							calls = append(calls, "h2")
+							if panicHook {
+								panic("tool_result handler panicked")
+							}
+							return agent.AfterToolCallResult{Content: &badContent}, failureErr
+						},
+						func(_ context.Context, event agent.AfterToolCallContext) (agent.AfterToolCallResult, error) {
+							calls = append(calls, "h3")
+							if event.IsError || toolContentText(event.Result.Content) != "first" ||
+								!reflect.DeepEqual(event.Result.Details, originalDetails) || !reflect.DeepEqual(event.Result.AddedToolNames, []string{"lazy"}) {
+								t.Errorf("h3 saw %#v", event)
+							}
+							return agent.AfterToolCallResult{Content: &finalContent}, nil
+						},
+					},
+					ExtensionError: func(_ context.Context, event agent.ExtensionErrorEvent) {
+						reports = append(reports, event)
+					},
+				},
+				SettlementTimeout: time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+				switch value := event.(type) {
+				case agent.ToolExecutionEndEvent:
+					if value.ToolCallID == "call" {
+						copy := value
+						executionEnd = &copy
+					}
+				case agent.MessageEndEvent:
+					wrapped, ok := value.Message.(agentmsg.LLM)
+					if !ok {
+						return
+					}
+					if result := wrapped.Conversation(); result.Role() == llm.RoleToolResult {
+						messageEnd = result
+					}
+				}
+			})
+			result, err := runtime.Run(context.Background(), "go")
+			if err != nil || !result.Succeeded() {
+				t.Fatalf("Run = (%#v, %v)", result, err)
+			}
+			if !reflect.DeepEqual(calls, []string{"h1", "h2", "h3"}) {
+				t.Fatalf("handler calls = %v", calls)
+			}
+			if len(reports) != 1 || reports[0].Event != "tool_result" || reports[0].HandlerIndex != 1 {
+				t.Fatalf("extension reports = %#v", reports)
+			}
+			if panicHook {
+				if !strings.Contains(reports[0].Cause.Error(), "tool_result handler panicked") {
+					t.Fatalf("panic report = %v", reports[0].Cause)
+				}
+			} else if !errors.Is(reports[0].Cause, failureErr) {
+				t.Fatalf("error report = %v", reports[0].Cause)
+			}
+			assertFinal := func(label string, toolResult llm.ConversationMessage) {
+				t.Helper()
+				var text string
+				var details json.RawMessage
+				var added []string
+				var isError bool
+				switch value := toolResult.(type) {
+				case llm.ToolResultMessage:
+					var builder strings.Builder
+					for _, block := range value.Content() {
+						builder.WriteString(block.Text())
+					}
+					text, details, added, isError = builder.String(), value.Details(), value.AddedToolNames(), value.IsError()
+				case llm.ToolResultContentMessage:
+					text, details, added, isError = toolContentText(value.Content()), value.Details(), value.AddedToolNames(), value.IsError()
+				default:
+					t.Errorf("%s tool result type = %T", label, toolResult)
+					return
+				}
+				if isError || text != "final" || string(details) != `{"stage":"original"}` || !reflect.DeepEqual(added, []string{"lazy"}) {
+					t.Errorf("%s tool result = %#v", label, toolResult)
+				}
+			}
+			if executionEnd == nil || executionEnd.IsError || executionEnd.Err != nil || toolContentText(executionEnd.Result.Content) != "final" ||
+				!reflect.DeepEqual(executionEnd.Result.Details, originalDetails) ||
+				!reflect.DeepEqual(executionEnd.Result.AddedToolNames, []string{"lazy"}) {
+				t.Fatalf("tool_execution_end = %#v", executionEnd)
+			}
+			if messageEnd == nil {
+				t.Fatal("tool-result message_end was not observed")
+			}
+			assertFinal("message_end", messageEnd)
+			messages := transcript.BuildContext().Messages()
+			assertFinal("durable", messages[2])
+			requests := providerImpl.Requests()
+			if len(requests) != 2 {
+				t.Fatalf("provider requests = %d", len(requests))
+			}
+			assertFinal("next provider", requests[1].Messages()[2])
+		})
 	}
 }
 

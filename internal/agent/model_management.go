@@ -372,9 +372,8 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 		s.lifecycleMu.Unlock()
 		return modelSelectionEvent{}, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	s.mu.RLock()
-	previous, hadPrevious, previousThinking := s.model, s.hasModel, s.thinkingLevel
-	s.mu.RUnlock()
+	state := s.loop.State()
+	previous, hadPrevious, previousThinking := state.Model(), state.HasModel(), state.ThinkingLevel()
 	desired := previousThinking
 	if explicitThinking != nil {
 		desired = *explicitThinking
@@ -451,12 +450,11 @@ func (s *AgentSession) publishModelSelection(model provider.Model, thinking prov
 	if err := s.loop.SetModelAndThinking(model, thinking); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.model, s.hasModel, s.thinkingLevel = model, true, thinking
 	if persistThinking && s.resolveDefaultThinking == nil {
+		s.mu.Lock()
 		s.defaultThinking = thinking
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 	return nil
 }
 
@@ -503,9 +501,8 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 		s.lifecycleMu.Unlock()
 		return thinkingSelectionEvent{}, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	s.mu.RLock()
-	previous, model, hasModel := s.thinkingLevel, s.model, s.hasModel
-	s.mu.RUnlock()
+	state := s.loop.State()
+	previous, model, hasModel := state.ThinkingLevel(), state.Model(), state.HasModel()
 	selected := level
 	if hasModel {
 		selected = model.ClampThinkingLevel(level)
@@ -574,12 +571,11 @@ func (s *AgentSession) publishThinkingLevel(thinking provider.ThinkingLevel, per
 	if err := s.loop.SetThinkingLevel(thinking); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	s.thinkingLevel = thinking
 	if persistDefault && s.resolveDefaultThinking == nil {
+		s.mu.Lock()
 		s.defaultThinking = thinking
+		s.mu.Unlock()
 	}
-	s.mu.Unlock()
 	return nil
 }
 

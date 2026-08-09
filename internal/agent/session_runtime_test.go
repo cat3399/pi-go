@@ -993,7 +993,7 @@ func TestAgentSessionProviderFailureSettlesBeforeNextPrompt(t *testing.T) {
 	}
 }
 
-func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
+func TestAgentSessionAbortDrainsQueuedPromptBeforeSettling(t *testing.T) {
 	model, err := newTestModel("scripted", "scripted", "model")
 	if err != nil {
 		t.Fatal(err)
@@ -1011,7 +1011,11 @@ func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := providerImpl.SetResponses([]provider.ScriptStep{step}); err != nil {
+	continued, err := provider.FixedResponseStep(mustTextTerminal(t, "continued after abort"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := providerImpl.SetResponses([]provider.ScriptStep{step, continued}); err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := agent.NewSession(agent.SessionConfig{Provider: providerImpl, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second})
@@ -1029,7 +1033,7 @@ func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
 	if !started.Load() {
 		t.Fatal("run did not start")
 	}
-	if err := runtime.Steer("keep queued"); err != nil {
+	if err := runtime.Steer("consume queued"); err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.Abort(context.Background()); err != nil {
@@ -1042,8 +1046,12 @@ func TestAgentSessionAbortLeavesQueuedPromptAndSettles(t *testing.T) {
 		t.Fatalf("state after abort = %s", state.Active.Phase())
 	}
 	steering, _ := runtime.Queues()
-	if len(steering) != 1 {
-		t.Fatalf("queued steer lost after abort: %#v", steering)
+	if len(steering) != 0 || providerImpl.CallCount() != 2 {
+		t.Fatalf("abort left stale queue: steering=%#v calls=%d", steering, providerImpl.CallCount())
+	}
+	requests := providerImpl.Requests()
+	if got := requests[1].Messages(); len(got) < 3 || messageText(t, got[len(got)-1]) != "consume queued" {
+		t.Fatalf("queued continuation request = %#v", got)
 	}
 }
 
@@ -1801,9 +1809,7 @@ func TestAgentSessionManualCompactSharesGateAndAbort(t *testing.T) {
 	if _, err := runtime.Run(context.Background(), "busy"); !errors.Is(err, agent.ErrBusy) {
 		t.Fatalf("Run during manual compact = %v", err)
 	}
-	if err := runtime.Abort(context.Background()); err != nil {
-		t.Fatalf("Abort manual compact = %v", err)
-	}
+	runtime.AbortCompaction()
 	if err := <-done; err == nil {
 		t.Fatal("manual compact unexpectedly succeeded after Abort")
 	}

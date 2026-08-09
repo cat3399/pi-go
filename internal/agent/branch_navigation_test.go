@@ -299,6 +299,19 @@ func TestAbortBranchSummaryDoesNotMutateTree(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("summarizer was not entered")
 	}
+	if state := runtime.State(); state.Active.Phase() != agent.PhaseCompacting {
+		t.Fatalf("branch summary phase = %s, want compacting", state.Active.Phase())
+	}
+	abortCtx, cancelAbort := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancelAbort()
+	if err := runtime.Abort(abortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("agent Abort crossed branch-summary cancellation domain: %v", err)
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("agent Abort settled branch summary: %#v", got)
+	default:
+	}
 	runtime.AbortBranchSummary()
 	select {
 	case got := <-done:
@@ -311,6 +324,9 @@ func TestAbortBranchSummaryDoesNotMutateTree(t *testing.T) {
 	leaf, _ := manager.LeafID()
 	if leaf != oldLeaf.ID() {
 		t.Fatalf("leaf=%q want %q", leaf, oldLeaf.ID())
+	}
+	if state := runtime.State(); state.Active.Phase() != agent.PhaseIdle {
+		t.Fatalf("branch summary settled phase = %s", state.Active.Phase())
 	}
 }
 

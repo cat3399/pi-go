@@ -20,8 +20,9 @@ import (
 
 // SessionConfig supplies the long-lived product state around the in-memory
 // Agent and its AgentLoop execution core.
-// Provider and SessionManager are lifecycle dependencies; all prompt-visible
-// settings below are owned by AgentSession and snapshotted per provider turn.
+// Provider and SessionManager are lifecycle dependencies. Agent owns the
+// prompt-visible runtime state; AgentSession supplies its initial values and
+// product services, then reads immutable Agent snapshots per provider turn.
 type SessionConfig struct {
 	Provider       provider.Provider
 	SessionManager *session.SessionManager
@@ -294,19 +295,13 @@ type AgentSession struct {
 	// discovery phase. Lock order is controlMu,
 	// lifecycleMu, selectionMu, then the Agent/AgentSession state mutexes.
 	controlMu sync.Mutex
-	// selectionMu makes the duplicated AgentSession/Agent model selection a
-	// single published snapshot. Writers hold it across both copies; readers
-	// that combine or consume model/thinking state hold its read side.
+	// selectionMu keeps selection readers outside the final in-memory publish
+	// step of a durable/settings transaction. The selected values themselves
+	// live only in Agent state.
 	selectionMu            sync.RWMutex
 	loop                   *Agent
 	sessionManager         *session.SessionManager
-	model                  provider.Model
-	hasModel               bool
-	thinkingLevel          provider.ThinkingLevel
-	systemPrompt           string
 	systemOptions          BuildSystemPromptOptions
-	tool                   ToolExecutor
-	tools                  []provider.ToolDefinition
 	beforeToolCall         BeforeToolCallHook
 	afterToolCall          AfterToolCallHook
 	stream                 provider.StreamOptions
@@ -327,10 +322,17 @@ type AgentSession struct {
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
 	// and post-run continuations remain active too.
-	lifecycleMu             sync.Mutex
-	run                     *sessionRun
+	lifecycleMu sync.Mutex
+	run         *sessionRun
+	// idleWait is the shared idle-generation latch. A run admitted from an
+	// agent_settled callback joins the same generation, so callers that began
+	// waiting on the preceding run do not return until the replacement run also
+	// settles. run.done remains the completion signal for one sessionRun only.
+	idleWait                chan struct{}
+	settlingCallbacks       uint32
 	closing                 bool
 	closed                  bool
+	shutdown                *sessionShutdownAttempt
 	retryPolicy             RetryPolicy
 	retryEnabled            bool
 	resolveRuntimeSettings  func() RuntimeControlSettings
@@ -361,6 +363,7 @@ type sessionRun struct {
 	retryError                   string
 	retryMax                     uint32
 	retryCancel                  context.CancelCauseFunc
+	compaction                   *runCancellation
 	overflowCompacted            bool
 	thresholdCompactionAttempted bool
 	assistantStarted             bool
@@ -372,6 +375,18 @@ type sessionRun struct {
 	started                      bool
 	extensionSystemPrompt        *string
 	branchSummary                bool
+	branchCancellation           *runCancellation
+	finishOnce                   sync.Once
+}
+
+type runCancellation struct {
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+}
+
+type sessionShutdownAttempt struct {
+	done chan struct{}
+	err  error
 }
 type sessionObserverEntry struct {
 	id       uint64
@@ -454,11 +469,15 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 			systemOptions.SelectedTools[index] = definition.Name()
 		}
 	}
+	hooks := config.Hooks
+	hooks.MessageHandlers = append([]MessageHook(nil), config.Hooks.MessageHandlers...)
+	hooks.ToolResultHandlers = append([]AfterToolCallHook(nil), config.Hooks.ToolResultHandlers...)
+	config.Hooks = hooks
 	s := &AgentSession{
-		sessionManager: config.SessionManager, model: config.Model, hasModel: hasModel, thinkingLevel: config.ThinkingLevel,
-		systemPrompt: config.SystemPrompt, systemOptions: systemOptions, tool: config.Tool, tools: append([]provider.ToolDefinition(nil), config.Tools...), beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall), afterToolCall: composeAfterToolHooks(config.AfterToolCall, config.Hooks.ToolResult),
-		stream:        provider.CloneStreamOptions(config.Stream),
-		resolveStream: config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
+		sessionManager: config.SessionManager, systemOptions: systemOptions,
+		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
+		stream:         provider.CloneStreamOptions(config.Stream),
+		resolveStream:  config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
 		allModels: cloneModels(config.AllModels), scopedModels: cloneScopedModels(config.ScopedModels), modelAvailable: config.ModelAvailable, resolveAvailableModels: config.ResolveAvailableModels,
 		defaultThinking: config.DefaultThinkingLevel, resolveDefaultThinking: config.ResolveDefaultThinkingLevel, persistSettings: config.PersistSettings,
 		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
@@ -469,6 +488,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		branchSummarizer: config.BranchSummarizer, resolveBranchSummarizer: config.ResolveBranchSummarizer,
 		branchSummaryReserve: config.BranchSummaryReserveTokens,
 	}
+	s.afterToolCall = composeAfterToolHooks(config.AfterToolCall, s.toolResultTransform())
 	s.appendModelControl = config.SessionManager.AppendModelControlChange
 	s.appendThinkingControl = config.SessionManager.AppendThinkingLevelChange
 	if s.defaultThinking == "" || !s.defaultThinking.Valid() {
@@ -567,13 +587,10 @@ func (s *AgentSession) requireModelAccess(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	s.selectionMu.RLock()
+	selected, hasModel, _ := s.selectionSnapshot()
 	s.mu.RLock()
-	hasModel := s.hasModel
-	selected := s.model
 	validate := s.validateAccess
 	s.mu.RUnlock()
-	s.selectionMu.RUnlock()
 	if !hasModel {
 		return s.noModelSelectedError()
 	}
@@ -644,6 +661,8 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 	var agentMessages []agentmsg.Message
 	var willRetry bool
 	var skipAssistantStartHook bool
+	var queueUpdate SessionQueueUpdateEvent
+	var hasQueueUpdate bool
 	switch value := event.(type) {
 	case AgentStartEvent:
 		s.lifecycleMu.Lock()
@@ -709,6 +728,8 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 		willRetry = s.willRetry(value.Terminal)
 	case QueueUpdateEvent:
 		types = []string{"queue_update"}
+		queueUpdate = sessionQueueUpdateEventFromAgent(value)
+		hasQueueUpdate = true
 	}
 	for _, kind := range types {
 		hookMessage := agentMessage
@@ -748,8 +769,11 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 		case "agent_end":
 			emitted = SessionAgentEndEvent{Messages: agentmsg.Clone(agentMessages), Terminal: terminal, WillRetry: willRetry}
 		case "queue_update":
-			queue := s.sessionQueueUpdateEvent()
-			emitted = queue
+			if hasQueueUpdate {
+				emitted = queueUpdate
+			} else {
+				emitted = s.sessionQueueUpdateEvent()
+			}
 		}
 		if emitted != nil {
 			s.emitToObservers(ctx, observers, emitted)
@@ -779,25 +803,19 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 			lifecycle = AgentStartHookEvent
 		case "agent_end":
 			lifecycle = AgentEndHookEvent
-		case "agent_settled":
-			lifecycle = AgentSettledHookEvent
 		}
 		if lifecycle != "" {
 			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: lifecycle, Messages: s.sessionCommittedAgentMessages(), Terminal: terminal})
 		}
 	}
-	if s.hooks.Message != nil && agentMessage != nil {
+	if len(s.messageHooks()) != 0 && agentMessage != nil {
 		var messageType MessageHookType
 		var providerEvent llm.StreamEvent
 		switch kind {
 		case "message_start":
-			// Non-assistant starts already ran synchronously in
-			// messageEndTransform before persistence.
-			if agentMessage.Role() == agentmsg.RoleAssistant {
-				messageType = MessageStartHookEvent
-				if partial, ok := agentMessage.(agentmsg.AssistantPartial); ok {
-					providerEvent = partial.ProviderEvent()
-				}
+			messageType = MessageStartHookEvent
+			if partial, ok := agentMessage.(agentmsg.AssistantPartial); ok {
+				providerEvent = partial.ProviderEvent()
 			}
 		case "message_update":
 			messageType = MessageUpdateHookEvent
@@ -806,7 +824,12 @@ func (s *AgentSession) dispatchExtensionHook(ctx context.Context, kind string, m
 			}
 		}
 		if messageType != "" {
-			_, _ = s.hooks.Message(ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage), ProviderEvent: providerEvent})
+			for index, hook := range s.messageHooks() {
+				_, err := callMessageHook(hook, ctx, MessageHookEvent{Type: messageType, Message: agentmsg.CloneOne(agentMessage), ProviderEvent: providerEvent})
+				if err != nil {
+					s.reportExtensionError(ctx, string(messageType), index, err)
+				}
+			}
 		}
 	}
 	if s.hooks.Turn != nil {
@@ -1025,15 +1048,15 @@ func (s *AgentSession) prepareTurn(ctx context.Context, _ TurnContext) (TurnSnap
 		return TurnSnapshot{}, err
 	}
 	s.selectionMu.RLock()
-	s.mu.RLock()
-	if !s.hasModel {
-		s.mu.RUnlock()
+	state, executor := s.loop.runtimeSnapshot()
+	if !state.HasModel() {
 		s.selectionMu.RUnlock()
 		return TurnSnapshot{}, ErrNoModelSelected
 	}
+	s.mu.RLock()
 	snapshot := TurnSnapshot{
-		Model: s.model, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt,
-		Tool: s.tool, Tools: append([]provider.ToolDefinition(nil), s.tools...), Stream: provider.CloneStreamOptions(s.stream),
+		Model: state.Model(), ThinkingLevel: state.ThinkingLevel(), SystemPrompt: state.SystemPrompt(),
+		Tool: executor, Tools: state.Tools(), Stream: provider.CloneStreamOptions(s.stream),
 	}
 	resolver := s.resolveStream
 	s.mu.RUnlock()
@@ -1066,32 +1089,32 @@ func (s *AgentSession) State() SessionState {
 	if s == nil {
 		return SessionState{Active: State{phase: PhaseIdle}}
 	}
-	// Snapshot lifecycle first, without retaining lifecycleMu while acquiring
-	// selectionMu. Selection writers take lifecycleMu before selectionMu.
+	// Hold the documented lifecycle -> selection -> Agent lock order so the
+	// returned active/idle projection cannot straddle session-run detachment.
 	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	run := s.run
 	phase := PhaseIdle
 	if run != nil {
 		phase = run.phase
 	}
-	s.lifecycleMu.Unlock()
-
 	s.selectionMu.RLock()
-	s.mu.RLock()
-	state := SessionState{Model: s.model, HasModel: s.hasModel, ThinkingLevel: s.thinkingLevel, SystemPrompt: s.systemPrompt, Tools: append([]provider.ToolDefinition(nil), s.tools...)}
-	s.mu.RUnlock()
 	active := State{phase: PhaseIdle}
 	if s.loop != nil {
 		active = s.loop.State()
 	}
+	state := SessionState{
+		Model: active.Model(), HasModel: active.HasModel(), ThinkingLevel: active.ThinkingLevel(),
+		SystemPrompt: active.SystemPrompt(), Tools: active.Tools(), Active: active,
+	}
 	s.selectionMu.RUnlock()
 	if run != nil {
 		if active.Phase() == PhaseIdle {
-			active = State{phase: phase}
+			active.phase = phase
 		}
 		state.Active = active
 	} else {
-		state.Active = State{phase: PhaseIdle}
+		state.Active.phase = PhaseIdle
 	}
 	return state
 }
@@ -1131,19 +1154,12 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 		}
 	}
 	s.mu.RUnlock()
-	if kind == "agent_settled" {
-		if s.hooks.Agent != nil {
-			_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: AgentSettledHookEvent, Messages: s.sessionCommittedAgentMessages()})
-		}
-	}
 	var retryEvent retryControl
 	if len(retry) != 0 {
 		retryEvent = retry[0]
 	}
 	var event SessionEvent
 	switch kind {
-	case "agent_settled":
-		event = AgentSettledEvent{}
 	case "queue_update":
 		queue := s.sessionQueueUpdateEvent()
 		event = queue
@@ -1158,6 +1174,24 @@ func (s *AgentSession) emitControl(ctx context.Context, kind string, retry ...re
 	if event != nil {
 		s.emitToObservers(ctx, observers, event)
 	}
+}
+
+func (s *AgentSession) emitAgentSettled(ctx context.Context, messages []agentmsg.Message) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	observers := make([]SessionObserver, 0, len(s.observers))
+	for _, entry := range s.observers {
+		if entry.observer != nil {
+			observers = append(observers, entry.observer)
+		}
+	}
+	s.mu.RUnlock()
+	if s.hooks.Agent != nil {
+		_ = s.hooks.Agent(ctx, AgentLifecycleEvent{Type: AgentSettledHookEvent, Messages: agentmsg.Clone(messages)})
+	}
+	s.emitToObservers(ctx, observers, AgentSettledEvent{})
 }
 
 func (s *AgentSession) emitThinkingLevelChanged(ctx context.Context, level provider.ThinkingLevel) {
@@ -1192,32 +1226,26 @@ func (s *AgentSession) ThinkingLevel() provider.ThinkingLevel {
 	return thinking
 }
 func (s *AgentSession) SystemPrompt() string {
-	if s == nil {
+	if s == nil || s.loop == nil {
 		return ""
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.systemPrompt
+	return s.loop.State().SystemPrompt()
 }
 func (s *AgentSession) Tools() []provider.ToolDefinition {
-	if s == nil {
+	if s == nil || s.loop == nil {
 		return nil
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]provider.ToolDefinition(nil), s.tools...)
+	return s.loop.State().Tools()
 }
 
 func (s *AgentSession) selectionSnapshot() (provider.Model, bool, provider.ThinkingLevel) {
-	if s == nil {
+	if s == nil || s.loop == nil {
 		return provider.Model{}, false, ""
 	}
 	s.selectionMu.RLock()
-	s.mu.RLock()
-	model, hasModel, thinking := s.model, s.hasModel, s.thinkingLevel
-	s.mu.RUnlock()
+	state := s.loop.State()
 	s.selectionMu.RUnlock()
-	return model, hasModel, thinking
+	return state.Model(), state.HasModel(), state.ThinkingLevel()
 }
 func (s *AgentSession) SessionManager() *session.SessionManager {
 	if s == nil {
@@ -1231,6 +1259,34 @@ func (s *AgentSession) SessionName() (string, bool) {
 		return "", false
 	}
 	return s.sessionManager.SessionName()
+}
+
+// AppendCustomEntry is the extension-neutral counterpart to pi.appendEntry.
+// The durable custom entry commits before the product event is published.
+func (s *AgentSession) AppendCustomEntry(ctx context.Context, customType string, data json.RawMessage) (session.Entry, error) {
+	if s == nil || s.sessionManager == nil {
+		return session.Entry{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	if err := s.rejectIfClosed(); err != nil {
+		return session.Entry{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entry, err := s.sessionManager.AppendCustomEntry(ctx, customType, bytes.Clone(data))
+	if err != nil {
+		return session.Entry{}, fmt.Errorf("%w: custom entry: %w", ErrTranscriptCommit, err)
+	}
+	s.mu.RLock()
+	observers := make([]SessionObserver, 0, len(s.observers))
+	for _, observer := range s.observers {
+		if observer.observer != nil {
+			observers = append(observers, observer.observer)
+		}
+	}
+	s.mu.RUnlock()
+	s.emitToObservers(ctx, observers, EntryAppendedEvent{Entry: entry})
+	return entry, nil
 }
 
 // SetSessionName persists the sanitized session_info entry before publishing
@@ -1280,9 +1336,6 @@ func (s *AgentSession) SetSystemPrompt(prompt string) error {
 		s.lifecycleMu.Unlock()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	s.mu.Lock()
-	s.systemPrompt = prompt
-	s.mu.Unlock()
 	if err := s.loop.SetSystemPrompt(prompt); err != nil {
 		s.lifecycleMu.Unlock()
 		return err
@@ -1309,18 +1362,16 @@ func (s *AgentSession) SetTools(executor ToolExecutor, tools []provider.ToolDefi
 		s.lifecycleMu.Unlock()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
+	if err := s.loop.SetTools(executor, tools); err != nil {
+		s.lifecycleMu.Unlock()
+		return err
+	}
 	s.mu.Lock()
-	s.tool = executor
-	s.tools = append([]provider.ToolDefinition(nil), tools...)
 	s.systemOptions.SelectedTools = make([]string, len(tools))
 	for index, definition := range tools {
 		s.systemOptions.SelectedTools[index] = definition.Name()
 	}
 	s.mu.Unlock()
-	if err := s.loop.SetTools(executor, tools); err != nil {
-		s.lifecycleMu.Unlock()
-		return err
-	}
 	s.lifecycleMu.Unlock()
 	return nil
 }
@@ -1486,25 +1537,34 @@ func (s *AgentSession) runSession(
 	if err != nil {
 		return Result{}, err
 	}
-	defer func() {
-		s.setSessionPhase(run, PhaseSettling)
-		if s.sessionRunStarted(run) {
-			s.emitControl(run.ctx, "agent_settled")
-		}
-		s.finishSessionRun(run)
-	}()
+	defer s.settleSessionRun(run)
 	if err := s.requireModelAccess(run.ctx); err != nil {
+		if cause := context.Cause(run.ctx); cause != nil {
+			return Result{}, cause
+		}
 		return Result{}, err
+	}
+	if cause := context.Cause(run.ctx); cause != nil {
+		return Result{}, cause
 	}
 	var input sessionPromptInput
 	if prepare != nil {
 		input, err = prepare()
 		if err != nil {
+			if cause := context.Cause(run.ctx); cause != nil {
+				return Result{}, cause
+			}
 			return Result{}, err
 		}
 	}
+	if cause := context.Cause(run.ctx); cause != nil {
+		return Result{}, cause
+	}
 	if prePromptCheck {
 		s.checkPrePromptCompaction(run)
+		if cause := context.Cause(run.ctx); cause != nil {
+			return Result{}, cause
+		}
 	}
 	var extra []agentmsg.Message
 	if hook := s.hooks.BeforeAgentStart; prePromptCheck && hook != nil {
@@ -1513,6 +1573,9 @@ func (s *AgentSession) runSession(
 			Prompt: input.Text, Images: append([]llm.ImageBlock(nil), input.Images...), PromptMessages: agentmsg.Clone(input.Messages),
 			SystemPrompt: state.SystemPrompt, SystemPromptOptions: s.systemPromptOptions(), Messages: s.loop.State().Messages(),
 		})
+		if cause := context.Cause(run.ctx); cause != nil {
+			return Result{}, cause
+		}
 		if hookErr != nil {
 			return Result{}, hookErr
 		}
@@ -1547,9 +1610,17 @@ func (s *AgentSession) runSession(
 			return result, nil
 		}
 		retryEnabled, retryController := s.currentRetrySettings()
-		if retryEnabled && s.retryableResult(result) && run.retryAttempt+1 < retryController.MaxAttempts() {
-			run.retryAttempt++
-			nextAttempt := run.retryAttempt + 1
+		retryAttempt := uint32(0)
+		if retryEnabled && s.retryableResult(result) {
+			s.lifecycleMu.Lock()
+			if s.run == run && run.retryAttempt+1 < retryController.MaxAttempts() {
+				run.retryAttempt++
+				retryAttempt = run.retryAttempt
+			}
+			s.lifecycleMu.Unlock()
+		}
+		if retryAttempt != 0 {
+			nextAttempt := retryAttempt + 1
 			failure := providerFailureFromTerminalForSession(result)
 			delay := retryController.Delay(nextAttempt, failure)
 			errorMessage := retryErrorMessage(result)
@@ -1557,7 +1628,7 @@ func (s *AgentSession) runSession(
 			s.beginRetrySeries(run, delay, errorMessage, maxRetries)
 			s.setSessionPhase(run, PhaseRetryWait)
 			s.emitControl(run.ctx, "auto_retry_start", retryControl{
-				attempt: run.retryAttempt, max: maxRetries, delay: delay, errorMessage: errorMessage,
+				attempt: retryAttempt, max: maxRetries, delay: delay, errorMessage: errorMessage,
 			})
 			// The failed assistant turn is durable history but must not be sent
 			// back to the provider when resending this attempt.
@@ -1582,12 +1653,21 @@ func (s *AgentSession) runSession(
 					finalError = "Retry cancelled"
 				}
 				s.endRetrySeries(run.ctx, false, finalError)
-				return result, nil
+				s.resetRetryState(run)
+				// Public Abort/AbortRetry cancel only this delay. As in pi, a
+				// cancelled retry still proceeds through overflow/threshold
+				// compaction and queued-message continuation. Only cancellation
+				// of the owning session context (caller cancellation or shutdown)
+				// terminates the complete pipeline here.
+				if context.Cause(run.ctx) != nil {
+					return result, nil
+				}
+			} else {
+				s.setSessionPhase(run, PhaseProvider)
+				result, runErr = s.loop.Continue(run.ctx)
+				result = accumulate(result)
+				continue
 			}
-			s.setSessionPhase(run, PhaseProvider)
-			result, runErr = s.loop.Continue(run.ctx)
-			result = accumulate(result)
-			continue
 		}
 		if s.checkPostRunCompaction(run, result) {
 			s.setSessionPhase(run, PhaseProvider)
@@ -1856,6 +1936,83 @@ func (s *AgentSession) compactionAvailable() bool {
 	return available
 }
 
+func (s *AgentSession) beginCompaction(run *sessionRun) (*runCancellation, bool) {
+	if s == nil || run == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancelCause(run.ctx)
+	domain := &runCancellation{ctx: ctx, cancel: cancel}
+	s.lifecycleMu.Lock()
+	if s.run != run || run.compaction != nil {
+		s.lifecycleMu.Unlock()
+		cancel(context.Canceled)
+		return nil, false
+	}
+	run.compaction = domain
+	s.lifecycleMu.Unlock()
+	return domain, true
+}
+
+func (s *AgentSession) endCompaction(run *sessionRun, domain *runCancellation) {
+	if domain == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if s.run == run && run.compaction == domain {
+		run.compaction = nil
+	}
+	s.lifecycleMu.Unlock()
+	domain.cancel(context.Canceled)
+}
+
+func (s *AgentSession) beginBranchSummary(run *sessionRun) (*runCancellation, bool) {
+	if s == nil || run == nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancelCause(run.ctx)
+	domain := &runCancellation{ctx: ctx, cancel: cancel}
+	s.lifecycleMu.Lock()
+	if s.run != run || run.branchCancellation != nil {
+		s.lifecycleMu.Unlock()
+		cancel(context.Canceled)
+		return nil, false
+	}
+	run.branchSummary = true
+	run.branchCancellation = domain
+	s.lifecycleMu.Unlock()
+	return domain, true
+}
+
+func (s *AgentSession) endBranchSummary(run *sessionRun, domain *runCancellation) {
+	if domain == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if s.run == run && run.branchCancellation == domain {
+		run.branchCancellation = nil
+		run.branchSummary = false
+	}
+	s.lifecycleMu.Unlock()
+	domain.cancel(context.Canceled)
+}
+
+// AbortCompaction cancels only the current manual or automatic compaction.
+// Agent execution, retry, and branch-summary cancellation remain independent.
+func (s *AgentSession) AbortCompaction() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	var cancel context.CancelCauseFunc
+	if s.run != nil && s.run.compaction != nil {
+		cancel = s.run.compaction.cancel
+	}
+	s.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel(errCompactionCancelled)
+	}
+}
+
 // runCompaction returns true only on a committed compaction. Automatic
 // failures are surfaced as compaction_end and leave the surrounding request's
 // settled result intact.
@@ -1863,15 +2020,20 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 	if s == nil || s.sessionManager == nil || !s.compactionAvailable() {
 		return false
 	}
-	input, summarizer, err := s.prepareCompaction(run.ctx, instructions)
+	domain, ok := s.beginCompaction(run)
+	if !ok {
+		return false
+	}
+	defer s.endCompaction(run, domain)
+	input, summarizer, err := s.prepareCompaction(domain.ctx, instructions)
 	if err != nil {
 		return false
 	}
 	s.setSessionPhase(run, PhaseCompacting)
-	s.emitCompaction(run.ctx, "compaction_start", reason, nil, false, willRetry, "")
-	result, err := s.compactPrepared(run, reason, willRetry, instructions, input, summarizer)
+	s.emitCompaction(domain.ctx, "compaction_start", reason, nil, false, willRetry, "")
+	result, err := s.compactPrepared(run, domain.ctx, reason, willRetry, instructions, input, summarizer)
 	if err != nil {
-		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
+		aborted := context.Cause(domain.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
 		errorMessage := ""
 		if !aborted {
 			prefix := "Auto-compaction failed: "
@@ -1880,7 +2042,7 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 			}
 			errorMessage = prefix + safeCompactionEventError(err)
 		}
-		s.emitCompaction(run.ctx, "compaction_end", reason, nil, aborted, false, errorMessage)
+		s.emitCompaction(domain.ctx, "compaction_end", reason, nil, aborted, false, errorMessage)
 		return false
 	}
 	if willRetry {
@@ -1889,19 +2051,22 @@ func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, w
 		// context.
 		s.removeLastFailureFromAgentState()
 	}
-	s.afterCompaction(run.ctx, result, reason, willRetry)
-	s.emitCompaction(run.ctx, "compaction_end", reason, &result, false, willRetry, "")
+	s.afterCompaction(domain.ctx, result, reason, willRetry)
+	s.emitCompaction(domain.ctx, "compaction_end", reason, &result, false, willRetry, "")
 	return true
 }
 
-var errExtensionCompactionCancelled = errors.New("extension cancelled compaction")
+var (
+	errCompactionCancelled          = errors.New("Compaction cancelled")
+	errExtensionCompactionCancelled = errors.New("extension cancelled compaction")
+)
 
-func (s *AgentSession) compactTranscript(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
-	input, summarizer, err := s.prepareCompaction(run.ctx, instructions)
+func (s *AgentSession) compactTranscript(run *sessionRun, ctx context.Context, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
+	input, summarizer, err := s.prepareCompaction(ctx, instructions)
 	if err != nil {
 		return session.CompactResult{}, err
 	}
-	return s.compactPrepared(run, reason, willRetry, instructions, input, summarizer)
+	return s.compactPrepared(run, ctx, reason, willRetry, instructions, input, summarizer)
 }
 
 func (s *AgentSession) prepareCompaction(ctx context.Context, instructions string) (session.SummaryInput, session.Summarizer, error) {
@@ -1921,11 +2086,11 @@ func (s *AgentSession) prepareCompaction(ctx context.Context, instructions strin
 	return input, summarizer, nil
 }
 
-func (s *AgentSession) compactPrepared(run *sessionRun, reason CompactionReason, willRetry bool, instructions string, input session.SummaryInput, resolved session.Summarizer) (session.CompactResult, error) {
+func (s *AgentSession) compactPrepared(run *sessionRun, ctx context.Context, reason CompactionReason, willRetry bool, instructions string, input session.SummaryInput, resolved session.Summarizer) (session.CompactResult, error) {
 	base := sessionObservedSummarizer{session: s, run: run, reason: reason, base: resolved}
 	summarizer := extensionCompactionSummarizer{session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base}
-	output, err := summarizer.Summarize(run.ctx, input)
-	if cause := context.Cause(run.ctx); cause != nil {
+	output, err := summarizer.Summarize(ctx, input)
+	if cause := context.Cause(ctx); cause != nil {
 		if err != nil {
 			return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrAppendCanceled, errors.Join(cause, err))
 		}
@@ -1934,7 +2099,7 @@ func (s *AgentSession) compactPrepared(run *sessionRun, reason CompactionReason,
 	if err != nil {
 		return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrSummaryFailed, err)
 	}
-	result, err := s.sessionManager.CommitCompaction(run.ctx, input, output)
+	result, err := s.sessionManager.CommitCompaction(ctx, input, output)
 	if err != nil {
 		return session.CompactResult{}, err
 	}
@@ -1949,10 +2114,8 @@ func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session
 		return nil, ErrCompactionUnavailable
 	}
 	s.selectionMu.RLock()
+	state := s.loop.State()
 	s.mu.RLock()
-	hasModel := s.hasModel
-	selected := s.model
-	thinking := s.thinkingLevel
 	stream := provider.CloneStreamOptions(s.stream)
 	resolveStream := s.resolveStream
 	resolveSummarizer := s.resolveSummarizer
@@ -1960,6 +2123,7 @@ func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session
 	validate := s.validateAccess
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
+	hasModel, selected, thinking := state.HasModel(), state.Model(), state.ThinkingLevel()
 	runtimeSettings := s.resolvedRuntimeSettings()
 	retry := runtimeSettings.Retry
 	if !runtimeSettings.AutoRetryEnabled {
@@ -2168,7 +2332,7 @@ func (s sessionObservedSummarizer) Summarize(ctx context.Context, input session.
 		return s.base.Summarize(ctx, input)
 	}
 	return observable.SummarizeWithRetryObserver(ctx, input, func(_ context.Context, retry provider.RetryEvent) {
-		s.session.emitSummarizationRetry(s.run.ctx, s.reason, retry)
+		s.session.emitSummarizationRetry(ctx, s.reason, retry)
 	})
 }
 
@@ -2351,6 +2515,15 @@ func (s *AgentSession) sessionRunStarted(run *sessionRun) bool {
 	return started
 }
 
+func (s *AgentSession) sessionRunCommittedAgentMessages(run *sessionRun) []agentmsg.Message {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.run != run {
+		return nil
+	}
+	return agentmsg.Clone(run.committedAgent)
+}
+
 func (s *AgentSession) admitSessionRun(ctx context.Context) (*sessionRun, error) {
 	if s == nil || ctx == nil || context.Cause(ctx) != nil {
 		return nil, fmt.Errorf("%w: invalid session context", ErrInvalidRun)
@@ -2365,6 +2538,9 @@ func (s *AgentSession) admitSessionRun(ctx context.Context) (*sessionRun, error)
 	}
 	runCtx, cancel := context.WithCancelCause(ctx)
 	run := &sessionRun{ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider}
+	if s.idleWait == nil {
+		s.idleWait = make(chan struct{})
+	}
 	s.run = run
 	return run, nil
 }
@@ -2378,13 +2554,90 @@ func (s *AgentSession) setSessionPhase(run *sessionRun, phase Phase) {
 }
 
 func (s *AgentSession) finishSessionRun(run *sessionRun) {
+	if run == nil {
+		return
+	}
 	s.lifecycleMu.Lock()
-	if s.run == run {
-		s.run = nil
+	if s.run != run {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.run = nil
+	s.lifecycleMu.Unlock()
+	s.completeSessionRun(run)
+	s.resolveSessionIdle()
+}
+
+// beginSessionSettlement publishes the visible idle state before invoking
+// agent_settled callbacks, while retaining the current idle generation until
+// every callback returns. A reentrant prompt can therefore be admitted without
+// releasing waiters that observed the preceding run.
+func (s *AgentSession) beginSessionSettlement(run *sessionRun) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.run != run {
+		return false
+	}
+	s.run = nil
+	s.settlingCallbacks++
+	return true
+}
+
+func (s *AgentSession) completeSessionRun(run *sessionRun) {
+	if run == nil {
+		return
+	}
+	run.finishOnce.Do(func() {
 		run.cancel(context.Canceled)
 		close(run.done)
+	})
+}
+
+func (s *AgentSession) endSessionSettlement(run *sessionRun) {
+	s.completeSessionRun(run)
+	s.lifecycleMu.Lock()
+	if s.settlingCallbacks > 0 {
+		s.settlingCallbacks--
 	}
 	s.lifecycleMu.Unlock()
+	s.resolveSessionIdle()
+}
+
+// resolveSessionIdle closes at most one shared generation. The final check is
+// intentionally performed after per-run cleanup: if another goroutine admits
+// a run in that window, it reuses idleWait and keeps all existing waiters
+// attached to the new work instead of observing a transient idle edge.
+func (s *AgentSession) resolveSessionIdle() {
+	var idle chan struct{}
+	s.lifecycleMu.Lock()
+	if s.run == nil && s.settlingCallbacks == 0 && s.idleWait != nil {
+		idle = s.idleWait
+		s.idleWait = nil
+	}
+	s.lifecycleMu.Unlock()
+	if idle != nil {
+		close(idle)
+	}
+}
+
+// settleSessionRun publishes idle before agent_settled, matching the original
+// AgentSession contract. Waiters that observed the old run are released only
+// after all synchronous settled callbacks return, while a callback itself may
+// immediately start a new prompt against the now-idle session.
+func (s *AgentSession) settleSessionRun(run *sessionRun) {
+	if run == nil {
+		return
+	}
+	s.setSessionPhase(run, PhaseSettling)
+	started := s.sessionRunStarted(run)
+	messages := s.sessionRunCommittedAgentMessages(run)
+	if !s.beginSessionSettlement(run) {
+		return
+	}
+	defer s.endSessionSettlement(run)
+	if started {
+		s.emitAgentSettled(run.ctx, messages)
+	}
 }
 
 func providerFailureFromTerminalForSession(result Result) *provider.ProviderFailure {
@@ -2534,6 +2787,16 @@ func (s *AgentSession) FollowUpMode() QueueMode {
 
 func (s *AgentSession) sessionQueueUpdateEvent() SessionQueueUpdateEvent {
 	steering, followUp := s.RichQueues()
+	return newSessionQueueUpdateEvent(steering, followUp)
+}
+
+func sessionQueueUpdateEventFromAgent(value QueueUpdateEvent) SessionQueueUpdateEvent {
+	steering, _ := agentmsg.ConvertToLLM(value.SteeringMessages)
+	followUp, _ := agentmsg.ConvertToLLM(value.FollowUpMessages)
+	return newSessionQueueUpdateEvent(steering, followUp)
+}
+
+func newSessionQueueUpdateEvent(steering, followUp []llm.ConversationMessage) SessionQueueUpdateEvent {
 	event := SessionQueueUpdateEvent{
 		SteeringMessages: append([]llm.ConversationMessage(nil), steering...),
 		FollowUpMessages: append([]llm.ConversationMessage(nil), followUp...),
@@ -2601,15 +2864,30 @@ func (s *AgentSession) Abort(ctx context.Context) error {
 	}
 	s.lifecycleMu.Lock()
 	run := s.run
+	var idle chan struct{}
+	var cancelRetry context.CancelCauseFunc
 	if run != nil {
-		run.cancel(ErrAgentAborted)
+		idle = s.idleWait
+		cancelRetry = run.retryCancel
 	}
 	s.lifecycleMu.Unlock()
 	if run == nil {
 		return nil
 	}
+	// Match coding-agent's independent cancellation domains: abort an active
+	// retry delay and the low-level Agent request/tool run, but leave compaction
+	// and the top-level session pipeline alive so post-run compaction and queued
+	// continuation still execute.
+	_ = s.loop.Abort(ctx)
+	if cancelRetry != nil {
+		// Cancel the retry only after sampling/aborting the currently active
+		// low Agent run. This preserves JavaScript's single-turn ordering: the
+		// awakened retry path cannot race ahead and have its queued continuation
+		// mistaken for the run the caller intended to abort.
+		cancelRetry(errRetryCancelled)
+	}
 	select {
-	case <-run.done:
+	case <-idle:
 		return nil
 	case <-ctx.Done():
 		return context.Cause(ctx)
@@ -2623,13 +2901,14 @@ func (s *AgentSession) WaitForIdle(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.lifecycleMu.Lock()
-	run := s.run
-	s.lifecycleMu.Unlock()
-	if run == nil {
+	if s.run == nil {
+		s.lifecycleMu.Unlock()
 		return nil
 	}
+	idle := s.idleWait
+	s.lifecycleMu.Unlock()
 	select {
-	case <-run.done:
+	case <-idle:
 		return nil
 	case <-ctx.Done():
 		return context.Cause(ctx)
@@ -2709,7 +2988,7 @@ func (s *AgentSession) PrepareSessionFork(ctx context.Context, event SessionBefo
 // Shutdown settles active work, emits the requested shutdown event, invokes
 // the final synchronous invalidation callback, then disposes the owned manager
 // and event subscriptions. It is safe to call repeatedly after success.
-func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOptions) error {
+func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOptions) (shutdownErr error) {
 	if s == nil {
 		return nil
 	}
@@ -2717,18 +2996,53 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		ctx = context.Background()
 	}
 	s.lifecycleMu.Lock()
+	if active := s.shutdown; active != nil {
+		s.lifecycleMu.Unlock()
+		select {
+		case <-active.done:
+			return active.err
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
 	if s.closed {
 		s.lifecycleMu.Unlock()
 		return nil
 	}
+	attempt := &sessionShutdownAttempt{done: make(chan struct{})}
+	s.shutdown = attempt
+	defer func() {
+		s.lifecycleMu.Lock()
+		attempt.err = shutdownErr
+		if s.shutdown == attempt {
+			s.shutdown = nil
+		}
+		close(attempt.done)
+		s.lifecycleMu.Unlock()
+	}()
 	s.closing = true
-	s.lifecycleMu.Unlock()
-	err := s.Abort(ctx)
-	if err == nil {
-		err = s.WaitForIdle(ctx)
+	run := s.run
+	var idle chan struct{}
+	var cancelRetry context.CancelCauseFunc
+	if run != nil {
+		idle = s.idleWait
+		cancelRetry = run.retryCancel
+		run.cancel(ErrAgentAborted)
 	}
-	if err != nil {
-		return err
+	s.lifecycleMu.Unlock()
+	// Shutdown is the owning-lifecycle cancellation boundary. Unlike public
+	// Abort it must stop every session phase, including compaction and branch
+	// summarization, before invalidating the manager.
+	if cancelRetry != nil {
+		cancelRetry(errRetryCancelled)
+	}
+	_ = s.loop.Abort(ctx)
+	if run != nil {
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
 	}
 	if s.hooks.SessionShutdown != nil {
 		if hookErr := s.hooks.SessionShutdown(ctx, cloneSessionShutdownHookEvent(options.Event)); hookErr != nil {
@@ -2799,23 +3113,28 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 		return session.CompactResult{}, err
 	}
 	defer s.finishSessionRun(run)
+	domain, ok := s.beginCompaction(run)
+	if !ok {
+		return session.CompactResult{}, ErrBusy
+	}
+	defer s.endCompaction(run, domain)
 	s.setSessionPhase(run, PhaseCompacting)
-	s.emitCompaction(run.ctx, "compaction_start", CompactionManual, nil, false, false, "")
-	result, err := s.compactTranscript(run, CompactionManual, false, instructions)
+	s.emitCompaction(domain.ctx, "compaction_start", CompactionManual, nil, false, false, "")
+	result, err := s.compactTranscript(run, domain.ctx, CompactionManual, false, instructions)
 	if err != nil {
-		aborted := context.Cause(run.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
+		aborted := context.Cause(domain.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
 		errorMessage := ""
 		if !aborted {
 			errorMessage = "Compaction failed: " + safeCompactionEventError(err)
 		}
-		s.emitCompaction(run.ctx, "compaction_end", CompactionManual, nil, aborted, false, errorMessage)
+		s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, nil, aborted, false, errorMessage)
 		if errors.Is(err, errExtensionCompactionCancelled) {
 			return session.CompactResult{}, ErrAgentAborted
 		}
 		return session.CompactResult{}, err
 	}
-	s.afterCompaction(run.ctx, result, CompactionManual, false)
-	s.emitCompaction(run.ctx, "compaction_end", CompactionManual, &result, false, false, "")
+	s.afterCompaction(domain.ctx, result, CompactionManual, false)
+	s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, &result, false, false, "")
 	return result, nil
 }
 
@@ -2845,10 +3164,8 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 		return nil, provider.Model{}, ErrBranchSummaryUnavailable
 	}
 	s.selectionMu.RLock()
+	state := s.loop.State()
 	s.mu.RLock()
-	hasModel := s.hasModel
-	selected := s.model
-	thinking := s.thinkingLevel
 	stream := provider.CloneStreamOptions(s.stream)
 	resolveStream := s.resolveStream
 	resolve := s.resolveBranchSummarizer
@@ -2858,6 +3175,7 @@ func (s *AgentSession) resolveTreeSummarizer(ctx context.Context) (session.Branc
 	validate := s.validateAccess
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
+	hasModel, selected, thinking := state.HasModel(), state.Model(), state.ThinkingLevel()
 	runtimeSettings := s.resolvedRuntimeSettings()
 	retry := runtimeSettings.Retry
 	if !runtimeSettings.AutoRetryEnabled {
@@ -2970,11 +3288,6 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		}
 		return NavigateTreeResult{}, err
 	}
-	s.lifecycleMu.Lock()
-	if s.run == run {
-		run.branchSummary = true
-	}
-	s.lifecycleMu.Unlock()
 	defer s.finishSessionRun(run)
 	manager := s.sessionManager
 	oldLeaf, _ := manager.LeafID()
@@ -3002,9 +3315,19 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		EntriesToSummarize: cloneSessionEntries(collected.Entries), UserWantsSummary: options.Summarize,
 		CustomInstructions: cloneStringPointer(customInstructions), ReplaceInstructions: cloneBoolPointer(replaceInstructions), Label: cloneStringPointer(label),
 	}
+	// pi installs the branch-summary abort controller immediately before the
+	// first extension/summarizer await. Publish the equivalent phase at that
+	// same boundary, after all synchronous target validation is complete.
+	s.setSessionPhase(run, PhaseCompacting)
+	branch, ok := s.beginBranchSummary(run)
+	if !ok {
+		return NavigateTreeResult{}, ErrBusy
+	}
+	defer s.endBranchSummary(run, branch)
+	branchCtx := branch.ctx
 	var extensionSummary *TreeSummary
 	if hook := s.hooks.SessionBeforeTree; hook != nil {
-		result, hookErr := hook(run.ctx, SessionBeforeTreeEvent{Preparation: preparation})
+		result, hookErr := hook(branchCtx, SessionBeforeTreeEvent{Preparation: preparation})
 		if hookErr == nil {
 			if err := result.Cancel.Validate(); err != nil {
 				return NavigateTreeResult{}, err
@@ -3038,9 +3361,9 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		summaryText, summaryDetails = extensionSummary.Summary, bytes.Clone(extensionSummary.Details)
 		summaryUsage, fromExtension = cloneCompactionUsage(extensionSummary.Usage), true
 	} else if options.Summarize && len(collected.Entries) > 0 {
-		resolved, selected, resolveErr := s.resolveTreeSummarizer(run.ctx)
+		resolved, selected, resolveErr := s.resolveTreeSummarizer(branchCtx)
 		if resolveErr != nil {
-			if context.Cause(run.ctx) != nil {
+			if context.Cause(branchCtx) != nil {
 				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
 			}
 			return NavigateTreeResult{}, resolveErr
@@ -3063,19 +3386,19 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		} else {
 			var output session.BranchSummaryOutput
 			if observable, ok := resolved.(branchSummarizerWithRetryObserver); ok {
-				output, err = observable.SummarizeBranchWithRetryObserver(run.ctx, input, func(_ context.Context, retry provider.RetryEvent) {
-					s.emitSummarizationRetryFrom(run.ctx, CompactionBranchSummary, "branchSummary", retry)
+				output, err = observable.SummarizeBranchWithRetryObserver(branchCtx, input, func(_ context.Context, retry provider.RetryEvent) {
+					s.emitSummarizationRetryFrom(branchCtx, CompactionBranchSummary, "branchSummary", retry)
 				})
 			} else {
-				output, err = resolved.SummarizeBranch(run.ctx, input)
+				output, err = resolved.SummarizeBranch(branchCtx, input)
 			}
 			if err != nil {
-				if context.Cause(run.ctx) != nil {
+				if context.Cause(branchCtx) != nil {
 					return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
 				}
 				return NavigateTreeResult{}, err
 			}
-			if output.Aborted || context.Cause(run.ctx) != nil {
+			if output.Aborted || context.Cause(branchCtx) != nil {
 				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
 			}
 			if output.Error != "" {
@@ -3102,22 +3425,22 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 	var summaryEntry *session.Entry
 	if summaryText != "" {
 		flag := fromExtension
-		entry, commitErr := manager.BranchWithSummary(run.ctx, newLeafID, summaryText, summaryDetails, &flag, summaryUsage)
+		entry, commitErr := manager.BranchWithSummary(branchCtx, newLeafID, summaryText, summaryDetails, &flag, summaryUsage)
 		if commitErr != nil {
-			if context.Cause(run.ctx) != nil {
+			if context.Cause(branchCtx) != nil {
 				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
 			}
 			return NavigateTreeResult{}, commitErr
 		}
 		summaryEntry = &entry
 		if label != nil && *label != "" {
-			if _, err := manager.AppendLabelChange(context.WithoutCancel(run.ctx), entry.ID(), label); err != nil {
+			if _, err := manager.AppendLabelChange(context.WithoutCancel(branchCtx), entry.ID(), label); err != nil {
 				return NavigateTreeResult{}, err
 			}
 		}
 	} else {
-		if _, err := manager.NavigateTreePosition(run.ctx, newLeafID, targetID, label); err != nil {
-			if context.Cause(run.ctx) != nil {
+		if _, err := manager.NavigateTreePosition(branchCtx, newLeafID, targetID, label); err != nil {
+			if context.Cause(branchCtx) != nil {
 				return NavigateTreeResult{Cancelled: true, Aborted: true}, nil
 			}
 			return NavigateTreeResult{}, err
@@ -3136,7 +3459,7 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		if summaryText != "" {
 			fromHook = &fromExtension
 		}
-		_ = hook(run.ctx, SessionTreeEvent{NewLeafID: actualNewLeaf, OldLeafID: optionalString(oldLeaf), SummaryEntry: summaryEntry, FromExtension: fromHook})
+		_ = hook(branchCtx, SessionTreeEvent{NewLeafID: actualNewLeaf, OldLeafID: optionalString(oldLeaf), SummaryEntry: summaryEntry, FromExtension: fromHook})
 	}
 	return NavigateTreeResult{EditorText: editorText, SummaryEntry: summaryEntry}, nil
 }
@@ -3165,10 +3488,14 @@ func (s *AgentSession) AbortBranchSummary() {
 		return
 	}
 	s.lifecycleMu.Lock()
-	if s.run != nil && s.run.branchSummary {
-		s.run.cancel(ErrAgentAborted)
+	var cancel context.CancelCauseFunc
+	if s.run != nil && s.run.branchSummary && s.run.branchCancellation != nil {
+		cancel = s.run.branchCancellation.cancel
 	}
 	s.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel(ErrAgentAborted)
+	}
 }
 
 // SelectLeaf exposes the current Session tree navigation boundary without

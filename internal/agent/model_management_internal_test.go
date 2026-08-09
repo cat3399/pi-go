@@ -348,7 +348,7 @@ func waitForSelectionWriter(t *testing.T, coordinator *AgentSession) {
 	t.Fatal("selection publisher did not wait for the write lock")
 }
 
-func TestSelectionReadersWaitForCoupledAgentAndSessionSnapshot(t *testing.T) {
+func TestSelectionReadersWaitForPublishedAgentSnapshot(t *testing.T) {
 	a, b := internalControlModel(t, "a"), internalControlModel(t, "b")
 	coordinator := internalControlSession(t, a, provider.ThinkingHigh)
 
@@ -369,8 +369,9 @@ func TestSelectionReadersWaitForCoupledAgentAndSessionSnapshot(t *testing.T) {
 		coordinator.loop.mu.Unlock()
 	})
 
-	// Reproduce the exact old publication window: the low Agent already has
-	// the new pair while AgentSession still has the old pair.
+	// Publication holds selectionMu across the Agent's coupled model/thinking
+	// update and the surrounding durable/settings transaction. AgentSession no
+	// longer keeps a second value copy for readers to race with.
 	coordinator.selectionMu.Lock()
 	if err := coordinator.loop.SetModelAndThinking(b, provider.ThinkingLow); err != nil {
 		coordinator.selectionMu.Unlock()
@@ -417,9 +418,6 @@ func TestSelectionReadersWaitForCoupledAgentAndSessionSnapshot(t *testing.T) {
 	default:
 	}
 
-	coordinator.mu.Lock()
-	coordinator.model, coordinator.hasModel, coordinator.thinkingLevel = b, true, provider.ThinkingLow
-	coordinator.mu.Unlock()
 	coordinator.selectionMu.Unlock()
 
 	for range 4 {
@@ -447,6 +445,46 @@ func TestSelectionReadersWaitForCoupledAgentAndSessionSnapshot(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestAgentSessionRuntimeSelectionHasOnlyAgentStateOwner(t *testing.T) {
+	first, second := internalControlModel(t, "first"), internalControlModel(t, "second")
+	coordinator := internalControlSession(t, first, provider.ThinkingHigh)
+	if err := coordinator.loop.SetModelAndThinking(second, provider.ThinkingLow); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.loop.SetSystemPrompt("agent-owned prompt"); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := provider.NewToolDefinition("owned", "owned", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := internalOwnedTool{}
+	if err := coordinator.loop.SetTools(executor, []provider.ToolDefinition{definition}); err != nil {
+		t.Fatal(err)
+	}
+
+	state := coordinator.State()
+	if !state.Model.Equal(second) || state.ThinkingLevel != provider.ThinkingLow || state.SystemPrompt != "agent-owned prompt" ||
+		len(state.Tools) != 1 || !state.Active.Model().Equal(second) || state.Active.SystemPrompt() != "agent-owned prompt" {
+		t.Fatalf("session did not project Agent state: %#v", state)
+	}
+	turn, err := coordinator.prepareTurn(context.Background(), TurnContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !turn.Model.Equal(second) || turn.ThinkingLevel != provider.ThinkingLow || turn.SystemPrompt != "agent-owned prompt" ||
+		len(turn.Tools) != 1 || turn.Tool == nil || turn.Tool.Name() != "owned" {
+		t.Fatalf("turn did not snapshot Agent owner: %#v", turn)
+	}
+}
+
+type internalOwnedTool struct{}
+
+func (internalOwnedTool) Name() string { return "owned" }
+func (internalOwnedTool) Execute(context.Context, []byte, func(ToolUpdate)) (ToolOutput, error) {
+	return ToolOutput{Text: "owned"}, nil
 }
 
 func TestSelectionPublishersSerializeSuccessAndCommitUnknown(t *testing.T) {

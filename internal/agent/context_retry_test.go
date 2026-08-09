@@ -339,7 +339,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	assertContextRetryEntries(t, transcript, "summary retry prompt", "answer after summary retry", 1, 0)
 }
 
-func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *testing.T) {
+func TestAbortDoesNotCancelSummarizerRetryButShutdownDoes(t *testing.T) {
 	transcript := newSessionManager(t)
 	old, err := llm.NewUserTextMessage(strings.Repeat("cancel summary context ", 10), agentTestEpoch)
 	if err != nil {
@@ -379,13 +379,18 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	baselineEntries := len(transcript.Entries())
 	var retryEvents, compactionEvents []agentEventSnapshot
+	var lifecycleEvents []agent.AgentEventType
 	subscribeAllAgentEvents(coordinator, func(_ context.Context, event observedAgentEvent) {
 		switch event.Type() {
 		case agent.SummarizationRetryScheduledEventType, agent.SummarizationRetryAttemptEventType, agent.SummarizationRetryFinishedEventType:
 			retryEvents = append(retryEvents, snapshotAgentEvent(event))
 		case agent.CompactionStartEventType, agent.CompactionEndEventType:
 			compactionEvents = append(compactionEvents, snapshotAgentEvent(event))
+		case agent.AgentStartEventType, agent.TurnStartEventType, agent.MessageStartEventType,
+			agent.MessageEndEventType, agent.TurnEndEventType, agent.AgentEndEventType, agent.AgentSettledEventType:
+			lifecycleEvents = append(lifecycleEvents, event.Type())
 		}
 	})
 	type runOutcome struct {
@@ -408,16 +413,26 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 	if err := coordinator.Steer("queued while summarizer retries"); err != nil {
 		t.Fatal(err)
 	}
-	if err := coordinator.Abort(context.Background()); err != nil {
+	abortCtx, cancelAbort := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancelAbort()
+	if err := coordinator.Abort(abortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Abort during independent compaction = %v, want deadline", err)
+	}
+	if state := coordinator.State(); state.Active.Phase() != agent.PhaseCompacting {
+		t.Fatalf("Abort cancelled compaction domain: phase=%s", state.Active.Phase())
+	}
+	if err := coordinator.Shutdown(context.Background(), agent.SessionShutdownOptions{Event: agent.SessionShutdownHookEvent{Reason: agent.ShutdownQuit}}); err != nil {
 		t.Fatal(err)
 	}
 	outcome := <-runDone
-	terminal, ok := outcome.result.Terminal()
-	if outcome.err != nil || !ok || terminal.FinishReason() != llm.FinishAborted {
-		t.Fatalf("Run() terminal=%T/%v error=%v", terminal, terminal.FinishReason(), outcome.err)
+	if !errors.Is(outcome.err, agent.ErrAgentAborted) {
+		t.Fatalf("Run() = (%#v, %v), want pre-low-run abort", outcome.result, outcome.err)
 	}
-	if err := coordinator.WaitForIdle(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, ok := outcome.result.Terminal(); ok {
+		t.Fatalf("pre-low-run abort produced terminal = %#v", outcome.result)
+	}
+	if len(lifecycleEvents) != 0 {
+		t.Fatalf("pre-low-run abort emitted lifecycle = %v", lifecycleEvents)
 	}
 	steering, _ := coordinator.Queues()
 	if len(steering) != 1 || joinContextText(steering[0].Content()) != "queued while summarizer retries" {
@@ -427,6 +442,9 @@ func TestAbortDuringSummarizerRetrySettlesQueueAndDoesNotCommitCompaction(t *tes
 		if entry.Type() == "compaction" {
 			t.Fatal("cancelled summary appended a compaction")
 		}
+	}
+	if entries := len(transcript.Entries()); entries != baselineEntries {
+		t.Fatalf("pre-low-run abort entries = %d, want baseline %d", entries, baselineEntries)
 	}
 	if len(retryEvents) != 2 || retryEvents[0].Kind != agent.SummarizationRetryScheduledEventType ||
 		retryEvents[1].Kind != agent.SummarizationRetryFinishedEventType ||
@@ -909,9 +927,7 @@ func TestManualCompactionAbortPublishesSafeCancellationSettlement(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("manual compaction did not reach summarizer")
 	}
-	if err := coordinator.Abort(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	coordinator.AbortCompaction()
 	if err := <-done; !errors.Is(err, session.ErrAppendCanceled) {
 		t.Fatalf("Compact() error = %v", err)
 	}

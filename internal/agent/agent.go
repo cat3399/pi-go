@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -22,6 +23,18 @@ type activeRun struct {
 	turn             uint32
 	phase            Phase
 	pendingToolCalls []string
+	// messagePrecommitted is set only while the stateful MessageEnd hook is
+	// running. The original Agent has already appended the finalized message
+	// when AgentSession's message_end listener executes; this marker lets the Go
+	// wrapper expose that same state without appending it a second time when the
+	// resulting MessageEndEvent is reduced.
+	messagePrecommitted bool
+	queueDelivery       []queuedDelivery
+}
+
+type queuedDelivery struct {
+	message  agentmsg.Message
+	steering bool
 }
 
 type agentRunMode uint8
@@ -88,7 +101,7 @@ type Agent struct {
 }
 
 func New(config Config) (*Agent, error) {
-	runtime, err := validateConfig(config)
+	validated, err := validateConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -98,18 +111,18 @@ func New(config Config) (*Agent, error) {
 	// Match createMutableAgentState: isolate the array while retaining each
 	// immutable AgentMessage element as supplied.
 	messages := append([]agentmsg.Message(nil), config.InitialMessages...)
-	if len(runtime.tools) == 0 && !isNilInterface(runtime.tool) {
-		definition, err := provider.NewToolDefinition(runtime.toolName, runtime.toolName, false, []byte(`{"type":"object"}`))
+	if len(validated.tools) == 0 && !isNilInterface(validated.tool) {
+		definition, err := provider.NewToolDefinition(validated.toolName, validated.toolName, false, []byte(`{"type":"object"}`))
 		if err != nil {
 			return nil, fmt.Errorf("%w: default tool definition: %w", ErrInvalidConfig, err)
 		}
-		runtime.tools = []provider.ToolDefinition{definition}
+		validated.tools = []provider.ToolDefinition{definition}
 	}
 	return &Agent{
-		config: runtime, model: runtime.model, hasModel: runtime.hasModel, thinkingLevel: runtime.thinkingLevel,
-		systemPrompt: runtime.systemPrompt, tool: runtime.tool,
-		tools:    append([]provider.ToolDefinition(nil), runtime.tools...),
-		messages: messages, steeringMode: runtime.steeringMode, followUpMode: runtime.followUpMode,
+		config: validated.policy, model: validated.model, hasModel: validated.hasModel, thinkingLevel: validated.thinkingLevel,
+		systemPrompt: validated.systemPrompt, tool: validated.tool,
+		tools:    append([]provider.ToolDefinition(nil), validated.tools...),
+		messages: messages, steeringMode: validated.policy.steeringMode, followUpMode: validated.policy.followUpMode,
 	}, nil
 }
 
@@ -188,6 +201,23 @@ func (a *Agent) State() State {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.stateLocked()
+}
+
+// runtimeSnapshot returns the complete Agent-owned turn selection under one
+// lock. AgentSession uses it only to add product-level stream/auth overrides;
+// it does not retain a second copy of model, thinking, prompt, tools, or the
+// executor.
+func (a *Agent) runtimeSnapshot() (State, ToolExecutor) {
+	if a == nil {
+		return State{phase: PhaseIdle}, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.stateLocked(), a.tool
+}
+
+func (a *Agent) stateLocked() State {
 	state := State{
 		phase: a.phaseLocked(), model: a.model, hasModel: a.hasModel, thinkingLevel: a.thinkingLevel,
 		systemPrompt: a.systemPrompt, tools: append([]provider.ToolDefinition(nil), a.tools...),
@@ -485,12 +515,14 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 	}
 	lastRole := a.messages[len(a.messages)-1].Role()
 	var prompts []agentmsg.Message
+	queuedSteering := false
 	skipInitialSteering := false
 	mode := agentRunContinuation
 	if lastRole == agentmsg.RoleAssistant {
 		mode = agentRunPrompt
 		prompts = a.drainQueueLocked(true)
 		if len(prompts) != 0 {
+			queuedSteering = true
 			skipInitialSteering = true
 		} else {
 			prompts = a.drainQueueLocked(false)
@@ -501,6 +533,9 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 		}
 	}
 	active, err := a.beginRunLocked(ctx)
+	if err == nil && len(prompts) != 0 {
+		a.stageQueueDeliveryLocked(active, prompts, queuedSteering)
+	}
 	a.mu.Unlock()
 	if err != nil {
 		return Result{}, err
@@ -584,21 +619,11 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 	stream := provider.CloneStreamOptions(a.config.stream)
 	a.mu.Unlock()
 
-	if a.config.prepareTurn != nil {
-		snapshot, err := a.config.prepareTurn(active.ctx, TurnContext{RunID: active.id, Turn: 1})
-		if err != nil {
-			return nil, AgentLoopContext{}, err
-		}
-		model, thinking, systemPrompt, executor = snapshot.Model, snapshot.ThinkingLevel, snapshot.SystemPrompt, snapshot.Tool
-		definitions = append([]provider.ToolDefinition(nil), snapshot.Tools...)
-		stream = provider.CloneStreamOptions(snapshot.Stream)
-	}
 	tools, err := adaptAgentLoopTools(definitions, executor)
 	if err != nil {
 		return nil, AgentLoopContext{}, err
 	}
 	contextSnapshot := AgentLoopContext{SystemPrompt: systemPrompt, Messages: messages, Tools: tools}
-	turn := uint32(1)
 	config := AgentLoopConfig{
 		RunID: active.id, Provider: a.config.provider, Model: model, ThinkingLevel: thinking,
 		Stream:        stream,
@@ -609,74 +634,74 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 	}
 	if a.config.messageEnd != nil {
 		config.ProcessMessage = func(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
-			replacement, err := a.config.messageEnd(ctx, agentmsg.CloneOne(message))
+			return a.processFinalMessage(active, ctx, message)
+		}
+	}
+	var pendingNextTurnOverride *AgentLoopTurnUpdate
+	if a.config.prepareNextTurn != nil {
+		config.PrepareNextTurn = func(ctx context.Context, input AgentLoopTurnContext) (*AgentLoopTurnUpdate, error) {
+			fullInput := cloneAgentLoopTurnContext(input.Message, input.ToolResults, input.Context, input.NewMessages)
+			full, err := a.config.prepareNextTurn(ctx, fullInput)
 			if err != nil {
 				return nil, err
 			}
-			if replacement == nil {
-				return message, nil
+			owned := cloneAgentLoopTurnUpdate(full)
+			if a.config.prepareTurn != nil {
+				// The public after-turn update is applied immediately by AgentLoop
+				// so ShouldStopAfterTurn observes it. Retain an owned copy only to
+				// reapply its explicitly selected fields after the legacy dynamic
+				// provider snapshot is refreshed for an actual following request.
+				pendingNextTurnOverride = cloneAgentLoopTurnUpdate(owned)
 			}
-			return agentmsg.CloneOne(replacement), nil
+			return owned, nil
 		}
 	}
-	if a.config.prepareTurn != nil || a.config.prepareNextTurn != nil {
-		config.PrepareNextTurn = func(ctx context.Context, input AgentLoopTurnContext) (*AgentLoopTurnUpdate, error) {
-			turn++
-			update := AgentLoopTurnUpdate{}
-			changed := false
-			a.mu.Lock()
-			hasQueued := len(a.steeringQueue) != 0 || len(a.followUpQueue) != 0
-			a.mu.Unlock()
-			_, toolTurn := input.Message.(llm.AssistantToolUseMessage)
-			if a.config.prepareTurn != nil && (toolTurn || hasQueued) {
-				snapshot, err := a.config.prepareTurn(ctx, TurnContext{RunID: active.id, Turn: turn})
-				if err != nil {
-					return nil, err
-				}
-				adapted, err := adaptAgentLoopTools(snapshot.Tools, snapshot.Tool)
-				if err != nil {
-					return nil, err
-				}
-				next := cloneAgentLoopContext(input.Context)
-				next.SystemPrompt = snapshot.SystemPrompt
-				next.Tools = adapted
-				stream := provider.CloneStreamOptions(snapshot.Stream)
-				update.Context, update.Model, update.ThinkingLevel, update.Stream = &next, &snapshot.Model, &snapshot.ThinkingLevel, &stream
-				changed = true
+	if a.config.prepareTurn != nil {
+		config.prepareProviderTurn = func(ctx context.Context, input agentLoopProviderTurnContext) (*AgentLoopTurnUpdate, error) {
+			snapshot, err := a.config.prepareTurn(ctx, TurnContext{RunID: active.id, Turn: input.Turn})
+			if err != nil {
+				return nil, err
 			}
-			if a.config.prepareNextTurn != nil {
-				fullInput := cloneAgentLoopTurnContext(input.Message, input.ToolResults, input.Context, input.NewMessages)
-				full, err := a.config.prepareNextTurn(ctx, fullInput)
-				if err != nil {
-					return nil, err
+			adapted, err := adaptAgentLoopTools(snapshot.Tools, snapshot.Tool)
+			if err != nil {
+				return nil, err
+			}
+			next := cloneAgentLoopContext(input.Context)
+			next.SystemPrompt = snapshot.SystemPrompt
+			next.Tools = adapted
+			model := snapshot.Model
+			thinking := snapshot.ThinkingLevel
+			stream := provider.CloneStreamOptions(snapshot.Stream)
+			update := &AgentLoopTurnUpdate{
+				Context: &next, Model: &model, ThinkingLevel: &thinking, Stream: &stream,
+			}
+			if override := pendingNextTurnOverride; override != nil {
+				if override.Context != nil {
+					// AgentLoop applied the replacement before draining queues, so
+					// input.Context already contains its message replacement plus any
+					// subsequently delivered users. Reapply only the fields the legacy
+					// snapshot refresh overwrote; replacing Messages here would discard
+					// those queued users.
+					context := cloneAgentLoopContext(input.Context)
+					context.SystemPrompt = override.Context.SystemPrompt
+					context.Tools = append([]AgentLoopTool(nil), override.Context.Tools...)
+					update.Context = &context
 				}
-				if full != nil {
-					if full.Context != nil {
-						next := cloneAgentLoopContext(*full.Context)
-						update.Context = &next
-						changed = true
-					}
-					if full.Model != nil {
-						model := *full.Model
-						update.Model = &model
-						changed = true
-					}
-					if full.ThinkingLevel != nil {
-						thinking := *full.ThinkingLevel
-						update.ThinkingLevel = &thinking
-						changed = true
-					}
-					if full.Stream != nil {
-						stream := provider.CloneStreamOptions(*full.Stream)
-						update.Stream = &stream
-						changed = true
-					}
+				if override.Model != nil {
+					value := *override.Model
+					update.Model = &value
+				}
+				if override.ThinkingLevel != nil {
+					value := *override.ThinkingLevel
+					update.ThinkingLevel = &value
+				}
+				if override.Stream != nil {
+					value := provider.CloneStreamOptions(*override.Stream)
+					update.Stream = &value
 				}
 			}
-			if !changed {
-				return nil, nil
-			}
-			return &update, nil
+			pendingNextTurnOverride = nil
+			return update, nil
 		}
 	}
 	firstSteeringPoll := true
@@ -692,10 +717,10 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 		}
 		firstSteeringPoll = false
 		drained := a.drainQueueLocked(true)
-		a.mu.Unlock()
 		if len(drained) != 0 {
-			a.notifyControl(active.ctx, QueueUpdateEvent{RunID: active.id, Turn: active.turn})
+			a.stageQueueDeliveryLocked(active, drained, true)
 		}
+		a.mu.Unlock()
 		return drained, nil
 	}
 	config.GetFollowUpMessages = func(ctx context.Context) ([]agentmsg.Message, error) {
@@ -704,10 +729,10 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 		}
 		a.mu.Lock()
 		drained := a.drainQueueLocked(false)
-		a.mu.Unlock()
 		if len(drained) != 0 {
-			a.notifyControl(active.ctx, QueueUpdateEvent{RunID: active.id, Turn: active.turn})
+			a.stageQueueDeliveryLocked(active, drained, false)
 		}
+		a.mu.Unlock()
 		return drained, nil
 	}
 	loop, err := NewAgentLoop(config)
@@ -723,7 +748,14 @@ func adaptAgentLoopTools(definitions []provider.ToolDefinition, executor ToolExe
 	}
 	tools := make([]AgentLoopTool, 0, len(definitions))
 	for _, definition := range definitions {
-		tool, err := NewAgentLoopToolAdapter(definition, executor, nil)
+		var prepare func(any) (any, error)
+		if preparer, ok := executor.(NamedToolArgumentPreparer); ok {
+			name := definition.Name()
+			prepare = func(arguments any) (any, error) {
+				return preparer.PrepareArguments(name, arguments)
+			}
+		}
+		tool, err := NewAgentLoopToolAdapter(definition, executor, prepare)
 		if err != nil {
 			return nil, err
 		}
@@ -836,6 +868,17 @@ func (a *Agent) processEvent(active *activeRun, ctx context.Context, event Agent
 		return fmt.Errorf("%w: event for inactive run", ErrInvariant)
 	}
 	a.reduceEventLocked(event)
+	var queueUpdate *QueueUpdateEvent
+	if started, ok := event.(MessageStartEvent); ok && len(active.queueDelivery) != 0 &&
+		reflect.DeepEqual(active.queueDelivery[0].message, started.Message) {
+		active.queueDelivery = active.queueDelivery[1:]
+		steering, followUp := a.richQueueMessagesLocked()
+		value := QueueUpdateEvent{
+			RunID: active.id, Turn: active.turn,
+			SteeringMessages: agentmsg.Clone(steering), FollowUpMessages: agentmsg.Clone(followUp),
+		}
+		queueUpdate = &value
+	}
 	listeners := make([]agentListener, 0, len(a.observers))
 	for _, entry := range a.observers {
 		if entry.listener != nil {
@@ -843,6 +886,9 @@ func (a *Agent) processEvent(active *activeRun, ctx context.Context, event Agent
 		}
 	}
 	a.mu.Unlock()
+	if queueUpdate != nil {
+		a.notifyControl(ctx, *queueUpdate)
+	}
 	for _, listener := range listeners {
 		if err := callAgentListener(listener, ctx, cloneAgentEvent(event)); err != nil {
 			return err
@@ -885,7 +931,20 @@ func (a *Agent) reduceEventLocked(event AgentEvent) {
 		a.streaming = agentmsg.CloneOne(value.Message)
 	case MessageEndEvent:
 		a.streaming = nil
-		a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+		if active.messagePrecommitted {
+			active.messagePrecommitted = false
+			if len(a.messages) == 0 {
+				// processFinalMessage and event reduction are one serialized
+				// lifecycle. Losing the staged element means caller code mutated
+				// Agent state reentrantly from the hook; retain a safe state while
+				// the invariant error is surfaced by processFinalMessage.
+				a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+			} else {
+				a.messages[len(a.messages)-1] = agentmsg.CloneOne(value.Message)
+			}
+		} else {
+			a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+		}
 	case ToolExecutionStartEvent:
 		active.phase = PhaseTool
 		active.pendingToolCalls = append(active.pendingToolCalls, value.ToolCallID)
@@ -909,12 +968,73 @@ func (a *Agent) reduceEventLocked(event AgentEvent) {
 	}
 }
 
+// processFinalMessage recreates the mutable-object ordering used by the
+// TypeScript Agent/AgentSession boundary while retaining copy-safe Go values:
+// message_start has already been reduced, the raw finalized message is visible
+// in Agent state while the message_end hook runs, then a same-role replacement
+// atomically becomes the retained/event/context value.
+func (a *Agent) processFinalMessage(active *activeRun, ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
+	if a == nil || active == nil || isNilInterface(message) {
+		return nil, fmt.Errorf("%w: invalid finalized message", ErrInvariant)
+	}
+	raw := agentmsg.CloneOne(message)
+	a.mu.Lock()
+	if a.active != active || active.messagePrecommitted {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("%w: finalized message outside serialized active run", ErrInvariant)
+	}
+	a.streaming = nil
+	a.messages = append(a.messages, raw)
+	index := len(a.messages) - 1
+	active.messagePrecommitted = true
+	a.mu.Unlock()
+
+	rollback := func() {
+		a.mu.Lock()
+		if a.active == active && active.messagePrecommitted {
+			active.messagePrecommitted = false
+			if len(a.messages) == index+1 {
+				a.messages = a.messages[:index]
+			}
+		}
+		a.mu.Unlock()
+	}
+
+	replacement, err := a.config.messageEnd(ctx, agentmsg.CloneOne(raw))
+	if err != nil {
+		rollback()
+		return nil, err
+	}
+	if replacement == nil {
+		replacement = raw
+	}
+	if isNilInterface(replacement) || replacement.Role() != raw.Role() || isAssistantPartialMessage(replacement) {
+		rollback()
+		return nil, fmt.Errorf("%w: processed message changed role or finality", ErrInvariant)
+	}
+	processed := agentmsg.CloneOne(replacement)
+	a.mu.Lock()
+	if a.active != active || !active.messagePrecommitted || len(a.messages) != index+1 {
+		if a.active == active {
+			active.messagePrecommitted = false
+		}
+		a.mu.Unlock()
+		return nil, fmt.Errorf("%w: Agent state changed during message_end hook", ErrInvariant)
+	}
+	a.messages[index] = agentmsg.CloneOne(processed)
+	a.mu.Unlock()
+	return processed, nil
+}
+
 func (a *Agent) handleRunFailure(active *activeRun, cause error) (llm.AssistantTerminal, error) {
 	a.mu.Lock()
 	model := a.model
 	turn := active.turn
 	aborted := context.Cause(active.ctx) != nil
 	a.mu.Unlock()
+	if activeCause := context.Cause(active.ctx); activeCause != nil && !errors.Is(cause, activeCause) {
+		cause = errors.Join(cause, activeCause)
+	}
 	reason := llm.FinishError
 	if aborted {
 		reason = llm.FinishAborted
@@ -940,26 +1060,26 @@ func (a *Agent) handleRunFailure(active *activeRun, cause error) (llm.AssistantT
 		return nil, err
 	}
 	var wrapped agentmsg.Message = wrappedLLM
+	if err := a.processEvent(active, active.ctx, MessageStartEvent{RunID: active.id, Turn: turn, Message: wrapped}); err != nil {
+		return nil, err
+	}
 	if a.config.messageEnd != nil {
-		replacement, hookErr := a.config.messageEnd(active.ctx, agentmsg.CloneOne(wrapped))
+		replacement, hookErr := a.processFinalMessage(active, active.ctx, wrapped)
 		if hookErr != nil {
 			return nil, hookErr
 		}
-		if replacement != nil {
-			standard, ok := replacement.(agentmsg.LLM)
-			if !ok {
-				return nil, fmt.Errorf("%w: processed synthetic failure is %T", ErrInvariant, replacement)
-			}
-			replacedTerminal, ok := standard.Conversation().(llm.AssistantTerminal)
-			if !ok {
-				return nil, fmt.Errorf("%w: processed synthetic failure is not terminal", ErrInvariant)
-			}
-			terminal = replacedTerminal
-			wrapped = agentmsg.CloneOne(replacement)
+		wrapped = replacement
+		standard, ok := replacement.(agentmsg.LLM)
+		if !ok {
+			return nil, fmt.Errorf("%w: processed synthetic failure is %T", ErrInvariant, replacement)
 		}
+		replacedTerminal, ok := standard.Conversation().(llm.AssistantTerminal)
+		if !ok {
+			return nil, fmt.Errorf("%w: processed synthetic failure is not terminal", ErrInvariant)
+		}
+		terminal = replacedTerminal
 	}
 	for _, event := range []AgentEvent{
-		MessageStartEvent{RunID: active.id, Turn: turn, Message: wrapped},
 		MessageEndEvent{RunID: active.id, Turn: turn, Message: wrapped, Model: model},
 		TurnEndEvent{RunID: active.id, Turn: turn, Message: wrapped},
 		AgentEndEvent{RunID: active.id, Turn: turn, Messages: []agentmsg.Message{wrapped}, Terminal: terminal},
@@ -1077,13 +1197,40 @@ func (a *Agent) drainQueueLocked(steering bool) []agentmsg.Message {
 	return result
 }
 
+func (a *Agent) stageQueueDeliveryLocked(active *activeRun, messages []agentmsg.Message, steering bool) {
+	if active == nil {
+		return
+	}
+	for _, message := range messages {
+		active.queueDelivery = append(active.queueDelivery, queuedDelivery{
+			message: agentmsg.CloneOne(message), steering: steering,
+		})
+	}
+}
+
+func (a *Agent) richQueueMessagesLocked() (steering, followUp []agentmsg.Message) {
+	if a.active != nil {
+		for _, delivery := range a.active.queueDelivery {
+			if delivery.steering {
+				steering = append(steering, delivery.message)
+			} else {
+				followUp = append(followUp, delivery.message)
+			}
+		}
+	}
+	steering = append(steering, a.steeringQueue...)
+	followUp = append(followUp, a.followUpQueue...)
+	return steering, followUp
+}
+
 func (a *Agent) RichQueues() (steering, followUp []llm.ConversationMessage) {
 	if a == nil {
 		return nil, nil
 	}
 	a.mu.Lock()
-	steeringMessages := append([]agentmsg.Message(nil), a.steeringQueue...)
-	followMessages := append([]agentmsg.Message(nil), a.followUpQueue...)
+	steeringMessages, followMessages := a.richQueueMessagesLocked()
+	steeringMessages = agentmsg.Clone(steeringMessages)
+	followMessages = agentmsg.Clone(followMessages)
 	a.mu.Unlock()
 	steering, _ = agentmsg.ConvertToLLM(steeringMessages)
 	followUp, _ = agentmsg.ConvertToLLM(followMessages)
@@ -1138,6 +1285,9 @@ func (a *Agent) ClearAllQueues() {
 	}
 	a.mu.Lock()
 	a.steeringQueue, a.followUpQueue = nil, nil
+	if a.active != nil {
+		a.active.queueDelivery = nil
+	}
 	a.mu.Unlock()
 }
 func (a *Agent) clearQueue(steering bool) {
@@ -1149,6 +1299,15 @@ func (a *Agent) clearQueue(steering bool) {
 		a.steeringQueue = nil
 	} else {
 		a.followUpQueue = nil
+	}
+	if a.active != nil && len(a.active.queueDelivery) != 0 {
+		kept := a.active.queueDelivery[:0]
+		for _, delivery := range a.active.queueDelivery {
+			if delivery.steering != steering {
+				kept = append(kept, delivery)
+			}
+		}
+		a.active.queueDelivery = kept
 	}
 	a.mu.Unlock()
 }

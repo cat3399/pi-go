@@ -113,9 +113,16 @@ func TestAgentLoopRunAllowsEmptyPromptBatch(t *testing.T) {
 
 func TestAgentLoopProcessesMessagesBeforeContextEventsAndResults(t *testing.T) {
 	model := mustLoopModel(t, "loop", provider.CostRates{})
-	var eventTexts []string
+	var startTexts, eventTexts []string
 	textOf := func(message agentmsg.Message) string {
-		conversation := message.(agentmsg.LLM).Conversation()
+		standard, ok := message.(agentmsg.LLM)
+		if !ok {
+			if _, partial := message.(agentmsg.AssistantPartial); partial {
+				return "assistant-partial"
+			}
+			return fmt.Sprintf("%T", message)
+		}
+		conversation := standard.Conversation()
 		switch value := conversation.(type) {
 		case llm.UserTextMessage:
 			return value.Content()[0].Text()
@@ -146,6 +153,9 @@ func TestAgentLoopProcessesMessagesBeforeContextEventsAndResults(t *testing.T) {
 			}
 		},
 		Emit: func(_ context.Context, event agent.AgentEvent) error {
+			if messageStart, ok := event.(agent.MessageStartEvent); ok {
+				startTexts = append(startTexts, textOf(messageStart.Message))
+			}
 			if messageEnd, ok := event.(agent.MessageEndEvent); ok {
 				eventTexts = append(eventTexts, textOf(messageEnd.Message))
 			}
@@ -159,6 +169,7 @@ func TestAgentLoopProcessesMessagesBeforeContextEventsAndResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertLoopStrings(t, startTexts, []string{"raw user", "assistant-partial"})
 	assertLoopStrings(t, eventTexts, []string{"processed user", "processed assistant"})
 	if got := []string{textOf(result.Messages[0]), textOf(result.Messages[1])}; got[0] != "processed user" || got[1] != "processed assistant" {
 		t.Fatalf("result messages = %v", got)
@@ -1339,6 +1350,87 @@ func TestAgentLoopTerminateStillRunsTurnCallbacksAndQueuedMessages(t *testing.T)
 	})
 }
 
+func TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain(t *testing.T) {
+	model := mustLoopModel(t, "prepare-stop", provider.CostRates{})
+	queued := atomic.Bool{}
+	providerCalls := atomic.Uint32{}
+	runtimeProvider := loopProviderFunc(func(ctx context.Context, request provider.Request) provider.EventStream {
+		providerCalls.Add(1)
+		queued.Store(true)
+		return loopTerminalEventStream(ctx, request, mustLoopTextMessage(t, request.Model(), "done", llm.FinishStop, 2))
+	})
+	var callbackOrder []string
+	prepareCalls := 0
+	steeringPolls := 0
+	loop, err := agent.NewAgentLoop(agent.AgentLoopConfig{
+		Provider: runtimeProvider, Model: model,
+		PrepareNextTurn: func(_ context.Context, input agent.AgentLoopTurnContext) (*agent.AgentLoopTurnUpdate, error) {
+			callbackOrder = append(callbackOrder, "prepare")
+			prepareCalls++
+			if !queued.Load() {
+				t.Error("PrepareNextTurn ran before the provider made steering available")
+			}
+			replacement := input.Context
+			replacement.SystemPrompt = "prepared-marker"
+			return &agent.AgentLoopTurnUpdate{Context: &replacement}, nil
+		},
+		ShouldStopAfterTurn: func(_ context.Context, input agent.AgentLoopTurnContext) (bool, error) {
+			callbackOrder = append(callbackOrder, "stop")
+			if input.Context.SystemPrompt != "prepared-marker" {
+				t.Errorf("ShouldStopAfterTurn context = %q", input.Context.SystemPrompt)
+				return false, nil
+			}
+			return true, nil
+		},
+		GetSteeringMessages: func(context.Context) ([]agentmsg.Message, error) {
+			callbackOrder = append(callbackOrder, "steering")
+			steeringPolls++
+			if queued.Load() {
+				return []agentmsg.Message{mustLoopUser(t, "must remain queued", 3)}, nil
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := loop.Run(context.Background(), []agentmsg.Message{mustLoopUser(t, "start", 1)}, agent.AgentLoopContext{SystemPrompt: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerCalls.Load() != 1 || prepareCalls != 1 || steeringPolls != 1 {
+		t.Fatalf("provider/prepare/steering = %d/%d/%d, want 1/1/1", providerCalls.Load(), prepareCalls, steeringPolls)
+	}
+	if result.Context.SystemPrompt != "prepared-marker" || len(result.Messages) != 2 {
+		t.Fatalf("result context/messages = %q/%#v", result.Context.SystemPrompt, result.Messages)
+	}
+	assertLoopStrings(t, callbackOrder, []string{"steering", "prepare", "stop"})
+}
+
+func TestAgentLoopPrepareNextTurnRunsAfterFinalTurnWithoutContinuation(t *testing.T) {
+	model := mustLoopModel(t, "prepare-final", provider.CostRates{})
+	prepareCalls := 0
+	loop, err := agent.NewAgentLoop(agent.AgentLoopConfig{
+		Provider: mustLoopProvider(t, mustLoopTextMessage(t, model, "done", llm.FinishStop, 2)), Model: model,
+		PrepareNextTurn: func(_ context.Context, input agent.AgentLoopTurnContext) (*agent.AgentLoopTurnUpdate, error) {
+			prepareCalls++
+			replacement := input.Context
+			replacement.SystemPrompt = "final-side-effect"
+			return &agent.AgentLoopTurnUpdate{Context: &replacement}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := loop.Run(context.Background(), nil, agent.AgentLoopContext{SystemPrompt: "initial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepareCalls != 1 || result.Context.SystemPrompt != "final-side-effect" {
+		t.Fatalf("final PrepareNextTurn = calls %d context %q", prepareCalls, result.Context.SystemPrompt)
+	}
+}
+
 func TestAgentLoopPrepareReplacesDynamicRequestStateWithoutPersistingTransform(t *testing.T) {
 	firstModel := mustLoopModel(t, "first", provider.CostRates{})
 	secondModel := mustLoopModel(t, "second", provider.CostRates{})
@@ -1553,9 +1645,19 @@ func TestAgentLoopPreCancelledMissingToolWinsBeforeScanStops(t *testing.T) {
 	var started []string
 	providerCalls := atomic.Uint32{}
 	loop, err := agent.NewAgentLoop(agent.AgentLoopConfig{
-		Provider: loopProviderFunc(func(context.Context, provider.Request) provider.EventStream {
-			providerCalls.Add(1)
-			return &loopSliceStream{events: loopToolUseEvents(t, model, calls...)}
+		Provider: loopProviderFunc(func(ctx context.Context, request provider.Request) provider.EventStream {
+			call := providerCalls.Add(1)
+			if call == 1 {
+				return &loopSliceStream{events: loopToolUseEvents(t, model, calls...)}
+			}
+			if call != 2 || context.Cause(ctx) == nil {
+				t.Fatalf("provider call %d context cause = %v", call, context.Cause(ctx))
+			}
+			event, eventErr := llm.NewErrorEvent(llm.FinishAborted, "cancelled", llm.Usage{}, time.UnixMilli(3), loopProvenance(request.Model()))
+			if eventErr != nil {
+				t.Fatal(eventErr)
+			}
+			return &loopSliceStream{events: []llm.StreamEvent{event}}
 		}), Model: model,
 		Emit: func(_ context.Context, event agent.AgentEvent) error {
 			if value, ok := event.(agent.ToolExecutionStartEvent); ok {
@@ -1574,7 +1676,7 @@ func TestAgentLoopPreCancelledMissingToolWinsBeforeScanStops(t *testing.T) {
 	}
 	assertLoopStrings(t, started, []string{"call-1"})
 	toolResult := result.Messages[1].(agentmsg.LLM).Conversation().(llm.ToolResultMessage)
-	if providerCalls.Load() != 1 || tool.calls.Load() != 0 || toolResult.Content()[0].Text() != "Tool missing not found" {
+	if providerCalls.Load() != 2 || tool.calls.Load() != 0 || toolResult.Content()[0].Text() != "Tool missing not found" || result.Terminal.FinishReason() != llm.FinishAborted {
 		t.Fatalf("provider=%d execute=%d result=%#v", providerCalls.Load(), tool.calls.Load(), toolResult)
 	}
 }
