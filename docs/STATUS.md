@@ -83,8 +83,11 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ### Runtime 与外部边界
 
-- AgentSession 已有 extension command dispatch；Runtime/Host 尚无覆盖内置命令的统一 dispatch、
-  权威 state snapshot、canonical wire DTO 和单一有序 event stream。
+- transport-neutral Host 已建立权威 state snapshot、跨 reload/session replacement 的单一递增
+  event stream，以及 `prompt`、`abort`、`get_state`、`clear_queue`、`reload` 首批 dispatch；
+  `prompt` 在原版 preflight 成功边界确认，实际 Agent run 异步继续，Host 不用事件反推核心状态。
+- Host 尚未覆盖原版全部内置命令，也未完成 canonical wire DTO、长期 JSONL/HTTP transport 和
+  多 session registry；pi-web 依赖的其余 model/thinking/tools/bash/tree/stats 命令仍需接入。
 - 当前 CLI 只执行一次 prompt 后退出，没有长期 JSONL RPC host。
 - pi-web 仍在服务端直接使用 TypeScript AgentSession、SessionManager、model 和 auth 服务。
 

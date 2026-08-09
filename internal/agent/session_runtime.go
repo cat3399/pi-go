@@ -216,6 +216,19 @@ type SessionState struct {
 	Active        State
 }
 
+// SessionActivity is the high-level product lifecycle projection exposed to
+// hosts. IsStreaming deliberately tracks the complete Agent prompt lifecycle
+// (including retry waits, automatic compaction, and queued continuations), not
+// merely an individual provider request. Manual compaction and tree navigation
+// can therefore be compacting while IsStreaming remains false, as in pi.
+type SessionActivity struct {
+	Phase        Phase
+	IsStreaming  bool
+	IsCompacting bool
+	RetryAttempt uint32
+	RetryWaiting bool
+}
+
 // SessionEvent is pi's AgentSessionEvent union. Core AgentEvent members are
 // reused directly; session-only control members have their own concrete
 // structs and therefore cannot carry unrelated zero-valued fields.
@@ -1235,6 +1248,27 @@ func (s *AgentSession) State() SessionState {
 	return state
 }
 
+// Activity returns one lifecycleMu-consistent view of the session operation.
+// AgentSession remains the sole owner of these fields; a Host must sample this
+// view instead of reconstructing streaming/compaction state from events.
+func (s *AgentSession) Activity() SessionActivity {
+	if s == nil {
+		return SessionActivity{Phase: PhaseIdle}
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.run == nil {
+		return SessionActivity{Phase: PhaseIdle}
+	}
+	return SessionActivity{
+		Phase:        s.run.phase,
+		IsStreaming:  s.run.agentRunActive,
+		IsCompacting: s.run.compaction != nil || s.run.branchCancellation != nil,
+		RetryAttempt: s.run.retryAttempt,
+		RetryWaiting: s.run.retryCancel != nil,
+	}
+}
+
 func (s *AgentSession) rejectIfClosed() error {
 	if s == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
@@ -1710,7 +1744,7 @@ func (s *AgentSession) RunMessages(ctx context.Context, messages []agentmsg.Mess
 		initial := agentmsg.Clone(messages)
 		prompt, images := promptTextAndImages(initial)
 		return sessionPromptInput{Text: prompt, Messages: agentmsg.Clone(initial), Images: images}, nil
-	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+	}, nil, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
 		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
 	})
 }
@@ -1772,6 +1806,7 @@ func (s *AgentSession) runSession(
 	ctx context.Context,
 	prePromptCheck bool,
 	prepare func() (sessionPromptInput, error),
+	beforeBegin func(),
 	begin func(context.Context, sessionPromptInput, []agentmsg.Message) (Result, error),
 ) (result Result, runErr error) {
 	var providerTurns, toolExecutions uint32
@@ -1865,6 +1900,9 @@ func (s *AgentSession) runSession(
 
 	if prePromptCheck {
 		s.setSessionPhase(run, PhaseProvider)
+	}
+	if beforeBegin != nil {
+		beforeBegin()
 	}
 	result, runErr = s.runLowAgent(run, func() (Result, error) {
 		return begin(run.ctx, input, extra)
@@ -2789,6 +2827,12 @@ func cloneSessionEvent(event SessionEvent) SessionEvent {
 	return nil
 }
 
+// CloneSessionEvent gives transport-neutral hosts an owned copy of an event
+// without exposing AgentSession's mutable observer bookkeeping.
+func CloneSessionEvent(event SessionEvent) SessionEvent {
+	return cloneSessionEvent(event)
+}
+
 func (s *AgentSession) sessionRunStarted(run *sessionRun) bool {
 	s.lifecycleMu.Lock()
 	started := s.run == run && run.started
@@ -2959,7 +3003,7 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, false, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
+	return s.runSession(ctx, false, nil, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.Continue(run)
 	})
 }

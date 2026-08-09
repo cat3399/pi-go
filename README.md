@@ -35,8 +35,9 @@ compaction、会话树和 Runtime replacement 生命周期均有真实实现。�
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
 项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension runtime 重建、
-standalone bash 的 `user_bash` Host hook 集成、provider/model/auth 组合、统一
-command/state/event 边界，以及完整的 TypeScript/Go 跨实现验收。
+standalone bash 的 `user_bash` Host hook 集成、provider/model/auth 组合、Host 剩余内置命令与
+canonical wire DTO，以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、跨 session
+replacement 的单一有序 event stream，并按原版 prompt preflight 时点异步确认首批命令。
 
 `cmd/pi-go -p` 是一次性 headless 诊断入口，不代表长期 Runtime 或 pi-web 接入已经完成。
 

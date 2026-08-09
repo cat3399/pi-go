@@ -163,6 +163,139 @@ func TestAgentSessionPromptPreflightMatchesCommandInputAndExpansionOrder(t *test
 	}
 }
 
+func TestAgentSessionPromptPreflightResultMatchesOriginalAcknowledgementBoundary(t *testing.T) {
+	t.Run("ordinary prompt acknowledges before Agent events and streaming state", func(t *testing.T) {
+		implementation := newScriptedProvider(t, mustTextTerminal(t, "done"))
+		var runtime *agent.AgentSession
+		var orderMu sync.Mutex
+		var order []string
+		var streamingAtPreflight bool
+		created, err := agent.NewSession(agent.SessionConfig{
+			Provider: implementation, SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+			Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime = created
+		runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+			if event.Type() == agent.AgentStartEventType {
+				orderMu.Lock()
+				order = append(order, "agent_start")
+				orderMu.Unlock()
+			}
+		})
+
+		var callbacks []bool
+		result, err := runtime.PromptWithOptions(context.Background(), "hello", agent.PromptOptions{
+			PreflightResult: func(success bool) {
+				callbacks = append(callbacks, success)
+				streamingAtPreflight = runtime.Activity().IsStreaming
+				orderMu.Lock()
+				order = append(order, "preflight")
+				orderMu.Unlock()
+			},
+		})
+		if err != nil || !result.Succeeded() {
+			t.Fatalf("PromptWithOptions() = (%#v, %v)", result, err)
+		}
+		orderMu.Lock()
+		gotOrder := append([]string(nil), order...)
+		orderMu.Unlock()
+		if !reflect.DeepEqual(callbacks, []bool{true}) || streamingAtPreflight {
+			t.Fatalf("preflight callbacks=%v streaming=%v", callbacks, streamingAtPreflight)
+		}
+		if !reflect.DeepEqual(gotOrder, []string{"preflight", "agent_start"}) {
+			t.Fatalf("acknowledgement order = %v", gotOrder)
+		}
+	})
+
+	t.Run("handled and queued prompts acknowledge without starting another run", func(t *testing.T) {
+		implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return agentTestEpoch }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		started := make(chan struct{})
+		release := make(chan struct{})
+		first, err := provider.FactoryResponseStep(func(context.Context, provider.Request, uint64) (llm.AssistantTerminal, error) {
+			close(started)
+			<-release
+			return mustTextTerminal(t, "first"), nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := provider.FixedResponseStep(mustTextTerminal(t, "second"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := implementation.SetResponses([]provider.ScriptStep{first, second}); err != nil {
+			t.Fatal(err)
+		}
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: implementation, SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+			Hooks: agent.Hooks{Commands: []agent.ExtensionCommand{{Name: "handled", Handler: func(context.Context, string, *agent.AgentSession) error { return nil }}}},
+			Now:   func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var handledCallbacks []bool
+		handled, err := runtime.PromptWithOptions(context.Background(), "/handled", agent.PromptOptions{
+			PreflightResult: func(success bool) { handledCallbacks = append(handledCallbacks, success) },
+		})
+		if err != nil || !handled.Handled() || !reflect.DeepEqual(handledCallbacks, []bool{true}) || implementation.CallCount() != 0 {
+			t.Fatalf("handled prompt = (%#v, %v), callbacks=%v calls=%d", handled, err, handledCallbacks, implementation.CallCount())
+		}
+
+		runDone := make(chan error, 1)
+		go func() {
+			_, runErr := runtime.Prompt(context.Background(), "start")
+			runDone <- runErr
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("initial prompt did not reach provider")
+		}
+		var queuedCallbacks []bool
+		queued, err := runtime.PromptWithOptions(context.Background(), "queued", agent.PromptOptions{
+			StreamingBehavior: agent.StreamingFollowUp,
+			PreflightResult:   func(success bool) { queuedCallbacks = append(queuedCallbacks, success) },
+		})
+		if err != nil || !queued.Handled() || !reflect.DeepEqual(queuedCallbacks, []bool{true}) {
+			t.Fatalf("queued prompt = (%#v, %v), callbacks=%v", queued, err, queuedCallbacks)
+		}
+		close(release)
+		select {
+		case err := <-runDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("queued prompt did not settle")
+		}
+	})
+
+	t.Run("preflight rejection reports false exactly once", func(t *testing.T) {
+		runtime, err := agent.NewSession(agent.SessionConfig{
+			Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+			Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var callbacks []bool
+		_, err = runtime.PromptWithOptions(context.Background(), "rejected", agent.PromptOptions{
+			StreamingBehavior: agent.StreamingBehavior("invalid"),
+			PreflightResult:   func(success bool) { callbacks = append(callbacks, success) },
+		})
+		if err == nil || !reflect.DeepEqual(callbacks, []bool{false}) || runtime.Activity().IsStreaming {
+			t.Fatalf("rejected prompt error=%v callbacks=%v activity=%#v", err, callbacks, runtime.Activity())
+		}
+	})
+}
+
 func TestAgentSessionPromptQueuesProcessedInputAndRunsCommandsWhileStreaming(t *testing.T) {
 	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return agentTestEpoch }})
 	if err != nil {

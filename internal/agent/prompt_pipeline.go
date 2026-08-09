@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
@@ -19,6 +20,24 @@ type PromptOptions struct {
 	Images                []llm.ImageBlock
 	StreamingBehavior     StreamingBehavior
 	Source                InputSource
+	// PreflightResult is the transport-neutral acknowledgement boundary used
+	// by coding-agent's RPC host. It is called exactly once: true after an
+	// immediately handled/queued prompt or after every ordinary prompt
+	// preflight succeeds, and false when the prompt is rejected before that
+	// boundary. A successful callback always precedes the first Agent event.
+	PreflightResult func(bool)
+}
+
+type promptPreflightNotifier struct {
+	callback func(bool)
+	once     sync.Once
+}
+
+func (n *promptPreflightNotifier) notify(success bool) {
+	if n == nil || n.callback == nil {
+		return
+	}
+	n.once.Do(func() { n.callback(success) })
 }
 
 type UserMessageOptions struct {
@@ -320,6 +339,7 @@ func (s *AgentSession) runOrQueuePrompt(
 	ctx context.Context,
 	behavior StreamingBehavior,
 	prepare func() (sessionPromptInput, error),
+	preflight *promptPreflightNotifier,
 ) (Result, error) {
 	var cached sessionPromptInput
 	var cachedErr error
@@ -345,6 +365,7 @@ func (s *AgentSession) runOrQueuePrompt(
 				return Result{}, err
 			}
 			if queued {
+				preflight.notify(true)
 				return handledPromptResult(), nil
 			}
 			if s.hasActiveSessionRun() {
@@ -354,7 +375,9 @@ func (s *AgentSession) runOrQueuePrompt(
 			}
 			continue
 		}
-		result, err := s.runSession(ctx, true, prepareOnce, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+		result, err := s.runSession(ctx, true, prepareOnce, func() {
+			preflight.notify(true)
+		}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
 			messages := append(agentmsg.Clone(input.Messages), extra...)
 			return s.loop.RunAgentMessages(run, messages)
 		})
@@ -370,7 +393,13 @@ func (s *AgentSession) runOrQueuePrompt(
 	}
 }
 
-func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, options PromptOptions) (Result, error) {
+func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, options PromptOptions) (result Result, resultErr error) {
+	preflight := &promptPreflightNotifier{callback: options.PreflightResult}
+	defer func() {
+		if resultErr != nil {
+			preflight.notify(false)
+		}
+	}()
 	if err := s.rejectIfClosed(); err != nil {
 		return Result{}, err
 	}
@@ -389,6 +418,7 @@ func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, op
 		return Result{}, err
 	}
 	if processed.handled {
+		preflight.notify(true)
 		return handledPromptResult(), nil
 	}
 	return s.runOrQueuePrompt(ctx, options.StreamingBehavior, func() (sessionPromptInput, error) {
@@ -397,7 +427,7 @@ func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, op
 			return sessionPromptInput{}, err
 		}
 		return s.prepareUserPrompt(content)
-	})
+	}, preflight)
 }
 
 func promptContentTextAndImages(content []llm.UserContentBlock) (string, []llm.ImageBlock) {
@@ -417,7 +447,13 @@ func promptContentTextAndImages(content []llm.UserContentBlock) (string, []llm.I
 	return text.String(), images
 }
 
-func (s *AgentSession) runContentWithOptions(ctx context.Context, content []llm.UserContentBlock, options PromptOptions) (Result, error) {
+func (s *AgentSession) runContentWithOptions(ctx context.Context, content []llm.UserContentBlock, options PromptOptions) (result Result, resultErr error) {
+	preflight := &promptPreflightNotifier{callback: options.PreflightResult}
+	defer func() {
+		if resultErr != nil {
+			preflight.notify(false)
+		}
+	}()
 	if err := s.rejectIfClosed(); err != nil {
 		return Result{}, err
 	}
@@ -437,6 +473,7 @@ func (s *AgentSession) runContentWithOptions(ctx context.Context, content []llm.
 		return Result{}, err
 	}
 	if processed.handled {
+		preflight.notify(true)
 		return handledPromptResult(), nil
 	}
 	original := append([]llm.UserContentBlock(nil), content...)
@@ -452,7 +489,7 @@ func (s *AgentSession) runContentWithOptions(ctx context.Context, content []llm.
 			}
 		}
 		return s.prepareUserPrompt(prepared)
-	})
+	}, preflight)
 }
 
 // PromptWithOptions is the canonical coding-agent-style prompt entry point.
@@ -629,7 +666,7 @@ func (s *AgentSession) queueCustomIfRunning(message agentmsg.Custom, delivery Cu
 func (s *AgentSession) runCustomMessage(ctx context.Context, message agentmsg.Custom) (Result, error) {
 	return s.runSession(ctx, false, func() (sessionPromptInput, error) {
 		return sessionPromptInput{Messages: []agentmsg.Message{message}}, nil
-	}, func(run context.Context, input sessionPromptInput, _ []agentmsg.Message) (Result, error) {
+	}, nil, func(run context.Context, input sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.RunAgentMessages(run, agentmsg.Clone(input.Messages))
 	})
 }
