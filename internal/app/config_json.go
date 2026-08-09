@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"runtime"
 	"unicode/utf8"
 )
 
@@ -21,6 +20,10 @@ func readConfigObject(
 	allowLineComments bool,
 	requirePrivate bool,
 ) (map[string]any, bool, error) {
+	// Kept in the adapter signature for existing callers, but permission-based
+	// admission is intentionally disabled. Upstream pi accepts user-managed
+	// configuration files created with the process umask.
+	_ = requirePrivate
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
@@ -36,10 +39,6 @@ func readConfigObject(
 	if !info.Mode().IsRegular() {
 		_ = file.Close()
 		return nil, false, fmt.Errorf("read %s %s: path is not a regular file", label, path)
-	}
-	if requirePrivate && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		_ = file.Close()
-		return nil, false, fmt.Errorf("read %s %s: credential file permissions must not grant group or other access", label, path)
 	}
 	if info.Size() > maxProductionConfigBytes {
 		_ = file.Close()

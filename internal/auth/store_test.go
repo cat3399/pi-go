@@ -65,7 +65,7 @@ func TestStoreRoundTripPreservesUnknownProviderAndPermissions(t *testing.T) {
 	}
 }
 
-func TestStoreMalformedAndUnsafeFilesAreNeverOverwritten(t *testing.T) {
+func TestStoreMalformedFilesAreNeverOverwrittenAndOrdinaryModesAreAccepted(t *testing.T) {
 	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
@@ -92,13 +92,12 @@ func TestStoreMalformedAndUnsafeFilesAreNeverOverwritten(t *testing.T) {
 	if err := os.Chmod(store.Path(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := store.SetAPIKey(context.Background(), "openai", "new-key", nil)
-	if !IsKind(err, KindPermission) {
-		t.Fatalf("unsafe mode error = %v", err)
+	if err := store.SetAPIKey(context.Background(), "openai", "new-key", nil); err != nil {
+		t.Fatalf("ordinary auth.json mode: %v", err)
 	}
-	data, _ := os.ReadFile(store.Path())
-	if string(data) != `{}` {
-		t.Fatalf("unsafe file changed: %q", data)
+	credential, exists, err := store.Read(context.Background(), "openai")
+	if err != nil || !exists || credential.Key != "new-key" {
+		t.Fatalf("credential after ordinary-mode update = %#v, %t, %v", credential, exists, err)
 	}
 }
 

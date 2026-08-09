@@ -237,9 +237,8 @@ func (s *Store) readRoot() (map[string]json.RawMessage, bool, error) {
 	if runtime.GOOS == "windows" {
 		return nil, false, failure(KindPermission, "read auth file", "", ErrPrivateAdmissionUnavailable)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, false, failure(KindPermission, "read auth file", "", nil)
-	}
+	// File-mode admission is intentionally disabled for compatibility with
+	// existing pi installations. Atomic writes still publish mode 0600.
 	if info.Size() > s.maxFileBytes {
 		return nil, false, failure(KindInvalid, "read auth file", "", nil)
 	}

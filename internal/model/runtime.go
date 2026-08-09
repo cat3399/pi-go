@@ -48,7 +48,6 @@ var (
 	ErrUnavailable   = errors.New("model is unavailable")
 	ErrUnsupported   = errors.New("unsupported model configuration")
 	ErrCancelled     = errors.New("model runtime operation cancelled")
-	ErrUnsafeMode    = errors.New("configuration file permissions are unsafe")
 	ErrPersistence   = errors.New("persistent model settings are unavailable")
 	ErrCommitUnknown = errors.New("configuration publication outcome is unknown")
 )
@@ -2232,12 +2231,8 @@ func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMe
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false, Diagnostic{label, "root", "must be a regular file"}
 	}
-	if runtime.GOOS == "windows" {
-		return nil, false, fmt.Errorf("%w: cannot admit private %s on Windows", ErrUnsafeMode, label)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return nil, false, fmt.Errorf("%w: %s", ErrUnsafeMode, label)
-	}
+	// Do not reject settings.json or models.json based on Unix permission bits.
+	// Upstream pi accepts user-managed files created with the process umask.
 	if info.Size() > maxFileBytes {
 		return nil, false, Diagnostic{label, "root", "exceeds size limit"}
 	}

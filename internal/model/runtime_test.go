@@ -1057,11 +1057,11 @@ func TestRuntimeConcurrentSnapshotAndReload(t *testing.T) {
 	wg.Wait()
 }
 
-func TestGlobalSettingsCancellationFaultAndPrivateAdmission(t *testing.T) {
+func TestGlobalSettingsCancellationFaultAndUpstreamFileModeCompatibility(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
+		t.Skip("durable settings writes are not implemented on Windows")
 	}
-	r, agent, _ := newTestRuntime(t, "", `{"defaultModel":"gpt-5.5"}`, false)
+	r, agent, _ := newTestRuntime(t, `{"providers":{}}`, `{"defaultModel":"gpt-5.5"}`, false)
 	release, err := acquireLocal(context.Background(), r.local)
 	if err != nil {
 		t.Fatal(err)
@@ -1102,8 +1102,18 @@ func TestGlobalSettingsCancellationFaultAndPrivateAdmission(t *testing.T) {
 	if err := os.Chmod(filepath.Join(agent, "settings.json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Reload(context.Background()); !errors.Is(err, ErrUnsafeMode) {
-		t.Fatalf("unsafe settings mode = %v", err)
+	if err := os.Chmod(filepath.Join(agent, "models.json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Upstream pi writes settings.json with the process umask and accepts
+	// user-managed models.json with ordinary file modes. These configuration
+	// files must remain directly reusable by the Go runtime. Credential parsing
+	// remains isolated in auth; file mode alone is not an admission boundary.
+	if err := r.Reload(context.Background()); err != nil {
+		t.Fatalf("reload upstream-compatible configuration modes: %v", err)
+	}
+	if got := r.Snapshot().Settings.DefaultModel; got != "durable" {
+		t.Fatalf("reloaded default model = %q", got)
 	}
 }
 
