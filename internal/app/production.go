@@ -164,19 +164,78 @@ type productionRuntimePlan struct {
 	ambientEnvironment map[string]string
 }
 
+func (p productionRuntimePlan) toolRuntimeOptions(cwd string, settings modelcatalog.Settings) (productionToolRuntimeOptions, error) {
+	shellPath := p.config.BashShellPath
+	if shellPath == "" {
+		shellPath = settings.ShellPath
+	}
+	resolvedShellPath, err := resolveProductionShellPath(shellPath)
+	if err != nil {
+		return productionToolRuntimeOptions{}, err
+	}
+	autoResizeImages := settings.Images.AutoResizeOrDefault()
+	return productionToolRuntimeOptions{
+		Bash: tool.BashOptions{
+			WorkingDir: cwd, Environment: append([]string(nil), p.environment...), Runner: p.config.BashRunner,
+			ShellPath: resolvedShellPath, CommandPrefix: settings.ShellCommandPrefix,
+			ArtifactDirectory: p.config.BashArtifactDirectory,
+			MaxOutputLines:    p.config.BashMaxOutputLines, MaxOutputBytes: p.config.BashMaxOutputBytes,
+		},
+		Filesystem: tool.FilesystemOptions{WorkingDir: cwd, AutoResizeImages: &autoResizeImages},
+	}, nil
+}
+
+func (p productionRuntimePlan) buildToolRuntime(
+	cwd string,
+	settings modelcatalog.Settings,
+) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, agent.StandaloneBashExecutor, error) {
+	options, err := p.toolRuntimeOptions(cwd, settings)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return buildProductionToolRuntime(options)
+}
+
+func (p productionRuntimePlan) buildStandaloneBash(cwd string, settings modelcatalog.Settings) (agent.StandaloneBashExecutor, error) {
+	options, err := p.toolRuntimeOptions(cwd, settings)
+	if err != nil {
+		return nil, err
+	}
+	bash, err := tool.NewBash(options.Bash)
+	if err != nil {
+		return nil, err
+	}
+	return agent.NewBashExecutor(bash)
+}
+
+func resolveProductionShellPath(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("%w: expand shell path: %w", ErrInvalidProductionConfig, err)
+		}
+		if path == "~" {
+			return home, nil
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
+}
+
 func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 	cwd := options.SessionManager.Cwd()
-	toolOptions := tool.BashOptions{
-		WorkingDir: cwd, Environment: append([]string(nil), p.environment...), Runner: p.config.BashRunner,
-		ShellPath: p.config.BashShellPath, ArtifactDirectory: p.config.BashArtifactDirectory,
-		MaxOutputLines: p.config.BashMaxOutputLines, MaxOutputBytes: p.config.BashMaxOutputBytes,
-	}
-	executor, definitions, resourceTools, standaloneBash, err := buildProductionToolRuntime(toolOptions)
+	bootstrapToolOptions, err := p.toolRuntimeOptions(cwd, modelcatalog.Settings{})
 	if err != nil {
-		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
+		return agentruntime.CreateResult{}, err
+	}
+	_, _, resourceTools, _, err := buildProductionToolRuntime(bootstrapToolOptions)
+	if err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool metadata: %w", ErrInvalidProductionConfig, err)
 	}
 	activeToolNames := defaultActiveToolNames()
-	activeDefinitions := selectProductionToolDefinitions(definitions, activeToolNames)
 	resources, err := resource.New(resource.Config{
 		CWD: cwd, AgentDir: p.agentDir,
 		Tools: resourceTools, SelectedTools: activeToolNames,
@@ -199,6 +258,11 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
 	}
 	snapshot := catalog.Snapshot()
+	executor, definitions, _, standaloneBash, err := p.buildToolRuntime(cwd, snapshot.Settings)
+	if err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
+	}
+	activeDefinitions := selectProductionToolDefinitions(definitions, activeToolNames)
 	router, err := newProductionProviderRouter(snapshot, p.config)
 	if err != nil {
 		return agentruntime.CreateResult{}, err
@@ -274,7 +338,17 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	services := &agentruntime.Services{
 		CWD: cwd, AgentDir: p.agentDir, ModelRuntime: catalog, ResourceService: resources,
-		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
+		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor,
+		Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
+		ReloadTools: func(_ context.Context) (agent.ToolRuntime, error) {
+			reloadedExecutor, reloadedDefinitions, _, reloadedStandalone, reloadErr := p.buildToolRuntime(cwd, catalog.Snapshot().Settings)
+			if reloadErr != nil {
+				return agent.ToolRuntime{}, reloadErr
+			}
+			return agent.ToolRuntime{
+				Executor: reloadedExecutor, Tools: reloadedDefinitions, StandaloneBash: reloadedStandalone,
+			}, nil
+		},
 	}
 	stream, err := productionProviderStreamOptions(snapshot.Settings, options.SessionManager.SessionID())
 	if err != nil {
@@ -301,6 +375,13 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		BaseConfig: agent.SessionConfig{
 			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: activeDefinitions,
 			AllTools: definitions, ActiveToolNames: activeToolNames, Stream: stream,
+			ResolveBashCommandPrefix: func() string { return catalog.Snapshot().Settings.ShellCommandPrefix },
+			ResolveStandaloneBash: func(resolveCtx context.Context) (agent.StandaloneBashExecutor, error) {
+				if cause := context.Cause(resolveCtx); cause != nil {
+					return nil, cause
+				}
+				return p.buildStandaloneBash(cwd, catalog.Snapshot().Settings)
+			},
 			CompactionEnabled: &compactionEnabled,
 			ContextReserve:    snapshot.Settings.Compaction.ReserveTokensOrDefault(),
 			KeepRecentTokens:  snapshot.Settings.Compaction.KeepRecentTokensOrDefault(),

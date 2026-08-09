@@ -130,7 +130,15 @@ func (s *AgentSession) ExecuteBash(
 	if isNilInterface(executor) {
 		s.mu.RLock()
 		executor = s.standaloneBash
+		resolve := s.resolveStandaloneBash
 		s.mu.RUnlock()
+		if resolve != nil {
+			var err error
+			executor, err = resolve(ctx)
+			if err != nil {
+				return BashResult{}, fmt.Errorf("resolve standalone bash: %w", err)
+			}
+		}
 	}
 	if isNilInterface(executor) {
 		return BashResult{}, ErrBashUnavailable

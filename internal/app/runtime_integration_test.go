@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/tool"
 )
 
 type rejectingHTTPDoer struct{ calls atomic.Uint32 }
@@ -42,6 +44,70 @@ type dynamicProviderSettingsDoer struct {
 	mu        sync.Mutex
 	deadlines []time.Duration
 	calls     int
+}
+
+type reloadToolSettingsDoer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *reloadToolSettingsDoer) Do(request *http.Request) (*http.Response, error) {
+	d.mu.Lock()
+	d.calls++
+	call := d.calls
+	d.mu.Unlock()
+	var events []map[string]any
+	if call%2 == 1 {
+		itemID, callID := fmt.Sprintf("fc-%d", call), fmt.Sprintf("call-%d", call)
+		arguments := `{"command":"model command"}`
+		item := map[string]any{"type": "function_call", "id": itemID, "call_id": callID, "name": "bash", "arguments": arguments}
+		events = []map[string]any{
+			{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": itemID, "call_id": callID, "name": "bash", "arguments": ""}},
+			{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": itemID, "delta": arguments},
+			{"type": "response.function_call_arguments.done", "output_index": 0, "item_id": itemID, "arguments": arguments},
+			{"type": "response.output_item.done", "output_index": 0, "item": item},
+			{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{item}}},
+		}
+	} else {
+		item := map[string]any{"type": "message", "id": fmt.Sprintf("msg-%d", call), "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "done"}}}
+		events = []map[string]any{
+			{"type": "response.output_item.done", "output_index": 0, "item": item},
+			{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{item}}},
+		}
+	}
+	var body strings.Builder
+	for _, event := range events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Fprintf(&body, "data: %s\n\n", encoded)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(body.String())), Request: request,
+	}, nil
+}
+
+type reloadToolSettingsRunner struct {
+	mu       sync.Mutex
+	commands []string
+}
+
+func (r *reloadToolSettingsRunner) Run(_ context.Context, request tool.RunRequest, sink tool.OutputSink) (tool.ExitStatus, error) {
+	r.mu.Lock()
+	r.commands = append(r.commands, request.Command())
+	r.mu.Unlock()
+	if err := sink([]byte("ok")); err != nil {
+		return tool.ExitStatus{}, err
+	}
+	return tool.NewExitStatus(0)
+}
+
+func (r *reloadToolSettingsRunner) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.commands...)
 }
 
 func (d *dynamicProviderSettingsDoer) Do(request *http.Request) (*http.Response, error) {
@@ -121,6 +187,34 @@ func fixedProductionConfig(cwd, agentDir, docsDir string) ProductionConfig {
 		WorkingDir: cwd, AgentDir: agentDir, DocsDir: docsDir, Environment: []string{},
 		SessionID: "runtime-integration", SessionNow: func() time.Time { return time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC) },
 		AgentNow: func() time.Time { return time.Date(2026, 8, 6, 12, 0, 1, 0, time.UTC) },
+	}
+}
+
+func TestProductionToolRuntimeOptionsUseLiveShellAndImageSettings(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	autoResize := false
+	plan := productionRuntimePlan{config: ProductionConfig{}, environment: []string{"PATH=/fixture"}}
+	options, err := plan.toolRuntimeOptions(t.TempDir(), model.Settings{
+		ShellPath: "~/custom-shell", ShellCommandPrefix: "prepare-shell",
+		Images: model.ImageSettings{AutoResize: &autoResize},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Bash.ShellPath != filepath.Join(home, "custom-shell") || options.Bash.CommandPrefix != "prepare-shell" ||
+		options.Filesystem.AutoResizeImages == nil || *options.Filesystem.AutoResizeImages {
+		t.Fatalf("production tool options = %#v", options)
+	}
+	plan.config.BashShellPath = "/explicit/shell"
+	overridden, err := plan.toolRuntimeOptions(t.TempDir(), model.Settings{ShellPath: "/settings/shell"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overridden.Bash.ShellPath != "/explicit/shell" {
+		t.Fatalf("explicit shell override = %q", overridden.Bash.ShellPath)
 	}
 }
 
@@ -290,6 +384,63 @@ func TestProductionRuntimeRefreshesProviderSettingsForEveryTurn(t *testing.T) {
 	if stream.Transport != provider.TransportSSE || stream.WebsocketConnectTimeoutMS == nil || *stream.WebsocketConnectTimeoutMS != 0 ||
 		stream.MaxRetries == nil || *stream.MaxRetries != 1 || stream.MaxRetryDelayMS == nil || *stream.MaxRetryDelayMS != 0 {
 		t.Fatalf("refreshed stream options = %#v", stream)
+	}
+}
+
+func TestProductionReloadRebuildsModelAndStandaloneBashFromSettings(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"shellPath":"initial-shell","shellCommandPrefix":"prefix-one","images":{"autoResize":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doer := &reloadToolSettingsDoer{}
+	runner := &reloadToolSettingsRunner{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	config.BashRunner = runner
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{
+		CWD: cwd, AgentDir: agentDir, SessionManager: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	if result, err := productRuntime.Session().Run(context.Background(), "first"); err != nil || !result.Succeeded() {
+		t.Fatalf("first run = (%#v, %v)", result, err)
+	}
+	autoResize := false
+	if err := productRuntime.Services().ModelRuntime.SetGlobalSettings(context.Background(), func(settings *model.Settings) error {
+		settings.ShellPath = "reloaded-shell"
+		settings.ShellCommandPrefix = "prefix-two"
+		settings.Images.AutoResize = &autoResize
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := productRuntime.Session().Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := productRuntime.Session().Run(context.Background(), "second"); err != nil || !result.Succeeded() {
+		t.Fatalf("second run = (%#v, %v)", result, err)
+	}
+	if _, err := productRuntime.Session().ExecuteBash(context.Background(), "standalone", nil, agent.ExecuteBashOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prefix-one\nmodel command", "prefix-two\nmodel command", "prefix-two\nstandalone"}
+	if got := runner.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("bash commands across reload = %#v, want %#v", got, want)
+	}
+	settings := productRuntime.Services().ModelRuntime.Snapshot().Settings
+	if settings.ShellPath != "reloaded-shell" || settings.ShellCommandPrefix != "prefix-two" || settings.Images.AutoResizeOrDefault() {
+		t.Fatalf("reloaded settings snapshot = %#v", settings)
 	}
 }
 

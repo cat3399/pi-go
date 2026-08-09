@@ -69,10 +69,11 @@ func TestBashSuccessUsesFixedConfigurationAndMergedRunnerOrder(t *testing.T) {
 		return testExitStatus(t, 0), nil
 	})
 	bash, err := NewBash(BashOptions{
-		WorkingDir:  workingDir,
-		Environment: environment,
-		Runner:      runner,
-		ShellPath:   "/ignored/by/custom/runner",
+		WorkingDir:    workingDir,
+		Environment:   environment,
+		Runner:        runner,
+		ShellPath:     "/ignored/by/custom/runner",
+		CommandPrefix: "prepare-shell",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +90,7 @@ func TestBashSuccessUsesFixedConfigurationAndMergedRunnerOrder(t *testing.T) {
 	if result.Text() != "stdout-1\nstderr-1\nstdout-2\n" {
 		t.Fatalf("Text() = %q", result.Text())
 	}
-	if captured.Command() != "do-work" {
+	if captured.Command() != "prepare-shell\ndo-work" {
 		t.Fatalf("runner command = %q", captured.Command())
 	}
 	if captured.WorkingDir() != filepath.Clean(workingDir) {
@@ -384,6 +385,7 @@ func TestBashRejectsInvalidUTF8Configuration(t *testing.T) {
 		options BashOptions
 	}{
 		{name: "shell", options: BashOptions{ShellPath: "shell-\xff"}},
+		{name: "prefix", options: BashOptions{CommandPrefix: "prefix-\xff"}},
 		{name: "artifact", options: BashOptions{ArtifactDirectory: "artifact-\xff"}},
 		{name: "environment", options: BashOptions{Environment: []string{"VALUE=\xff"}}},
 	}

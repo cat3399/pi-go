@@ -63,10 +63,12 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 ### 产品级 AgentSession
 
 - settings、resources、queue/retry/compaction 参数及 active tools/system prompt 的 reload 已接入；
-  Provider reset 暂按当前阶段约定后置，动态 extension/tool runtime 重建、flag 保留和扩展资源二次发现
-  仍未实现，因此尚不能称为原版完整 reload。
+  production 的内置 tool/standalone bash runtime 已按新设置整代重建并保留 active tool 名称；
+  Provider reset 暂按当前阶段约定后置，动态 extension runtime、flag 保留和扩展资源二次发现仍未实现，
+  因此尚不能称为原版完整 reload。
 - standalone bash 的 AgentSession 核心已实现；外层 Runtime/Host 仍缺 `user_bash` hook dispatch，
-  production settings 尚未把 `shellPath`/`shellCommandPrefix` 动态注入执行器，reload 也尚未重建 shell/tool runtime。
+  production settings 已把 `shellPath`/`shellCommandPrefix` 注入执行器，并在 reload 时连同 read image
+  `autoResize` 设置一起重建。
 - extension-neutral command/input 契约已经接入 AgentSession；完整 JS extension loader、动态失效与
   command context actions 属于后续 Runtime/扩展宿主工作。
 

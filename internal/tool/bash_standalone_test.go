@@ -13,7 +13,7 @@ func TestStandaloneBashStreamsSanitizedOutputAndReturnsExitStatusAsData(t *testi
 	t.Parallel()
 	workingDir := t.TempDir()
 	bash, err := NewBash(BashOptions{
-		WorkingDir: workingDir, Environment: []string{},
+		WorkingDir: workingDir, Environment: []string{}, CommandPrefix: "model-tool-only",
 		Runner: runnerFunc(func(_ context.Context, request RunRequest, sink OutputSink) (ExitStatus, error) {
 			if request.Command() != "failing command" || request.WorkingDir() != workingDir {
 				t.Fatalf("request = %#v", request)

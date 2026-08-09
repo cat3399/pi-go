@@ -107,6 +107,81 @@ func TestQueueModeSettingsDefaultsMergeLegacyMigrationAndLosslessWrite(t *testin
 	}
 }
 
+func TestShellAndImageSettingsMergeAndWriteWithoutLosingUnknownFields(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"/global/shell","shellCommandPrefix":"global-prefix","images":{"autoResize":false,"blockImages":true},"future":7}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellPath":"/project/shell","images":{"autoResize":true}}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings
+	if settings.ShellPath != "/project/shell" || settings.ShellCommandPrefix != "global-prefix" || !settings.Images.AutoResizeOrDefault() {
+		t.Fatalf("effective shell/image settings = %#v", settings)
+	}
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.ShellCommandPrefix = "next-prefix"
+		value := false
+		settings.Images.AutoResize = &value
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var images map[string]json.RawMessage
+	if err := json.Unmarshal(root["images"], &images); err != nil {
+		t.Fatal(err)
+	}
+	var prefix string
+	var autoResize, blockImages bool
+	if err := json.Unmarshal(root["shellCommandPrefix"], &prefix); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(images["autoResize"], &autoResize); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(images["blockImages"], &blockImages); err != nil {
+		t.Fatal(err)
+	}
+	if prefix != "next-prefix" || autoResize || !blockImages || string(root["future"]) != "7" {
+		t.Fatalf("lossless shell/image settings = %s", data)
+	}
+}
+
+func TestProjectNullImagesResetsGlobalAutoResizeToDefault(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"images":{"autoResize":false}}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"images":null}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.Snapshot().Settings.Images.AutoResizeOrDefault() {
+		t.Fatal("project images:null did not restore upstream autoResize default")
+	}
+}
+
+func TestProjectEmptyShellSettingsDisableGlobalValues(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"/global/shell","shellCommandPrefix":"global-prefix"}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellPath":"","shellCommandPrefix":null}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings
+	if settings.ShellPath != "" || settings.ShellCommandPrefix != "" {
+		t.Fatalf("project shell reset = %#v", settings)
+	}
+}
+
 func TestQueueModeMigrationDoesNotReplaceExplicitSteeringOrUnknownLegacyField(t *testing.T) {
 	runtime, agentDir, _ := newTestRuntime(t, "", `{"queueMode":"all","steeringMode":"one-at-a-time","future":7}`, false)
 	if got := runtime.Snapshot().Settings.SteeringModeOrDefault(); got != QueueModeOneAtATime {

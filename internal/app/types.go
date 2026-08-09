@@ -143,7 +143,9 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	factory := func(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 		toolOptions := bashOptions
 		toolOptions.WorkingDir = options.SessionManager.Cwd()
-		executor, definitions, _, standaloneBash, err := buildProductionToolRuntime(toolOptions)
+		executor, definitions, _, standaloneBash, err := buildProductionToolRuntime(productionToolRuntimeOptions{
+			Bash: toolOptions, Filesystem: tool.FilesystemOptions{WorkingDir: toolOptions.WorkingDir},
+		})
 		if err != nil {
 			return agentruntime.CreateResult{}, fmt.Errorf("initialize session tool runtime: %w", err)
 		}
@@ -217,8 +219,13 @@ func resolveWorkingDirectory(path string) (string, error) {
 	return resolved, nil
 }
 
-func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, agent.StandaloneBashExecutor, error) {
-	bash, err := tool.NewBash(options)
+type productionToolRuntimeOptions struct {
+	Bash       tool.BashOptions
+	Filesystem tool.FilesystemOptions
+}
+
+func buildProductionToolRuntime(options productionToolRuntimeOptions) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, agent.StandaloneBashExecutor, error) {
+	bash, err := tool.NewBash(options.Bash)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -226,7 +233,7 @@ func buildProductionToolRuntime(options tool.BashOptions) (agent.ToolExecutor, [
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	filesystem, err := tool.NewFilesystemSuite(tool.FilesystemOptions{WorkingDir: options.WorkingDir})
+	filesystem, err := tool.NewFilesystemSuite(options.Filesystem)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -131,6 +132,45 @@ func TestAgentSessionExecuteBashUsesPerCallOperationsAndLivePrefix(t *testing.T)
 	second, secondOK := messages[1].(agentmsg.BashExecution)
 	if !firstOK || !secondOK || first.Command != "one" || second.Command != "two" {
 		t.Fatalf("stored commands included runtime prefix = %#v", messages)
+	}
+}
+
+func TestAgentSessionExecuteBashResolvesLiveStandaloneExecutorUnlessOverridden(t *testing.T) {
+	generation := 0
+	var commands []string
+	resolver := func(context.Context) (agent.StandaloneBashExecutor, error) {
+		generation++
+		current := generation
+		return standaloneBashFunc(func(_ context.Context, command string, _ func(string)) (agent.BashResult, error) {
+			commands = append(commands, fmt.Sprintf("%d:%s", current, command))
+			code := 0
+			return agent.BashResult{ExitCode: &code}, nil
+		}), nil
+	}
+	override := standaloneBashFunc(func(_ context.Context, command string, _ func(string)) (agent.BashResult, error) {
+		commands = append(commands, "override:"+command)
+		code := 0
+		return agent.BashResult{ExitCode: &code}, nil
+	})
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+		ResolveStandaloneBash: resolver,
+		Now:                   func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ExecuteBash(context.Background(), "one", nil, agent.ExecuteBashOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ExecuteBash(context.Background(), "two", nil, agent.ExecuteBashOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ExecuteBash(context.Background(), "three", nil, agent.ExecuteBashOptions{Executor: override}); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 2 || !reflect.DeepEqual(commands, []string{"1:one", "2:two", "override:three"}) {
+		t.Fatalf("live standalone generations = %d / %#v", generation, commands)
 	}
 }
 

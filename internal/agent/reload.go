@@ -93,7 +93,7 @@ func (s *AgentSession) beginReload() (func(), error) {
 //  2. external settings/catalog reload
 //  3. queue/runtime settings synchronization
 //  4. resource reload
-//  5. system prompt + current active-tool publication
+//  5. complete tool runtime rebuild + current active-tool/prompt publication
 //  6. host rebind and session_start(reload)
 //
 // Hook failures are isolated through ExtensionError like ExtensionRunner.emit;
@@ -125,6 +125,7 @@ func (s *AgentSession) Reload(ctx context.Context, options ReloadOptions) error 
 
 	s.mu.RLock()
 	reloadRuntime := s.reloadRuntime
+	reloadTools := s.reloadTools
 	resources := s.resources
 	s.mu.RUnlock()
 	if reloadRuntime != nil {
@@ -149,10 +150,26 @@ func (s *AgentSession) Reload(ctx context.Context, options ReloadOptions) error 
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
+	var rebuilt *ToolRuntime
+	if reloadTools != nil {
+		runtime, err := reloadTools(ctx)
+		if err != nil {
+			return fmt.Errorf("reload tool runtime: %w", err)
+		}
+		rebuilt = &runtime
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
 	// Public active-tool changes share controlMu. Sampling and publication in
 	// one short critical section preserves the latest concurrent user choice.
 	s.controlMu.Lock()
-	err = s.setActiveToolsByName(s.ActiveToolNames())
+	activeToolNames := s.ActiveToolNames()
+	if rebuilt == nil {
+		err = s.setActiveToolsByName(activeToolNames)
+	} else {
+		err = s.replaceToolRuntime(*rebuilt, activeToolNames)
+	}
 	s.controlMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("reload active tools and system prompt: %w", err)

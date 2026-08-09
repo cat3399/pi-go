@@ -131,6 +131,9 @@ type Settings struct {
 	Transport                 provider.Transport
 	SteeringMode              string
 	FollowUpMode              string
+	ShellPath                 string
+	ShellCommandPrefix        string
+	Images                    ImageSettings
 	EnabledModels             []string
 	Compaction                CompactionSettings
 	BranchSummary             BranchSummarySettings
@@ -138,6 +141,19 @@ type Settings struct {
 	HTTPIdleTimeoutMS         *uint64
 	WebsocketConnectTimeoutMS *uint64
 	transportPresent          bool
+	imagesPresence            settingsObjectPresence
+	shellPathPresent          bool
+	shellCommandPrefixPresent bool
+}
+
+// ImageSettings mirrors settings.images. Pointer optionality preserves the
+// upstream default and project-over-global field merge behavior.
+type ImageSettings struct {
+	AutoResize *bool `json:"autoResize,omitempty"`
+}
+
+func (s ImageSettings) AutoResizeOrDefault() bool {
+	return s.AutoResize == nil || *s.AutoResize
 }
 
 func (s Settings) TransportOrDefault() provider.Transport {
@@ -484,6 +500,8 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	putString(root, "transport", string(current.Transport))
 	putString(root, "steeringMode", current.SteeringMode)
 	putString(root, "followUpMode", current.FollowUpMode)
+	putString(root, "shellPath", current.ShellPath)
+	putString(root, "shellCommandPrefix", current.ShellCommandPrefix)
 	if migratedQueueMode {
 		delete(root, "queueMode")
 	}
@@ -500,6 +518,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	putOptionalSettingsObject(root, "branchSummary", map[string]json.RawMessage{
 		"reserveTokens": optionalUint64JSON(current.BranchSummary.ReserveTokens), "skipPrompt": optionalBoolJSON(current.BranchSummary.SkipPrompt),
 	})
+	putImageSettings(root, current.Images, current.imagesPresence)
 	putRetrySettings(root, current.Retry)
 	if current.HTTPIdleTimeoutMS == nil {
 		delete(root, "httpIdleTimeoutMs")
@@ -623,6 +642,22 @@ func putRetrySettings(root map[string]json.RawMessage, value RetrySettings) {
 	}
 	encoded, _ := json.Marshal(object)
 	root["retry"] = encoded
+}
+
+func putImageSettings(root map[string]json.RawMessage, value ImageSettings, presence settingsObjectPresence) {
+	if value.AutoResize != nil {
+		presence = settingsObjectPresent
+	}
+	switch presence {
+	case settingsObjectAbsent:
+		delete(root, "images")
+	case settingsObjectNull:
+		root["images"] = json.RawMessage("null")
+	case settingsObjectPresent:
+		putOptionalSettingsObject(root, "images", map[string]json.RawMessage{
+			"autoResize": optionalBoolJSON(value.AutoResize),
+		})
+	}
 }
 
 func retrySettingsHaveKnownValues(value RetrySettings) bool {
@@ -1320,6 +1355,12 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	if s.FollowUpMode, err = optionalString(root, "followUpMode", ""); err != nil {
 		return s, Diagnostic{label, "followUpMode", "must be all or one-at-a-time"}
 	}
+	if s.ShellPath, s.shellPathPresent, err = optionalSettingsString(root, "shellPath"); err != nil {
+		return s, Diagnostic{label, "shellPath", "must be a valid string"}
+	}
+	if s.ShellCommandPrefix, s.shellCommandPrefixPresent, err = optionalSettingsString(root, "shellCommandPrefix"); err != nil {
+		return s, Diagnostic{label, "shellCommandPrefix", "must be a valid string"}
+	}
 	if raw, ok := root["enabledModels"]; ok {
 		if err := json.Unmarshal(raw, &s.EnabledModels); err != nil {
 			return s, Diagnostic{label, "enabledModels", "must be an array of strings"}
@@ -1338,6 +1379,15 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	if raw, ok := root["branchSummary"]; ok {
 		if err := json.Unmarshal(raw, &s.BranchSummary); err != nil {
 			return s, Diagnostic{label, "branchSummary", "must be an object with reserveTokens and skipPrompt"}
+		}
+	}
+	if raw, ok := root["images"]; ok {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			s.imagesPresence = settingsObjectNull
+		} else if err := json.Unmarshal(raw, &s.Images); err != nil {
+			return s, Diagnostic{label, "images", "must be an object with autoResize"}
+		} else {
+			s.imagesPresence = settingsObjectPresent
 		}
 	}
 	if raw, ok := root["retry"]; ok {
@@ -1484,6 +1534,31 @@ func mergeSettings(base, override Settings) Settings {
 	if override.FollowUpMode != "" {
 		out.FollowUpMode = override.FollowUpMode
 	}
+	if override.shellPathPresent || override.ShellPath != "" {
+		out.ShellPath = override.ShellPath
+		out.shellPathPresent = true
+	}
+	if override.shellCommandPrefixPresent || override.ShellCommandPrefix != "" {
+		out.ShellCommandPrefix = override.ShellCommandPrefix
+		out.shellCommandPrefixPresent = true
+	}
+	imagesPresence := override.imagesPresence
+	if imagesPresence == settingsObjectAbsent && override.Images.AutoResize != nil {
+		imagesPresence = settingsObjectPresent
+	}
+	switch imagesPresence {
+	case settingsObjectNull:
+		out.Images = ImageSettings{}
+		out.imagesPresence = settingsObjectNull
+	case settingsObjectPresent:
+		if out.imagesPresence == settingsObjectNull {
+			out.Images = ImageSettings{}
+		}
+		out.imagesPresence = settingsObjectPresent
+		if override.Images.AutoResize != nil {
+			out.Images.AutoResize = cloneBoolPointer(override.Images.AutoResize)
+		}
+	}
 	if override.EnabledModels != nil {
 		out.EnabledModels = append([]string(nil), override.EnabledModels...)
 	}
@@ -1548,6 +1623,21 @@ func mergeSettings(base, override Settings) Settings {
 func optionalString(o map[string]json.RawMessage, key, owner string) (string, error) {
 	v, _, err := requiredString(o, key, owner)
 	return v, err
+}
+
+func optionalSettingsString(object map[string]json.RawMessage, key string) (string, bool, error) {
+	raw, ok := object[key]
+	if !ok {
+		return "", false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", true, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+		return "", true, ErrInvalidConfig
+	}
+	return value, true, nil
 }
 func requiredString(o map[string]json.RawMessage, key, owner string) (string, bool, error) {
 	raw, ok := o[key]
@@ -2709,6 +2799,7 @@ func cloneSettings(s Settings) Settings {
 	s.Compaction.KeepRecentTokens = cloneUint64Pointer(s.Compaction.KeepRecentTokens)
 	s.BranchSummary.ReserveTokens = cloneUint64Pointer(s.BranchSummary.ReserveTokens)
 	s.BranchSummary.SkipPrompt = cloneBoolPointer(s.BranchSummary.SkipPrompt)
+	s.Images.AutoResize = cloneBoolPointer(s.Images.AutoResize)
 	s.Retry.Enabled = cloneBoolPointer(s.Retry.Enabled)
 	s.Retry.MaxRetries = cloneUint64Pointer(s.Retry.MaxRetries)
 	s.Retry.BaseDelayMS = cloneUint64Pointer(s.Retry.BaseDelayMS)

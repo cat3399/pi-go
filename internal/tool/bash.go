@@ -29,6 +29,7 @@ type BashOptions struct {
 	Environment       []string
 	Runner            Runner
 	ShellPath         string
+	CommandPrefix     string
 	ArtifactDirectory string
 	MaxOutputLines    int
 	MaxOutputBytes    int
@@ -37,12 +38,13 @@ type BashOptions struct {
 // Bash is the production built-in Bash tool. It owns immutable execution
 // configuration but no agent or session state.
 type Bash struct {
-	workingDir  string
-	environment []string
-	runner      Runner
-	store       artifactFactory
-	maxLines    int
-	maxBytes    int
+	workingDir    string
+	environment   []string
+	runner        Runner
+	commandPrefix string
+	store         artifactFactory
+	maxLines      int
+	maxBytes      int
 }
 
 func NewBash(options BashOptions) (*Bash, error) {
@@ -61,6 +63,9 @@ func NewBash(options BashOptions) (*Bash, error) {
 	}
 	if err := validateBashPathOption("shell path", options.ShellPath); err != nil {
 		return nil, err
+	}
+	if !utf8.ValidString(options.CommandPrefix) || strings.IndexByte(options.CommandPrefix, 0) >= 0 {
+		return nil, fmt.Errorf("%w: command prefix is invalid", ErrInvalidBashOptions)
 	}
 	if err := validateBashPathOption("artifact directory", options.ArtifactDirectory); err != nil {
 		return nil, err
@@ -103,12 +108,13 @@ func NewBash(options BashOptions) (*Bash, error) {
 		runner = NewLocalRunner(LocalRunnerOptions{ShellPath: shellPath})
 	}
 	return &Bash{
-		workingDir:  filepath.Clean(workingDir),
-		environment: environment,
-		runner:      runner,
-		store:       store,
-		maxLines:    maxLines,
-		maxBytes:    maxBytes,
+		workingDir:    filepath.Clean(workingDir),
+		environment:   environment,
+		runner:        runner,
+		commandPrefix: options.CommandPrefix,
+		store:         store,
+		maxLines:      maxLines,
+		maxBytes:      maxBytes,
 	}, nil
 }
 
@@ -199,9 +205,13 @@ func (b *Bash) ExecuteWithContext(ctx context.Context, input BashInput, executio
 		accumulator: accumulator,
 		cancel:      cancelRun,
 	}
+	command := input.Command()
+	if b.commandPrefix != "" {
+		command = b.commandPrefix + "\n" + command
+	}
 	status, runErr := b.runner.Run(
 		runContext,
-		newRunRequest(input.Command(), workingDir, environment),
+		newRunRequest(command, workingDir, environment),
 		state.append,
 	)
 	if timeoutTimer != nil {

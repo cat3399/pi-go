@@ -34,8 +34,8 @@ AgentSession 已组合 SessionManager，AgentLoop、stateful Agent、JSONL sessi
 compaction、会话树和 Runtime replacement 生命周期均有真实实现。普通生产入口使用真实
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
-项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension/tool runtime 重建、
-standalone bash 的 `user_bash` Host/settings 集成、provider/model/auth 组合、统一
+项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension runtime 重建、
+standalone bash 的 `user_bash` Host hook 集成、provider/model/auth 组合、统一
 command/state/event 边界，以及完整的 TypeScript/Go 跨实现验收。
 
 `cmd/pi-go -p` 是一次性 headless 诊断入口，不代表长期 Runtime 或 pi-web 接入已经完成。

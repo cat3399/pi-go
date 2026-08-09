@@ -21,6 +21,32 @@ type reloadResourceFixture struct {
 	order   *[]string
 }
 
+type reloadGenerationExecutor struct {
+	mu    sync.Mutex
+	label string
+	calls int
+}
+
+func (e *reloadGenerationExecutor) Name() string         { return e.label }
+func (e *reloadGenerationExecutor) Supports(string) bool { return true }
+func (e *reloadGenerationExecutor) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	return e.execute()
+}
+func (e *reloadGenerationExecutor) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	return e.execute()
+}
+func (e *reloadGenerationExecutor) execute() (agent.ToolOutput, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return agent.ToolOutput{Text: e.label}, nil
+}
+func (e *reloadGenerationExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
 func (r *reloadResourceFixture) BuildSystemPrompt(names []string) (string, agent.BuildSystemPromptOptions, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -98,6 +124,10 @@ func TestAgentSessionReloadMatchesLifecycleSettingsResourceAndPromptOrder(t *tes
 			settingsMu.Unlock()
 			return nil
 		},
+		ReloadTools: func(context.Context) (agent.ToolRuntime, error) {
+			order = append(order, "tools")
+			return agent.ToolRuntime{Executor: sessionCatalogExecutor{}, Tools: []provider.ToolDefinition{definition}}, nil
+		},
 		ResolveRuntimeSettings: func() agent.RuntimeControlSettings {
 			settingsMu.Lock()
 			defer settingsMu.Unlock()
@@ -148,7 +178,7 @@ func TestAgentSessionReloadMatchesLifecycleSettingsResourceAndPromptOrder(t *tes
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"shutdown", "runtime", "resources", "before-start", "start"}; !reflect.DeepEqual(order, want) {
+	if want := []string{"shutdown", "runtime", "resources", "tools", "before-start", "start"}; !reflect.DeepEqual(order, want) {
 		t.Fatalf("reload order = %v, want %v", order, want)
 	}
 	if runtime.SteeringMode() != agent.QueueAll || runtime.FollowUpMode() != agent.QueueAll ||
@@ -177,6 +207,192 @@ func TestAgentSessionReloadMatchesLifecycleSettingsResourceAndPromptOrder(t *tes
 	requests := implementation.Requests()
 	if len(requests) != 2 || requests[0].SystemPrompt() != "resources:0 tools:[read]" || requests[1].SystemPrompt() != "resources:1 tools:[read]" {
 		t.Fatalf("reload request prompts = %#v", requests)
+	}
+}
+
+func TestAgentSessionReloadReplacesCompleteToolRuntimeAndPreservesActiveNames(t *testing.T) {
+	read, err := provider.NewToolDefinition("read", "read old", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadedRead, err := provider.NewToolDefinition("read", "read new", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := provider.NewToolDefinition("write", "write new", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBashCalled := false
+	oldBash := standaloneBashFunc(func(context.Context, string, func(string)) (agent.BashResult, error) {
+		oldBashCalled = true
+		return agent.BashResult{}, nil
+	})
+	newBashCalled := false
+	newBash := standaloneBashFunc(func(_ context.Context, command string, _ func(string)) (agent.BashResult, error) {
+		newBashCalled = true
+		if command != "after reload" {
+			t.Fatalf("reloaded standalone command = %q", command)
+		}
+		code := 0
+		return agent.BashResult{ExitCode: &code}, nil
+	})
+	resources := &reloadResourceFixture{}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+		Tool: sessionCatalogExecutor{}, Tools: []provider.ToolDefinition{read}, AllTools: []provider.ToolDefinition{read},
+		ActiveToolNames: []string{"read"}, Resources: resources, StandaloneBash: oldBash,
+		ReloadTools: func(context.Context) (agent.ToolRuntime, error) {
+			return agent.ToolRuntime{
+				Executor: sessionCatalogExecutor{}, Tools: []provider.ToolDefinition{reloadedRead, write}, StandaloneBash: newBash,
+			}, nil
+		},
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	all := runtime.AllTools()
+	if len(all) != 2 || all[0].Name() != "read" || all[0].Description() != "read new" || all[1].Name() != "write" {
+		t.Fatalf("reloaded tool registry = %#v", all)
+	}
+	if active := runtime.ActiveToolNames(); !reflect.DeepEqual(active, []string{"read"}) {
+		t.Fatalf("reloaded active tools = %v", active)
+	}
+	if runtime.SystemPrompt() != "resources:1 tools:[read]" {
+		t.Fatalf("reloaded system prompt = %q", runtime.SystemPrompt())
+	}
+	if _, err := runtime.ExecuteBash(context.Background(), "after reload", nil, agent.ExecuteBashOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if oldBashCalled || !newBashCalled {
+		t.Fatalf("standalone bash generation old=%t new=%t", oldBashCalled, newBashCalled)
+	}
+}
+
+func TestAgentSessionReloadRejectsInvalidToolGenerationWithoutReplacingLastHealthyRuntime(t *testing.T) {
+	read, err := provider.NewToolDefinition("read", "healthy", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate, err := provider.NewToolDefinition("read", "invalid duplicate", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBashCalled := false
+	oldBash := standaloneBashFunc(func(_ context.Context, _ string, _ func(string)) (agent.BashResult, error) {
+		oldBashCalled = true
+		code := 0
+		return agent.BashResult{ExitCode: &code}, nil
+	})
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+		Tool: sessionCatalogExecutor{}, Tools: []provider.ToolDefinition{read}, StandaloneBash: oldBash,
+		ReloadTools: func(context.Context) (agent.ToolRuntime, error) {
+			return agent.ToolRuntime{
+				Executor: sessionCatalogExecutor{}, Tools: []provider.ToolDefinition{duplicate, duplicate},
+			}, nil
+		},
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Reload(context.Background(), agent.ReloadOptions{}); !errors.Is(err, agent.ErrInvalidConfig) {
+		t.Fatalf("invalid tool reload error = %v", err)
+	}
+	all := runtime.AllTools()
+	if len(all) != 1 || all[0].Name() != "read" || all[0].Description() != "healthy" {
+		t.Fatalf("last healthy tool registry = %#v", all)
+	}
+	if _, err := runtime.ExecuteBash(context.Background(), "still healthy", nil, agent.ExecuteBashOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !oldBashCalled {
+		t.Fatal("invalid reload replaced or removed last healthy standalone bash")
+	}
+}
+
+func TestAgentSessionReloadKeepsActiveTurnToolSnapshotAndAppliesNewRuntimeNextRun(t *testing.T) {
+	definition, err := provider.NewToolDefinition("which", "which generation", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	first, err := provider.FactoryResponseStep(func(context.Context, provider.Request, uint64) (llm.AssistantTerminal, error) {
+		close(started)
+		<-release
+		return mustToolUseTerminal(t, "call-old", "which", []byte(`{}`)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := []provider.ScriptStep{first}
+	for _, terminal := range []llm.AssistantTerminal{
+		mustTextTerminal(t, "first done"),
+		mustToolUseTerminal(t, "call-new", "which", []byte(`{}`)),
+		mustTextTerminal(t, "second done"),
+	} {
+		step, err := provider.FixedResponseStep(terminal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps = append(steps, step)
+	}
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return agentTestEpoch }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := implementation.SetResponses(steps); err != nil {
+		t.Fatal(err)
+	}
+	oldExecutor := &reloadGenerationExecutor{label: "old"}
+	newExecutor := &reloadGenerationExecutor{label: "new"}
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: newSessionManager(t), Model: sessionTestModel(t),
+		Tool: oldExecutor, Tools: []provider.ToolDefinition{definition},
+		ReloadTools: func(context.Context) (agent.ToolRuntime, error) {
+			return agent.ToolRuntime{Executor: newExecutor, Tools: []provider.ToolDefinition{definition}}, nil
+		},
+		Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, runErr := runtime.Run(context.Background(), "first")
+		firstDone <- runErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first provider request did not start")
+	}
+	if err := runtime.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first run did not settle")
+	}
+	if oldExecutor.callCount() != 1 || newExecutor.callCount() != 0 {
+		t.Fatalf("active turn executor calls old=%d new=%d", oldExecutor.callCount(), newExecutor.callCount())
+	}
+	if result, err := runtime.Run(context.Background(), "second"); err != nil || !result.Succeeded() {
+		t.Fatalf("second run = (%#v, %v)", result, err)
+	}
+	if oldExecutor.callCount() != 1 || newExecutor.callCount() != 1 {
+		t.Fatalf("post-reload executor calls old=%d new=%d", oldExecutor.callCount(), newExecutor.callCount())
 	}
 }
 

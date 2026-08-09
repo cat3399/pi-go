@@ -52,10 +52,19 @@ type SessionConfig struct {
 	// modes/resources are refreshed. Nil leaves low-level injected sessions with
 	// resource-only reload behavior.
 	ReloadRuntime func(context.Context) error
+	// ReloadTools rebuilds the complete non-extension tool runtime after
+	// settings and resources have reloaded. The returned runtime is validated
+	// off to the side and then published while preserving the latest active tool
+	// names. Nil keeps injected/low-level sessions on their existing registry.
+	ReloadTools func(context.Context) (ToolRuntime, error)
 	// StandaloneBash is the user-initiated !/!! execution port. It is distinct
 	// from Tool because its result is a BashExecution AgentMessage, non-zero exit
 	// codes are data, and output is streamed through session events.
 	StandaloneBash StandaloneBashExecutor
+	// ResolveStandaloneBash mirrors executeBash's live SettingsManager shell
+	// lookup. A custom per-call ExecuteBashOptions.Executor still takes
+	// precedence. Nil uses StandaloneBash as a stable injected fallback.
+	ResolveStandaloneBash func(context.Context) (StandaloneBashExecutor, error)
 	// BashCommandPrefix is prepended to the executed command but not the command
 	// stored in BashExecution history. ResolveBashCommandPrefix provides the
 	// live SettingsManager-style production path when configured.
@@ -153,6 +162,15 @@ type SessionConfig struct {
 	Retry                      RetryPolicy
 	Now                        func() time.Time
 	SettlementTimeout          time.Duration
+}
+
+// ToolRuntime is one complete, publishable generation of the tool execution
+// boundary. Tools is the full registry; AgentSession selects the active subset
+// by name and owns publication with the effective system prompt.
+type ToolRuntime struct {
+	Executor       ToolExecutor
+	Tools          []provider.ToolDefinition
+	StandaloneBash StandaloneBashExecutor
 }
 
 const (
@@ -345,7 +363,9 @@ type AgentSession struct {
 	systemOptions          BuildSystemPromptOptions
 	resources              SessionResources
 	reloadRuntime          func(context.Context) error
+	reloadTools            func(context.Context) (ToolRuntime, error)
 	standaloneBash         StandaloneBashExecutor
+	resolveStandaloneBash  func(context.Context) (StandaloneBashExecutor, error)
 	bashCommandPrefix      string
 	resolveBashPrefix      func() string
 	toolExecutor           ToolExecutor
@@ -567,8 +587,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	config.Hooks = hooks
 	s := &AgentSession{
 		sessionManager: config.SessionManager, systemOptions: systemOptions,
-		resources: config.Resources, reloadRuntime: config.ReloadRuntime,
-		standaloneBash: config.StandaloneBash, bashCommandPrefix: config.BashCommandPrefix, resolveBashPrefix: config.ResolveBashCommandPrefix,
+		resources: config.Resources, reloadRuntime: config.ReloadRuntime, reloadTools: config.ReloadTools,
+		standaloneBash: config.StandaloneBash, resolveStandaloneBash: config.ResolveStandaloneBash,
+		bashCommandPrefix: config.BashCommandPrefix, resolveBashPrefix: config.ResolveBashCommandPrefix,
 		toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
 		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
 		stream:         provider.CloneStreamOptions(config.Stream),
@@ -1474,6 +1495,31 @@ func (s *AgentSession) setTools(executor ToolExecutor, tools []provider.ToolDefi
 	if err != nil {
 		return err
 	}
+	return s.publishToolRuntime(executor, selected, registry, order, nil, false)
+}
+
+func (s *AgentSession) replaceToolRuntime(runtime ToolRuntime, activeNames []string) error {
+	if len(runtime.Tools) != 0 && isNilInterface(runtime.Executor) {
+		return fmt.Errorf("%w: advertised tools require a non-nil executor", ErrInvalidConfig)
+	}
+	if runtime.StandaloneBash != nil && isNilInterface(runtime.StandaloneBash) {
+		return fmt.Errorf("%w: standalone bash executor is a typed nil", ErrInvalidConfig)
+	}
+	selected, registry, order, err := buildToolCatalog(nil, runtime.Tools, activeNames)
+	if err != nil {
+		return err
+	}
+	return s.publishToolRuntime(runtime.Executor, selected, registry, order, runtime.StandaloneBash, true)
+}
+
+func (s *AgentSession) publishToolRuntime(
+	executor ToolExecutor,
+	selected []provider.ToolDefinition,
+	registry map[string]provider.ToolDefinition,
+	order []string,
+	standaloneBash StandaloneBashExecutor,
+	replaceStandalone bool,
+) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if s.closed || s.closing {
@@ -1488,6 +1534,7 @@ func (s *AgentSession) setTools(executor ToolExecutor, tools []provider.ToolDefi
 	s.mu.RLock()
 	resources := s.resources
 	s.mu.RUnlock()
+	var err error
 	if resources != nil {
 		prompt, options, err = resources.BuildSystemPrompt(options.SelectedTools)
 		if err != nil {
@@ -1507,6 +1554,9 @@ func (s *AgentSession) setTools(executor ToolExecutor, tools []provider.ToolDefi
 	s.toolExecutor = executor
 	s.toolRegistry = registry
 	s.toolOrder = order
+	if replaceStandalone {
+		s.standaloneBash = standaloneBash
+	}
 	s.mu.Unlock()
 	return nil
 }
