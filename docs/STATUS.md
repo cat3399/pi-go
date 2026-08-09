@@ -12,7 +12,8 @@ AgentSession 已组合 SessionManager，生产入口没有使用 scripted/fake P
 AgentLoop、stateful Agent 和当前生产版 SessionManager 的主体完成度较高；AgentSession 与
 Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验收。
 
-当前处于“补齐产品级 AgentSession 和 Runtime 边界，然后执行跨实现整体验收”的阶段。
+当前处于“继续补齐产品级 AgentSession，同时让 pi-web 通过已完成的 Runtime 边界开始真实
+适配，并执行跨实现整体验收”的阶段。
 
 ## 已实现
 
@@ -89,10 +90,14 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - Host 已覆盖 pi-web 当前除 extension UI 外直接调用的 Agent 命令，包括 queue、model/thinking、
   tools、compaction/retry、bash、stats/name、tree/fork、resources 和 reload；命令直接委托现有
   Runtime/AgentSession owner，没有 Host 侧第二套产品逻辑。
+- canonical AgentMessage/ToolResult/usage/event wire 与长期 stdio JSONL transport 已实现；
+  `cmd/pi-go-rpc` 使用生产 assembly 打开或恢复 Runtime，并在 EOF/signal 时等待已接纳命令和
+  Host 生命周期完整收束。
 - Host 尚未覆盖原版 RPC 的全部辅助命令（例如 cycle/list/new/switch/clone/entries/tree/messages），
-  也未完成 canonical wire DTO、长期 JSONL/HTTP transport 和多 session registry。
-- 当前 CLI 只执行一次 prompt 后退出，没有长期 JSONL RPC host。
-- pi-web 仍在服务端直接使用 TypeScript AgentSession、SessionManager、model 和 auth 服务。
+  也没有进程内多 session registry；当前 pi-web adapter 采用一个 Go 进程对应一个权威 Runtime。
+- pi-web 已有 opt-in 的 Go Agent backend：服务端只负责进程、request correlation、SSE event
+  转发和 registry，不再构建 TypeScript AgentSession。session 浏览、model/auth 配置等外围服务
+  仍使用现有 TypeScript 实现；自动命名和 extension UI/loader 尚未接入 Go backend。
 
 ### 整体验收
 
@@ -116,6 +121,8 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - `go build ./...`
 - `git diff --check`
 - SessionManager TypeScript/Go golden check
+- DeepSeek V4 Flash 的 OpenAI Responses、Chat Completions、Anthropic Messages 三协议真实
+  Agent tool-loop，以及 pi-web adapter → `pi-go-rpc` → read tool 的只读端到端验证
 
 远端 Provider 测试为显式 opt-in，无凭据时跳过。生产代码未发现静态模型回复或 fake tool
 result 冒充真实实现。

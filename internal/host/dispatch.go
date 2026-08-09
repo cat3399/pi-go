@@ -132,6 +132,9 @@ func (h *Host) dispatchPrompt(ctx context.Context, command PromptCommand) (Comma
 			StreamingBehavior: command.StreamingBehavior,
 			Source:            agent.InputRPC,
 			PreflightResult: func(success bool) {
+				if success && command.PreflightResult != nil {
+					command.PreflightResult(PromptAcceptedResult{OperationID: operationID})
+				}
 				preflight <- success
 			},
 		})

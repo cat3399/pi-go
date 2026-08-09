@@ -76,11 +76,12 @@
 
 只有这一阶段通过后，内部 Agent 重写才算完成。
 
-## 第五阶段：接入 pi-web
+## 第五阶段：接入 pi-web（已启动）
 
-在核心验收完成后，按 pi-web 的真实需求补充 Provider/model/auth breadth，再实现 JSONL RPC
-或等价长期 transport，替换 pi-web 服务端直接使用的 TypeScript Agent 核心。pi-web 继续负责
-HTTP/SSE、连接恢复和 UI 投影，不保留第二套 Agent 状态或产品策略。
+长期 JSONL Runtime 和 pi-web 薄进程 adapter 已落地并可 opt-in 使用。下一步按 pi-web 的真实
+需求补充辅助 command、恢复/切换场景和 Provider/model/auth breadth，逐步替换服务端直接使用的
+TypeScript Agent 核心。pi-web 继续负责 HTTP/SSE、连接恢复和 UI 投影，不保留第二套 Agent
+状态或产品策略。
 
 参考：
 

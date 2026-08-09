@@ -35,12 +35,24 @@ compaction、会话树和 Runtime replacement 生命周期均有真实实现。�
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
 项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension runtime 重建、
-standalone bash 的 `user_bash` Host hook 集成、provider/model/auth 组合、canonical wire/长期
-transport 与多 session registry，以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、
-跨 session replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展 UI 外的全部直接
-Agent 命令；`prompt` 按原版 preflight 时点异步确认。
+standalone bash 的 `user_bash` Host hook 集成、provider/model/auth breadth、原版 RPC 的辅助命令、
+多 session registry，以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、跨 session
+replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展 UI 外的全部直接 Agent 命令；
+`prompt` 按原版 preflight 时点异步确认。
 
-`cmd/pi-go -p` 是一次性 headless 诊断入口，不代表长期 Runtime 或 pi-web 接入已经完成。
+`cmd/pi-go-rpc` 已提供长期 stdio JSONL Runtime，pi-web 可以通过薄进程 adapter 选择它作为
+Agent 核心。`cmd/pi-go -p` 仍是一次性 headless 诊断入口。
+
+## JSONL Agent Host
+
+```sh
+go build -o /path/to/pi-go-rpc ./cmd/pi-go-rpc
+/path/to/pi-go-rpc --cwd /path/to/project
+```
+
+每行输入一个带可选 `id` 的 JSON command；response 与原版 AgentSession event 逐行输出。
+也可以用 `--session` 恢复现有 JSONL，会话、模型、工具、队列、retry、compaction 和 fork 等
+行为仍由同一个 `Runtime → AgentSession → Agent` 调用链拥有，RPC 层不维护影子状态。
 
 ## 范围
 

@@ -65,6 +65,18 @@ func TestLiveDeepSeekV4FlashAgentSession(t *testing.T) {
 				})
 			},
 		},
+		{
+			name:          "anthropic_messages",
+			api:           provider.AnthropicMessagesAPI,
+			thinkingLevel: provider.ThinkingOff,
+			maxTokens:     512,
+			new: func(key string) (provider.Provider, error) {
+				return provider.NewAnthropicProvider(provider.AnthropicConfig{
+					BaseURL: deepSeekLiveBaseURL + "/anthropic",
+					APIKey:  key,
+				})
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -298,12 +310,13 @@ func deepSeekLiveModel(api string) model.Model {
 		ContextWindow: 1_000_000,
 		MaxTokens:     384_000,
 	}
-	if api == provider.OpenAIResponsesAPI {
+	switch api {
+	case provider.OpenAIResponsesAPI:
 		supportsDeveloperRole := false
 		catalogModel.Compat.OpenAIResponses = &provider.OpenAIResponsesCompat{
 			SupportsDeveloperRole: &supportsDeveloperRole,
 		}
-	} else {
+	case provider.OpenAICompletionsAPI:
 		supportsStore := false
 		supportsDeveloperRole := false
 		requiresReasoningContent := true
@@ -313,6 +326,18 @@ func deepSeekLiveModel(api string) model.Model {
 			SupportsDeveloperRole: &supportsDeveloperRole,
 			RequiresReasoningContentOnAssistantMessages: &requiresReasoningContent,
 			ThinkingFormat: &thinkingFormat,
+		}
+	case provider.AnthropicMessagesAPI:
+		// DeepSeek's Anthropic-compatible endpoint exposes the Messages wire
+		// format, but not Claude-specific prompt-cache or tool-reference
+		// extensions. Keep the Agent loop identical while advertising only the
+		// portable surface that this endpoint implements.
+		portableOnly := false
+		catalogModel.BaseURL = deepSeekLiveBaseURL + "/anthropic"
+		catalogModel.Compat.AnthropicMessages = &provider.AnthropicMessagesCompat{
+			SupportsLongCacheRetention:  &portableOnly,
+			SupportsCacheControlOnTools: &portableOnly,
+			SupportsToolReferences:      &portableOnly,
 		}
 	}
 	return catalogModel

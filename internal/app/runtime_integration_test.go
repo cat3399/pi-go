@@ -190,6 +190,35 @@ func fixedProductionConfig(cwd, agentDir, docsDir string) ProductionConfig {
 	}
 }
 
+func TestOpenProductionRuntimeUsesProductionRestoreWithoutRunningPrompt(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	sessionPath := filepath.Join(t.TempDir(), "rpc-session.jsonl")
+	runtime, err := OpenProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), ProductionRuntimeOptions{
+		SessionPath: sessionPath, ProviderID: "openai", ModelID: "gpt-5.5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := runtime.Dispose(context.Background()); err != nil {
+			t.Errorf("dispose runtime: %v", err)
+		}
+	}()
+	productSession := runtime.Session()
+	selected, ok := productSession.SelectedModel()
+	if !ok || selected.Provider() != "openai" || selected.ID() != "gpt-5.5" {
+		t.Fatalf("selected model = %#v, %t", selected, ok)
+	}
+	if path, ok := productSession.SessionManager().SessionFile(); !ok || path != sessionPath {
+		t.Fatalf("session file = %q, %t", path, ok)
+	}
+	messages := productSession.State().Active.Messages()
+	if productSession.SessionManager().Cwd() != cwd || len(messages) != 0 {
+		t.Fatalf("opened session = cwd %q messages %#v", productSession.SessionManager().Cwd(), messages)
+	}
+}
+
 func TestProductionToolRuntimeOptionsUseLiveShellAndImageSettings(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

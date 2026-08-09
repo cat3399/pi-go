@@ -322,6 +322,60 @@ func TestHostPromptAcknowledgesPreflightAndPublishesOneOrderedLifecycle(t *testi
 	}
 }
 
+func TestHostPromptPreflightCallbackPrecedesAgentEvents(t *testing.T) {
+	harness := newHostHarness(t, mustFixedStep(t, hostTextTerminal(t, "answer")))
+
+	var mu sync.Mutex
+	order := make([]string, 0, 2)
+	preflight := make(chan host.PromptAcceptedResult, 1)
+	unsubscribe := harness.host.Subscribe(func(_ context.Context, event host.Event) {
+		if sessionEvent, ok := event.Value.(host.AgentSessionEvent); ok && sessionEvent.Event.Type() == agent.AgentStartEventType {
+			mu.Lock()
+			order = append(order, "agent_start")
+			mu.Unlock()
+		}
+	})
+	defer unsubscribe()
+
+	result, err := harness.host.Dispatch(context.Background(), host.PromptCommand{
+		Message: "hello",
+		PreflightResult: func(result host.PromptAcceptedResult) {
+			mu.Lock()
+			order = append(order, "preflight")
+			mu.Unlock()
+			preflight <- result
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := result.(host.PromptAcceptedResult)
+	if callback := <-preflight; callback != accepted {
+		t.Fatalf("preflight result = %#v, dispatch result %#v", callback, accepted)
+	}
+	if err := harness.runtime.Session().WaitForIdle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		complete := len(order) >= 2
+		mu.Unlock()
+		if complete {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for agent_start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(order[:2], []string{"preflight", "agent_start"}) {
+		t.Fatalf("preflight/event order = %#v", order)
+	}
+}
+
 func TestHostPromptPreflightFailureReturnsErrorAndPublishesErrorBeforeDone(t *testing.T) {
 	harness := newHostHarness(t)
 	events := make(chan host.Event, 4)

@@ -19,6 +19,7 @@ type queuedEvent struct {
 	sessionID string
 	value     EventValue
 	barrier   chan struct{}
+	observers []*hostObserver
 }
 
 type hostObserver struct {
@@ -196,8 +197,14 @@ func (h *Host) enqueue(ctx context.Context, sessionID string, value EventValue) 
 	if closed {
 		return
 	}
+	h.observerMu.RLock()
+	observers := make([]*hostObserver, 0, len(h.observers))
+	for _, observer := range h.observers {
+		observers = append(observers, observer)
+	}
+	h.observerMu.RUnlock()
 	select {
-	case h.eventIngress <- queuedEvent{ctx: ctx, sessionID: sessionID, value: value}:
+	case h.eventIngress <- queuedEvent{ctx: ctx, sessionID: sessionID, value: value, observers: observers}:
 	case <-h.ctx.Done():
 	}
 }
@@ -214,13 +221,7 @@ func (h *Host) dispatchEvents() {
 			}
 			sequence++
 			event := Event{Sequence: sequence, SessionID: item.sessionID, Value: item.value}
-			h.observerMu.RLock()
-			observers := make([]*hostObserver, 0, len(h.observers))
-			for _, observer := range h.observers {
-				observers = append(observers, observer)
-			}
-			h.observerMu.RUnlock()
-			for _, observer := range observers {
+			for _, observer := range item.observers {
 				select {
 				case observer.inbox <- cloneEvent(event):
 				case <-observer.stop:

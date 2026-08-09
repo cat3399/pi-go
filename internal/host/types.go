@@ -58,6 +58,11 @@ type PromptCommand struct {
 	Message           string
 	Images            []llm.ImageBlock
 	StreamingBehavior agent.StreamingBehavior
+	// PreflightResult runs synchronously at pi's authoritative prompt
+	// admission boundary. A transport that needs to acknowledge a prompt
+	// before the first Agent event can write that acknowledgement here instead
+	// of racing the asynchronous Host event dispatcher.
+	PreflightResult func(PromptAcceptedResult)
 }
 type AbortCommand struct{}
 type GetStateCommand struct{}
