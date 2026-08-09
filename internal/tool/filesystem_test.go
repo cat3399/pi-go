@@ -36,7 +36,7 @@ func textPointer(value string) *string { return &value }
 func intPointer(value int) *int        { return &value }
 func boolPointer(value bool) *bool     { return &value }
 
-func TestFilesystemReadRangeTruncateAndBinary(t *testing.T) {
+func TestFilesystemReadRangeTruncateAndNonImageBytes(t *testing.T) {
 	suite := newTestSuite(t)
 	writeTestFile(t, suite.WorkingDir(), "notes.txt", "one\ntwo\nthree\nfour\n")
 	result, err := suite.Read(context.Background(), ReadInput{Path: "notes.txt", Offset: intPointer(2), Limit: intPointer(2)})
@@ -52,7 +52,7 @@ func TestFilesystemReadRangeTruncateAndBinary(t *testing.T) {
 	}
 	writeTestFile(t, suite.WorkingDir(), "binary.bin", "a\x00b")
 	result, err = suite.Read(context.Background(), ReadInput{Path: "binary.bin"})
-	if !errors.Is(err, ErrBinaryFile) || !strings.Contains(result.Text, "binary file") {
+	if err != nil || result.Text != "a\x00b" {
 		t.Fatalf("binary result = %#v, %v", result, err)
 	}
 	small, err := NewFilesystemSuite(FilesystemOptions{WorkingDir: suite.WorkingDir(), MaxLines: 2, MaxBytes: 100})
@@ -91,7 +91,7 @@ func TestFilesystemPathPolicy(t *testing.T) {
 	}
 }
 
-func TestFilesystemWriteIsAtomicAndCancellationIsSafe(t *testing.T) {
+func TestFilesystemWriteCancellationAndUpstreamCount(t *testing.T) {
 	suite := newTestSuite(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -106,7 +106,9 @@ func TestFilesystemWriteIsAtomicAndCancellationIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "12 bytes") {
+	// pi reports JavaScript string length (UTF-16 code units), despite calling
+	// the value bytes in the provider-visible result.
+	if !strings.Contains(result.Text, "8 bytes") {
 		t.Fatalf("write result = %q", result.Text)
 	}
 	data, err := os.ReadFile(filepath.Join(suite.WorkingDir(), "new/file.txt"))
@@ -215,8 +217,12 @@ func TestFilesystemEditFuzzyAndUnique(t *testing.T) {
 	}
 	writeTestFile(t, suite.WorkingDir(), "compatibility.txt", "ＡＢＣ\n")
 	_, err = suite.Edit(context.Background(), EditInput{Path: "compatibility.txt", Edits: []Edit{{OldText: "ABC", NewText: "XYZ"}}})
-	if !errors.Is(err, ErrUnsupportedFilesystemFeature) {
-		t.Fatalf("NFKC gap must fail explicitly: %v", err)
+	if err != nil {
+		t.Fatalf("NFKC fuzzy match = %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(suite.WorkingDir(), "compatibility.txt"))
+	if err != nil || string(data) != "XYZ\n" {
+		t.Fatalf("NFKC edited content = %q, %v", data, err)
 	}
 }
 
@@ -251,17 +257,21 @@ func TestFilesystemFindGrepLsDeterministic(t *testing.T) {
 	}
 }
 
-func TestFilesystemRegistryStrictDecodeAndDispatch(t *testing.T) {
+func TestFilesystemRegistryJSONParseSemanticsAndDispatch(t *testing.T) {
 	suite := newTestSuite(t)
 	registry, err := NewFilesystemRegistry(suite)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = registry.ExecuteJSON(context.Background(), WriteToolName, []byte(`{"path":"a.txt","content":"x","content":"y"}`))
-	if !errors.Is(err, ErrInvalidFilesystemInput) {
-		t.Fatalf("duplicate decode = %v", err)
+	result, err := registry.ExecuteJSON(context.Background(), WriteToolName, []byte(`{"path":"a.txt","content":"x","content":"y","extra":true}`))
+	if err != nil {
+		t.Fatalf("duplicate/extra property decode = %v", err)
 	}
-	result, err := registry.ExecuteJSON(context.Background(), WriteToolName, []byte(`{"path":"a.txt","content":"x"}`))
+	data, readErr := os.ReadFile(filepath.Join(suite.WorkingDir(), "a.txt"))
+	if readErr != nil || string(data) != "y" {
+		t.Fatalf("last duplicate value was not used: %q, %v", data, readErr)
+	}
+	result, err = registry.ExecuteJSON(context.Background(), WriteToolName, []byte(`{"path":"a.txt","content":"x"}`))
 	if err != nil || !strings.Contains(result.Text, "Successfully wrote") {
 		t.Fatalf("registry write = %#v %v", result, err)
 	}

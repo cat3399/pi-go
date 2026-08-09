@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -38,7 +37,7 @@ func write(t *testing.T, path, value string) {
 	}
 }
 
-func TestUntrustedProjectIsNotProbedOrIncluded(t *testing.T) {
+func TestUntrustedProjectConfigIsGatedWhileContextIsIncluded(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "AGENTS.md"), "global rule")
 	write(t, filepath.Join(cwd, "AGENTS.md"), string([]byte{0xff}))
@@ -50,14 +49,18 @@ func TestUntrustedProjectIsNotProbedOrIncluded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Trusted || len(snapshot.Instructions) != 1 || snapshot.Instructions[0].Content != "global rule" || strings.Contains(snapshot.SystemPrompt, "project secret") {
+	if snapshot.Trusted || len(snapshot.Instructions) != 2 || snapshot.Instructions[0].Content != "global rule" || snapshot.Instructions[1].Content != "�" || strings.Contains(snapshot.SystemPrompt, "project secret") {
 		t.Fatalf("untrusted snapshot = %#v", snapshot)
 	}
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("trusted invalid project Reload() = %v", err)
+	}
+	snapshot, _ = s.Snapshot()
+	if snapshot.BaseSystemPrompt != "project secret" {
+		t.Fatalf("trusted project system prompt = %#v", snapshot)
 	}
 }
 func TestTrustedResourcesPrecedenceCollisionAndAssembly(t *testing.T) {
@@ -83,38 +86,38 @@ func TestTrustedResourcesPrecedenceCollisionAndAssembly(t *testing.T) {
 		t.Fatalf("collisions = %#v", snap.Diagnostics)
 	}
 }
-func TestUnsafeAndOversizedResourcesFailClosedAndKeepHealthySnapshot(t *testing.T) {
+func TestBrokenSymlinkIsSkippedAndDefaultResourceSizeIsUnbounded(t *testing.T) {
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "SYSTEM.md"), "healthy")
 	if err := s.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := s.Snapshot()
 	if err := os.Remove(filepath.Join(agent, "SYSTEM.md")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(agent, "missing"), filepath.Join(agent, "SYSTEM.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("symlink reload = %v", err)
 	}
 	after, _ := s.Snapshot()
-	if after.SystemPrompt != before.SystemPrompt {
-		t.Fatalf("failed reload replaced healthy snapshot")
+	if after.BaseSystemPrompt != "" || strings.Contains(after.SystemPrompt, "healthy") {
+		t.Fatalf("broken prompt symlink was not skipped: %#v", after)
 	}
 	if err := os.Remove(filepath.Join(agent, "SYSTEM.md")); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(agent, "SYSTEM.md"), strings.Repeat("x", int(DefaultMaxFileBytes)+1))
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrTooLarge) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("large reload = %v", err)
 	}
-}
-func TestTrustStoreStrictPrivateAtomicAndPreservesOtherDecisions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("v0.1 has no Windows private-file implementation")
+	after, _ = s.Snapshot()
+	if len(after.BaseSystemPrompt) != int(DefaultMaxFileBytes)+1 {
+		t.Fatalf("large prompt length = %d", len(after.BaseSystemPrompt))
 	}
+}
+func TestTrustStoreAtomicPreservesDecisionsAndJSONUsesLastDuplicate(t *testing.T) {
 	s, agent, cwd := newService(t)
 	other := filepath.Join(filepath.Dir(cwd), "other")
 	write(t, filepath.Join(agent, "trust.json"), "{\n  \""+other+"\": false\n}\n")
@@ -133,8 +136,8 @@ func TestTrustStoreStrictPrivateAtomicAndPreservesOtherDecisions(t *testing.T) {
 		t.Fatalf("Get = %t,%t,%v", trusted, known, err)
 	}
 	write(t, filepath.Join(agent, "trust.json"), `{"x":true,"x":false}`)
-	if _, _, err := s.Trust().Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
-		t.Fatalf("duplicate trust = %v", err)
+	if trusted, known, err := s.Trust().Get(context.Background(), "x"); err != nil || known || trusted {
+		t.Fatalf("duplicate trust JSON = %t,%t,%v", trusted, known, err)
 	}
 }
 func TestCancelAndConcurrentSnapshots(t *testing.T) {

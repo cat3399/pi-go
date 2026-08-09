@@ -22,6 +22,9 @@ func resolveToolPath(cwd, supplied string) (string, error) {
 	if !utf8.ValidString(supplied) {
 		return "", fmt.Errorf("%w: path must be valid UTF-8", ErrFilesystemPath)
 	}
+	if strings.IndexByte(supplied, 0) >= 0 {
+		return "", fmt.Errorf("%w: path contains NUL", ErrFilesystemPath)
+	}
 	if strings.HasPrefix(supplied, "@") {
 		supplied = strings.TrimPrefix(supplied, "@")
 	}

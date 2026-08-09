@@ -35,9 +35,6 @@ func TestOutputAccumulatorStreamingUTF8AndTrailingNewline(t *testing.T) {
 }
 
 func TestOutputAccumulatorBOMAndInvalidUTF8(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	accumulator := newTestAccumulator(t, 10, 100)
 	raw := append([]byte{0xef, 0xbb, 0xbf}, []byte("x")...)
@@ -76,9 +73,6 @@ func TestOutputAccumulatorBOMAndInvalidUTF8(t *testing.T) {
 }
 
 func TestOutputAccumulatorLineTailArtifactAndModes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	parent := t.TempDir()
 	root := filepath.Join(parent, "private")
@@ -123,7 +117,7 @@ func TestOutputAccumulatorLineTailArtifactAndModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rootInfo.Mode().Perm() != 0o700 || fileInfo.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && (rootInfo.Mode().Perm() != 0o700 || fileInfo.Mode().Perm() != 0o600) {
 		t.Fatalf("modes = dir %04o file %04o", rootInfo.Mode().Perm(), fileInfo.Mode().Perm())
 	}
 }
@@ -147,9 +141,6 @@ func TestOutputAccumulatorByteTailCases(t *testing.T) {
 			t.Parallel()
 			accumulator := newTestAccumulator(t, 100, test.maxBytes)
 			if err := accumulator.append([]byte(test.content)); err != nil {
-				if runtime.GOOS == "windows" && errors.Is(err, ErrArtifactSecurity) {
-					t.Skip("Windows artifact creation fails closed")
-				}
 				t.Fatal(err)
 			}
 			snapshot := finishTestAccumulator(t, accumulator)
@@ -165,9 +156,6 @@ func TestOutputAccumulatorByteTailCases(t *testing.T) {
 }
 
 func TestOutputAccumulatorTrailingNewlineRetainsLastLineSize(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	accumulator := newTestAccumulator(t, 100, 4)
 	if err := accumulator.append([]byte("abcdefgh\n")); err != nil {
@@ -284,9 +272,6 @@ func TestOutputAccumulatorExactlyAtLimitsDoesNotTruncate(t *testing.T) {
 }
 
 func TestOutputAccumulatorRollingTailMatchesWholeOutputOracle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	full := strings.Repeat("0123456789", 40) + "\nend"
 	accumulator := newTestAccumulator(t, 1000, 16)
@@ -368,9 +353,6 @@ func newTestAccumulator(t *testing.T, maxLines, maxBytes int) *outputAccumulator
 func finishTestAccumulator(t *testing.T, accumulator *outputAccumulator) outputSnapshot {
 	t.Helper()
 	if err := accumulator.finish(); err != nil {
-		if runtime.GOOS == "windows" && errors.Is(err, ErrArtifactSecurity) {
-			t.Skip("Windows artifact creation fails closed")
-		}
 		t.Fatal(err)
 	}
 	if err := accumulator.close(); err != nil {

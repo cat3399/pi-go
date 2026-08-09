@@ -125,7 +125,7 @@ func waitForQueueState(t *testing.T, queue *mutationQueue, expectedNodes, expect
 	t.Fatalf("queue nodes = %d, keys = %d, settling = %d; want nodes = %d, settling = %d", nodes, keys, settling, expectedNodes, expectedSettling)
 }
 
-func TestAtomicWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) {
+func TestWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("symlink creation needs platform privilege on Windows")
 	}
@@ -146,7 +146,7 @@ func TestAtomicWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) 
 		t.Fatal(err)
 	}
 	if aliasInfo.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("atomic write replaced the symlink itself")
+		t.Fatal("write replaced the symlink itself")
 	}
 	data, err := os.ReadFile(target)
 	if err != nil || string(data) != "new" {
@@ -181,101 +181,6 @@ func TestAtomicWriteFollowsSymlinkPreservesModeAndRejectsReadonly(t *testing.T) 
 	data, _ = os.ReadFile(target)
 	if string(data) != "new" {
 		t.Fatalf("readonly target changed to %q", data)
-	}
-}
-
-func TestEffectiveWritabilityProbeDoesNotChangeContentsOrModTime(t *testing.T) {
-	root := t.TempDir()
-	target := writeTestFile(t, root, "probe.txt", "unchanged")
-	expected, err := snapshotPath(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyEffectiveWritability(target, expected); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "unchanged" {
-		t.Fatalf("probe changed contents to %q", data)
-	}
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Fatalf("probe changed mtime from %v to %v", before.ModTime(), after.ModTime())
-	}
-}
-
-func TestAtomicWriteRechecksTargetPermissionsBeforeCommit(t *testing.T) {
-	root := t.TempDir()
-	target := writeTestFile(t, root, "recheck.txt", "old")
-	key, err := mutationKey(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := prepareAtomicWrite(context.Background(), target, key, []byte("new"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plan.cleanup()
-	if err := os.Chmod(target, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chmod(target, 0o600) }()
-	if err := plan.commit(context.Background()); !errors.Is(err, ErrFilesystemPath) {
-		t.Fatalf("commit error = %v, want changed permission snapshot", err)
-	}
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "old" {
-		t.Fatalf("target changed to %q", data)
-	}
-}
-
-func TestAtomicWriteDetectsSymlinkRetargetBeforeCommit(t *testing.T) {
-	if os.PathSeparator == '\\' {
-		t.Skip("symlink creation needs platform privilege on Windows")
-	}
-	root := t.TempDir()
-	first := writeTestFile(t, root, "first.txt", "first")
-	second := writeTestFile(t, root, "second.txt", "second")
-	alias := filepath.Join(root, "alias.txt")
-	if err := os.Symlink("first.txt", alias); err != nil {
-		t.Fatal(err)
-	}
-	key, err := mutationKey(alias)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan, err := prepareAtomicWrite(context.Background(), alias, key, []byte("replacement"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer plan.cleanup()
-	movedAlias := filepath.Join(root, "old-alias.txt")
-	if err := os.Rename(alias, movedAlias); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("second.txt", alias); err != nil {
-		t.Fatal(err)
-	}
-	if err := plan.commit(context.Background()); !errors.Is(err, ErrFilesystemPath) {
-		t.Fatalf("commit error = %v", err)
-	}
-	firstData, _ := os.ReadFile(first)
-	secondData, _ := os.ReadFile(second)
-	if string(firstData) != "first" || string(secondData) != "second" {
-		t.Fatalf("targets changed: %q / %q", firstData, secondData)
 	}
 }
 
@@ -424,9 +329,9 @@ func TestIgnoreRulesParentNestedMalformedAndIOFailure(t *testing.T) {
 		t.Fatalf("malformed ignore error = %v", err)
 	}
 	writeTestFile(t, root, "nested/.gitignore", `escaped\ pattern`)
-	_, err = suite.Find(context.Background(), FindInput{Pattern: "**", Path: textPointer("nested")})
-	if !errors.Is(err, ErrUnsupportedFilesystemFeature) {
-		t.Fatalf("unsupported ignore syntax error = %v", err)
+	result, err = suite.Find(context.Background(), FindInput{Pattern: "**", Path: textPointer("nested")})
+	if err != nil || strings.Contains(result.Text, "escaped pattern") {
+		t.Fatalf("escaped ignore syntax result = %#v, %v", result, err)
 	}
 
 	other := t.TempDir()

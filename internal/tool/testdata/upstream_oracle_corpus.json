@@ -1,0 +1,103 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "nodeVersion": "v24.18.1",
+  "tools": {
+    "rg": {
+      "version": "ripgrep 15.2.0 (rev e89fff89ac)",
+      "sha256ByPlatform": {
+        "darwin-arm64": "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e"
+      }
+    },
+    "fd": {
+      "version": "fd 10.4.2",
+      "sha256ByPlatform": {
+        "darwin-arm64": "bbd98b652be41796406f9d793a2909a717fd871d0e0b824f72fb85c645ad5366"
+      }
+    }
+  },
+  "files": {
+    "main.go": "TOKEN\n",
+    "web.ts": "TOKEN\n",
+    "web.test.ts": "TOKEN\n",
+    "notes.md": "TOKEN\n",
+    "!literal.txt": "TOKEN\n"
+  },
+  "grep": {
+    "pattern": "TOKEN",
+    "braceGlob": "{*.go,*.ts}",
+    "negativeGlob": "!*.test.ts"
+  },
+  "find": {
+    "pattern": "!*.txt"
+  },
+  "ignore": {
+    "pattern": "*.txt",
+    "grepPattern": "TOKEN",
+    "controlFiles": {
+      ".gitignore": "literal.txt\nprefix-*\n*.suffix\nglob-?-x.txt\n/anchored.txt\ncache/\nordered.txt\n!ordered.txt\nparent-vcs.txt\nchild/child-choice.txt\nshared-precedence.txt\n",
+      ".ignore": "generic-only.txt\nnested-generic.txt\n!shared-precedence.txt\n",
+      ".fdignore": "fd-only.txt\n",
+      ".rgignore": "rg-only.txt\n",
+      "child/.gitignore": "!child-choice.txt\nsibling.txt\n",
+      "a/.gitignore": "sibling.txt\n"
+    },
+    "files": {
+      ".git/HEAD": "ref: refs/heads/main\n",
+      "literal.txt": "TOKEN\n",
+      "deep/literal.txt": "TOKEN\n",
+      "prefix-value.txt": "TOKEN\n",
+      "value.suffix": "TOKEN\n",
+      "glob-a-x.txt": "TOKEN\n",
+      "glob-ab-x.txt": "TOKEN\n",
+      "anchored.txt": "TOKEN\n",
+      "deep/anchored.txt": "TOKEN\n",
+      "cache/child.txt": "TOKEN\n",
+      "ordered.txt": "TOKEN\n",
+      "parent-vcs.txt": "TOKEN\n",
+      "child/child-choice.txt": "TOKEN\n",
+      "child/sibling.txt": "TOKEN\n",
+      "a/sibling.txt": "TOKEN\n",
+      "b/sibling.txt": "TOKEN\n",
+      "generic-only.txt": "TOKEN\n",
+      "fd-only.txt": "TOKEN\n",
+      "rg-only.txt": "TOKEN\n",
+      "shared-precedence.txt": "TOKEN\n",
+      "normal.txt": "TOKEN\n",
+      "nested/.git/HEAD": "ref: refs/heads/nested\n",
+      "nested/parent-vcs.txt": "TOKEN\n",
+      "nested/nested-generic.txt": "TOKEN\n"
+    }
+  },
+  "ancestorIgnore": {
+    "findPattern": "*.txt",
+    "grepPattern": "TOKEN",
+    "repositorySearch": "repo/search",
+    "outsideRepositorySearch": "outside/search",
+    "controlFiles": {
+      ".gitignore": "above-vcs.txt\n",
+      ".ignore": "above-generic.txt\n",
+      ".fdignore": "above-find.txt\n",
+      ".rgignore": "above-grep.txt\n",
+      "repo/.gitignore": "repo-vcs.txt\n",
+      "outside/.gitignore": "parent-vcs.txt\nnested-parent.txt\n",
+      "outside/search/.gitignore": "local-vcs.txt\n",
+      "outside/search/nested-repo/.gitignore": "nested-local.txt\n"
+    },
+    "files": {
+      "repo/.git/HEAD": "ref: refs/heads/main\n",
+      "repo/search/above-vcs.txt": "TOKEN\n",
+      "repo/search/above-generic.txt": "TOKEN\n",
+      "repo/search/above-find.txt": "TOKEN\n",
+      "repo/search/above-grep.txt": "TOKEN\n",
+      "repo/search/repo-vcs.txt": "TOKEN\n",
+      "repo/search/normal.txt": "TOKEN\n",
+      "outside/search/parent-vcs.txt": "TOKEN\n",
+      "outside/search/local-vcs.txt": "TOKEN\n",
+      "outside/search/normal.txt": "TOKEN\n",
+      "outside/search/nested-repo/.git/HEAD": "ref: refs/heads/nested\n",
+      "outside/search/nested-repo/nested-parent.txt": "TOKEN\n",
+      "outside/search/nested-repo/nested-local.txt": "TOKEN\n",
+      "outside/search/sibling/nested-local.txt": "TOKEN\n"
+    }
+  }
+}

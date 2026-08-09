@@ -15,7 +15,7 @@ import (
 	"unicode/utf8"
 )
 
-func TestExactTrustDoesNotReadAboveTrustAnchor(t *testing.T) {
+func TestContextFilesLoadThroughAllAncestorsIndependentlyOfTrust(t *testing.T) {
 	root := t.TempDir()
 	agent := filepath.Join(root, "agent")
 	trusted := filepath.Join(root, "trusted")
@@ -43,12 +43,12 @@ func TestExactTrustDoesNotReadAboveTrustAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Instructions) != 2 || snapshot.Instructions[0].Content != "trusted ancestor" || snapshot.Instructions[1].Content != "trusted cwd" {
+	if len(snapshot.Instructions) != 3 || snapshot.Instructions[0].Content != "�" || snapshot.Instructions[1].Content != "trusted ancestor" || snapshot.Instructions[2].Content != "trusted cwd" {
 		t.Fatalf("instructions = %#v", snapshot.Instructions)
 	}
 }
 
-func TestUntrustedProjectAssetsCannotChangeFailureOrSnapshot(t *testing.T) {
+func TestUntrustedProjectConfigIsGatedButContextAlwaysLoads(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "SYSTEM.md"), "global")
 	for _, path := range []string{
@@ -65,7 +65,7 @@ func TestUntrustedProjectAssetsCannotChangeFailureOrSnapshot(t *testing.T) {
 		t.Fatalf("untrusted assets affected reload: %v", err)
 	}
 	first, _ := s.Snapshot()
-	if first.Trusted || first.SystemPrompt != "global\n\n<available_tools>\n- read: Read files\n</available_tools>\n\nCurrent working directory: "+strings.ReplaceAll(cwd, "\\", "/") {
+	if first.Trusted || first.BaseSystemPrompt != "global" || len(first.Instructions) != 1 || first.Instructions[0].Content != "�" || len(first.Templates) != 0 || len(first.Skills) != 0 || len(first.AppendSystem) != 0 || !strings.Contains(first.SystemPrompt, "global") {
 		t.Fatalf("snapshot = %#v", first)
 	}
 	if err := s.Reload(context.Background()); err != nil {
@@ -97,7 +97,7 @@ func TestUntrustedMissingLoopAndAliasedCWDDoNotProbeOrAuthorize(t *testing.T) {
 			t.Fatalf("untrusted Reload(%q) = %v", cwd, err)
 		}
 		got, _ := s.Snapshot()
-		if got.Trusted || !strings.Contains(got.SystemPrompt, "global") {
+		if !got.Trusted || !strings.Contains(got.SystemPrompt, "global") {
 			t.Fatalf("untrusted snapshot for %q = %#v", cwd, got)
 		}
 	}
@@ -120,12 +120,16 @@ func TestUntrustedMissingLoopAndAliasedCWDDoNotProbeOrAuthorize(t *testing.T) {
 	if err := s.Trust().Set(context.Background(), anchor, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
-		t.Fatalf("trusted symlink escape = %v", err)
+	if err := s.Reload(context.Background()); err != nil {
+		t.Fatalf("trusted symlink cwd = %v", err)
+	}
+	got, _ := s.Snapshot()
+	if len(got.Instructions) == 0 || got.Instructions[len(got.Instructions)-1].Content != "must not escape" {
+		t.Fatalf("symlink cwd context = %#v", got.Instructions)
 	}
 }
 
-func TestInstructionCandidateOrderAndSafety(t *testing.T) {
+func TestInstructionCandidateOrderAndSymlinkFiles(t *testing.T) {
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "AGENTS.MD"), "agents upper")
 	write(t, filepath.Join(agent, "CLAUDE.md"), "claude")
@@ -142,8 +146,12 @@ func TestInstructionCandidateOrderAndSafety(t *testing.T) {
 	if err := os.Symlink(filepath.Join(agent, "CLAUDE.md"), filepath.Join(agent, "AGENTS.md")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("symlink instruction = %v", err)
+	}
+	snapshot, _ = s.Snapshot()
+	if len(snapshot.Instructions) != 1 || snapshot.Instructions[0].Content != "claude" {
+		t.Fatalf("symlink instruction content = %#v", snapshot.Instructions)
 	}
 }
 
@@ -171,11 +179,7 @@ func TestTemplatesExpansionAndPrecedenceAreDeterministic(t *testing.T) {
 	if got := substitute("${999999999999999999999999:-x}|${@:999999999999999999999999}", []string{"one"}); got != "x|" {
 		t.Fatalf("overflow substitution = %q", got)
 	}
-	physicalCWD, err := filepath.EvalSymlinks(cwd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Resource != "template" || snapshot.Diagnostics[0].WinnerPath != filepath.Join(physicalCWD, ".pi", "prompts", "a.md") {
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Resource != "template" || snapshot.Diagnostics[0].WinnerPath != filepath.Join(cwd, ".pi", "prompts", "a.md") {
 		t.Fatalf("template collision = %#v", snapshot.Diagnostics)
 	}
 }
@@ -208,7 +212,7 @@ line two"`)); got != "<line one\nline two>" {
 	}
 }
 
-func TestMalformedTemplatesFailWithoutReplacingHealthySnapshot(t *testing.T) {
+func TestMalformedTemplatesAreSkipped(t *testing.T) {
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "prompts", "ok.md"), "body")
 	if err := s.Reload(context.Background()); err != nil {
@@ -216,12 +220,12 @@ func TestMalformedTemplatesFailWithoutReplacingHealthySnapshot(t *testing.T) {
 	}
 	before, _ := s.Snapshot()
 	write(t, filepath.Join(agent, "prompts", "bad.md"), "---\ndescription missing colon\n---\nbody")
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("malformed template = %v", err)
 	}
 	after, _ := s.Snapshot()
-	if after.SystemPrompt != before.SystemPrompt {
-		t.Fatalf("failed template reload changed snapshot")
+	if after.SystemPrompt != before.SystemPrompt || len(after.Templates) != 1 || after.Templates[0].Name != "ok" || len(after.Diagnostics) != 1 || after.Diagnostics[0].Path != filepath.Join(agent, "prompts", "bad.md") {
+		t.Fatalf("malformed template behavior: templates %#v diagnostics %#v", after.Templates, after.Diagnostics)
 	}
 }
 
@@ -239,7 +243,7 @@ func TestSkillsRootNestedCollisionAndDisableInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, _ := s.Snapshot()
-	if len(snapshot.Skills) != 3 || snapshot.Skills[0].Name != "hidden" || snapshot.Skills[1].Name != "root" || snapshot.Skills[2].Description != "project winner" {
+	if len(snapshot.Skills) != 3 || snapshot.Skills[0].Description != "project winner" || snapshot.Skills[1].Name != "hidden" || snapshot.Skills[2].Name != "root" {
 		t.Fatalf("skills = %#v", snapshot.Skills)
 	}
 	if strings.Contains(snapshot.SystemPrompt, "hidden skill") || !strings.Contains(snapshot.SystemPrompt, "project winner") || strings.Contains(snapshot.SystemPrompt, "nested") {
@@ -295,54 +299,64 @@ func TestWideDescriptionsKeepValidUTF8Boundaries(t *testing.T) {
 		t.Fatalf("wide skill/prompt = %#v, valid=%t", snapshot.Skills, utf8.ValidString(snapshot.SystemPrompt))
 	}
 	write(t, filepath.Join(agent, "skills", "too-wide", "SKILL.md"), "---\nname: too-wide\ndescription: "+strings.Repeat("界", 1025)+"\n---")
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("overlong rune description = %v", err)
+	}
+	snapshot, _ = s.Snapshot()
+	if len(snapshot.Skills) != 2 || len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Kind != "warning" {
+		t.Fatalf("overlong description warning/load = skills %#v diagnostics %#v", snapshot.Skills, snapshot.Diagnostics)
 	}
 }
 
-func TestSkillValidationAndSymlinkFailClosed(t *testing.T) {
-	for _, content := range []string{
-		"---\nname: INVALID\ndescription: x\n---",
-		"---\nname: good\ndescription: x\ndisable-model-invocation: perhaps\n---",
-		"---\nname: good\ndescription: \n---",
-	} {
-		s, agent, _ := newService(t)
-		write(t, filepath.Join(agent, "skills", "candidate", "SKILL.md"), content)
-		if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
-			t.Fatalf("skill %q reload = %v", content, err)
-		}
-	}
+func TestSkillValidationWarnsAndSymlinksAreFollowed(t *testing.T) {
+	linked := t.TempDir()
+	write(t, filepath.Join(linked, "linked", "SKILL.md"), "---\nname: linked\ndescription: followed\n---")
 	s, agent, _ := newService(t)
 	if err := os.MkdirAll(filepath.Join(agent, "skills"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(agent, "skills", "linked")); err != nil {
+	if err := os.Symlink(linked, filepath.Join(agent, "skills", "linked-root")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+	write(t, filepath.Join(agent, "skills", "invalid", "SKILL.md"), "---\nname: INVALID\ndescription: x\n---")
+	write(t, filepath.Join(agent, "skills", "typed", "SKILL.md"), "---\nname: typed\ndescription: x\ndisable-model-invocation: perhaps\n---")
+	write(t, filepath.Join(agent, "skills", "missing", "SKILL.md"), "---\nname: missing\n---")
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("linked skill directory = %v", err)
+	}
+	snapshot, _ := s.Snapshot()
+	if len(snapshot.Skills) != 2 || len(snapshot.Diagnostics) < 3 {
+		t.Fatalf("skill warning/follow behavior = skills %#v diagnostics %#v", snapshot.Skills, snapshot.Diagnostics)
 	}
 }
 
-func TestSkillBooleanAndTrimEmptyDescriptionAreStrict(t *testing.T) {
+func TestSkillBooleanUsesYAMLBooleanAndMissingDescriptionIsSkipped(t *testing.T) {
 	for _, value := range []string{"1", "t", "yes", "'true'", `"true"`} {
 		s, agent, _ := newService(t)
 		write(t, filepath.Join(agent, "skills", "candidate", "SKILL.md"), "---\nname: candidate\ndescription: valid\ndisable-model-invocation: "+value+"\n---")
-		if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+		if err := s.Reload(context.Background()); err != nil {
 			t.Fatalf("disable-model-invocation %q = %v", value, err)
+		}
+		snapshot, _ := s.Snapshot()
+		if len(snapshot.Skills) != 0 || len(snapshot.Diagnostics) != 1 || !strings.Contains(snapshot.Diagnostics[0].Message, "must be a boolean") {
+			t.Fatalf("non-boolean disable value %q = %#v", value, snapshot.Skills)
 		}
 	}
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "skills", "blank", "SKILL.md"), "---\nname: blank\ndescription: ' \t '\n---")
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("trim-empty description = %v", err)
+	}
+	snapshot, _ := s.Snapshot()
+	if len(snapshot.Skills) != 0 || len(snapshot.Diagnostics) != 1 {
+		t.Fatalf("blank description behavior = %#v %#v", snapshot.Skills, snapshot.Diagnostics)
 	}
 	s, agent, _ = newService(t)
 	write(t, filepath.Join(agent, "skills", "visible", "SKILL.md"), "---\nname: visible\ndescription: valid\ndisable-model-invocation: false\n---")
 	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("literal false = %v", err)
 	}
-	snapshot, _ := s.Snapshot()
+	snapshot, _ = s.Snapshot()
 	if snapshot.Skills[0].DisableModelInvocation {
 		t.Fatalf("literal false disabled skill")
 	}
@@ -377,11 +391,12 @@ func TestSnapshotIsDeeplyImmutableToCallers(t *testing.T) {
 func TestReloadFailureBeforeFirstSnapshotAndCancellationRetention(t *testing.T) {
 	s, agent, _ := newService(t)
 	write(t, filepath.Join(agent, "SYSTEM.md"), string([]byte{0xff}))
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrMalformed) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("initial malformed reload = %v", err)
 	}
-	if _, err := s.Snapshot(); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("initial failed snapshot = %v", err)
+	initial, err := s.Snapshot()
+	if err != nil || !strings.Contains(initial.SystemPrompt, "�") {
+		t.Fatalf("initial replacement-decoded snapshot = %#v, %v", initial, err)
 	}
 	write(t, filepath.Join(agent, "SYSTEM.md"), "healthy")
 	if err := s.Reload(context.Background()); err != nil {
@@ -399,9 +414,6 @@ func TestReloadFailureBeforeFirstSnapshotAndCancellationRetention(t *testing.T) 
 }
 
 func TestReloadGenerationPreventsTrustedStalePublication(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, _, cwd := newService(t)
 	write(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "stale trusted prompt")
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
@@ -434,7 +446,7 @@ func TestReloadGenerationPreventsTrustedStalePublication(t *testing.T) {
 	}
 }
 
-func TestPromptAssemblyEscapesOrdersAndEnforcesWholeLimit(t *testing.T) {
+func TestPromptAssemblyPreservesToolOrderOmitsTemplatesAndEscapesSkills(t *testing.T) {
 	snapshot := Snapshot{
 		AppendSystem: []string{"appendix"},
 		Instructions: []Instruction{{Source: Source{Path: `/a&"`, Scope: ScopeProject}, Content: "rule"}},
@@ -448,10 +460,10 @@ func TestPromptAssemblyEscapesOrdersAndEnforcesWholeLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Index(prompt, "- a: first") > strings.Index(prompt, "- z: last") ||
-		!strings.Contains(prompt, `path="/a&amp;&quot;"`) ||
-		!strings.Contains(prompt, `name="a&lt;&amp;"`) ||
-		!strings.Contains(prompt, "use &lt;this&gt; &amp; that") ||
+	if strings.Index(prompt, "- z: last") > strings.Index(prompt, "- a: first") ||
+		!strings.Contains(prompt, `path="/a&""`) ||
+		strings.Contains(prompt, "available_prompt_templates") || strings.Contains(prompt, `name="a&lt;&amp;"`) ||
+		strings.Contains(prompt, "available_skills") ||
 		strings.Contains(prompt, "hidden\" description") ||
 		!strings.Contains(prompt, "Current working directory: C:/work") {
 		t.Fatalf("assembled prompt = %q", prompt)
@@ -461,7 +473,7 @@ func TestPromptAssemblyEscapesOrdersAndEnforcesWholeLimit(t *testing.T) {
 	}
 }
 
-func TestConfigAndFrontmatterRejectAmbiguousInputs(t *testing.T) {
+func TestConfigValidationAndFullYAMLFrontmatter(t *testing.T) {
 	for _, config := range []Config{
 		{CWD: "", AgentDir: "/agent"},
 		{CWD: "/cwd", AgentDir: "", MaxFileBytes: 1, MaxPromptBytes: 1},
@@ -472,30 +484,30 @@ func TestConfigAndFrontmatterRejectAmbiguousInputs(t *testing.T) {
 			t.Fatalf("validateConfig(%#v) = %v", config, err)
 		}
 	}
-	for _, raw := range []string{
-		"---\nname: duplicate\nname: duplicate\n---\nbody",
-		"---\nname: broken\nbody",
-		"---\ndescription: >\n text\n---\nbody",
-		"---\nname: never closes\n",
-	} {
-		if _, _, err := frontmatter(raw); err == nil {
-			t.Fatalf("frontmatter(%q) unexpectedly succeeded", raw)
+	if _, _, err := frontmatter("---\nname: duplicate\nname: duplicate\n---\nbody"); err == nil {
+		t.Fatal("duplicate YAML key unexpectedly succeeded")
+	}
+	for _, raw := range []string{"---\nname: broken\nbody", "---\nname: never closes\n"} {
+		front, body, err := frontmatter(raw)
+		if err != nil || len(front) != 0 || body != raw {
+			t.Fatalf("unterminated marker behavior for %q = %#v %q %v", raw, front, body, err)
 		}
 	}
-	front, body, err := frontmatter("---\nname: 'quoted'\ndescription: \"works\"\n---\nbody")
+	front, body, err := frontmatter("---\ndescription: >\n text\n---\nbody")
+	if err != nil || front["description"] != "text" || body != "body" {
+		t.Fatalf("folded YAML = %#v %q %v", front, body, err)
+	}
+	front, body, err = frontmatter("---\nname: 'quoted'\ndescription: \"works\"\n---\nbody")
 	if err != nil || front["name"] != "quoted" || front["description"] != "works" || body != "body" {
 		t.Fatalf("frontmatter quoted scalar = %#v %q %v", front, body, err)
 	}
 }
 
 func TestTrustOptionsAndClearingRestoreParentDecision(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, _, cwd := newService(t)
 	parent := filepath.Dir(cwd)
 	options, err := s.Trust().Options(cwd)
-	if err != nil || len(options) != 3 || !strings.Contains(options[0].Label, parent) || options[2].Trusted {
+	if err != nil || len(options) != 3 || options[0].Label != "Trust" || !strings.Contains(options[1].Label, parent) || options[2].Trusted {
 		t.Fatalf("trust options = %#v %v", options, err)
 	}
 	if err := s.Trust().Set(context.Background(), parent, true); err != nil {
@@ -516,39 +528,23 @@ func TestTrustOptionsAndClearingRestoreParentDecision(t *testing.T) {
 	}
 }
 
-func TestTrustNullAndFutureValuesRoundTripWithoutBlockingOtherDecision(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
+func TestTrustNullInheritsAndInvalidValuesAreRejected(t *testing.T) {
 	s, agent, cwd := newService(t)
 	parent := filepath.Dir(cwd)
-	future := filepath.Join(cwd, "future")
-	content := "{\n  \"/future-number\": 1e9999,\n  \"" + future + "\": {\"trusted\": false},\n  \"" + parent + "\": true,\n  \"" + cwd + "\": null\n}\n"
+	canonicalParent, _ := normalize(parent)
+	canonicalCWD, _ := normalize(cwd)
+	content := "{\n  \"" + canonicalParent + "\": true,\n  \"" + canonicalCWD + "\": null\n}\n"
 	write(t, filepath.Join(agent, "trust.json"), content)
 	if trusted, known, err := s.Trust().Get(context.Background(), cwd); err != nil || !known || !trusted {
 		t.Fatalf("null entry should inherit parent = %t,%t,%v", trusted, known, err)
 	}
-	if trusted, known, err := s.Trust().Get(context.Background(), filepath.Join(future, "child")); err != nil || known || trusted {
-		t.Fatalf("future value inherited parent trust = %t,%t,%v", trusted, known, err)
-	}
-	child := filepath.Join(cwd, "child")
-	no := false
-	if err := s.Trust().Set(context.Background(), child, no); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(agent, "trust.json"))
-	if err != nil || !strings.Contains(string(data), `"/future-number": 1e9999`) || !strings.Contains(string(data), `"`+future+`": {"trusted": false}`) || !strings.Contains(string(data), `"`+cwd+`": null`) {
-		t.Fatalf("future/null preservation = %q %v", data, err)
-	}
-	if trusted, known, err := s.Trust().Get(context.Background(), child); err != nil || !known || trusted {
-		t.Fatalf("new explicit decision = %t,%t,%v", trusted, known, err)
+	write(t, filepath.Join(agent, "trust.json"), `{"future":{"trusted":false}}`)
+	if _, _, err := s.Trust().Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
+		t.Fatalf("invalid trust value = %v", err)
 	}
 }
 
 func TestTrustFutureRawNestedDuplicateIsRejected(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "trust.json"), "{\n  \""+cwd+"\": {\"x\": 1, \"x\": 2}\n}\n")
 	if _, _, err := s.Trust().Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
@@ -557,9 +553,6 @@ func TestTrustFutureRawNestedDuplicateIsRejected(t *testing.T) {
 }
 
 func TestTrustSerializationCancellationAndCommitUnknownReconcile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, _, cwd := newService(t)
 	store := s.Trust()
 	entered := make(chan struct{})
@@ -594,7 +587,7 @@ func TestTrustSerializationCancellationAndCommitUnknownReconcile(t *testing.T) {
 	}
 }
 
-func TestDirectoryReplacementBetweenLstatAndOpenFailsClosed(t *testing.T) {
+func TestDirectorySymlinkReplacementFollowsResolvedDirectory(t *testing.T) {
 	s, agent, _ := newService(t)
 	prompts := filepath.Join(agent, "prompts")
 	write(t, filepath.Join(prompts, "safe.md"), "safe")
@@ -613,14 +606,18 @@ func TestDirectoryReplacementBetweenLstatAndOpenFailsClosed(t *testing.T) {
 		}
 	}
 	defer func() { afterDirectoryLstat = nil }()
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("directory swap = %v", err)
+	}
+	snapshot, _ := s.Snapshot()
+	if len(snapshot.Templates) != 1 || snapshot.Templates[0].Name != "outside" {
+		t.Fatalf("replaced prompt directory = %#v", snapshot.Templates)
 	}
 }
 
-func TestTrustedProjectResourceParentSymlinkFailsClosed(t *testing.T) {
+func TestTrustedProjectResourceParentSymlinkIsFollowed(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
+		t.Skip("creating a directory symlink requires Windows developer mode or elevation")
 	}
 	s, _, cwd := newService(t)
 	outside := t.TempDir()
@@ -631,15 +628,16 @@ func TestTrustedProjectResourceParentSymlinkFailsClosed(t *testing.T) {
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Reload(context.Background()); !errors.Is(err, ErrUnsafePath) {
+	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("project resource parent symlink = %v", err)
+	}
+	snapshot, _ := s.Snapshot()
+	if snapshot.BaseSystemPrompt != "outside prompt" {
+		t.Fatalf("project resource symlink prompt = %#v", snapshot)
 	}
 }
 
 func TestTrustStoreRejectsUnsafeInputsAndFaultKeepsOldFile(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, agent, cwd := newService(t)
 	store := s.Trust()
 	if err := store.Set(context.Background(), cwd, true); err != nil {
@@ -661,8 +659,13 @@ func TestTrustStoreRejectsUnsafeInputsAndFaultKeepsOldFile(t *testing.T) {
 	if err := os.Chmod(store.Path(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
+	if trusted, known, err := store.Get(context.Background(), cwd); err != nil || !known || !trusted {
 		t.Fatalf("public trust file = %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		// The durable/private-file behavior above is portable. The remaining
+		// symlink fixture requires developer mode or elevation on Windows.
+		return
 	}
 	if err := os.Remove(store.Path()); err != nil {
 		t.Fatal(err)
@@ -671,15 +674,12 @@ func TestTrustStoreRejectsUnsafeInputsAndFaultKeepsOldFile(t *testing.T) {
 	if err := os.Symlink(filepath.Join(agent, "target.json"), store.Path()); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Get(context.Background(), cwd); !errors.Is(err, ErrTrustStore) {
+	if trusted, known, err := store.Get(context.Background(), cwd); err != nil || known || trusted {
 		t.Fatalf("symlink trust store = %v", err)
 	}
 }
 
 func TestTrustStoreCancellationLockAndMultiInstanceRace(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, agent, cwd := newService(t)
 	store := s.Trust()
 	if err := os.Mkdir(store.Path()+".lock", 0o700); err != nil {
@@ -716,9 +716,6 @@ func TestTrustStoreCancellationLockAndMultiInstanceRace(t *testing.T) {
 }
 
 func TestTrustSerializedSizeLimitPreservesOldStateAndReopens(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, agent, cwd := newService(t)
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
@@ -759,20 +756,13 @@ func TestTrustSerializedSizeLimitPreservesOldStateAndReopens(t *testing.T) {
 }
 
 func TestTrustControlCharacterKeyRoundTripPreservesRawAndBoundary(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows persistence is deliberately fail-closed")
-	}
 	s, agent, cwd := newService(t)
-	futurePath := filepath.Join(filepath.Dir(cwd), "future")
-	cwdJSON, err := json.Marshal(cwd)
+	canonicalCWD, _ := normalize(cwd)
+	cwdJSON, err := json.Marshal(canonicalCWD)
 	if err != nil {
 		t.Fatal(err)
 	}
-	futureJSON, err := json.Marshal(futurePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, filepath.Join(agent, "trust.json"), "{\n  "+string(cwdJSON)+": true,\n  "+string(futureJSON)+": {\"version\": 2}\n}\n")
+	write(t, filepath.Join(agent, "trust.json"), "{\n  "+string(cwdJSON)+": true\n}\n")
 	controlPath := filepath.Join(filepath.Dir(cwd), "control\x01segment")
 	no := false
 	if err := s.Trust().SetMany(context.Background(), []TrustUpdate{{Path: controlPath, Decision: &no}}); err != nil {
@@ -782,7 +772,7 @@ func TestTrustControlCharacterKeyRoundTripPreservesRawAndBoundary(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid(committed) || bytes.Contains(committed, []byte(`\x01`)) || !bytes.Contains(committed, []byte(`\u0001`)) || !bytes.Contains(committed, []byte(`{"version": 2}`)) {
+	if !json.Valid(committed) || bytes.Contains(committed, []byte(`\x01`)) || !bytes.Contains(committed, []byte(`\u0001`)) {
 		t.Fatalf("encoded trust store = %q", committed)
 	}
 	reopened, err := NewTrustStore(agent)

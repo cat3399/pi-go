@@ -49,12 +49,15 @@ func NewBash(options BashOptions) (*Bash, error) {
 	if options.WorkingDir == "" {
 		return nil, fmt.Errorf("%w: working directory is required", ErrInvalidBashOptions)
 	}
+	if err := validateBashPathOption("working directory", options.WorkingDir); err != nil {
+		return nil, err
+	}
 	workingDir, err := filepath.Abs(options.WorkingDir)
 	if err != nil {
 		return nil, fmt.Errorf("%w: resolve working directory: %w", ErrInvalidBashOptions, err)
 	}
-	if !utf8.ValidString(workingDir) {
-		return nil, fmt.Errorf("%w: working directory must be valid UTF-8", ErrInvalidBashOptions)
+	if err := validateBashPathOption("resolved working directory", workingDir); err != nil {
+		return nil, err
 	}
 	if err := validateBashPathOption("shell path", options.ShellPath); err != nil {
 		return nil, err
@@ -124,16 +127,24 @@ func (b *Bash) Name() string {
 // invalid provider arguments as the same typed failure shape as execution
 // failures, without making Bash own tool-call IDs or transcript state.
 func (b *Bash) ExecuteJSON(ctx context.Context, arguments []byte) (BashResult, error) {
+	return b.ExecuteJSONWithContext(ctx, arguments, bashExecutionContextFromContext(ctx))
+}
+
+func (b *Bash) ExecuteJSONWithContext(ctx context.Context, arguments []byte, execution BashExecutionContext) (BashResult, error) {
 	input, err := DecodeBashInput(arguments)
 	if err != nil {
 		result := BashResult{text: safeErrorText(err)}
 		failure := newBashFailure(FailureInvalidInput, result, err)
 		return failure.Result(), failure
 	}
-	return b.Execute(ctx, input)
+	return b.ExecuteWithContext(ctx, input, execution)
 }
 
 func (b *Bash) Execute(ctx context.Context, input BashInput) (BashResult, error) {
+	return b.ExecuteWithContext(ctx, input, bashExecutionContextFromContext(ctx))
+}
+
+func (b *Bash) ExecuteWithContext(ctx context.Context, input BashInput, execution BashExecutionContext) (BashResult, error) {
 	if b == nil {
 		cause := errors.New("bash tool is nil")
 		result := BashResult{text: "Bash tool is not configured"}
@@ -156,7 +167,13 @@ func (b *Bash) Execute(ctx context.Context, input BashInput) (BashResult, error)
 		failure := newBashFailure(FailureCancelled, result, cause)
 		return failure.Result(), failure
 	}
-	if err := validateWorkingDirectory(b.workingDir); err != nil {
+	workingDir, environment, err := b.resolveExecutionContext(cloneBashExecutionContext(execution))
+	if err != nil {
+		result := BashResult{text: safeErrorText(err)}
+		failure := newBashFailure(FailureInvalidInput, result, err)
+		return failure.Result(), failure
+	}
+	if err := validateWorkingDirectory(workingDir); err != nil {
 		result := BashResult{text: safeErrorText(err)}
 		failure := newBashFailure(FailureWorkingDirectory, result, err)
 		return failure.Result(), failure
@@ -184,7 +201,7 @@ func (b *Bash) Execute(ctx context.Context, input BashInput) (BashResult, error)
 	}
 	status, runErr := b.runner.Run(
 		runContext,
-		newRunRequest(input.Command(), b.workingDir, b.environment),
+		newRunRequest(input.Command(), workingDir, environment),
 		state.append,
 	)
 	if timeoutTimer != nil {

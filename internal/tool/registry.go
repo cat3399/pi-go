@@ -37,14 +37,28 @@ type ExecutionModeTool interface{ ToolExecutionMode() ExecutionMode }
 // JSON tool. It deliberately lives beside execution, not in a provider
 // package: registry construction remains usable with deterministic providers.
 type Specification struct {
-	name        string
-	description string
-	strict      bool
-	parameters  []byte
+	name             string
+	label            string
+	description      string
+	promptSnippet    string
+	promptGuidelines []string
+	strict           bool
+	parameters       []byte
 }
 
 func NewSpecification(name, description string, strict bool, parametersJSON []byte) (Specification, error) {
-	specification := Specification{name: name, description: description, strict: strict, parameters: bytes.Clone(parametersJSON)}
+	return NewSpecificationWithPrompt(name, name, description, "", nil, strict, parametersJSON)
+}
+
+// NewSpecificationWithPrompt retains the complete built-in ToolDefinition
+// metadata used by system-prompt reconstruction. Provider schemas and prompt
+// descriptions are two projections of the same definition, not parallel
+// hard-coded registries.
+func NewSpecificationWithPrompt(name, label, description, promptSnippet string, promptGuidelines []string, strict bool, parametersJSON []byte) (Specification, error) {
+	specification := Specification{
+		name: name, label: label, description: description, promptSnippet: promptSnippet,
+		promptGuidelines: append([]string(nil), promptGuidelines...), strict: strict, parameters: bytes.Clone(parametersJSON),
+	}
 	if err := specification.validate(); err != nil {
 		return Specification{}, err
 	}
@@ -53,9 +67,16 @@ func NewSpecification(name, description string, strict bool, parametersJSON []by
 
 func (s Specification) validate() error {
 	if !utf8.ValidString(s.name) || strings.TrimSpace(s.name) == "" ||
+		!utf8.ValidString(s.label) || strings.TrimSpace(s.label) == "" ||
 		!utf8.ValidString(s.description) || strings.TrimSpace(s.description) == "" ||
+		!utf8.ValidString(s.promptSnippet) ||
 		!utf8.Valid(s.parameters) || len(s.parameters) == 0 {
 		return fmt.Errorf("%w: name, description, and schema are required", ErrInvalidToolRegistry)
+	}
+	for _, guideline := range s.promptGuidelines {
+		if !utf8.ValidString(guideline) {
+			return fmt.Errorf("%w: prompt guideline for %q is invalid", ErrInvalidToolRegistry, s.name)
+		}
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(s.parameters, &object); err != nil || object == nil {
@@ -63,8 +84,13 @@ func (s Specification) validate() error {
 	}
 	return nil
 }
-func (s Specification) Name() string           { return s.name }
-func (s Specification) Description() string    { return s.description }
+func (s Specification) Name() string          { return s.name }
+func (s Specification) Label() string         { return s.label }
+func (s Specification) Description() string   { return s.description }
+func (s Specification) PromptSnippet() string { return s.promptSnippet }
+func (s Specification) PromptGuidelines() []string {
+	return append([]string(nil), s.promptGuidelines...)
+}
 func (s Specification) Strict() bool           { return s.strict }
 func (s Specification) ParametersJSON() []byte { return bytes.Clone(s.parameters) }
 
@@ -135,6 +161,8 @@ func (r *Registry) Specifications() []Specification {
 	result := make([]Specification, 0, len(r.names))
 	for _, name := range r.names {
 		if specification, ok := r.specs[name]; ok {
+			specification.parameters = bytes.Clone(specification.parameters)
+			specification.promptGuidelines = append([]string(nil), specification.promptGuidelines...)
 			result = append(result, specification)
 		}
 	}
@@ -152,6 +180,19 @@ func (r *Registry) Supports(name string) bool {
 	}
 	_, ok := r.tools[name]
 	return ok
+}
+
+// PrepareArguments exposes definition-specific transforms that must run before
+// agent-side JSON Schema validation. Tools without a transform return the same
+// value unchanged.
+func (r *Registry) PrepareArguments(name string, arguments any) (any, error) {
+	if r == nil || !r.Supports(name) {
+		return arguments, nil
+	}
+	if name == EditToolName {
+		return PrepareEditArguments(arguments), nil
+	}
+	return arguments, nil
 }
 
 // ExecutionMode returns the selected tool override. Unknown and malformed
@@ -217,7 +258,29 @@ type bashJSONTool struct{ bash *Bash }
 func (t bashJSONTool) Name() string { return BashToolName }
 func (t bashJSONTool) ExecuteJSON(ctx context.Context, arguments []byte) (ToolResult, error) {
 	result, err := t.bash.ExecuteJSON(ctx, arguments)
-	return ToolResult{Text: result.Text()}, err
+	details := map[string]any(nil)
+	truncation := result.Truncation()
+	if truncatedBy, ok := truncation.TruncatedBy(); ok {
+		details = map[string]any{
+			"truncation": map[string]any{
+				"content":               result.CapturedOutput(),
+				"truncated":             true,
+				"truncatedBy":           truncatedBy.String(),
+				"totalLines":            truncation.TotalLines(),
+				"totalBytes":            truncation.TotalBytes(),
+				"outputLines":           truncation.OutputLines(),
+				"outputBytes":           truncation.OutputBytes(),
+				"lastLinePartial":       truncation.LastLinePartial(),
+				"firstLineExceedsLimit": false,
+				"maxLines":              truncation.MaxLines(),
+				"maxBytes":              truncation.MaxBytes(),
+			},
+		}
+		if path, exists := result.FullOutputPath(); exists {
+			details["fullOutputPath"] = path
+		}
+	}
+	return ToolResult{Text: result.Text(), Details: details}, err
 }
 
 // NewBuiltInRegistry is the provider-visible built-in tool set. It contains
@@ -237,11 +300,11 @@ func NewBuiltInRegistry(bash *Bash, filesystem *FilesystemSuite) (*Registry, err
 	return NewRegistryWithSpecifications(specifications, tools...)
 }
 
-func mustBuiltInSpecification(name, description, schema string) Specification {
+func mustBuiltInSpecification(name, description, promptSnippet string, promptGuidelines []string, schema string) Specification {
 	// The fixed upstream Responses conversion defaults ordinary JSON-schema
 	// tools to non-strict mode. Keep built-ins false unless their schemas are
 	// deliberately redesigned so every optional property is required-nullable.
-	specification, err := NewSpecification(name, description, false, []byte(schema))
+	specification, err := NewSpecificationWithPrompt(name, name, description, promptSnippet, promptGuidelines, false, []byte(schema))
 	if err != nil {
 		panic(err)
 	}
@@ -249,21 +312,58 @@ func mustBuiltInSpecification(name, description, schema string) Specification {
 }
 
 func bashSpecification() Specification {
-	schema := fmt.Sprintf(
-		`{"type":"object","additionalProperties":false,"properties":{"command":{"type":"string"},"timeout":{"type":"number","exclusiveMinimum":0,"maximum":%s}},"required":["command"]}`,
-		formatSeconds(MaxBashTimeout),
+	schema := `{"type":"object","properties":{"command":{"type":"string","description":"Bash command to execute"},"timeout":{"type":"number","description":"Timeout in seconds (optional, no default timeout)"}},"required":["command"]}`
+	return mustBuiltInSpecification(
+		BashToolName,
+		"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+		"Execute bash commands (ls, grep, find, etc.)", []string{"Inspect PI_* environment variables for current model and session details."}, schema,
 	)
-	return mustBuiltInSpecification(BashToolName, "Run a shell command in the working directory.", schema)
 }
 
 func filesystemSpecifications() []Specification {
 	return []Specification{
-		mustBuiltInSpecification(ReadToolName, "Read a UTF-8 text file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"]}`),
-		mustBuiltInSpecification(WriteToolName, "Write UTF-8 text to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"content":{"type":"string"}},"required":["path","content"]}`),
-		mustBuiltInSpecification(EditToolName, "Apply exact text replacements to a file.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"edits":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"properties":{"oldText":{"type":"string","minLength":1},"newText":{"type":"string"}},"required":["oldText","newText"]}}},"required":["path","edits"]}`),
-		mustBuiltInSpecification(GrepToolName, "Search text files for a pattern.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"glob":{"type":"string"},"ignoreCase":{"type":"boolean"},"literal":{"type":"boolean"},"context":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustBuiltInSpecification(FindToolName, "Find paths matching a glob.", `{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":["pattern"]}`),
-		mustBuiltInSpecification(LsToolName, "List directory entries.", `{"type":"object","additionalProperties":false,"properties":{"path":{"type":"string","minLength":1},"limit":{"type":"integer","minimum":1}},"required":[]}`),
+		mustBuiltInSpecification(
+			ReadToolName,
+			"Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+			"Read file contents", []string{"Use read to examine files instead of cat or sed."},
+			`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to read (relative or absolute)"},"offset":{"type":"number","description":"Line number to start reading from (1-indexed)"},"limit":{"type":"number","description":"Maximum number of lines to read"}},"required":["path"]}`,
+		),
+		mustBuiltInSpecification(
+			WriteToolName,
+			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+			"Create or overwrite files", []string{"Use write only for new files or complete rewrites."},
+			`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to write (relative or absolute)"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"]}`,
+		),
+		mustBuiltInSpecification(
+			EditToolName,
+			"Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+			[]string{
+				"Use edit for precise changes (edits[].oldText must match exactly)",
+				"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
+				"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
+				"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+			},
+			`{"type":"object","properties":{"path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},"edits":{"type":"array","description":"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.","items":{"type":"object","properties":{"oldText":{"type":"string","description":"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."},"newText":{"type":"string","description":"Replacement text for this targeted edit."}},"required":["oldText","newText"]}}},"required":["path","edits"]}`,
+		),
+		mustBuiltInSpecification(
+			GrepToolName,
+			"Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.",
+			"Search file contents for patterns (respects .gitignore)", nil,
+			`{"type":"object","properties":{"pattern":{"type":"string","description":"Search pattern (regex or literal string)"},"path":{"type":"string","description":"Directory or file to search (default: current directory)"},"glob":{"type":"string","description":"Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'"},"ignoreCase":{"type":"boolean","description":"Case-insensitive search (default: false)"},"literal":{"type":"boolean","description":"Treat pattern as literal string instead of regex (default: false)"},"context":{"type":"number","description":"Number of lines to show before and after each match (default: 0)"},"limit":{"type":"number","description":"Maximum number of matches to return (default: 100)"}},"required":["pattern"]}`,
+		),
+		mustBuiltInSpecification(
+			FindToolName,
+			"Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).",
+			"Find files by glob pattern (respects .gitignore)", nil,
+			`{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'"},"path":{"type":"string","description":"Directory to search in (default: current directory)"},"limit":{"type":"number","description":"Maximum number of results (default: 1000)"}},"required":["pattern"]}`,
+		),
+		mustBuiltInSpecification(
+			LsToolName,
+			"List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).",
+			"List directory contents", nil,
+			`{"type":"object","properties":{"path":{"type":"string","description":"Directory to list (default: current directory)"},"limit":{"type":"number","description":"Maximum number of entries to return (default: 500)"}},"required":[]}`,
+		),
 	}
 }
 

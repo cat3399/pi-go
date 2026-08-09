@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -18,11 +20,20 @@ import (
 // grep/find/ls family. It owns path policy and mutation serialization, but no
 // agent/session state or provider tool-call identifiers.
 type FilesystemSuite struct {
-	workingDir string
-	maxLines   int
-	maxBytes   int
-	mutations  *mutationQueue
+	workingDir       string
+	maxLines         int
+	maxBytes         int
+	maxTextUnits     int64
+	maxImagePixels   int64
+	maxImageBytes    int
+	autoResizeImages bool
+	mutations        *mutationQueue
+	openReadFile     func(string) (*os.File, error)
+	openSearchFile   func(string) (*os.File, int64, error)
+	readSearchDir    func(string) ([]os.DirEntry, error)
 }
+
+var builtInFileMutations = newMutationQueue()
 
 func NewFilesystemSuite(options FilesystemOptions) (*FilesystemSuite, error) {
 	options, err := options.validate()
@@ -40,7 +51,17 @@ func NewFilesystemSuite(options FilesystemOptions) (*FilesystemSuite, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: working directory is not a directory", ErrInvalidFilesystemOptions)
 	}
-	return &FilesystemSuite{workingDir: filepath.Clean(workingDir), maxLines: options.MaxLines, maxBytes: options.MaxBytes, mutations: newMutationQueue()}, nil
+	autoResizeImages := true
+	if options.AutoResizeImages != nil {
+		autoResizeImages = *options.AutoResizeImages
+	}
+	return &FilesystemSuite{
+		workingDir: filepath.Clean(workingDir), maxLines: options.MaxLines, maxBytes: options.MaxBytes,
+		maxTextUnits: options.MaxTextUnits, maxImagePixels: options.MaxImagePixels, maxImageBytes: options.MaxImageBytes,
+		autoResizeImages: autoResizeImages, mutations: builtInFileMutations,
+		openReadFile: openRegularReadFile, openSearchFile: openBoundedRegularSearchFile,
+		readSearchDir: os.ReadDir,
+	}, nil
 }
 
 func (s *FilesystemSuite) WorkingDir() string {
@@ -63,9 +84,9 @@ func (s *FilesystemSuite) Supports(name string) bool {
 	return false
 }
 
-// ExecuteJSON is the registry dispatch boundary. It rejects unknown and
-// duplicate fields at each tool boundary; decoding into a Go struct directly
-// would silently accept both and diverge from the established Bash contract.
+// ExecuteJSON is the registry dispatch boundary. Its decoders apply the same
+// last-value and extra-property behavior as JavaScript JSON.parse plus
+// TypeBox's default Object schemas.
 func (s *FilesystemSuite) ExecuteJSON(ctx context.Context, name string, raw []byte) (ToolResult, error) {
 	if s == nil {
 		return ToolResult{Text: "Filesystem tools are not configured"}, errors.New("filesystem suite is nil")
@@ -131,75 +152,42 @@ type EditInput struct {
 	Edits []Edit
 }
 
-func (s *FilesystemSuite) Read(ctx context.Context, input ReadInput) (ToolResult, error) {
-	if err := contextFailure(ctx); err != nil {
-		return ToolResult{Text: operationErrorText(err)}, err
+// PrepareEditArguments is the pre-schema compatibility transform used by pi's
+// edit definition. Some models serialize edits as a JSON string, while older
+// calls provide top-level oldText/newText fields. The transform must run before
+// JSON Schema validation because the advertised schema requires edits[].
+func PrepareEditArguments(arguments any) any {
+	object, ok := arguments.(map[string]any)
+	if !ok || object == nil {
+		return arguments
 	}
-	if err := validText("path", input.Path); err != nil {
-		return inputError(err)
+	prepared := make(map[string]any, len(object))
+	for key, value := range object {
+		prepared[key] = value
 	}
-	if input.Offset != nil && *input.Offset < 1 {
-		return inputError(fmt.Errorf("%w: offset must be at least 1", ErrInvalidFilesystemInput))
-	}
-	if input.Limit != nil && *input.Limit < 1 {
-		return inputError(fmt.Errorf("%w: limit must be at least 1", ErrInvalidFilesystemInput))
-	}
-	path, err := resolveReadPath(s.workingDir, input.Path)
-	if err != nil {
-		return ToolResult{}, err
-	}
-	if err := context.Cause(ctx); err != nil {
-		return ToolResult{Text: "Filesystem operation cancelled"}, errors.Join(ErrOperationCancelled, err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ToolResult{}, fmt.Errorf("read %s: %w", input.Path, err)
-	}
-	if isBinary(data) {
-		return ToolResult{Text: fmt.Sprintf("Cannot read %s: binary file is not supported by this text tool", input.Path)}, fmt.Errorf("%w: %s", ErrBinaryFile, input.Path)
-	}
-	if !utf8.Valid(data) {
-		return ToolResult{Text: fmt.Sprintf("Cannot read %s: file is not valid UTF-8", input.Path)}, fmt.Errorf("%w: invalid UTF-8", ErrBinaryFile)
-	}
-	if err := context.Cause(ctx); err != nil {
-		return ToolResult{Text: "Filesystem operation cancelled"}, errors.Join(ErrOperationCancelled, err)
-	}
-	text := string(data)
-	lines := strings.Split(text, "\n")
-	start := 0
-	if input.Offset != nil {
-		start = *input.Offset - 1
-	}
-	if start >= len(lines) {
-		return ToolResult{}, fmt.Errorf("%w: offset %d is beyond end of file (%d lines total)", ErrFilesystemPath, start+1, len(lines))
-	}
-	selected := lines[start:]
-	limited := false
-	if input.Limit != nil && len(selected) > *input.Limit {
-		selected, limited = selected[:*input.Limit], true
-	}
-	truncation := truncateFilesystemHead(strings.Join(selected, "\n"), s.maxLines, s.maxBytes)
-	details := map[string]any{}
-	output := truncation.Content
-	if truncation.Truncated {
-		details["truncation"] = s.truncationDetails(truncation)
-		if truncation.FirstLineLarge {
-			output = fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use read with a smaller range.]", start+1, formatSize(len(lines[start])), formatSize(s.maxBytes))
-		} else {
-			end := start + truncation.OutputLines
-			output += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Use offset=%d to continue.]", start+1, end, len(lines), end+1)
+	if encoded, ok := prepared["edits"].(string); ok {
+		var parsed any
+		if json.Unmarshal([]byte(encoded), &parsed) == nil {
+			if edits, ok := parsed.([]any); ok {
+				prepared["edits"] = edits
+			}
 		}
-	} else if limited {
-		next := start + len(selected) + 1
-		output += fmt.Sprintf("\n\n[%d more lines in file. Use offset=%d to continue.]", len(lines)-(start+len(selected)), next)
 	}
-	if err := contextFailure(ctx); err != nil {
-		return ToolResult{Text: operationErrorText(err)}, err
+	oldText, hasOldText := prepared["oldText"].(string)
+	newText, hasNewText := prepared["newText"].(string)
+	if !hasOldText || !hasNewText {
+		return prepared
 	}
-	if len(details) == 0 {
-		details = nil
-	}
-	return ToolResult{Text: output, Details: details}, nil
+	edits, _ := prepared["edits"].([]any)
+	edits = append(append([]any(nil), edits...), map[string]any{"oldText": oldText, "newText": newText})
+	prepared["edits"] = edits
+	delete(prepared, "oldText")
+	delete(prepared, "newText")
+	return prepared
+}
+
+func (s *FilesystemSuite) Read(ctx context.Context, input ReadInput) (ToolResult, error) {
+	return s.read(ctx, input)
 }
 
 func isBinary(data []byte) bool {
@@ -209,15 +197,21 @@ func isBinary(data []byte) bool {
 	return false
 }
 
-func (s *FilesystemSuite) truncationDetails(value FilesystemTruncation) map[string]any {
-	return map[string]any{"truncated": value.Truncated, "truncatedBy": value.TruncatedBy, "totalLines": value.TotalLines, "totalBytes": value.TotalBytes, "outputLines": value.OutputLines, "outputBytes": value.OutputBytes, "maxLines": s.maxLines, "maxBytes": s.maxBytes, "firstLineExceedsLimit": value.FirstLineLarge}
+func truncationDetails(value FilesystemTruncation, maxLines, maxBytes int) map[string]any {
+	return map[string]any{
+		"content": value.Content, "truncated": value.Truncated, "truncatedBy": value.TruncatedBy,
+		"totalLines": value.TotalLines, "totalBytes": value.TotalBytes,
+		"outputLines": value.OutputLines, "outputBytes": value.OutputBytes,
+		"lastLinePartial": false, "firstLineExceedsLimit": value.FirstLineLarge,
+		"maxLines": maxLines, "maxBytes": maxBytes,
+	}
 }
 
 func (s *FilesystemSuite) Write(ctx context.Context, input WriteInput) (ToolResult, error) {
 	if err := contextFailure(ctx); err != nil {
 		return ToolResult{Text: operationErrorText(err)}, err
 	}
-	if err := validText("path", input.Path); err != nil {
+	if err := validFilesystemArgument("path", input.Path); err != nil {
 		return inputError(err)
 	}
 	if err := validText("content", input.Content); err != nil {
@@ -232,151 +226,30 @@ func (s *FilesystemSuite) Write(ctx context.Context, input WriteInput) (ToolResu
 		return ToolResult{}, err
 	}
 	err = s.mutations.with(ctx, key, func() error {
-		if err := atomicWrite(ctx, path, key, []byte(input.Content)); err != nil {
-			return err
+		if err := context.Cause(ctx); err != nil {
+			return errors.Join(ErrOperationCancelled, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create parent directory: %w", err)
+		}
+		if err := context.Cause(ctx); err != nil {
+			return errors.Join(ErrOperationCancelled, err)
+		}
+		if err := os.WriteFile(path, []byte(input.Content), 0o666); err != nil {
+			return fmt.Errorf("write file: %w", err)
+		}
+		if err := context.Cause(ctx); err != nil {
+			return errors.Join(ErrOperationCancelled, err)
 		}
 		return nil
 	})
 	if err != nil {
 		return ToolResult{Text: operationErrorText(err)}, err
 	}
-	return ToolResult{Text: fmt.Sprintf("Successfully wrote %d bytes to %s", len(input.Content), input.Path)}, nil
-}
-
-type pathSnapshot struct {
-	exists bool
-	info   fs.FileInfo
-	link   string
-}
-
-type atomicWritePlan struct {
-	requested         string
-	target            string
-	mutationKey       string
-	temporaryName     string
-	requestedSnapshot pathSnapshot
-	targetSnapshot    pathSnapshot
-	committed         bool
-}
-
-func atomicWrite(ctx context.Context, destination, expectedKey string, contents []byte) error {
-	plan, err := prepareAtomicWrite(ctx, destination, expectedKey, contents)
-	if err != nil {
-		return err
-	}
-	defer plan.cleanup()
-	return plan.commit(ctx)
-}
-
-func prepareAtomicWrite(ctx context.Context, destination, expectedKey string, contents []byte) (*atomicWritePlan, error) {
-	if err := context.Cause(ctx); err != nil {
-		return nil, errors.Join(ErrOperationCancelled, err)
-	}
-	requested := filepath.Clean(destination)
-	directory := filepath.Dir(requested)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return nil, fmt.Errorf("create parent directory: %w", err)
-	}
-	target, err := resolveMutationDestination(requested)
-	if err != nil {
-		return nil, err
-	}
-	key, err := mutationKey(requested)
-	if err != nil {
-		return nil, err
-	}
-	if filepath.Clean(key) != filepath.Clean(expectedKey) {
-		return nil, fmt.Errorf("%w: mutation target changed before write", ErrFilesystemPath)
-	}
-	requestedSnapshot, err := snapshotPath(requested)
-	if err != nil {
-		return nil, err
-	}
-	targetSnapshot, err := snapshotPath(target)
-	if err != nil {
-		return nil, err
-	}
-	if err := verifyEffectiveWritability(target, targetSnapshot); err != nil {
-		return nil, err
-	}
-	mode := fs.FileMode(0o644)
-	if targetSnapshot.exists {
-		mode = targetSnapshot.info.Mode().Perm()
-	}
-	targetDirectory := filepath.Dir(target)
-	temporary, err := os.CreateTemp(targetDirectory, ".pi-go-write-*")
-	if err != nil {
-		return nil, fmt.Errorf("create temporary file: %w", err)
-	}
-	temporaryName := temporary.Name()
-	if err := temporary.Chmod(mode); err != nil {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryName)
-		return nil, fmt.Errorf("set temporary mode: %w", err)
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryName)
-		return nil, fmt.Errorf("write temporary file: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		_ = os.Remove(temporaryName)
-		return nil, fmt.Errorf("sync temporary file: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		_ = os.Remove(temporaryName)
-		return nil, fmt.Errorf("close temporary file: %w", err)
-	}
-	return &atomicWritePlan{requested: requested, target: target, mutationKey: key, temporaryName: temporaryName, requestedSnapshot: requestedSnapshot, targetSnapshot: targetSnapshot}, nil
-}
-
-func (p *atomicWritePlan) commit(ctx context.Context) error {
-	if p == nil {
-		return errors.New("atomic write plan is nil")
-	}
-	if err := context.Cause(ctx); err != nil {
-		return errors.Join(ErrOperationCancelled, err)
-	}
-	if err := verifyPathSnapshot(p.requested, p.requestedSnapshot); err != nil {
-		return fmt.Errorf("%w: requested path changed before commit: %v", ErrFilesystemPath, err)
-	}
-	currentTarget, err := resolveMutationDestination(p.requested)
-	if err != nil {
-		return err
-	}
-	if filepath.Clean(currentTarget) != filepath.Clean(p.target) {
-		return fmt.Errorf("%w: symlink target changed before commit", ErrFilesystemPath)
-	}
-	currentKey, err := mutationKey(p.requested)
-	if err != nil {
-		return err
-	}
-	if filepath.Clean(currentKey) != filepath.Clean(p.mutationKey) {
-		return fmt.Errorf("%w: mutation target changed before commit", ErrFilesystemPath)
-	}
-	if err := verifyPathSnapshot(p.target, p.targetSnapshot); err != nil {
-		return fmt.Errorf("%w: destination changed before commit: %v", ErrFilesystemPath, err)
-	}
-	if err := verifyEffectiveWritability(p.target, p.targetSnapshot); err != nil {
-		return err
-	}
-	if err := os.Rename(p.temporaryName, p.target); err != nil {
-		return fmt.Errorf("atomically replace destination: %w", err)
-	}
-	p.committed = true
-	if directoryHandle, err := os.Open(filepath.Dir(p.target)); err == nil {
-		_ = directoryHandle.Sync()
-		_ = directoryHandle.Close()
-	}
-	return nil
-}
-
-func (p *atomicWritePlan) cleanup() {
-	if p == nil || p.committed || p.temporaryName == "" {
-		return
-	}
-	_ = os.Remove(p.temporaryName)
+	// The upstream message labels JavaScript string.length as bytes. Preserve
+	// that observable value, including UTF-16 surrogate-pair accounting.
+	length := len(utf16.Encode([]rune(input.Content)))
+	return ToolResult{Text: fmt.Sprintf("Successfully wrote %d bytes to %s", length, input.Path)}, nil
 }
 
 func resolveMutationDestination(requested string) (string, error) {
@@ -429,78 +302,6 @@ func resolveMissingDestination(destination string) (string, error) {
 	}
 }
 
-func snapshotPath(path string) (pathSnapshot, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return pathSnapshot{}, nil
-	}
-	if err != nil {
-		return pathSnapshot{}, fmt.Errorf("inspect path snapshot: %w", err)
-	}
-	snapshot := pathSnapshot{exists: true, info: info}
-	if info.Mode()&os.ModeSymlink != 0 {
-		snapshot.link, err = os.Readlink(path)
-		if err != nil {
-			return pathSnapshot{}, fmt.Errorf("read symlink snapshot: %w", err)
-		}
-	}
-	return snapshot, nil
-}
-
-func verifyPathSnapshot(path string, expected pathSnapshot) error {
-	current, err := snapshotPath(path)
-	if err != nil {
-		return err
-	}
-	if current.exists != expected.exists {
-		return errors.New("path existence changed")
-	}
-	if !current.exists {
-		return nil
-	}
-	if current.info.Mode().Type() != expected.info.Mode().Type() || current.link != expected.link {
-		return errors.New("path type or symlink changed")
-	}
-	if !os.SameFile(current.info, expected.info) {
-		return errors.New("path identity changed")
-	}
-	if current.info.Mode().Perm() != expected.info.Mode().Perm() {
-		return errors.New("path permissions changed")
-	}
-	return nil
-}
-
-// verifyEffectiveWritability supplements the stable mode/identity snapshot
-// with the OS account's effective permission decision. Opening without
-// O_TRUNC, O_APPEND, or a write keeps file contents and mtime unchanged while
-// still exercising owner-class permissions and platform ACLs.
-func verifyEffectiveWritability(path string, expected pathSnapshot) error {
-	if !expected.exists {
-		return nil
-	}
-	if expected.info.Mode().Perm()&0o222 == 0 {
-		return fmt.Errorf("destination is not writable: %w", fs.ErrPermission)
-	}
-	handle, err := os.OpenFile(path, os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("destination is not effectively writable: %w", err)
-	}
-	current, statErr := handle.Stat()
-	closeErr := handle.Close()
-	if statErr != nil {
-		return fmt.Errorf("inspect writability probe: %w", statErr)
-	}
-	if current.Mode().Type() != expected.info.Mode().Type() ||
-		!os.SameFile(current, expected.info) ||
-		current.Mode().Perm() != expected.info.Mode().Perm() {
-		return fmt.Errorf("%w: destination changed during writability probe", ErrFilesystemPath)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close writability probe: %w", closeErr)
-	}
-	return nil
-}
-
 func operationErrorText(err error) string {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrOperationCancelled) {
 		return "Filesystem operation cancelled"
@@ -522,61 +323,29 @@ func validText(name, value string) error {
 	if !utf8.ValidString(value) {
 		return fmt.Errorf("%w: %s must be valid UTF-8", ErrInvalidFilesystemInput, name)
 	}
-	if name == "path" && value == "" {
-		return fmt.Errorf("%w: path is required", ErrInvalidFilesystemInput)
+	return nil
+}
+
+func validFilesystemArgument(name, value string) error {
+	if err := validText(name, value); err != nil {
+		return err
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return fmt.Errorf("%w: %s contains NUL", ErrInvalidFilesystemInput, name)
 	}
 	return nil
 }
 
-// strictObject parses a JSON object with unique keys and consumes the complete
-// stream. It is shared by all filesystem tool inputs.
-func strictObject(raw []byte, allowed map[string]struct{}) (map[string]json.RawMessage, error) {
-	if !utf8.Valid(raw) {
-		return nil, fmt.Errorf("%w: arguments must be valid UTF-8 JSON", ErrInvalidFilesystemInput)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	token, err := decoder.Token()
-	if err != nil {
+// strictObject retains its historical name, but follows JavaScript JSON.parse
+// and TypeBox Object semantics: duplicate names use the final value and
+// undeclared properties are permitted unless the schema says otherwise.
+func strictObject(raw []byte, _ map[string]struct{}) (map[string]json.RawMessage, error) {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidFilesystemInput, err)
 	}
-	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+	if values == nil {
 		return nil, fmt.Errorf("%w: arguments must be an object", ErrInvalidFilesystemInput)
-	}
-	values := make(map[string]json.RawMessage)
-	for decoder.More() {
-		keyToken, err := decoder.Token()
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrInvalidFilesystemInput, err)
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return nil, fmt.Errorf("%w: object key must be a string", ErrInvalidFilesystemInput)
-		}
-		if _, exists := values[key]; exists {
-			return nil, fmt.Errorf("%w: duplicate field %q", ErrInvalidFilesystemInput, key)
-		}
-		if _, ok := allowed[key]; !ok {
-			return nil, fmt.Errorf("%w: unknown field %q", ErrInvalidFilesystemInput, key)
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return nil, fmt.Errorf("%w: field %q: %v", ErrInvalidFilesystemInput, key, err)
-		}
-		values[key] = value
-	}
-	token, err = decoder.Token()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidFilesystemInput, err)
-	}
-	if delimiter, ok := token.(json.Delim); !ok || delimiter != '}' {
-		return nil, fmt.Errorf("%w: malformed object", ErrInvalidFilesystemInput)
-	}
-	if token, err = decoder.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, fmt.Errorf("%w: unexpected trailing token %v", ErrInvalidFilesystemInput, token)
-		}
-		return nil, fmt.Errorf("%w: trailing JSON: %v", ErrInvalidFilesystemInput, err)
 	}
 	return values, nil
 }
@@ -613,10 +382,15 @@ func optionalInt(values map[string]json.RawMessage, name string) (*int, error) {
 	if !ok {
 		return nil, nil
 	}
-	var value int
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, fmt.Errorf("%w: %s must be an integer", ErrInvalidFilesystemInput, name)
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return nil, fmt.Errorf("%w: %s must be a number", ErrInvalidFilesystemInput, name)
 	}
+	value64, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil || math.IsNaN(value64) || math.IsInf(value64, 0) || value64 > float64(int(^uint(0)>>1)) || value64 < -float64(int(^uint(0)>>1))-1 {
+		return nil, fmt.Errorf("%w: %s must be a finite number", ErrInvalidFilesystemInput, name)
+	}
+	value := int(math.Trunc(value64))
 	return &value, nil
 }
 
@@ -669,7 +443,7 @@ func decodeWriteInput(raw []byte) (WriteInput, error) {
 }
 
 func decodeEditInput(raw []byte) (EditInput, error) {
-	values, err := strictObject(raw, fields("path", "edits"))
+	values, err := strictObject(raw, fields("path", "edits", "oldText", "newText"))
 	if err != nil {
 		return EditInput{}, err
 	}
@@ -677,16 +451,17 @@ func decodeEditInput(raw []byte) (EditInput, error) {
 	if err != nil {
 		return EditInput{}, err
 	}
-	rawEdits, ok := values["edits"]
-	if !ok {
-		return EditInput{}, fmt.Errorf("%w: edits is required", ErrInvalidFilesystemInput)
-	}
 	var encoded []json.RawMessage
-	if err := json.Unmarshal(rawEdits, &encoded); err != nil {
-		return EditInput{}, fmt.Errorf("%w: edits must be an array", ErrInvalidFilesystemInput)
-	}
-	if len(encoded) == 0 {
-		return EditInput{}, fmt.Errorf("%w: edits must contain at least one replacement", ErrInvalidFilesystemInput)
+	if rawEdits, ok := values["edits"]; ok {
+		if len(rawEdits) > 0 && rawEdits[0] == '"' {
+			var stringified string
+			if err := json.Unmarshal(rawEdits, &stringified); err == nil {
+				rawEdits = []byte(stringified)
+			}
+		}
+		if err := json.Unmarshal(rawEdits, &encoded); err != nil {
+			return EditInput{}, fmt.Errorf("%w: edits must be an array", ErrInvalidFilesystemInput)
+		}
 	}
 	edits := make([]Edit, 0, len(encoded))
 	for index, rawEdit := range encoded {
@@ -703,6 +478,20 @@ func decodeEditInput(raw []byte) (EditInput, error) {
 			return EditInput{}, err
 		}
 		edits = append(edits, Edit{oldText, newText})
+	}
+	if _, hasOld := values["oldText"]; hasOld {
+		oldText, oldErr := requiredString(values, "oldText")
+		newText, newErr := requiredString(values, "newText")
+		if oldErr != nil {
+			return EditInput{}, oldErr
+		}
+		if newErr != nil {
+			return EditInput{}, newErr
+		}
+		edits = append(edits, Edit{OldText: oldText, NewText: newText})
+	}
+	if len(edits) == 0 {
+		return EditInput{}, fmt.Errorf("%w: edits must contain at least one replacement", ErrInvalidFilesystemInput)
 	}
 	return EditInput{Path: path, Edits: edits}, nil
 }

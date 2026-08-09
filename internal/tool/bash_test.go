@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -108,6 +107,126 @@ func TestBashSuccessUsesFixedConfigurationAndMergedRunnerOrder(t *testing.T) {
 	code, ok := result.ExitCode()
 	if !ok || code != 0 {
 		t.Fatalf("ExitCode() = (%d, %v), want (0, true)", code, ok)
+	}
+}
+
+func TestBashPerCallExecutionContextInjectsSessionAndOverlaysEnvironment(t *testing.T) {
+	t.Parallel()
+	workingDir := t.TempDir()
+	callDir := filepath.Join(workingDir, "call")
+	if err := os.Mkdir(callDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var captured RunRequest
+	bash, err := NewBash(BashOptions{
+		WorkingDir: workingDir,
+		Environment: []string{
+			"KEEP=base",
+			"PI_SESSION_ID=must-not-leak",
+			"PI_MODEL=must-not-leak",
+		},
+		Runner: runnerFunc(func(_ context.Context, request RunRequest, _ OutputSink) (ExitStatus, error) {
+			captured = request
+			return testExitStatus(t, 0), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := BashExecutionContext{
+		WorkingDir:  "call",
+		Environment: map[string]string{"KEEP": "call", "EXTRA": "value", "PI_MODEL": "hook-model"},
+		SessionEnvironment: &BashSessionEnvironment{
+			SessionID: "session-id", SessionFile: "session.jsonl", Provider: "provider",
+			Model: "session-model", ReasoningLevel: "high",
+		},
+	}
+	ctx := WithBashExecutionContext(context.Background(), execution)
+	// The context owns a snapshot rather than the caller's mutable maps.
+	execution.Environment["KEEP"] = "mutated"
+	execution.SessionEnvironment.SessionID = "mutated"
+	if _, err := bash.ExecuteJSON(ctx, []byte(`{"command":"true"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if captured.WorkingDir() != callDir {
+		t.Fatalf("working directory = %q, want %q", captured.WorkingDir(), callDir)
+	}
+	got := map[string]string{}
+	for _, entry := range captured.Environment() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			got[name] = value
+		}
+	}
+	want := map[string]string{
+		"KEEP": "call", "EXTRA": "value", "PI_SESSION_ID": "session-id",
+		"PI_SESSION_FILE": "session.jsonl", "PI_PROVIDER": "provider",
+		"PI_MODEL": "hook-model", "PI_REASONING_LEVEL": "high",
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Fatalf("%s = %q, want %q; environment = %#v", name, got[name], value, got)
+		}
+	}
+}
+
+func TestBashPerCallEnvironmentOverlayRemovesDuplicateBaseEntries(t *testing.T) {
+	t.Parallel()
+	workingDir := t.TempDir()
+	var captured RunRequest
+	bash, err := NewBash(BashOptions{
+		WorkingDir:  workingDir,
+		Environment: []string{"DUP=first", "KEEP=value", "DUP=last"},
+		Runner: runnerFunc(func(_ context.Context, request RunRequest, _ OutputSink) (ExitStatus, error) {
+			captured = request
+			return testExitStatus(t, 0), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bash.ExecuteWithContext(context.Background(), testBashInput(t, "true", nil), BashExecutionContext{
+		Environment: map[string]string{"DUP": "overlay"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	duplicates := 0
+	for _, entry := range captured.Environment() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && name == "DUP" {
+			duplicates++
+			if value != "overlay" {
+				t.Fatalf("DUP = %q, want overlay", value)
+			}
+		}
+	}
+	if duplicates != 1 {
+		t.Fatalf("DUP entries = %d; environment = %#v", duplicates, captured.Environment())
+	}
+}
+
+func TestBashPerCallExecutionContextRejectsNUL(t *testing.T) {
+	t.Parallel()
+	bash, err := NewBash(BashOptions{
+		WorkingDir: t.TempDir(), Environment: []string{},
+		Runner: runnerFunc(func(context.Context, RunRequest, OutputSink) (ExitStatus, error) {
+			t.Fatal("runner must not be called")
+			return ExitStatus{}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, execution := range []BashExecutionContext{
+		{WorkingDir: "bad\x00cwd"},
+		{Environment: map[string]string{"BAD": "bad\x00value"}},
+		{Environment: map[string]string{"BAD\x00KEY": "value"}},
+	} {
+		_, err := bash.ExecuteWithContext(context.Background(), testBashInput(t, "true", nil), execution)
+		var failure *BashFailure
+		if !errors.As(err, &failure) || failure.Kind() != FailureInvalidInput {
+			t.Fatalf("error = %v, want invalid input", err)
+		}
 	}
 }
 
@@ -426,9 +545,6 @@ func TestBashIgnoresConcurrentLateOutputAfterRunnerReturns(t *testing.T) {
 }
 
 func TestBashArtifactFailureIsTypedAndDoesNotExposePath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows always exercises the fail-closed artifact path")
-	}
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "broad")
 	if err := os.Mkdir(root, 0o755); err != nil {
@@ -463,9 +579,6 @@ func TestBashArtifactFailureIsTypedAndDoesNotExposePath(t *testing.T) {
 }
 
 func TestBashTruncatedSuccessPersistsEveryRawChunk(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	var raw bytes.Buffer
 	runner := runnerFunc(func(_ context.Context, _ RunRequest, sink OutputSink) (ExitStatus, error) {
@@ -516,9 +629,6 @@ func TestBashTruncatedSuccessPersistsEveryRawChunk(t *testing.T) {
 }
 
 func TestBashTruncatedTimeoutRetainsArtifactPathInFailureText(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	runner := runnerFunc(func(_ context.Context, _ RunRequest, sink OutputSink) (ExitStatus, error) {
 		for line := 1; line <= 3000; line++ {
@@ -545,9 +655,6 @@ func TestBashTruncatedTimeoutRetainsArtifactPathInFailureText(t *testing.T) {
 }
 
 func TestBashByteTruncationFooterDistinguishesPartialLastLine(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	bash, err := NewBash(BashOptions{
 		WorkingDir:     t.TempDir(),
@@ -578,9 +685,6 @@ func TestBashByteTruncationFooterDistinguishesPartialLastLine(t *testing.T) {
 }
 
 func TestBashDoesNotCreateArtifactWhenDecodedOutputFitsLimits(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("raw-byte spool creation intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	bash, err := NewBash(BashOptions{
 		WorkingDir:     t.TempDir(),
@@ -609,9 +713,6 @@ func TestBashDoesNotCreateArtifactWhenDecodedOutputFitsLimits(t *testing.T) {
 }
 
 func TestBashConcurrentExecutionsOwnIndependentCaptureAndArtifacts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("owner-only artifact ACL adapter intentionally fails closed on Windows")
-	}
 	t.Parallel()
 	runner := runnerFunc(func(_ context.Context, request RunRequest, sink OutputSink) (ExitStatus, error) {
 		for line := 0; line < 4; line++ {
@@ -678,6 +779,7 @@ func TestNewBashRejectsInvalidConfiguration(t *testing.T) {
 		options BashOptions
 	}{
 		{name: "empty cwd", options: BashOptions{}},
+		{name: "NUL cwd", options: BashOptions{WorkingDir: "bad\x00cwd"}},
 		{name: "malformed environment", options: BashOptions{WorkingDir: t.TempDir(), Environment: []string{"BROKEN"}}},
 		{name: "negative lines", options: BashOptions{WorkingDir: t.TempDir(), Environment: []string{}, MaxOutputLines: -1}},
 		{name: "negative bytes", options: BashOptions{WorkingDir: t.TempDir(), Environment: []string{}, MaxOutputBytes: -1}},

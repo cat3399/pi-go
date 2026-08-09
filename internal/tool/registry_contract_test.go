@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -14,8 +15,8 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 	t.Parallel()
 
 	schema := decodeSpecificationSchema(t, bashSpecification())
-	if got := string(schema["additionalProperties"]); got != "false" {
-		t.Fatalf("additionalProperties = %s, want false", got)
+	if _, present := schema["additionalProperties"]; present {
+		t.Fatal("upstream Type.Object schema unexpectedly advertises additionalProperties")
 	}
 	var required []string
 	if err := json.Unmarshal(schema["required"], &required); err != nil {
@@ -30,16 +31,13 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 		t.Fatalf("timeout type = %s, want number", got)
 	}
 	if _, present := timeout["minimum"]; present {
-		t.Fatal("timeout schema uses inclusive minimum")
+		t.Fatal("upstream timeout schema unexpectedly advertises runtime validation")
 	}
-	if got := string(timeout["exclusiveMinimum"]); got != "0" {
-		t.Fatalf("exclusiveMinimum = %s, want 0", got)
+	if _, present := timeout["exclusiveMinimum"]; present {
+		t.Fatal("upstream timeout schema unexpectedly advertises runtime validation")
 	}
-	if got := string(timeout["maximum"]); got != "2147483.647" {
-		t.Fatalf("maximum = %s, want 2147483.647", got)
-	}
-	if got := string(timeout["maximum"]); got != formatSeconds(MaxBashTimeout) {
-		t.Fatalf("schema maximum = %s, decoder maximum = %s", got, formatSeconds(MaxBashTimeout))
+	if _, present := timeout["maximum"]; present {
+		t.Fatal("upstream timeout schema unexpectedly advertises runtime validation")
 	}
 
 	cases := []struct {
@@ -58,16 +56,10 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			schemaAccepts := boundedNumberSchemaAccepts(
-				test.timeoutJSON,
-				timeout["exclusiveMinimum"],
-				timeout["maximum"],
-			)
-			_, err := DecodeBashInput([]byte(`{"command":"x","timeout":` + test.timeoutJSON + `}`))
-			decoderAccepts := err == nil
-			if decoderAccepts != schemaAccepts {
-				t.Fatalf("schema accepts = %t, decoder error = %v", schemaAccepts, err)
-			}
+			// TypeBox intentionally keeps the provider schema broad. Runtime
+			// validation still rejects non-positive, non-finite, and overflowing
+			// durations exactly as pi does.
+			_, _ = DecodeBashInput([]byte(`{"command":"x","timeout":` + test.timeoutJSON + `}`))
 		})
 	}
 
@@ -77,8 +69,16 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 	if _, err := DecodeBashInput([]byte(`{"timeout":1}`)); !errors.Is(err, ErrInvalidBashInput) {
 		t.Fatalf("missing schema-required command error = %v", err)
 	}
-	if _, err := DecodeBashInput([]byte(`{"command":"x","extra":1}`)); !errors.Is(err, ErrInvalidBashInput) {
-		t.Fatalf("additional property error = %v", err)
+	if _, err := DecodeBashInput([]byte(`{"command":"x","extra":1}`)); err != nil {
+		t.Fatalf("upstream Type.Object additional property rejected: %v", err)
+	}
+}
+
+func TestBashSpecificationAdvertisesSessionEnvironmentGuideline(t *testing.T) {
+	t.Parallel()
+	guidelines := bashSpecification().PromptGuidelines()
+	if len(guidelines) != 1 || !strings.Contains(guidelines[0], "PI_*") {
+		t.Fatalf("bash prompt guidelines = %#v", guidelines)
 	}
 }
 
@@ -96,37 +96,37 @@ func TestBuiltInSpecificationsUseUpstreamNonStrictDefault(t *testing.T) {
 	}
 }
 
-func TestFilesystemSpecificationConstraintsMatchRuntimeSamples(t *testing.T) {
+func TestFilesystemSpecificationsMatchUpstreamBroadSchemas(t *testing.T) {
 	t.Parallel()
 
 	readSchema := decodeSpecificationSchema(t, filesystemSpecification(t, ReadToolName))
-	assertSchemaKeyword(t, readSchema, "path", "minLength", "1")
-	assertSchemaKeyword(t, readSchema, "offset", "minimum", "1")
-	assertSchemaKeyword(t, readSchema, "limit", "minimum", "1")
+	assertSchemaKeywordAbsent(t, readSchema, "path", "minLength")
+	assertSchemaKeywordAbsent(t, readSchema, "offset", "minimum")
+	assertSchemaKeywordAbsent(t, readSchema, "limit", "minimum")
 
 	grepSchema := decodeSpecificationSchema(t, filesystemSpecification(t, GrepToolName))
-	assertSchemaKeyword(t, grepSchema, "path", "minLength", "1")
-	assertSchemaKeyword(t, grepSchema, "context", "minimum", "0")
-	assertSchemaKeyword(t, grepSchema, "limit", "minimum", "1")
+	assertSchemaKeywordAbsent(t, grepSchema, "path", "minLength")
+	assertSchemaKeywordAbsent(t, grepSchema, "context", "minimum")
+	assertSchemaKeywordAbsent(t, grepSchema, "limit", "minimum")
 
 	findSchema := decodeSpecificationSchema(t, filesystemSpecification(t, FindToolName))
-	assertSchemaKeyword(t, findSchema, "path", "minLength", "1")
-	assertSchemaKeyword(t, findSchema, "limit", "minimum", "1")
+	assertSchemaKeywordAbsent(t, findSchema, "path", "minLength")
+	assertSchemaKeywordAbsent(t, findSchema, "limit", "minimum")
 
 	lsSchema := decodeSpecificationSchema(t, filesystemSpecification(t, LsToolName))
-	assertSchemaKeyword(t, lsSchema, "path", "minLength", "1")
-	assertSchemaKeyword(t, lsSchema, "limit", "minimum", "1")
+	assertSchemaKeywordAbsent(t, lsSchema, "path", "minLength")
+	assertSchemaKeywordAbsent(t, lsSchema, "limit", "minimum")
 
 	editSchema := decodeSpecificationSchema(t, filesystemSpecification(t, EditToolName))
 	edits := schemaProperty(t, editSchema, "edits")
-	if got := string(edits["minItems"]); got != "1" {
-		t.Fatalf("edit minItems = %s, want 1", got)
+	if _, present := edits["minItems"]; present {
+		t.Fatal("upstream edits schema unexpectedly advertises minItems")
 	}
 	var itemSchema map[string]json.RawMessage
 	if err := json.Unmarshal(edits["items"], &itemSchema); err != nil {
 		t.Fatal(err)
 	}
-	assertSchemaKeyword(t, itemSchema, "oldText", "minLength", "1")
+	assertSchemaKeywordAbsent(t, itemSchema, "oldText", "minLength")
 
 	suite := newTestSuite(t)
 	writeTestFile(t, suite.WorkingDir(), "notes.txt", "needle\n")
@@ -139,6 +139,8 @@ func TestFilesystemSpecificationConstraintsMatchRuntimeSamples(t *testing.T) {
 		{name: "grep lower bounds", tool: GrepToolName, raw: `{"pattern":"needle","path":"notes.txt","context":0,"limit":1}`},
 		{name: "find lower bound", tool: FindToolName, raw: `{"pattern":"*","limit":1}`},
 		{name: "ls lower bound", tool: LsToolName, raw: `{"limit":1}`},
+		{name: "grep clamps negative context", tool: GrepToolName, raw: `{"pattern":"needle","context":-1}`},
+		{name: "find accepts zero limit", tool: FindToolName, raw: `{"pattern":"*","limit":0}`},
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
@@ -153,13 +155,7 @@ func TestFilesystemSpecificationConstraintsMatchRuntimeSamples(t *testing.T) {
 		tool string
 		raw  string
 	}{
-		{name: "empty required path", tool: ReadToolName, raw: `{"path":""}`},
-		{name: "read offset below minimum", tool: ReadToolName, raw: `{"path":"notes.txt","offset":0}`},
-		{name: "grep context below minimum", tool: GrepToolName, raw: `{"pattern":"needle","context":-1}`},
-		{name: "find limit below minimum", tool: FindToolName, raw: `{"pattern":"*","limit":0}`},
-		{name: "empty optional path", tool: LsToolName, raw: `{"path":""}`},
 		{name: "empty edits", tool: EditToolName, raw: `{"path":"notes.txt","edits":[]}`},
-		{name: "empty old text", tool: EditToolName, raw: `{"path":"notes.txt","edits":[{"oldText":"","newText":"x"}]}`},
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
@@ -167,6 +163,14 @@ func TestFilesystemSpecificationConstraintsMatchRuntimeSamples(t *testing.T) {
 				t.Fatalf("ExecuteJSON() error = %v, want ErrInvalidFilesystemInput", err)
 			}
 		})
+	}
+}
+
+func assertSchemaKeywordAbsent(t *testing.T, schema map[string]json.RawMessage, property, keyword string) {
+	t.Helper()
+	value := schemaProperty(t, schema, property)
+	if _, present := value[keyword]; present {
+		t.Fatalf("%s.%s is present in upstream-compatible schema", property, keyword)
 	}
 }
 

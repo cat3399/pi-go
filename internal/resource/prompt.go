@@ -2,154 +2,404 @@ package resource
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
-type scalarKind uint8
-
-const (
-	scalarPlain scalarKind = iota
-	scalarQuoted
-)
-
-// frontmatter is deliberately a small strict subset. Resource metadata is
-// declarative; accepting YAML tags, aliases, or arbitrary nesting would add a
-// second interpreter to the trust boundary. Quoted scalars and folded lines
-// cover the upstream skill/template metadata used by this milestone.
 func frontmatter(raw string) (map[string]string, string, error) {
-	values, body, _, err := frontmatterDetailed(raw)
-	return values, body, err
+	values, body, err := parseFrontmatter(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := validateKnownFrontmatterTypes(values); err != nil {
+		return nil, "", err
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if text, ok := value.(string); ok {
+			out[key] = text
+		}
+	}
+	return out, body, nil
 }
 
-func frontmatterDetailed(raw string) (map[string]string, string, map[string]scalarKind, error) {
-	if !strings.HasPrefix(raw, "---\n") && !strings.HasPrefix(raw, "---\r\n") {
-		return map[string]string{}, raw, map[string]scalarKind{}, nil
-	}
-	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
-	end := -1
-	for i := 1; i < len(lines); i++ {
-		if lines[i] == "---" {
-			end = i
-			break
+func validateKnownFrontmatterTypes(values map[string]any) error {
+	for _, name := range []string{"name", "description", "argument-hint"} {
+		if value, exists := values[name]; exists {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("frontmatter field %q must be a string", name)
+			}
 		}
 	}
+	if value, exists := values["disable-model-invocation"]; exists {
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("frontmatter field %q must be a boolean", "disable-model-invocation")
+		}
+	}
+	return nil
+}
+
+// parseFrontmatter mirrors coding-agent's delimiter/body behavior while
+// keeping metadata declarative. Scalar aliases are supported, but YAML merge
+// keys are rejected rather than expanded into implicit fields.
+func parseFrontmatter(raw string) (map[string]any, string, error) {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	if !strings.HasPrefix(normalized, "---") {
+		return map[string]any{}, normalized, nil
+	}
+	end := strings.Index(normalized[3:], "\n---")
 	if end < 0 {
-		return nil, "", nil, fmt.Errorf("unterminated frontmatter")
+		return map[string]any{}, normalized, nil
 	}
-	out := map[string]string{}
-	kinds := map[string]scalarKind{}
-	for _, line := range lines[1:end] {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		key, value, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, "", nil, fmt.Errorf("invalid frontmatter")
-		}
-		key = strings.TrimSpace(key)
-		if _, exists := out[key]; exists {
-			return nil, "", nil, fmt.Errorf("duplicate frontmatter field")
-		}
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
-			kinds[key] = scalarQuoted
-			value = value[1 : len(value)-1]
-		}
-		if value == "|" || value == ">" {
-			return nil, "", nil, fmt.Errorf("multiline frontmatter is unsupported")
-		}
-		out[key] = value
+	end += 3
+	yamlText := normalized[4:end]
+	body := strings.TrimFunc(normalized[end+4:], isECMAScriptWhitespace)
+	if yamlText == "" {
+		return map[string]any{}, body, nil
 	}
-	return out, strings.Join(lines[end+1:], "\n"), kinds, nil
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(yamlText), &document); err != nil {
+		return nil, "", err
+	}
+	if len(document.Content) == 0 {
+		return map[string]any{}, body, nil
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, "", fmt.Errorf("frontmatter root must be a mapping")
+	}
+	value, err := decodeFrontmatterMapping(root, map[*yaml.Node]bool{})
+	if err != nil {
+		return nil, "", err
+	}
+	return value, body, nil
+}
+
+func decodeFrontmatterMapping(node *yaml.Node, resolving map[*yaml.Node]bool) (map[string]any, error) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("frontmatter mapping is invalid")
+	}
+	values := make(map[string]any, len(node.Content)/2)
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index]
+		if key.Kind == yaml.ScalarNode && key.Tag == "!!merge" {
+			return nil, fmt.Errorf("YAML merge keys are not supported in frontmatter")
+		}
+		if key.Kind != yaml.ScalarNode || key.Tag != "!!str" && key.Tag != "" {
+			return nil, fmt.Errorf("frontmatter keys must be strings")
+		}
+		if _, exists := values[key.Value]; exists {
+			return nil, fmt.Errorf("duplicate frontmatter field %q", key.Value)
+		}
+		value, err := decodeFrontmatterValue(node.Content[index+1], resolving)
+		if err != nil {
+			return nil, fmt.Errorf("frontmatter field %q: %w", key.Value, err)
+		}
+		values[key.Value] = value
+	}
+	return values, nil
+}
+
+func decodeFrontmatterValue(node *yaml.Node, resolving map[*yaml.Node]bool) (any, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if resolving[node] {
+		return nil, fmt.Errorf("cyclic YAML alias")
+	}
+	switch node.Kind {
+	case yaml.AliasNode:
+		if node.Alias == nil || node.Alias.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("only scalar YAML aliases are supported")
+		}
+		resolving[node] = true
+		value, err := decodeFrontmatterValue(node.Alias, resolving)
+		delete(resolving, node)
+		return value, err
+	case yaml.ScalarNode:
+		var value any
+		if err := node.Decode(&value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	case yaml.SequenceNode:
+		values := make([]any, 0, len(node.Content))
+		for _, child := range node.Content {
+			value, err := decodeFrontmatterValue(child, resolving)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		return values, nil
+	case yaml.MappingNode:
+		return decodeFrontmatterMapping(node, resolving)
+	default:
+		return nil, fmt.Errorf("unsupported YAML node")
+	}
 }
 
 func assemble(c Config, snapshot Snapshot) (string, error) {
+	selected := c.SelectedTools
+	if selected == nil && c.Tools != nil {
+		selected = make([]string, 0, len(c.Tools))
+		for _, candidate := range c.Tools {
+			selected = append(selected, candidate.Name)
+		}
+	}
+	snippets := make(map[string]string, len(c.Tools))
+	var guidelines []string
+	active := make(map[string]struct{}, len(selected))
+	for _, name := range selected {
+		active[name] = struct{}{}
+	}
+	for _, candidate := range c.Tools {
+		snippets[candidate.Name] = candidate.Snippet
+		if _, ok := active[candidate.Name]; ok {
+			guidelines = append(guidelines, candidate.PromptGuidelines...)
+		}
+	}
+	var custom *string
+	basePrompt := snapshot.BaseSystemPrompt
+	if basePrompt == "" {
+		basePrompt = snapshot.SystemPrompt
+	}
+	if basePrompt != "" {
+		value := basePrompt
+		custom = &value
+	}
+	prompt := BuildSystemPrompt(BuildSystemPromptOptions{
+		CustomPrompt: custom, SelectedTools: selected, ToolSnippets: snippets, PromptGuidelines: guidelines,
+		AppendSystemPrompt: strings.Join(snapshot.AppendSystem, "\n\n"), CWD: c.CWD,
+		ContextFiles: snapshot.Instructions, Skills: snapshot.Skills,
+		ReadmePath: c.ReadmePath, DocsPath: c.DocsPath, ExamplesPath: c.ExamplesPath,
+	})
+	if c.MaxPromptBytes > 0 && int64(len(prompt)) > c.MaxPromptBytes {
+		return "", fmt.Errorf("%w: assembled system prompt", ErrTooLarge)
+	}
+	return prompt, nil
+}
+
+type BuildSystemPromptOptions struct {
+	CustomPrompt       *string
+	SelectedTools      []string
+	ToolSnippets       map[string]string
+	PromptGuidelines   []string
+	AppendSystemPrompt string
+	CWD                string
+	ContextFiles       []Instruction
+	Skills             []Skill
+	ReadmePath         string
+	DocsPath           string
+	ExamplesPath       string
+}
+
+// BuildSystemPrompt is a behavioral port of coding-agent's system prompt
+// builder. Prompt templates deliberately are not injected into this prompt.
+func BuildSystemPrompt(options BuildSystemPromptOptions) string {
+	promptCWD := strings.ReplaceAll(options.CWD, "\\", "/")
+	appendSection := ""
+	if options.AppendSystemPrompt != "" {
+		appendSection = "\n\n" + options.AppendSystemPrompt
+	}
+	tools := options.SelectedTools
+	if tools == nil {
+		tools = []string{"read", "bash", "edit", "write"}
+	}
+	hasRead := containsString(tools, "read")
+	if options.CustomPrompt != nil && *options.CustomPrompt != "" {
+		prompt := *options.CustomPrompt + appendSection + formatContextFiles(options.ContextFiles)
+		if hasRead {
+			prompt += formatSkillsForPrompt(options.Skills)
+		}
+		return prompt + "\nCurrent working directory: " + promptCWD
+	}
+
+	visibleTools := make([]string, 0, len(tools))
+	for _, name := range tools {
+		if snippet := options.ToolSnippets[name]; snippet != "" {
+			visibleTools = append(visibleTools, "- "+name+": "+snippet)
+		}
+	}
+	toolsList := "(none)"
+	if len(visibleTools) > 0 {
+		toolsList = strings.Join(visibleTools, "\n")
+	}
+
+	guidelines := make([]string, 0, len(options.PromptGuidelines)+3)
+	seen := map[string]struct{}{}
+	addGuideline := func(value string) {
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		guidelines = append(guidelines, value)
+	}
+	if containsString(tools, "bash") && !containsString(tools, "grep") && !containsString(tools, "find") && !containsString(tools, "ls") {
+		addGuideline("Use bash for file operations like ls, rg, find")
+	}
+	for _, guideline := range options.PromptGuidelines {
+		if normalized := strings.TrimFunc(guideline, isECMAScriptWhitespace); normalized != "" {
+			addGuideline(normalized)
+		}
+	}
+	addGuideline("Be concise in your responses")
+	addGuideline("Show file paths clearly when working with files")
+	for index := range guidelines {
+		guidelines[index] = "- " + guidelines[index]
+	}
+
+	readmePath, docsPath, examplesPath := options.ReadmePath, options.DocsPath, options.ExamplesPath
+	if readmePath == "" {
+		readmePath = filepath.Join(defaultPiPackageRoot(), "README.md")
+	}
+	if docsPath == "" {
+		docsPath = filepath.Join(filepath.Dir(readmePath), "docs")
+	}
+	if examplesPath == "" {
+		examplesPath = filepath.Join(filepath.Dir(readmePath), "examples")
+	}
+	prompt := fmt.Sprintf(`You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+
+Available tools:
+%s
+
+In addition to the tools above, you may have access to other custom tools depending on the project.
+
+Guidelines:
+%s
+
+Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+- Main documentation: %s
+- Additional docs: %s
+- Examples: %s (extensions, custom tools, SDK)
+- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
+- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
+- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
+- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`, toolsList, strings.Join(guidelines, "\n"), readmePath, docsPath, examplesPath)
+	prompt += appendSection + formatContextFiles(options.ContextFiles)
+	if hasRead {
+		prompt += formatSkillsForPrompt(options.Skills)
+	}
+	return prompt + "\nCurrent working directory: " + promptCWD
+}
+
+func defaultPiPackageRoot() string {
+	if _, source, _, ok := runtime.Caller(0); ok {
+		root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
+		if _, err := os.Stat(filepath.Join(root, "README.md")); err == nil {
+			return root
+		}
+	}
+	if executable, err := os.Executable(); err == nil {
+		return filepath.Dir(executable)
+	}
+	return "."
+}
+
+func formatContextFiles(files []Instruction) string {
+	if len(files) == 0 {
+		return ""
+	}
 	var out strings.Builder
-	if snapshot.SystemPrompt != "" {
-		out.WriteString(snapshot.SystemPrompt)
-	} else {
-		out.WriteString("You are pi-go, a coding agent. Work carefully and report material failures.")
+	out.WriteString("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n")
+	for _, file := range files {
+		out.WriteString(`<project_instructions path="`)
+		out.WriteString(file.Path)
+		out.WriteString("\">\n")
+		out.WriteString(file.Content)
+		out.WriteString("\n</project_instructions>\n\n")
 	}
-	if len(c.Tools) > 0 {
-		out.WriteString("\n\n<available_tools>\n")
-		tools := append([]Tool(nil), c.Tools...)
-		for i := 0; i < len(tools); i++ {
-			for j := i + 1; j < len(tools); j++ {
-				if tools[j].Name < tools[i].Name {
-					tools[i], tools[j] = tools[j], tools[i]
-				}
-			}
-		}
-		for _, tool := range tools {
-			out.WriteString("- ")
-			out.WriteString(escape(tool.Name))
-			if tool.Snippet != "" {
-				out.WriteString(": ")
-				out.WriteString(escape(tool.Snippet))
-			}
-			out.WriteByte('\n')
-		}
-		out.WriteString("</available_tools>")
-	}
-	for _, appendix := range snapshot.AppendSystem {
-		out.WriteString("\n\n")
-		out.WriteString(appendix)
-	}
-	if len(snapshot.Instructions) > 0 {
-		out.WriteString("\n\n<project_context>\n")
-		for _, item := range snapshot.Instructions {
-			out.WriteString("<project_instructions path=\"")
-			out.WriteString(escape(item.Path))
-			out.WriteString("\">\n")
-			out.WriteString(item.Content)
-			out.WriteString("\n</project_instructions>\n")
-		}
-		out.WriteString("</project_context>")
-	}
-	if len(snapshot.Templates) > 0 {
-		out.WriteString("\n\n<available_prompt_templates>\n")
-		for _, item := range snapshot.Templates {
-			out.WriteString("<template name=\"")
-			out.WriteString(escape(item.Name))
-			out.WriteString("\" description=\"")
-			out.WriteString(escape(item.Description))
-			out.WriteString("\" location=\"")
-			out.WriteString(escape(item.Path))
-			out.WriteString("\"/>\n")
-		}
-		out.WriteString("</available_prompt_templates>")
-	}
-	visible := false
-	for _, skill := range snapshot.Skills {
+	out.WriteString("</project_context>\n")
+	return out.String()
+}
+
+func formatSkillsForPrompt(skills []Skill) string {
+	visible := make([]Skill, 0, len(skills))
+	for _, skill := range skills {
 		if !skill.DisableModelInvocation {
-			visible = true
+			visible = append(visible, skill)
+		}
+	}
+	if len(visible) == 0 {
+		return ""
+	}
+	lines := []string{
+		"\n\nThe following skills provide specialized instructions for specific tasks.",
+		"Use the read tool to load a skill's file when the task matches its description.",
+		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+		"", "<available_skills>",
+	}
+	for _, skill := range visible {
+		lines = append(lines, "  <skill>", "    <name>"+escape(skill.Name)+"</name>", "    <description>"+escape(skill.Description)+"</description>", "    <location>"+escape(skill.Path)+"</location>", "  </skill>")
+	}
+	return strings.Join(append(lines, "</available_skills>"), "\n")
+}
+
+// ExpandSkillCommand ports AgentSession._expandSkillCommand. Skill files are
+// read at invocation time so an edited SKILL.md takes effect without a resource
+// reload, exactly as in pi. Unknown or unreadable skills pass through unchanged.
+func ExpandSkillCommand(text string, skills []Skill) string {
+	if !strings.HasPrefix(text, "/skill:") {
+		return text
+	}
+	spaceIndex := strings.IndexByte(text, ' ')
+	name := ""
+	arguments := ""
+	if spaceIndex < 0 {
+		name = text[7:]
+	} else {
+		name = text[7:spaceIndex]
+		arguments = strings.TrimFunc(text[spaceIndex+1:], isECMAScriptWhitespace)
+	}
+	var selected *Skill
+	for index := range skills {
+		if skills[index].Name == name {
+			selected = &skills[index]
 			break
 		}
 	}
-	if visible {
-		out.WriteString("\n\n<available_skills>\n")
-		for _, skill := range snapshot.Skills {
-			if skill.DisableModelInvocation {
-				continue
-			}
-			out.WriteString("<skill name=\"")
-			out.WriteString(escape(skill.Name))
-			out.WriteString("\" description=\"")
-			out.WriteString(escape(skill.Description))
-			out.WriteString("\" location=\"")
-			out.WriteString(escape(skill.Path))
-			out.WriteString("\"/>\n")
+	if selected == nil {
+		return text
+	}
+	data, err := os.ReadFile(selected.Path)
+	if err != nil {
+		return text
+	}
+	_, body, err := parseFrontmatter(strings.ToValidUTF8(string(data), "�"))
+	if err != nil {
+		return text
+	}
+	body = strings.TrimFunc(body, isECMAScriptWhitespace)
+	skillBlock := fmt.Sprintf(
+		"<skill name=\"%s\" location=\"%s\">\nReferences are relative to %s.\n\n%s\n</skill>",
+		selected.Name, selected.Path, selected.BaseDir, body,
+	)
+	if arguments == "" {
+		return skillBlock
+	}
+	return skillBlock + "\n\n" + arguments
+}
+
+// ExpandPromptInput preserves pi's expansion order: explicit skill commands
+// are expanded first, then ordinary prompt templates are considered.
+func ExpandPromptInput(text string, snapshot Snapshot) string {
+	return ExpandTemplate(ExpandSkillCommand(text, snapshot.Skills), snapshot.Templates)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
 		}
-		out.WriteString("</available_skills>")
 	}
-	out.WriteString("\n\nCurrent working directory: ")
-	out.WriteString(strings.ReplaceAll(c.CWD, "\\", "/"))
-	if int64(out.Len()) > c.MaxPromptBytes {
-		return "", fmt.Errorf("%w: assembled system prompt", ErrTooLarge)
-	}
-	return out.String(), nil
+	return false
 }
 func escape(value string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&apos;").Replace(value)
@@ -159,7 +409,6 @@ func parseArgs(value string) []string {
 	var out []string
 	var current strings.Builder
 	var quote rune
-	hasToken := false
 	for _, r := range value {
 		if quote != 0 {
 			if r == quote {
@@ -167,26 +416,22 @@ func parseArgs(value string) []string {
 			} else {
 				current.WriteRune(r)
 			}
-			hasToken = true
 			continue
 		}
 		if r == '\'' || r == '"' {
 			quote = r
-			hasToken = true
 			continue
 		}
 		if isECMAScriptWhitespace(r) {
-			if hasToken {
+			if current.Len() > 0 {
 				out = append(out, current.String())
 				current.Reset()
-				hasToken = false
 			}
 			continue
 		}
 		current.WriteRune(r)
-		hasToken = true
 	}
-	if hasToken {
+	if current.Len() > 0 {
 		out = append(out, current.String())
 	}
 	return out

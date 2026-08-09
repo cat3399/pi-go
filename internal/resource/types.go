@@ -33,13 +33,27 @@ const (
 type Scope string
 
 const (
-	ScopeGlobal  Scope = "global"
-	ScopeProject Scope = "project"
+	ScopeUser      Scope = "user"
+	ScopeProject   Scope = "project"
+	ScopeTemporary Scope = "temporary"
+	// ScopeGlobal is retained as a source-compatible alias. Pi calls this
+	// persisted user scope rather than global scope.
+	ScopeGlobal = ScopeUser
+)
+
+type Origin string
+
+const (
+	OriginPackage  Origin = "package"
+	OriginTopLevel Origin = "top-level"
 )
 
 type Source struct {
-	Path  string
-	Scope Scope
+	Path    string
+	Source  string
+	Scope   Scope
+	Origin  Origin
+	BaseDir string
 }
 
 type Instruction struct {
@@ -55,18 +69,24 @@ type Skill struct {
 	Name, Description, BaseDir string
 	DisableModelInvocation     bool
 }
-type Diagnostic struct{ Kind, Resource, Name, WinnerPath, LoserPath string }
+type Diagnostic struct {
+	Kind, Resource, Name, WinnerPath, LoserPath string
+	Message, Path                               string
+	Source                                      Source
+	WinnerSource, LoserSource                   Source
+}
 
 // Snapshot has no mutable maps or slices exposed by Service. Callers receive
 // a copy, so a completed reload cannot be changed by a later caller.
 type Snapshot struct {
-	Trusted      bool
-	SystemPrompt string
-	AppendSystem []string
-	Instructions []Instruction
-	Templates    []Template
-	Skills       []Skill
-	Diagnostics  []Diagnostic
+	Trusted          bool
+	BaseSystemPrompt string
+	SystemPrompt     string
+	AppendSystem     []string
+	Instructions     []Instruction
+	Templates        []Template
+	Skills           []Skill
+	Diagnostics      []Diagnostic
 }
 
 func (s Snapshot) clone() Snapshot {
@@ -78,14 +98,51 @@ func (s Snapshot) clone() Snapshot {
 	return s
 }
 
-type Tool struct{ Name, Snippet string }
+type Tool struct {
+	Name             string
+	Snippet          string
+	PromptGuidelines []string
+}
 type Config struct {
-	CWD, AgentDir                string
-	Tools                        []Tool
-	MaxFileBytes, MaxPromptBytes int64
+	CWD, AgentDir string
+	Tools         []Tool
+	// A nil SelectedTools uses pi's default read/bash/edit/write set. An
+	// explicitly empty slice advertises no tools in the system prompt.
+	SelectedTools []string
+	// SkillSources and PromptSources carry provenance from an upstream package
+	// resolver. Their order is retained. SkillPaths and PromptPaths are CLI-like
+	// additional paths and are appended after defaults/resolved sources.
+	SkillSources, PromptSources                 []Source
+	SkillPaths, PromptPaths                     []string
+	NoContextFiles, NoSkills, NoPromptTemplates bool
+	SystemPromptSource                          string
+	AppendSystemPromptSources                   []string
+	ReadmePath, DocsPath, ExamplesPath          string
+	HomeDir                                     string
+	MaxFileBytes, MaxPromptBytes                int64
 }
 
 func validateConfig(c Config) (Config, error) {
+	if c.Tools != nil {
+		tools := make([]Tool, len(c.Tools))
+		copy(tools, c.Tools)
+		c.Tools = tools
+	}
+	for index := range c.Tools {
+		if c.Tools[index].PromptGuidelines != nil {
+			c.Tools[index].PromptGuidelines = append([]string{}, c.Tools[index].PromptGuidelines...)
+		}
+	}
+	if c.SelectedTools != nil {
+		c.SelectedTools = append([]string{}, c.SelectedTools...)
+	}
+	c.SkillPaths = append([]string(nil), c.SkillPaths...)
+	c.PromptPaths = append([]string(nil), c.PromptPaths...)
+	c.SkillSources = append([]Source(nil), c.SkillSources...)
+	c.PromptSources = append([]Source(nil), c.PromptSources...)
+	if c.AppendSystemPromptSources != nil {
+		c.AppendSystemPromptSources = append([]string{}, c.AppendSystemPromptSources...)
+	}
 	for _, item := range []struct{ label, value string }{{"cwd", c.CWD}, {"agent directory", c.AgentDir}} {
 		if item.value == "" || !utf8.ValidString(item.value) || strings.IndexByte(item.value, 0) >= 0 {
 			return Config{}, fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, item.label)
@@ -100,18 +157,47 @@ func validateConfig(c Config) (Config, error) {
 			c.AgentDir = filepath.Clean(absolute)
 		}
 	}
-	if c.MaxFileBytes == 0 {
-		c.MaxFileBytes = DefaultMaxFileBytes
+	for _, item := range []struct{ label, value string }{
+		{"home directory", c.HomeDir}, {"readme path", c.ReadmePath}, {"docs path", c.DocsPath}, {"examples path", c.ExamplesPath},
+	} {
+		if item.value != "" && (!utf8.ValidString(item.value) || strings.IndexByte(item.value, 0) >= 0) {
+			return Config{}, fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, item.label)
+		}
 	}
-	if c.MaxPromptBytes == 0 {
-		c.MaxPromptBytes = DefaultMaxPromptBytes
-	}
-	if c.MaxFileBytes < 1 || c.MaxPromptBytes < c.MaxFileBytes {
+	if c.MaxFileBytes < 0 || c.MaxPromptBytes < 0 || c.MaxPromptBytes > 0 && c.MaxFileBytes > c.MaxPromptBytes {
 		return Config{}, fmt.Errorf("%w: size limits are invalid", ErrInvalidConfig)
 	}
 	for _, tool := range c.Tools {
 		if tool.Name == "" || !utf8.ValidString(tool.Name) || !utf8.ValidString(tool.Snippet) {
 			return Config{}, fmt.Errorf("%w: tool declaration is invalid", ErrInvalidConfig)
+		}
+		for _, guideline := range tool.PromptGuidelines {
+			if !utf8.ValidString(guideline) {
+				return Config{}, fmt.Errorf("%w: tool guideline is invalid", ErrInvalidConfig)
+			}
+		}
+	}
+	for _, name := range c.SelectedTools {
+		if name == "" || !utf8.ValidString(name) {
+			return Config{}, fmt.Errorf("%w: selected tool is invalid", ErrInvalidConfig)
+		}
+	}
+	for _, item := range append(append([]string(nil), c.SkillPaths...), c.PromptPaths...) {
+		if !utf8.ValidString(item) || strings.IndexByte(item, 0) >= 0 {
+			return Config{}, fmt.Errorf("%w: additional resource path is invalid", ErrInvalidConfig)
+		}
+	}
+	for _, source := range append(append([]Source(nil), c.SkillSources...), c.PromptSources...) {
+		if source.Path == "" || !utf8.ValidString(source.Path) || strings.IndexByte(source.Path, 0) >= 0 ||
+			!utf8.ValidString(source.Source) || strings.IndexByte(source.Source, 0) >= 0 ||
+			!utf8.ValidString(source.BaseDir) || strings.IndexByte(source.BaseDir, 0) >= 0 {
+			return Config{}, fmt.Errorf("%w: resource source is invalid", ErrInvalidConfig)
+		}
+		if source.Scope != "" && source.Scope != ScopeUser && source.Scope != ScopeProject && source.Scope != ScopeTemporary {
+			return Config{}, fmt.Errorf("%w: resource source scope is invalid", ErrInvalidConfig)
+		}
+		if source.Origin != "" && source.Origin != OriginPackage && source.Origin != OriginTopLevel {
+			return Config{}, fmt.Errorf("%w: resource source origin is invalid", ErrInvalidConfig)
 		}
 	}
 	return c, nil

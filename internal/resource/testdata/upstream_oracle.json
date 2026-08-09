@@ -1,0 +1,64 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "generatedBy": "pinned packages/coding-agent parseFrontmatter/loadPromptTemplates",
+  "generator": {
+    "nodeVersion": "v24.18.1",
+    "corpus": "upstream_oracle_corpus.json"
+  },
+  "frontmatter": {
+    "scalarAlias": {
+      "frontmatter": {
+        "summary": "aliased text",
+        "description": "aliased text"
+      },
+      "body": "body"
+    },
+    "merge": {
+      "frontmatter": {
+        "defaults": {
+          "description": "merged"
+        },
+        "<<": {
+          "description": "merged"
+        }
+      },
+      "body": "body"
+    },
+    "typed": {
+      "frontmatter": {
+        "name": 7,
+        "description": false,
+        "disable-model-invocation": "true"
+      },
+      "body": "body"
+    }
+  },
+  "promptSourcesInLoaderOrder": [
+    {
+      "description": "user",
+      "source": "local",
+      "scope": "user",
+      "origin": "top-level",
+      "baseDir": "<root>/agent/prompts"
+    },
+    {
+      "description": "project",
+      "source": "local",
+      "scope": "project",
+      "origin": "top-level",
+      "baseDir": "<root>/project/.pi/prompts"
+    },
+    {
+      "description": "additional",
+      "source": "local",
+      "scope": "temporary",
+      "origin": "top-level",
+      "baseDir": "<root>/additional"
+    }
+  ],
+  "hardeningPolicy": {
+    "yamlMerge": "reject instead of upstream expansion",
+    "typedKnownFrontmatter": "reject resource instead of upstream coercive consumption",
+    "additionalCollision": "first resolved/default resource wins; additional path is appended"
+  }
+}

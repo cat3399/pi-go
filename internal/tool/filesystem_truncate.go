@@ -3,7 +3,7 @@ package tool
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
+	"unicode/utf16"
 )
 
 // FilesystemTruncation describes a text-safe prefix. Output never splits a
@@ -75,10 +75,11 @@ func splitLogicalLines(content string) []string {
 }
 
 func truncateGrepLine(line string, maximum int) (string, bool) {
-	if utf8.RuneCountInString(line) <= maximum {
+	units := utf16.Encode([]rune(line))
+	if len(units) <= maximum {
 		return line, false
 	}
-	return string([]rune(line)[:maximum]) + "... [truncated]", true
+	return string(utf16.Decode(units[:maximum])) + "... [truncated]", true
 }
 
 func formatSize(bytes int) string {

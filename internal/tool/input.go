@@ -40,6 +40,9 @@ func (i BashInput) validate() error {
 	if !utf8.ValidString(i.command) {
 		return fmt.Errorf("%w: command must be valid UTF-8", ErrInvalidBashInput)
 	}
+	if bytes.IndexByte([]byte(i.command), 0) >= 0 {
+		return fmt.Errorf("%w: command contains NUL", ErrInvalidBashInput)
+	}
 	if i.hasTimeout && (i.timeout <= 0 || i.timeout > MaxBashTimeout) {
 		return fmt.Errorf(
 			"%w: timeout must be greater than zero and no more than %s",
@@ -61,81 +64,32 @@ func (i BashInput) Timeout() (time.Duration, bool) {
 	return i.timeout, i.hasTimeout
 }
 
-// DecodeBashInput validates the provider-facing JSON object without losing
-// duplicate fields, unknown fields, or sub-nanosecond positive timeouts.
+// DecodeBashInput mirrors JSON.parse plus pi's TypeBox Object contract:
+// duplicate fields use their final value and undeclared properties are
+// ignored. Timeout conversion retains sub-nanosecond positive durations.
 func DecodeBashInput(raw []byte) (BashInput, error) {
-	if !utf8.Valid(raw) {
-		return BashInput{}, fmt.Errorf("%w: arguments must be valid UTF-8 JSON", ErrInvalidBashInput)
-	}
-
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	token, err := decoder.Token()
-	if err != nil {
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
 		return BashInput{}, fmt.Errorf("%w: %v", ErrInvalidBashInput, err)
 	}
-	delimiter, ok := token.(json.Delim)
-	if !ok || delimiter != '{' {
+	if values == nil {
 		return BashInput{}, fmt.Errorf("%w: arguments must be an object", ErrInvalidBashInput)
 	}
-
-	seen := make(map[string]struct{}, 2)
-	var command string
-	var timeout time.Duration
-	var hasCommand, hasTimeout bool
-	for decoder.More() {
-		token, err = decoder.Token()
-		if err != nil {
-			return BashInput{}, fmt.Errorf("%w: %v", ErrInvalidBashInput, err)
-		}
-		name, ok := token.(string)
-		if !ok {
-			return BashInput{}, fmt.Errorf("%w: object key must be a string", ErrInvalidBashInput)
-		}
-		if _, duplicate := seen[name]; duplicate {
-			return BashInput{}, fmt.Errorf("%w: duplicate field %q", ErrInvalidBashInput, name)
-		}
-		seen[name] = struct{}{}
-
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return BashInput{}, fmt.Errorf("%w: field %q: %v", ErrInvalidBashInput, name, err)
-		}
-
-		switch name {
-		case "command":
-			command, err = decodeStrictJSONString(value)
-			if err != nil {
-				return BashInput{}, fmt.Errorf("%w: command: %v", ErrInvalidBashInput, err)
-			}
-			hasCommand = true
-		case "timeout":
-			timeout, err = decodeTimeoutSeconds(value)
-			if err != nil {
-				return BashInput{}, fmt.Errorf("%w: timeout: %v", ErrInvalidBashInput, err)
-			}
-			hasTimeout = true
-		default:
-			return BashInput{}, fmt.Errorf("%w: unknown field %q", ErrInvalidBashInput, name)
-		}
-	}
-
-	token, err = decoder.Token()
-	if err != nil {
-		return BashInput{}, fmt.Errorf("%w: %v", ErrInvalidBashInput, err)
-	}
-	delimiter, ok = token.(json.Delim)
-	if !ok || delimiter != '}' {
-		return BashInput{}, fmt.Errorf("%w: malformed object", ErrInvalidBashInput)
-	}
-	if token, err = decoder.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return BashInput{}, fmt.Errorf("%w: unexpected trailing JSON token %v", ErrInvalidBashInput, token)
-		}
-		return BashInput{}, fmt.Errorf("%w: trailing JSON: %v", ErrInvalidBashInput, err)
-	}
+	commandRaw, hasCommand := values["command"]
 	if !hasCommand {
 		return BashInput{}, fmt.Errorf("%w: command is required", ErrInvalidBashInput)
+	}
+	command, err := decodeStrictJSONString(commandRaw)
+	if err != nil {
+		return BashInput{}, fmt.Errorf("%w: command: %v", ErrInvalidBashInput, err)
+	}
+	var timeout time.Duration
+	timeoutRaw, hasTimeout := values["timeout"]
+	if hasTimeout {
+		timeout, err = decodeTimeoutSeconds(timeoutRaw)
+		if err != nil {
+			return BashInput{}, fmt.Errorf("%w: timeout: %v", ErrInvalidBashInput, err)
+		}
 	}
 
 	input := BashInput{
@@ -153,15 +107,9 @@ func decodeStrictJSONString(raw []byte) (string, error) {
 	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return "", errors.New("must be a string")
 	}
-	if err := validateJSONSurrogates(raw); err != nil {
-		return "", errors.New("must be a valid Unicode JSON string")
-	}
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", errors.New("must be a valid Unicode JSON string")
-	}
-	if !utf8.ValidString(value) {
-		return "", errors.New("must be valid UTF-8")
+		return "", errors.New("must be a string")
 	}
 	return value, nil
 }

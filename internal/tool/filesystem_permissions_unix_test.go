@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestAtomicWriteRejectsEffectivelyUnwritableOwnerMode0002(t *testing.T) {
+func TestWriteRejectsEffectivelyUnwritableOwnerMode0002(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root may bypass owner-class permission checks")
 	}

@@ -1,0 +1,86 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "generatedBy": "pinned packages/coding-agent default rg/fd operations; custom Find probe records forwarding only",
+  "generator": {
+    "nodeVersion": "v24.18.1",
+    "toolPlatform": "darwin-arm64",
+    "rgVersion": "ripgrep 15.2.0 (rev e89fff89ac)",
+    "rgSHA256": "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e",
+    "fdVersion": "fd 10.4.2",
+    "fdSHA256": "bbd98b652be41796406f9d793a2909a717fd871d0e0b824f72fb85c645ad5366",
+    "corpus": "upstream_oracle_corpus.json"
+  },
+  "readRuntimeBoundary": {
+    "nodeVersion": "v24.18.1",
+    "bufferMaxStringLength": 536870888,
+    "unit": "decoded UTF-16 code units"
+  },
+  "grepGlob": {
+    "brace": [
+      "main.go:1: TOKEN",
+      "web.test.ts:1: TOKEN",
+      "web.ts:1: TOKEN"
+    ],
+    "negative": [
+      "!literal.txt:1: TOKEN",
+      "main.go:1: TOKEN",
+      "notes.md:1: TOKEN",
+      "web.ts:1: TOKEN"
+    ]
+  },
+  "findGlob": {
+    "input": "!*.txt",
+    "forwardedPattern": "!*.txt",
+    "operation": "default createFindToolDefinition with verified managed fd",
+    "output": "!literal.txt"
+  },
+  "ignoreSemantics": {
+    "operation": "default createFindToolDefinition/createGrepToolDefinition with verified managed fd/rg",
+    "find": [
+      "b/sibling.txt",
+      "child/child-choice.txt",
+      "deep/anchored.txt",
+      "glob-ab-x.txt",
+      "nested/parent-vcs.txt",
+      "normal.txt",
+      "ordered.txt",
+      "rg-only.txt",
+      "shared-precedence.txt"
+    ],
+    "grep": [
+      "b/sibling.txt:1: TOKEN",
+      "child/child-choice.txt:1: TOKEN",
+      "deep/anchored.txt:1: TOKEN",
+      "fd-only.txt:1: TOKEN",
+      "glob-ab-x.txt:1: TOKEN",
+      "nested/parent-vcs.txt:1: TOKEN",
+      "normal.txt:1: TOKEN",
+      "ordered.txt:1: TOKEN",
+      "shared-precedence.txt:1: TOKEN"
+    ]
+  },
+  "ancestorIgnoreSemantics": {
+    "operation": "default managed fd/rg ancestor discovery",
+    "repositoryFind": [
+      "above-grep.txt",
+      "above-vcs.txt",
+      "normal.txt"
+    ],
+    "repositoryGrep": [
+      "above-find.txt:1: TOKEN",
+      "above-vcs.txt:1: TOKEN",
+      "normal.txt:1: TOKEN"
+    ],
+    "outsideRepositoryFind": [
+      "normal.txt",
+      "sibling/nested-local.txt"
+    ],
+    "outsideRepositoryGrep": [
+      "local-vcs.txt:1: TOKEN",
+      "nested-repo/nested-parent.txt:1: TOKEN",
+      "normal.txt:1: TOKEN",
+      "parent-vcs.txt:1: TOKEN",
+      "sibling/nested-local.txt:1: TOKEN"
+    ]
+  }
+}

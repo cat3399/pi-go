@@ -1,0 +1,14 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "nodeVersion": "v24.18.1",
+  "frontmatter": {
+    "scalarAlias": "---\nsummary: &summary aliased text\ndescription: *summary\n---\nbody",
+    "merge": "---\ndefaults: &defaults\n  description: merged\n<<: *defaults\n---\nbody",
+    "typed": "---\nname: 7\ndescription: false\ndisable-model-invocation: 'true'\n---\nbody"
+  },
+  "prompts": [
+    { "location": "agent/prompts/review.md", "description": "user", "body": "user" },
+    { "location": "project/.pi/prompts/review.md", "description": "project", "body": "project" },
+    { "location": "additional/review.md", "description": "additional", "body": "additional" }
+  ]
+}
