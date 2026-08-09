@@ -18,6 +18,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
@@ -35,6 +36,48 @@ type dynamicAuthDoer struct {
 	mu             sync.Mutex
 	authorizations []string
 	nextID         uint64
+}
+
+type dynamicProviderSettingsDoer struct {
+	mu        sync.Mutex
+	deadlines []time.Duration
+	calls     int
+}
+
+func (d *dynamicProviderSettingsDoer) Do(request *http.Request) (*http.Response, error) {
+	remaining := time.Duration(-1)
+	if deadline, ok := request.Context().Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	d.mu.Lock()
+	d.calls++
+	call := d.calls
+	d.deadlines = append(d.deadlines, remaining)
+	d.mu.Unlock()
+	if call == 2 {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header: http.Header{
+				"Content-Type":   []string{"application/json"},
+				"Retry-After-Ms": []string{"0"},
+			},
+			Body:    io.NopCloser(strings.NewReader(`{"error":{"message":"retry","code":"rate_limit_exceeded"}}`)),
+			Request: request,
+		}, nil
+	}
+	item := fmt.Sprintf(`{"type":"message","id":"settings-%d","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}`, call)
+	body := "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" + item + "}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+	return &http.Response{
+		StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body: io.NopCloser(strings.NewReader(body)), Request: request,
+	}, nil
+}
+
+func (d *dynamicProviderSettingsDoer) snapshot() []time.Duration {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]time.Duration(nil), d.deadlines...)
 }
 
 func (d *dynamicAuthDoer) Do(request *http.Request) (*http.Response, error) {
@@ -187,6 +230,66 @@ func TestProductionRuntimeResolvesCurrentAuthForEveryTurn(t *testing.T) {
 	}
 	if got := doer.snapshot(); len(got) != 2 || got[0] != "Bearer fixture-key" || got[1] != "Bearer replacement-key" {
 		t.Fatalf("authorization sequence = %#v", got)
+	}
+}
+
+func TestProductionRuntimeRefreshesProviderSettingsForEveryTurn(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	doer := &dynamicProviderSettingsDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.OpenAIHTTPClient = doer
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	if _, err := productRuntime.Session().Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	timeout, zero, one := uint64(1_500), uint64(0), uint64(1)
+	if err := productRuntime.Services().ModelRuntime.SetGlobalSettings(context.Background(), func(settings *model.Settings) error {
+		settings.Transport = provider.TransportSSE
+		settings.HTTPIdleTimeoutMS = &zero
+		settings.WebsocketConnectTimeoutMS = &zero
+		settings.Retry.Provider.TimeoutMS = &timeout
+		settings.Retry.Provider.MaxRetries = &one
+		settings.Retry.Provider.MaxRetryDelayMS = &zero
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := productRuntime.Session().Run(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	deadlines := doer.snapshot()
+	if len(deadlines) != 3 {
+		t.Fatalf("provider attempts = %d, deadlines %#v", len(deadlines), deadlines)
+	}
+	if deadlines[0] < time.Minute {
+		t.Fatalf("first turn did not use initial 300s timeout: %s", deadlines[0])
+	}
+	for index, remaining := range deadlines[1:] {
+		if remaining <= 0 || remaining > 2*time.Second {
+			t.Fatalf("second-turn attempt %d deadline = %s, want refreshed 1500ms timeout", index+1, remaining)
+		}
+	}
+	settings := productRuntime.Services().ModelRuntime.Snapshot().Settings
+	stream, err := productionProviderStreamOptions(settings, manager.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream.Transport != provider.TransportSSE || stream.WebsocketConnectTimeoutMS == nil || *stream.WebsocketConnectTimeoutMS != 0 ||
+		stream.MaxRetries == nil || *stream.MaxRetries != 1 || stream.MaxRetryDelayMS == nil || *stream.MaxRetryDelayMS != 0 {
+		t.Fatalf("refreshed stream options = %#v", stream)
 	}
 }
 

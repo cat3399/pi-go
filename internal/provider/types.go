@@ -594,6 +594,10 @@ func CloneStreamOptions(value StreamOptions) StreamOptions {
 	value.WebsocketConnectTimeoutMS = cloneUint64(value.WebsocketConnectTimeoutMS)
 	value.MaxRetries = cloneUint32(value.MaxRetries)
 	value.MaxRetryDelayMS = cloneUint64(value.MaxRetryDelayMS)
+	value.ReasoningSummary = cloneString(value.ReasoningSummary)
+	value.ThinkingEnabled = cloneBool(value.ThinkingEnabled)
+	value.ThinkingBudgetTokens = cloneUint64(value.ThinkingBudgetTokens)
+	value.InterleavedThinking = cloneBool(value.InterleavedThinking)
 	return value
 }
 
@@ -659,8 +663,37 @@ func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
 	if overlay.MaxRetryDelayMS != nil {
 		result.MaxRetryDelayMS = cloneUint64(overlay.MaxRetryDelayMS)
 	}
+	if overlay.ReasoningSummary != nil {
+		result.ReasoningSummary = cloneString(overlay.ReasoningSummary)
+	}
+	if overlay.ReasoningEffort != "" {
+		result.ReasoningEffort = overlay.ReasoningEffort
+	}
+	if overlay.ServiceTier != "" {
+		result.ServiceTier = overlay.ServiceTier
+	}
+	if overlay.TextVerbosity != "" {
+		result.TextVerbosity = overlay.TextVerbosity
+	}
+	if overlay.ThinkingEnabled != nil {
+		result.ThinkingEnabled = cloneBool(overlay.ThinkingEnabled)
+	}
+	if overlay.ThinkingBudgetTokens != nil {
+		result.ThinkingBudgetTokens = cloneUint64(overlay.ThinkingBudgetTokens)
+	}
+	if overlay.ThinkingDisplay != "" {
+		result.ThinkingDisplay = overlay.ThinkingDisplay
+	}
+	if overlay.InterleavedThinking != nil {
+		result.InterleavedThinking = cloneBool(overlay.InterleavedThinking)
+	}
+	if overlay.AnthropicEffort != "" {
+		result.AnthropicEffort = overlay.AnthropicEffort
+	}
 	result.Metadata = mergeAnyMap(result.Metadata, overlay.Metadata)
-	result.Env = mergeStringMap(result.Env, overlay.Env)
+	// AgentSession supplies auth resolution as the overlay, while caller env is
+	// already in the base. Explicit request values have upstream precedence.
+	result.Env = mergeStringMap(overlay.Env, result.Env)
 	result.Extra = mergeAnyMap(result.Extra, overlay.Extra)
 	return result
 }
@@ -960,8 +993,20 @@ type StreamOptions struct {
 	WebsocketConnectTimeoutMS *uint64
 	MaxRetries                *uint32
 	MaxRetryDelayMS           *uint64
-	Metadata                  map[string]any
-	Env                       map[string]string
+	// The fields below are typed API-specific options from pi. Adapters consume
+	// only the options belonging to their dialect; AgentLoop remains unaware of
+	// vendor wire names.
+	ReasoningEffort      string
+	ReasoningSummary     *string
+	ServiceTier          string
+	TextVerbosity        string
+	ThinkingEnabled      *bool
+	ThinkingBudgetTokens *uint64
+	ThinkingDisplay      string
+	InterleavedThinking  *bool
+	AnthropicEffort      string
+	Metadata             map[string]any
+	Env                  map[string]string
 	// Extra is retained for source compatibility only. New portable options
 	// must have a typed field above; adapters must not treat Extra as a wire
 	// request escape hatch.
@@ -1080,6 +1125,38 @@ func (r Request) validate() error {
 	if r.stream.CacheRetention != "" && r.stream.CacheRetention != CacheRetentionNone && r.stream.CacheRetention != CacheRetentionShort && r.stream.CacheRetention != CacheRetentionLong {
 		return fmt.Errorf("%w: invalid cache retention", ErrInvalidRequest)
 	}
+	if r.stream.ReasoningSummary != nil {
+		switch *r.stream.ReasoningSummary {
+		case "", "auto", "detailed", "concise", "off", "on":
+		default:
+			return fmt.Errorf("%w: invalid reasoning summary", ErrInvalidRequest)
+		}
+	}
+	switch r.stream.ReasoningEffort {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("%w: invalid reasoning effort", ErrInvalidRequest)
+	}
+	switch r.stream.ServiceTier {
+	case "", "auto", "default", "flex", "priority":
+	default:
+		return fmt.Errorf("%w: invalid service tier", ErrInvalidRequest)
+	}
+	switch r.stream.TextVerbosity {
+	case "", "low", "medium", "high":
+	default:
+		return fmt.Errorf("%w: invalid text verbosity", ErrInvalidRequest)
+	}
+	switch r.stream.ThinkingDisplay {
+	case "", "summarized", "omitted":
+	default:
+		return fmt.Errorf("%w: invalid thinking display", ErrInvalidRequest)
+	}
+	switch r.stream.AnthropicEffort {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("%w: invalid Anthropic effort", ErrInvalidRequest)
+	}
 	for name, value := range r.stream.Headers {
 		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
 			return fmt.Errorf("%w: invalid stream header", ErrInvalidRequest)
@@ -1105,9 +1182,6 @@ func (r Request) validate() error {
 		if err := llm.ValidateConversationMessage(message); err != nil {
 			return fmt.Errorf("%w: message %d: %w", ErrInvalidRequest, index, err)
 		}
-	}
-	if err := validateToolResultCausality(r.messages); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidRequest, err)
 	}
 	seenTools := make(map[string]struct{}, len(r.tools))
 	for index, definition := range r.tools {
@@ -1137,147 +1211,6 @@ func (r Request) validate() error {
 		}
 	}
 	return nil
-}
-
-type pendingToolCall struct {
-	call         llm.ToolCallBlock
-	messageIndex int
-}
-
-type toolResultIdentity interface {
-	ToolCallID() string
-	ToolName() string
-}
-
-// validateToolResultCausality validates the conversation itself rather than
-// relying on an adapter to notice malformed replay incidentally. One
-// successful assistant tool-use turn introduces its calls in source order;
-// the immediately following tool results must consume that ordered queue.
-func validateToolResultCausality(messages []llm.ConversationMessage) error {
-	pending := make([]pendingToolCall, 0)
-	seenCalls := make(map[string]int)
-	seenResults := make(map[string]int)
-
-	for messageIndex, message := range messages {
-		switch message := message.(type) {
-		case llm.AssistantToolUseMessage:
-			if len(pending) != 0 {
-				return fmt.Errorf(
-					"message %d: assistant tool call arrived before result for call %q from message %d",
-					messageIndex,
-					pending[0].call.ID(),
-					pending[0].messageIndex,
-				)
-			}
-			for _, block := range message.Blocks() {
-				call, ok := block.(llm.ToolCallBlock)
-				if !ok {
-					continue
-				}
-				if firstIndex, duplicate := seenCalls[call.ID()]; duplicate {
-					return fmt.Errorf(
-						"message %d: duplicate tool call id %q first used by message %d",
-						messageIndex,
-						call.ID(),
-						firstIndex,
-					)
-				}
-				seenCalls[call.ID()] = messageIndex
-				pending = append(pending, pendingToolCall{call: call, messageIndex: messageIndex})
-			}
-
-		case llm.ToolResultMessage:
-			var err error
-			pending, err = consumePendingToolResult(messageIndex, message, pending, seenResults)
-			if err != nil {
-				return err
-			}
-
-		case llm.ToolResultContentMessage:
-			var err error
-			pending, err = consumePendingToolResult(messageIndex, message, pending, seenResults)
-			if err != nil {
-				return err
-			}
-
-		default:
-			if len(pending) != 0 {
-				return fmt.Errorf(
-					"message %d: %T arrived before result for call %q from message %d",
-					messageIndex,
-					message,
-					pending[0].call.ID(),
-					pending[0].messageIndex,
-				)
-			}
-		}
-	}
-
-	if len(pending) != 0 {
-		return fmt.Errorf(
-			"conversation ended before result for call %q from message %d",
-			pending[0].call.ID(),
-			pending[0].messageIndex,
-		)
-	}
-	return nil
-}
-
-func consumePendingToolResult(
-	messageIndex int,
-	message toolResultIdentity,
-	pending []pendingToolCall,
-	seenResults map[string]int,
-) ([]pendingToolCall, error) {
-	if firstIndex, duplicate := seenResults[message.ToolCallID()]; duplicate {
-		return pending, fmt.Errorf(
-			"message %d: duplicate tool result for call %q first supplied by message %d",
-			messageIndex,
-			message.ToolCallID(),
-			firstIndex,
-		)
-	}
-	if len(pending) == 0 {
-		return pending, fmt.Errorf(
-			"message %d: orphan tool result for call %q",
-			messageIndex,
-			message.ToolCallID(),
-		)
-	}
-
-	expected := pending[0]
-	if message.ToolCallID() != expected.call.ID() {
-		for _, later := range pending[1:] {
-			if message.ToolCallID() == later.call.ID() {
-				return pending, fmt.Errorf(
-					"message %d: out-of-order tool result for call %q; next call is %q",
-					messageIndex,
-					message.ToolCallID(),
-					expected.call.ID(),
-				)
-			}
-		}
-	}
-	if message.ToolCallID() != expected.call.ID() {
-		return pending, fmt.Errorf(
-			"message %d: %w: result call id %q, want %q",
-			messageIndex,
-			llm.ErrToolResultMismatch,
-			message.ToolCallID(),
-			expected.call.ID(),
-		)
-	}
-	if message.ToolName() != expected.call.Name() {
-		return pending, fmt.Errorf(
-			"message %d: %w: result tool name %q, want %q",
-			messageIndex,
-			llm.ErrToolResultMismatch,
-			message.ToolName(),
-			expected.call.Name(),
-		)
-	}
-	seenResults[message.ToolCallID()] = messageIndex
-	return pending[1:], nil
 }
 
 func (r Request) clone() Request {

@@ -53,8 +53,8 @@ type OpenAIResponsesConfig struct {
 	Client  HTTPDoer
 	Clock   Clock
 	// SystemRole selects the explicit Responses role for a non-empty system
-	// prompt. Zero selects "system"; reasoning-model assembly may select
-	// OpenAIResponsesDeveloperRole without guessing from a model ID.
+	// prompt. Zero selects "developer" for reasoning models whose compatibility
+	// contract permits it and "system" otherwise.
 	SystemRole OpenAIResponsesSystemRole
 
 	// Zero selects bounded production defaults. Negative values are invalid.
@@ -214,7 +214,11 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureConfiguration, err, "")
 	}
-	if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SupportsDeveloperRole != nil && !*compat.SupportsDeveloperRole {
+	compat := request.Model().Compat().OpenAIResponses
+	if p.systemRole == OpenAIResponsesSystemRoleDefault && request.Model().Reasoning() && (compat == nil || compat.SupportsDeveloperRole == nil || *compat.SupportsDeveloperRole) {
+		systemRole = "developer"
+	}
+	if compat != nil && compat.SupportsDeveloperRole != nil && !*compat.SupportsDeveloperRole {
 		systemRole = "system"
 	}
 	payload, err := encodeOpenAIResponsesRequest(request, systemRole)
@@ -225,6 +229,10 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
+	grammarProperties, err := responsesGrammarToolProperties(request)
+	if err != nil {
+		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
+	}
 	endpoint := p.endpoint
 	if baseURL := request.Model().BaseURL(); baseURL != "" {
 		endpoint, err = responsesEndpoint(baseURL)
@@ -232,7 +240,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 			return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 		}
 	}
-	streamContext, cancel := context.WithCancelCause(ctx)
+	streamContext, cancel, timeoutCancel := streamContextWithTimeout(ctx, options.TimeoutMS)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone {
 		format := "openai"
@@ -256,6 +264,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	return &openAIResponsesStream{
 		ctx:               streamContext,
 		cancel:            cancel,
+		timeoutCancel:     timeoutCancel,
 		endpoint:          endpoint,
 		apiKey:            requestAPIKey(request, p.apiKey),
 		client:            client,
@@ -269,6 +278,10 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		onResponse:        options.OnResponse,
 		onHeaders:         options.OnHeaders,
 		headerOverrides:   cloneHeaderOverrides(options.HeaderOverrides),
+		maxRetries:        valueOrZero32(options.MaxRetries),
+		maxRetryDelayMS:   cloneUint64(options.MaxRetryDelayMS),
+		serviceTier:       options.ServiceTier,
+		grammarProperties: grammarProperties,
 		configurationFail: p.configurationFail,
 		slots:             make(map[int]*responsesTextSlot),
 		reasoningSlots:    make(map[int]*responsesReasoningSlot),
@@ -278,6 +291,13 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		completedPhases:   make(map[int]string),
 		pendingReasoning:  make(map[int]*responsesCompletedReasoning),
 	}
+}
+
+func valueOrZero32(value *uint32) uint32 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (*OpenAIResponsesProvider) SupportsModel(model Model) bool {

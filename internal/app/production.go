@@ -44,12 +44,23 @@ type ProductionConfig struct {
 
 	OpenAIHTTPClient provider.HTTPDoer
 	OpenAIClock      provider.Clock
-	// OpenAIOAuthHTTPClient/BaseURL are test and embedding seams for OAuth
-	// token exchange. Empty values use a separately cloned no-redirect default
-	// HTTP client and the fixed auth.openai.com endpoint.
+	// Provider-specific clients fall back to OpenAIHTTPClient when omitted so
+	// existing embedders can keep one transport seam while tests can isolate
+	// dialects independently.
+	OpenAICodexHTTPClient provider.HTTPDoer
+	OpenAICodexClock      provider.Clock
+	AnthropicHTTPClient   provider.HTTPDoer
+	AnthropicClock        provider.Clock
+	// OpenAIOAuthHTTPClient/BaseURL configure the independent OpenAI Codex
+	// OAuth token service. Empty values use auth.openai.com.
 	OpenAIOAuthHTTPClient *http.Client
 	OpenAIOAuthBaseURL    string
 	OpenAIOAuthClock      func() time.Time
+	// Anthropic OAuth seams cover Claude Pro/Max token exchange. Login UI is
+	// outside production assembly, but stored credentials refresh here.
+	AnthropicOAuthHTTPClient *http.Client
+	AnthropicOAuthTokenURL   string
+	AnthropicOAuthClock      func() time.Time
 
 	SessionID         string
 	SessionNow        session.Clock
@@ -177,30 +188,23 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
 	}
 	snapshot := catalog.Snapshot()
-	authResolver, err := newProductionOpenAIAuthResolver(p.parsed, p.agentDir, catalog, p.ambientEnvironment, p.config)
+	router, err := newProductionProviderRouter(snapshot, p.config)
 	if err != nil {
 		return agentruntime.CreateResult{}, err
 	}
-	resolvedAuth, hasAuth, err := authResolver.resolve(ctx)
+	authResolver, err := newProductionProviderAuthResolver(p.agentDir, catalog, p.ambientEnvironment, p.config)
 	if err != nil {
 		return agentruntime.CreateResult{}, err
-	}
-	responses, err := provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{APIKey: resolvedAuth.APIKey, Client: p.config.OpenAIHTTPClient, Clock: p.config.OpenAIClock})
-	if err != nil {
-		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
-	}
-	completions, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{APIKey: resolvedAuth.APIKey, Client: p.config.OpenAIHTTPClient, Clock: p.config.OpenAIClock})
-	if err != nil {
-		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize OpenAI Chat Completions provider: %w", ErrInvalidProductionConfig, err)
-	}
-	router, err := provider.NewModelRouter([]provider.ProviderRegistration{{ID: openAIProviderID, Adapters: map[string]provider.Provider{
-		provider.OpenAIResponsesAPI: responses, provider.OpenAICompletionsAPI: completions,
-	}}})
-	if err != nil {
-		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize provider router: %w", ErrInvalidProductionConfig, err)
 	}
 	availability := modelcatalog.Availability{
-		HasConfiguredAuth: func(providerID string) bool { return strings.EqualFold(providerID, openAIProviderID) && hasAuth },
+		HasConfiguredAuth: func(providerID string) bool {
+			configured, checkErr := authResolver.check(context.Background(), providerID)
+			return checkErr == nil && configured
+		},
+		HasConfiguredModelAuth: func(candidate modelcatalog.Model) bool {
+			configured, checkErr := authResolver.checkModel(context.Background(), candidate)
+			return checkErr == nil && configured
+		},
 		SupportsRoute: func(candidate modelcatalog.Model) bool {
 			if catalog.ValidateRoute(candidate) != nil {
 				return false
@@ -224,7 +228,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	if p.parsed.modelID != "" {
 		resolved := modelcatalog.ResolveCLIModel(modelcatalog.CLIModelOptions{
 			Provider: p.parsed.providerID, Model: p.parsed.modelID, AllModels: snapshot.Models,
-			HasConfiguredAuth: availability.HasConfiguredAuth,
+			HasConfiguredAuth: availability.HasConfiguredAuth, HasConfiguredModelAuth: availability.HasConfiguredModelAuth,
 		})
 		if resolved.Warning != "" {
 			diagnostics = append(diagnostics, agentruntime.Diagnostic{Kind: agentruntime.DiagnosticWarning, Message: resolved.Warning})
@@ -237,6 +241,20 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		}
 		explicit = resolved.Model
 		explicitThinking = resolved.ThinkingLevel
+	}
+	if p.parsed.hasAPIKey && explicit != nil {
+		if err := authResolver.runtime.SetAPIKey(explicit.Provider, p.parsed.apiKey); err != nil {
+			return agentruntime.CreateResult{}, productionAuthError(err)
+		}
+	}
+	providersToCheck := snapshot.Providers
+	if explicit != nil {
+		providersToCheck = []string{explicit.Provider}
+	}
+	for _, providerID := range providersToCheck {
+		if _, err := authResolver.check(ctx, providerID); err != nil {
+			return agentruntime.CreateResult{}, productionAuthError(err)
+		}
 	}
 	availableModels := modelcatalog.FilterAvailableModels(snapshot.Models, availability)
 	scope := modelcatalog.ResolveModelScope(snapshot.Settings.EnabledModels, availableModels)
@@ -256,9 +274,9 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		CWD: cwd, AgentDir: p.agentDir, ModelRuntime: catalog, ResourceService: resources,
 		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...),
 	}
-	stream := provider.StreamOptions{SessionID: options.SessionManager.SessionID()}
-	if hasAuth {
-		stream.APIKey = resolvedAuth.APIKey
+	stream, err := productionProviderStreamOptions(snapshot.Settings, options.SessionManager.SessionID())
+	if err != nil {
+		return agentruntime.CreateResult{}, err
 	}
 	compactionEnabled := snapshot.Settings.Compaction.EnabledOrDefault()
 	retryPolicy, err := productionRetryPolicy(snapshot.Settings.Retry)
@@ -287,11 +305,21 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 			BranchSummaryReserveTokens: snapshot.Settings.BranchSummary.ReserveTokensOrDefault(), BranchSummaryReserveSet: true,
 			Retry: retryPolicy,
 			ResolveStreamOptions: func(turnCtx context.Context, selected provider.Model) (provider.StreamOptions, error) {
+				// SettingsManager is live in upstream: transport and provider retry/
+				// timeout values are read for every actual provider call, not frozen
+				// when the session is created. AgentSession applies later explicit
+				// turn/request overlays after this resolver.
+				turnStream, streamErr := productionProviderStreamOptions(catalog.Snapshot().Settings, "")
+				if streamErr != nil {
+					return provider.StreamOptions{}, streamErr
+				}
 				resolved, err := authResolver.requirePromptAccess(turnCtx, selected, p.docsDir)
 				if err != nil {
 					return provider.StreamOptions{}, err
 				}
-				return provider.StreamOptions{APIKey: resolved.APIKey}, nil
+				return provider.MergeStreamOptions(turnStream, provider.StreamOptions{
+					APIKey: resolved.APIKey, Headers: resolved.Headers, Env: productionProviderEnv(resolved.Env, p.ambientEnvironment),
+				}), nil
 			},
 			ResolveSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
 				return provider.NewContextSummarizerWithOptions(router, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
@@ -334,6 +362,34 @@ func productionRetryPolicy(settings modelcatalog.RetrySettings) (agent.RetryPoli
 	return agent.RetryPolicy{MaxAttempts: uint32(maxRetries) + 1, InitialDelay: time.Duration(baseDelayMS) * time.Millisecond}, nil
 }
 
+func productionProviderStreamOptions(settings modelcatalog.Settings, sessionID string) (provider.StreamOptions, error) {
+	httpIdleTimeoutMS := settings.HTTPIdleTimeoutMSOrDefault()
+	// Provider SDKs treat timeout=0 as immediate expiry; upstream maps the
+	// user-facing disabled value to max int32 milliseconds.
+	effectiveTimeoutMS := httpIdleTimeoutMS
+	if effectiveTimeoutMS == 0 {
+		effectiveTimeoutMS = uint64(1<<31 - 1)
+	}
+	if settings.Retry.Provider.TimeoutMS != nil {
+		effectiveTimeoutMS = *settings.Retry.Provider.TimeoutMS
+	}
+	options := provider.StreamOptions{SessionID: sessionID, Transport: settings.TransportOrDefault(), TimeoutMS: &effectiveTimeoutMS}
+	if settings.WebsocketConnectTimeoutMS != nil {
+		value := *settings.WebsocketConnectTimeoutMS
+		options.WebsocketConnectTimeoutMS = &value
+	}
+	if settings.Retry.Provider.MaxRetries != nil {
+		if *settings.Retry.Provider.MaxRetries > uint64(^uint32(0)) {
+			return provider.StreamOptions{}, fmt.Errorf("%w: retry.provider.maxRetries is too large", ErrInvalidProductionConfig)
+		}
+		value := uint32(*settings.Retry.Provider.MaxRetries)
+		options.MaxRetries = &value
+	}
+	maxRetryDelayMS := settings.Retry.Provider.MaxRetryDelayMSOrDefault()
+	options.MaxRetryDelayMS = &maxRetryDelayMS
+	return options, nil
+}
+
 func clockBeginningWith(first time.Time, subsequent session.Clock) session.Clock {
 	var delivered atomic.Bool
 	return func() time.Time {
@@ -344,122 +400,279 @@ func clockBeginningWith(first time.Time, subsequent session.Clock) session.Clock
 	}
 }
 
-func resolveOpenAIAPIKey(
-	ctx context.Context,
-	parsed options,
-	agentDir string,
-	modelConfig openAIModelConfig,
-	ambientEnvironment map[string]string,
-	config ProductionConfig,
-) (auth.OpenAIAuthResult, error) {
-	store, err := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
+func newProductionProviderRouter(snapshot modelcatalog.Snapshot, config ProductionConfig) (*provider.Router, error) {
+	codexClient := config.OpenAICodexHTTPClient
+	if codexClient == nil {
+		codexClient = config.OpenAIHTTPClient
+	}
+	codeClock := config.OpenAICodexClock
+	if codeClock == nil {
+		codeClock = config.OpenAIClock
+	}
+	anthropicClient := config.AnthropicHTTPClient
+	if anthropicClient == nil {
+		anthropicClient = config.OpenAIHTTPClient
+	}
+	anthropicClock := config.AnthropicClock
+	if anthropicClock == nil {
+		anthropicClock = config.OpenAIClock
+	}
+	responses, err := provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{Client: config.OpenAIHTTPClient, Clock: config.OpenAIClock})
 	if err != nil {
-		return auth.OpenAIAuthResult{}, fmt.Errorf("%w: initialize auth storage", ErrInvalidProductionConfig)
+		return nil, fmt.Errorf("%w: initialize OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
 	}
-	runtime := auth.NewRuntime(store)
-	if parsed.hasAPIKey {
-		if err := runtime.SetAPIKey(openAIProviderID, parsed.apiKey); err != nil {
-			return auth.OpenAIAuthResult{}, productionAuthError(err)
-		}
-	}
-	flow, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{HTTPClient: config.OpenAIOAuthHTTPClient, AuthBaseURL: config.OpenAIOAuthBaseURL, Clock: config.OpenAIOAuthClock})
+	completions, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{Client: config.OpenAIHTTPClient, Clock: config.OpenAIClock})
 	if err != nil {
-		return auth.OpenAIAuthResult{}, productionAuthError(err)
+		return nil, fmt.Errorf("%w: initialize OpenAI Chat Completions provider: %w", ErrInvalidProductionConfig, err)
 	}
-	resolved, err := auth.ResolveOpenAIAuth(ctx, runtime, nil, modelConfig.apiKey, ambientEnvironment, auth.OpenAIResolveOptions{OAuth: flow, Clock: config.OpenAIOAuthClock})
+	codex, err := provider.NewOpenAICodexResponsesProvider(provider.OpenAICodexResponsesConfig{Client: codexClient, Clock: codeClock})
 	if err != nil {
-		return auth.OpenAIAuthResult{}, productionAuthError(err)
+		return nil, fmt.Errorf("%w: initialize OpenAI Codex provider: %w", ErrInvalidProductionConfig, err)
 	}
-	key, err := validateResolvedAPIKey(resolved.APIKey, "resolved OpenAI API key")
+	anthropic, err := provider.NewAnthropicProvider(provider.AnthropicConfig{Client: anthropicClient, Clock: anthropicClock})
 	if err != nil {
-		return auth.OpenAIAuthResult{}, err
+		return nil, fmt.Errorf("%w: initialize Anthropic provider: %w", ErrInvalidProductionConfig, err)
 	}
-	resolved.APIKey = key
-	return resolved, nil
+	registrations := make([]provider.ProviderRegistration, 0, len(snapshot.Providers))
+	for _, providerID := range snapshot.Providers {
+		registrations = append(registrations, provider.ProviderRegistration{ID: providerID, Adapters: map[string]provider.Provider{
+			provider.OpenAIResponsesAPI: responses, provider.OpenAICompletionsAPI: completions,
+			provider.OpenAICodexResponsesAPI: codex, provider.AnthropicMessagesAPI: anthropic,
+		}})
+	}
+	router, err := provider.NewModelRouter(registrations)
+	if err != nil {
+		return nil, fmt.Errorf("%w: initialize provider router: %w", ErrInvalidProductionConfig, err)
+	}
+	return router, nil
 }
 
-type productionOpenAIAuthResolver struct {
+type productionProviderAuthResolver struct {
 	runtime            *auth.Runtime
-	configured         *string
+	catalog            *modelcatalog.Runtime
 	ambientEnvironment map[string]string
-	oauth              *auth.OpenAICodexOAuth
-	clock              func() time.Time
+	codexOAuth         *auth.OpenAICodexOAuth
+	codexClock         func() time.Time
+	anthropicOAuth     *auth.AnthropicOAuth
+	anthropicClock     func() time.Time
 }
 
-func newProductionOpenAIAuthResolver(
-	parsed options,
-	agentDir string,
-	catalog *modelcatalog.Runtime,
-	ambientEnvironment map[string]string,
-	config ProductionConfig,
-) (*productionOpenAIAuthResolver, error) {
+func newProductionProviderAuthResolver(agentDir string, catalog *modelcatalog.Runtime, ambientEnvironment map[string]string, config ProductionConfig) (*productionProviderAuthResolver, error) {
 	store, err := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
 	if err != nil {
 		return nil, fmt.Errorf("%w: initialize auth storage", ErrInvalidProductionConfig)
 	}
-	authRuntime := auth.NewRuntime(store)
-	// Match main.ts: install a CLI key only after CLI model admission. A key
-	// without a model becomes a blocking runtime diagnostic and must not make
-	// an automatic/default model available.
-	if parsed.hasAPIKey && parsed.modelID != "" {
-		if err := authRuntime.SetAPIKey(openAIProviderID, parsed.apiKey); err != nil {
-			return nil, productionAuthError(err)
-		}
-	}
-	flow, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{
+	codexOAuth, err := auth.NewOpenAICodexOAuth(auth.OpenAICodexOAuthConfig{
 		HTTPClient: config.OpenAIOAuthHTTPClient, AuthBaseURL: config.OpenAIOAuthBaseURL, Clock: config.OpenAIOAuthClock,
 	})
 	if err != nil {
 		return nil, productionAuthError(err)
 	}
-	configured, _ := catalog.Provider(openAIProviderID)
-	var configuredKey *string
-	if configured.ConfiguredAPIKey != nil {
-		copy := *configured.ConfiguredAPIKey
-		configuredKey = &copy
+	anthropicOAuth, err := auth.NewAnthropicOAuth(auth.AnthropicOAuthConfig{
+		HTTPClient: config.AnthropicOAuthHTTPClient, TokenURL: config.AnthropicOAuthTokenURL,
+		Clock: config.AnthropicOAuthClock, CallbackHost: ambientEnvironment["PI_OAUTH_CALLBACK_HOST"],
+	})
+	if err != nil {
+		return nil, productionAuthError(err)
 	}
-	return &productionOpenAIAuthResolver{
-		runtime: authRuntime, configured: configuredKey, ambientEnvironment: cloneStringMap(ambientEnvironment),
-		oauth: flow, clock: config.OpenAIOAuthClock,
+	return &productionProviderAuthResolver{
+		runtime: auth.NewRuntime(store), catalog: catalog, ambientEnvironment: cloneStringMap(ambientEnvironment),
+		codexOAuth: codexOAuth, codexClock: config.OpenAIOAuthClock,
+		anthropicOAuth: anthropicOAuth, anthropicClock: config.AnthropicOAuthClock,
 	}, nil
 }
 
-func (r *productionOpenAIAuthResolver) resolve(ctx context.Context) (auth.OpenAIAuthResult, bool, error) {
-	resolved, err := auth.ResolveOpenAIAuth(ctx, r.runtime, nil, r.configured, r.ambientEnvironment, auth.OpenAIResolveOptions{
-		OAuth: r.oauth, Clock: r.clock,
-	})
-	if err != nil {
-		var typed *auth.Error
-		if auth.IsKind(err, auth.KindNotConfigured) && errors.As(err, &typed) && typed.Operation == "resolve OpenAI API key" {
-			return auth.OpenAIAuthResult{}, false, nil
-		}
-		return auth.OpenAIAuthResult{}, false, productionAuthError(err)
-	}
-	key, err := validateResolvedAPIKey(resolved.APIKey, "resolved OpenAI API key")
-	if err != nil {
-		return auth.OpenAIAuthResult{}, false, err
-	}
-	resolved.APIKey = key
-	return resolved, true, nil
+func (r *productionProviderAuthResolver) providerConfig(providerID string) modelcatalog.ProviderConfig {
+	configured, _ := r.catalog.Provider(providerID)
+	return configured
 }
 
-func (r *productionOpenAIAuthResolver) requirePromptAccess(ctx context.Context, selected provider.Model, docsDir string) (auth.OpenAIAuthResult, error) {
-	resolved, available, err := r.resolve(ctx)
+func (r *productionProviderAuthResolver) check(ctx context.Context, providerID string) (bool, error) {
+	credential, exists, err := r.runtime.Read(ctx, providerID)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		switch credential.Type {
+		case "api_key":
+			return true, nil
+		case "oauth":
+			return strings.EqualFold(providerID, auth.OpenAICodexProviderID) || strings.EqualFold(providerID, auth.AnthropicProviderID), nil
+		default:
+			return false, &auth.Error{Kind: auth.KindUnsupported, Operation: "check stored credential", Provider: providerID, Cause: auth.ErrCredentialType}
+		}
+	}
+	configured := r.providerConfig(providerID)
+	if configured.ConfiguredAPIKey != nil {
+		return auth.ValueConfigured(*configured.ConfiguredAPIKey, nil, r.ambientEnvironment), nil
+	}
+	switch {
+	case strings.EqualFold(providerID, auth.OpenAIProviderID):
+		return strings.TrimSpace(r.ambientEnvironment[openAIKeyEnvironment]) != "", nil
+	case strings.EqualFold(providerID, auth.AnthropicProviderID):
+		for _, name := range []string{auth.AnthropicAuthTokenEnvironment, auth.AnthropicOAuthTokenEnvironment, auth.AnthropicAPIKeyEnvironment} {
+			if strings.TrimSpace(r.ambientEnvironment[name]) != "" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *productionProviderAuthResolver) checkModel(ctx context.Context, candidate modelcatalog.Model) (bool, error) {
+	configured, err := r.check(ctx, candidate.Provider)
+	if err != nil || configured {
+		return configured, err
+	}
+	providerConfig := r.providerConfig(candidate.Provider)
+	if providerConfig.AuthHeader != nil && *providerConfig.AuthHeader {
+		return false, nil
+	}
+	selected, err := candidate.Ref()
+	if err != nil {
+		return false, err
+	}
+	providerHeaders, err := auth.ResolveHeaders(ctx, providerConfig.Headers, "provider "+candidate.Provider, nil, r.ambientEnvironment)
+	if err != nil {
+		return false, err
+	}
+	modelHeaders, err := auth.ResolveHeaders(ctx, selected.Headers(), "model "+candidate.Provider+"/"+candidate.ID, nil, r.ambientEnvironment)
+	if err != nil {
+		return false, err
+	}
+	return authHeadersAuthorizeModel(candidate.API, mergeProductionHeaders(providerHeaders, modelHeaders)), nil
+}
+
+func (r *productionProviderAuthResolver) resolve(ctx context.Context, selected provider.Model) (auth.OpenAIAuthResult, bool, error) {
+	configured := r.providerConfig(selected.Provider())
+	var result auth.OpenAIAuthResult
+	var err error
+	switch {
+	case strings.EqualFold(selected.Provider(), auth.OpenAIProviderID):
+		result, err = auth.ResolveOpenAIAuth(ctx, r.runtime, nil, configured.ConfiguredAPIKey, r.ambientEnvironment, auth.OpenAIResolveOptions{})
+	case strings.EqualFold(selected.Provider(), auth.OpenAICodexProviderID):
+		result, err = auth.ResolveOpenAICodexAuth(ctx, r.runtime, nil, configured.ConfiguredAPIKey, r.ambientEnvironment, auth.OpenAIResolveOptions{OAuth: r.codexOAuth, Clock: r.codexClock})
+	case strings.EqualFold(selected.Provider(), auth.AnthropicProviderID):
+		result, err = auth.ResolveAnthropicAuth(ctx, r.runtime, nil, configured.ConfiguredAPIKey, r.ambientEnvironment, auth.AnthropicResolveOptions{OAuth: r.anthropicOAuth, Clock: r.anthropicClock})
+	default:
+		result, err = auth.ResolveProviderAPIKey(ctx, r.runtime, selected.Provider(), nil, configured.ConfiguredAPIKey, r.ambientEnvironment)
+	}
+	if err != nil {
+		var typed *auth.Error
+		if auth.IsKind(err, auth.KindNotConfigured) && errors.As(err, &typed) && isMissingProviderCredentialOperation(typed.Operation) {
+			// pi's model registry still resolves provider/model headers when the
+			// provider credential resolver has no API key. This is required for
+			// gateways whose Authorization (or cf-aig-authorization) header owns
+			// authentication independently of an SDK-style apiKey.
+			result = auth.OpenAIAuthResult{}
+			err = nil
+		} else {
+			return auth.OpenAIAuthResult{}, false, productionAuthError(err)
+		}
+	}
+	if result.APIKey != "" {
+		key, validationErr := validateResolvedAPIKey(result.APIKey, "resolved "+selected.Provider()+" API key")
+		if validationErr != nil {
+			return auth.OpenAIAuthResult{}, false, validationErr
+		}
+		result.APIKey = key
+	}
+	providerHeaders, headerErr := auth.ResolveHeaders(ctx, configured.Headers, "provider "+selected.Provider(), result.Env, r.ambientEnvironment)
+	if headerErr != nil {
+		return auth.OpenAIAuthResult{}, false, productionAuthError(headerErr)
+	}
+	result.Headers = mergeProductionHeaders(result.Headers, providerHeaders)
+	if configured.AuthHeader != nil && *configured.AuthHeader {
+		if result.APIKey == "" {
+			return auth.OpenAIAuthResult{}, false, productionAuthError(&auth.Error{Kind: auth.KindNotConfigured, Operation: "resolve authHeader API key", Provider: selected.Provider()})
+		}
+		result.Headers = mergeProductionHeaders(result.Headers, map[string]string{"Authorization": "Bearer " + result.APIKey})
+	}
+	modelHeaders, headerErr := auth.ResolveHeaders(ctx, selected.Headers(), "model "+selected.Provider()+"/"+selected.ID(), result.Env, r.ambientEnvironment)
+	if headerErr != nil {
+		return auth.OpenAIAuthResult{}, false, productionAuthError(headerErr)
+	}
+	result.Headers = mergeProductionHeaders(result.Headers, modelHeaders)
+	if result.APIKey == "" && !authHeadersAuthorizeModel(selected.API(), result.Headers) {
+		return auth.OpenAIAuthResult{}, false, nil
+	}
+	return result, true, nil
+}
+
+func isMissingProviderCredentialOperation(operation string) bool {
+	switch operation {
+	case "resolve OpenAI API key", "resolve OpenAI Codex credential", "resolve Anthropic credential", "resolve provider API key":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeProductionHeaders(groups ...map[string]string) map[string]string {
+	result := map[string]string{}
+	for _, group := range groups {
+		for name, value := range group {
+			for existing := range result {
+				if strings.EqualFold(existing, name) {
+					delete(result, existing)
+				}
+			}
+			result[name] = value
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func authHeadersAuthorizeModel(api string, headers map[string]string) bool {
+	for name, value := range headers {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		switch api {
+		case modelcatalog.AnthropicMessagesAPI:
+			if strings.EqualFold(name, "authorization") || strings.EqualFold(name, "x-api-key") || strings.EqualFold(name, "cf-aig-authorization") {
+				return true
+			}
+		case modelcatalog.OpenAIResponsesAPI, modelcatalog.OpenAICompletionsAPI:
+			if strings.EqualFold(name, "authorization") || strings.EqualFold(name, "cf-aig-authorization") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func productionProviderEnv(authEnv, ambient map[string]string) map[string]string {
+	value := ambient["PI_CACHE_RETENTION"]
+	if scoped := authEnv["PI_CACHE_RETENTION"]; scoped != "" {
+		value = scoped
+	}
+	if value == "" {
+		return nil
+	}
+	return map[string]string{"PI_CACHE_RETENTION": value}
+}
+
+func (r *productionProviderAuthResolver) requirePromptAccess(ctx context.Context, selected provider.Model, docsDir string) (auth.OpenAIAuthResult, error) {
+	resolved, available, err := r.resolve(ctx, selected)
 	if err != nil {
 		return auth.OpenAIAuthResult{}, err
 	}
-	if !strings.EqualFold(selected.Provider(), openAIProviderID) || !available {
+	if !available {
 		return auth.OpenAIAuthResult{}, &agent.ModelAccessError{Message: agentruntime.FormatNoAPIKeyFoundMessage(selected.Provider(), docsDir)}
 	}
 	return resolved, nil
 }
 
-func (r *productionOpenAIAuthResolver) requireSelectionAccess(ctx context.Context, selected provider.Model) (auth.OpenAIAuthResult, error) {
-	resolved, available, err := r.resolve(ctx)
+func (r *productionProviderAuthResolver) requireSelectionAccess(ctx context.Context, selected provider.Model) (auth.OpenAIAuthResult, error) {
+	resolved, available, err := r.resolve(ctx, selected)
 	if err != nil {
 		return auth.OpenAIAuthResult{}, err
 	}
-	if !strings.EqualFold(selected.Provider(), openAIProviderID) || !available {
+	if !available {
 		return auth.OpenAIAuthResult{}, &agent.ModelAccessError{Message: "No API key for " + selected.Provider() + "/" + selected.ID()}
 	}
 	return resolved, nil
@@ -470,27 +683,24 @@ func (r *productionOpenAIAuthResolver) requireSelectionAccess(ctx context.Contex
 func productionAuthError(err error) error {
 	var typed *auth.Error
 	_ = errors.As(err, &typed)
-	description := "OpenAI API key"
+	providerID := "provider"
+	if typed != nil && typed.Provider != "" {
+		providerID = typed.Provider
+	}
+	description := providerID + " credential"
 	if typed != nil && strings.Contains(typed.Operation, "stored") {
-		description = "stored OpenAI API key"
+		description = "stored " + providerID + " credential"
 	} else if typed != nil && strings.Contains(typed.Operation, "configured") {
-		description = "configured OpenAI API key"
+		description = "configured " + providerID + " credential"
 	}
 	switch {
 	case errors.Is(err, auth.ErrCredentialType):
-		return fmt.Errorf("%w: auth.json OpenAI credential type is not migrated", ErrUnsupportedProductionValue)
-	case errors.Is(err, auth.ErrCommandBacked):
-		return fmt.Errorf("%w: command-backed %s is not migrated", ErrUnsupportedProductionValue, description)
+		return fmt.Errorf("%w: auth.json credential type is unsupported for %s", ErrUnsupportedProductionValue, providerID)
+	case errors.Is(err, auth.ErrCommandFailed):
+		return fmt.Errorf("%w: cannot resolve command-backed %s", ErrInvalidProductionConfig, description)
 	case errors.Is(err, auth.ErrPersistentAuthUnavailable):
 		return fmt.Errorf("%w: persistent auth storage is unavailable on this platform", ErrUnsupportedProductionValue)
 	case auth.IsKind(err, auth.KindNotConfigured):
-		if typed != nil && typed.Operation == "resolve OpenAI API key" {
-			return fmt.Errorf(
-				"%w: OpenAI API key is not configured by --api-key, auth.json, models.json, or %s",
-				ErrInvalidProductionConfig,
-				openAIKeyEnvironment,
-			)
-		}
 		return fmt.Errorf("%w: %s references missing environment variable", ErrInvalidProductionConfig, description)
 	case auth.IsKind(err, auth.KindPermission):
 		return fmt.Errorf("%w: auth.json credential file permissions are unsafe", ErrInvalidProductionConfig)
@@ -498,6 +708,10 @@ func productionAuthError(err error) error {
 		return fmt.Errorf("%w: auth.json is malformed", ErrInvalidProductionConfig)
 	case auth.IsKind(err, auth.KindCancelled):
 		return fmt.Errorf("%w: resolve %s cancelled", ErrInvalidProductionConfig, description)
+	case auth.IsKind(err, auth.KindTimeout):
+		return fmt.Errorf("%w: resolve %s timed out", ErrInvalidProductionConfig, description)
+	case auth.IsKind(err, auth.KindOAuth):
+		return fmt.Errorf("%w: OAuth failed for %s", ErrInvalidProductionConfig, providerID)
 	default:
 		return fmt.Errorf("%w: cannot resolve %s", ErrInvalidProductionConfig, description)
 	}

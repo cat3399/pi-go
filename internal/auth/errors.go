@@ -9,7 +9,9 @@ import (
 
 var (
 	// ErrCommandBacked marks the intentionally disabled shell-command form.
+	// Deprecated: command-backed values are supported for pi compatibility.
 	ErrCommandBacked = errors.New("command-backed auth value is disabled")
+	ErrCommandFailed = errors.New("command-backed auth value could not be resolved")
 	// ErrCredentialType marks a selected stored credential that the API-key
 	// subset cannot consume. It must not fall through to a lower source.
 	ErrCredentialType = errors.New("stored credential type is unsupported")

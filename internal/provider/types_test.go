@@ -2,7 +2,6 @@ package provider_test
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -143,7 +142,7 @@ func TestRequestValidatesAndCopiesConversation(t *testing.T) {
 	}
 }
 
-func TestRequestValidatesToolResultCausality(t *testing.T) {
+func TestRequestAcceptsImportedToolHistoryForAdapterRepair(t *testing.T) {
 	t.Parallel()
 
 	model := mustModel(t)
@@ -168,23 +167,22 @@ func TestRequestValidatesToolResultCausality(t *testing.T) {
 	tests := []struct {
 		name     string
 		messages []llm.ConversationMessage
-		contains string
 	}{
-		{name: "orphan", messages: []llm.ConversationMessage{firstResult}, contains: "orphan tool result"},
-		{name: "out of order", messages: []llm.ConversationMessage{multiple, secondResult, firstResult}, contains: "out-of-order tool result"},
-		{name: "id mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongID}, contains: "does not match tool call"},
-		{name: "name mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongName}, contains: "does not match tool call"},
-		{name: "duplicate result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), firstResult, firstResult}, contains: "duplicate tool result"},
-		{name: "missing result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall)}, contains: "ended before result"},
-		{name: "interrupted results", messages: []llm.ConversationMessage{multiple, firstResult, mustUser(t, "continue")}, contains: "arrived before result"},
-		{name: "failed assistant creates no call", messages: []llm.ConversationMessage{failure, firstResult}, contains: "orphan tool result"},
+		{name: "orphan", messages: []llm.ConversationMessage{firstResult}},
+		{name: "out of order", messages: []llm.ConversationMessage{multiple, secondResult, firstResult}},
+		{name: "id mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongID}},
+		{name: "name mismatch", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), wrongName}},
+		{name: "duplicate result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall), firstResult, firstResult}},
+		{name: "missing result", messages: []llm.ConversationMessage{mustToolUseMessage(t, firstCall)}},
+		{name: "interrupted results", messages: []llm.ConversationMessage{multiple, firstResult, mustUser(t, "continue")}},
+		{name: "failed assistant creates no call", messages: []llm.ConversationMessage{failure, firstResult}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := provider.NewRequest(model, "", test.messages)
-			if !errors.Is(err, provider.ErrInvalidRequest) || !strings.Contains(err.Error(), test.contains) {
-				t.Fatalf("NewRequest() error = %v, want ErrInvalidRequest containing %q", err, test.contains)
+			request, err := provider.NewRequest(model, "", test.messages)
+			if err != nil || len(request.Messages()) != len(test.messages) {
+				t.Fatalf("NewRequest() = %#v, %v; imported history must reach adapter repair", request, err)
 			}
 		})
 	}

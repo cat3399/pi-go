@@ -166,10 +166,10 @@ func parseOAuthCredential(raw json.RawMessage, provider string) (Credential, err
 	}}, nil
 }
 
-func encodeOAuthCredential(value OAuthCredential) (json.RawMessage, error) {
+func encodeOAuthCredential(value OAuthCredential, provider string) (json.RawMessage, error) {
 	if !validOAuthText(value.Access) || !validOAuthText(value.Refresh) || value.Expires <= 0 ||
 		(value.AccountID != "" && !validOAuthText(value.AccountID)) {
-		return nil, failure(KindInvalid, "set OAuth credential", "openai", nil)
+		return nil, failure(KindInvalid, "set OAuth credential", provider, nil)
 	}
 	root := make(map[string]json.RawMessage, len(value.Extra)+5)
 	for key, raw := range value.Extra {
@@ -177,7 +177,7 @@ func encodeOAuthCredential(value OAuthCredential) (json.RawMessage, error) {
 			continue
 		}
 		if err := validateRaw(raw); err != nil {
-			return nil, failure(KindInvalid, "set OAuth credential", "openai", err)
+			return nil, failure(KindInvalid, "set OAuth credential", provider, err)
 		}
 		root[key] = append(json.RawMessage(nil), raw...)
 	}

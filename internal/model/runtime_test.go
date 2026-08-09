@@ -1,13 +1,16 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -197,8 +200,237 @@ func TestRetrySettingsDefaultsExplicitZerosAndFieldLevelProjectMerge(t *testing.
 	}
 }
 
+func TestProviderTransportSettingsParseMergeCloneAndPersistPresence(t *testing.T) {
+	if got := (Settings{}).TransportOrDefault(); got != provider.TransportAuto {
+		t.Fatalf("default transport = %q", got)
+	}
+	if got := (Settings{}).HTTPIdleTimeoutMSOrDefault(); got != 300_000 {
+		t.Fatalf("default httpIdleTimeoutMs = %d", got)
+	}
+	if got := (ProviderRetrySettings{}).MaxRetryDelayMSOrDefault(); got != 60_000 {
+		t.Fatalf("default provider maxRetryDelayMs = %d", got)
+	}
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"transport":"websocket","httpIdleTimeoutMs":111,"websocketConnectTimeoutMs":222,"retry":{"provider":{"timeoutMs":333,"maxRetries":4,"maxRetryDelayMs":555}}}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"transport":"sse","httpIdleTimeoutMs":0,"retry":{"provider":{"maxRetries":0}}}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings
+	if settings.Transport != provider.TransportSSE || settings.HTTPIdleTimeoutMS == nil || *settings.HTTPIdleTimeoutMS != 0 ||
+		settings.WebsocketConnectTimeoutMS == nil || *settings.WebsocketConnectTimeoutMS != 222 ||
+		settings.Retry.Provider.TimeoutMS != nil || settings.Retry.Provider.MaxRetries == nil || *settings.Retry.Provider.MaxRetries != 0 ||
+		settings.Retry.Provider.MaxRetryDelayMS != nil {
+		t.Fatalf("merged provider transport settings = %#v", settings)
+	}
+	// Snapshot pointers are defensive clones.
+	*settings.HTTPIdleTimeoutMS = 999
+	*settings.Retry.Provider.MaxRetries = 999
+	again := runtime.Snapshot().Settings
+	if *again.HTTPIdleTimeoutMS != 0 || *again.Retry.Provider.MaxRetries != 0 {
+		t.Fatalf("snapshot retained caller pointers = %#v", again)
+	}
+	zero := uint64(0)
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.Transport = provider.TransportWebsocketCached
+		settings.HTTPIdleTimeoutMS = &zero
+		settings.WebsocketConnectTimeoutMS = &zero
+		settings.Retry.Provider.TimeoutMS = &zero
+		settings.Retry.Provider.MaxRetries = &zero
+		settings.Retry.Provider.MaxRetryDelayMS = &zero
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	retry := root["retry"].(map[string]any)["provider"].(map[string]any)
+	if root["transport"] != string(provider.TransportWebsocketCached) || root["httpIdleTimeoutMs"] != float64(0) || root["websocketConnectTimeoutMs"] != float64(0) ||
+		retry["timeoutMs"] != float64(0) || retry["maxRetries"] != float64(0) || retry["maxRetryDelayMs"] != float64(0) {
+		t.Fatalf("persisted provider transport settings = %#v", root)
+	}
+}
+
+func TestProviderTransportSettingsRejectNullNegativeAndWrongTypes(t *testing.T) {
+	for _, settings := range []string{
+		`{"transport":null}`,
+		`{"transport":""}`,
+		`{"transport":"http"}`,
+		`{"transport":true}`,
+		`{"httpIdleTimeoutMs":null}`,
+		`{"httpIdleTimeoutMs":-1}`,
+		`{"websocketConnectTimeoutMs":"1"}`,
+		`{"retry":[]}`,
+		`{"retry":{"provider":"default"}}`,
+		`{"retry":{"provider":{"timeoutMs":null}}}`,
+		`{"retry":{"provider":{"maxRetries":-1}}}`,
+		`{"retry":{"provider":{"maxRetryDelayMs":"1"}}}`,
+	} {
+		if _, _, err := newTestRuntimeNoFatal(t, "", settings, false); err == nil {
+			t.Fatalf("invalid provider transport settings accepted: %s", settings)
+		}
+	}
+}
+
+func TestTransportSettingsMigrateLegacyWebsocketsExactly(t *testing.T) {
+	for _, testCase := range []struct {
+		name, settings string
+		want           provider.Transport
+		keepLegacy     bool
+	}{
+		{name: "legacy false selects sse", settings: `{"websockets":false,"future":1}`, want: provider.TransportSSE},
+		{name: "legacy true selects websocket", settings: `{"websockets":true}`, want: provider.TransportWebsocket},
+		{name: "explicit transport wins", settings: `{"transport":"auto","websockets":false}`, want: provider.TransportAuto, keepLegacy: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, agentDir, _ := newTestRuntime(t, "", testCase.settings, false)
+			if got := runtime.Snapshot().Settings.TransportOrDefault(); got != testCase.want {
+				t.Fatalf("transport = %q, want %q", got, testCase.want)
+			}
+			if err := runtime.SetGlobalSettings(context.Background(), func(*Settings) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var root map[string]json.RawMessage
+			if err := json.Unmarshal(data, &root); err != nil {
+				t.Fatal(err)
+			}
+			_, hasLegacy := root["websockets"]
+			if hasLegacy != testCase.keepLegacy || string(root["transport"]) != fmt.Sprintf("%q", testCase.want) {
+				t.Fatalf("persisted migration = %s", data)
+			}
+		})
+	}
+}
+
+func TestRetrySettingsPreserveAbsentObjectAndNullOverlayStates(t *testing.T) {
+	const global = `{"retry":{"enabled":false,"maxRetries":7,"baseDelayMs":250,"provider":{"timeoutMs":11,"maxRetries":2,"maxRetryDelayMs":33}}}`
+	for _, testCase := range []struct {
+		name, global, project         string
+		wantEnabled                   bool
+		wantMaxRetries, wantBaseDelay uint64
+		wantTimeout, wantProviderMax  *uint64
+		wantProviderDelay             uint64
+	}{
+		{name: "retry absent keeps global", project: `{}`, wantMaxRetries: 7, wantBaseDelay: 250, wantTimeout: uint64TestPointer(11), wantProviderMax: uint64TestPointer(2), wantProviderDelay: 33},
+		{name: "retry empty object merges", project: `{"retry":{}}`, wantMaxRetries: 7, wantBaseDelay: 250, wantTimeout: uint64TestPointer(11), wantProviderMax: uint64TestPointer(2), wantProviderDelay: 33},
+		{name: "retry null clears global", project: `{"retry":null}`, wantEnabled: true, wantMaxRetries: 3, wantBaseDelay: 2_000, wantProviderDelay: 60_000},
+		{name: "provider null clears provider", project: `{"retry":{"provider":null}}`, wantMaxRetries: 7, wantBaseDelay: 250, wantProviderDelay: 60_000},
+		{name: "provider empty object replaces provider", project: `{"retry":{"provider":{}}}`, wantMaxRetries: 7, wantBaseDelay: 250, wantProviderDelay: 60_000},
+		{name: "provider object replaces by field", project: `{"retry":{"provider":{"maxRetries":0}}}`, wantMaxRetries: 7, wantBaseDelay: 250, wantProviderMax: uint64TestPointer(0), wantProviderDelay: 60_000},
+		{name: "project object replaces global null", global: `{"retry":null}`, project: `{"retry":{"maxRetries":0}}`, wantEnabled: true, wantMaxRetries: 0, wantBaseDelay: 2_000, wantProviderDelay: 60_000},
+		{name: "project empty keeps global provider null", global: `{"retry":{"enabled":false,"provider":null}}`, project: `{"retry":{}}`, wantMaxRetries: 3, wantBaseDelay: 2_000, wantProviderDelay: 60_000},
+		{name: "project null over global absence", global: `{}`, project: `{"retry":null}`, wantEnabled: true, wantMaxRetries: 3, wantBaseDelay: 2_000, wantProviderDelay: 60_000},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			agentDir, cwd := t.TempDir(), t.TempDir()
+			globalSettings := testCase.global
+			if globalSettings == "" {
+				globalSettings = global
+			}
+			writeFile(t, filepath.Join(agentDir, "settings.json"), globalSettings)
+			writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), testCase.project)
+			runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := runtime.Snapshot().Settings.Retry
+			if got.EnabledOrDefault() != testCase.wantEnabled || got.MaxRetriesOrDefault() != testCase.wantMaxRetries ||
+				got.BaseDelayMSOrDefault() != testCase.wantBaseDelay || !reflect.DeepEqual(got.Provider.TimeoutMS, testCase.wantTimeout) ||
+				!reflect.DeepEqual(got.Provider.MaxRetries, testCase.wantProviderMax) || got.Provider.MaxRetryDelayMSOrDefault() != testCase.wantProviderDelay {
+				t.Fatalf("effective retry = %#v", got)
+			}
+		})
+	}
+}
+
+func TestRetryNullStatesSurviveUnrelatedGlobalPersistence(t *testing.T) {
+	for _, testCase := range []struct {
+		name, settings string
+		providerNull   bool
+	}{
+		{name: "top-level null", settings: `{"retry":null,"future":true}`},
+		{name: "nested provider null", settings: `{"retry":{"enabled":false,"provider":null,"future":true}}`, providerNull: true},
+		{name: "empty object", settings: `{"retry":{},"future":true}`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, agentDir, _ := newTestRuntime(t, "", testCase.settings, false)
+			if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+				settings.DefaultModel = "persist-only"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var root map[string]json.RawMessage
+			if err := json.Unmarshal(data, &root); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.settings == `{"retry":null,"future":true}` {
+				if string(root["retry"]) != "null" {
+					t.Fatalf("top-level null lost: %s", data)
+				}
+				return
+			}
+			var retry map[string]json.RawMessage
+			if err := json.Unmarshal(root["retry"], &retry); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.providerNull && string(retry["provider"]) != "null" {
+				t.Fatalf("provider null lost: %s", data)
+			}
+			if !testCase.providerNull && len(retry) != 0 {
+				t.Fatalf("empty retry object lost: %s", data)
+			}
+		})
+	}
+}
+
+func uint64TestPointer(value uint64) *uint64 { return &value }
+
+func TestProviderRetryMigratesLegacyMaxDelayWithoutOverridingNestedValue(t *testing.T) {
+	for _, testCase := range []struct {
+		name, settings string
+		want           uint64
+	}{
+		{name: "moves legacy value", settings: `{"retry":{"maxDelayMs":1234}}`, want: 1234},
+		{name: "nested value wins", settings: `{"retry":{"maxDelayMs":1234,"provider":{"maxRetryDelayMs":5678}}}`, want: 5678},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runtime, agentDir, _ := newTestRuntime(t, "", testCase.settings, false)
+			value := runtime.Snapshot().Settings.Retry.Provider.MaxRetryDelayMS
+			if value == nil || *value != testCase.want {
+				t.Fatalf("migrated max retry delay = %#v, want %d", value, testCase.want)
+			}
+			if err := runtime.SetGlobalSettings(context.Background(), func(*Settings) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte(`"maxDelayMs"`)) || !bytes.Contains(data, []byte(`"maxRetryDelayMs"`)) {
+				t.Fatalf("persisted migration = %s", data)
+			}
+		})
+	}
+}
+
 func TestSetGlobalSettingsPreservesUnportedRetryProviderFields(t *testing.T) {
-	runtime, agentDir, _ := newTestRuntime(t, "", `{"retry":{"enabled":true,"provider":{"maxRetries":9},"future":true}}`, false)
+	runtime, agentDir, _ := newTestRuntime(t, "", `{"retry":{"enabled":true,"provider":{"maxRetries":9,"futureProvider":true},"future":true}}`, false)
 	disabled, zero := false, uint64(0)
 	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
 		settings.Retry.Enabled = &disabled
@@ -219,7 +451,7 @@ func TestSetGlobalSettingsPreservesUnportedRetryProviderFields(t *testing.T) {
 	retry := root["retry"].(map[string]any)
 	providerSettings := retry["provider"].(map[string]any)
 	if retry["enabled"] != false || retry["maxRetries"] != float64(0) || retry["baseDelayMs"] != float64(0) ||
-		retry["future"] != true || providerSettings["maxRetries"] != float64(9) {
+		retry["future"] != true || providerSettings["maxRetries"] != float64(9) || providerSettings["futureProvider"] != true {
 		t.Fatalf("persisted retry = %#v", retry)
 	}
 }
@@ -254,7 +486,13 @@ func TestSetGlobalSettingsReplacesNullOptionalObjects(t *testing.T) {
 }
 
 func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
-	model := builtinOpenAIModel(DefaultOpenAIModel)
+	var model Model
+	for _, candidate := range builtinModels() {
+		if candidate.Provider == OpenAIProviderID && candidate.ID == DefaultOpenAIModel {
+			model = candidate
+			break
+		}
+	}
 	if model.Provider != OpenAIProviderID || model.ID != "gpt-5.5" || model.Name != "GPT-5.5" ||
 		model.API != OpenAIResponsesAPI || model.BaseURL != "https://api.openai.com/v1" || !model.Reasoning ||
 		model.ContextWindow != 272_000 || model.MaxTokens != 128_000 {
@@ -278,6 +516,64 @@ func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
 	}
 	if _, err := model.Ref(); err != nil {
 		t.Fatalf("builtin is not a complete provider Model: %v", err)
+	}
+}
+
+func TestGeneratedBuiltinCatalogMatchesScopedUpstreamOracle(t *testing.T) {
+	if generatedCatalogSource != "@earendil-works/pi-ai@0.83.0" {
+		t.Fatalf("catalog source = %q", generatedCatalogSource)
+	}
+	models := builtinModels()
+	if len(models) != 60 {
+		t.Fatalf("builtin model count = %d, want 60", len(models))
+	}
+	ids := make([]string, 0, len(models))
+	byID := make(map[string]Model, len(models))
+	for _, model := range models {
+		switch model.Provider {
+		case OpenAIProviderID:
+			if model.API != OpenAIResponsesAPI {
+				t.Fatalf("openai model %q API = %q", model.ID, model.API)
+			}
+		case OpenAICodexProviderID:
+			if model.API != OpenAICodexResponsesAPI {
+				t.Fatalf("openai-codex model %q API = %q", model.ID, model.API)
+			}
+		case AnthropicProviderID:
+			if model.API != AnthropicMessagesAPI {
+				t.Fatalf("anthropic model %q API = %q", model.ID, model.API)
+			}
+		default:
+			t.Fatalf("out-of-scope generated provider %q", model.Provider)
+		}
+		key := model.Provider + "/" + model.ID
+		if _, duplicate := byID[key]; duplicate {
+			t.Fatalf("duplicate generated model %q", key)
+		}
+		byID[key] = model
+		ids = append(ids, key)
+	}
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, generatedCatalogModelIDs) {
+		t.Fatalf("generated catalog IDs differ from oracle\n got: %v\nwant: %v", ids, generatedCatalogModelIDs)
+	}
+	for _, required := range []string{
+		"openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "openai/gpt-5.4-pro",
+		"openai/gpt-5.5-pro", "openai/gpt-5.6-sol", "openai-codex/gpt-5.6-sol",
+		"anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-6", "anthropic/claude-opus-4-8",
+		"anthropic/claude-sonnet-4-6", "anthropic/claude-fable-5",
+	} {
+		if _, ok := byID[required]; !ok {
+			t.Fatalf("catalog is missing required upstream model %q", required)
+		}
+	}
+	opus := byID["anthropic/claude-opus-4-8"]
+	if _, present := opus.ThinkingLevelMap[provider.ThinkingOff]; present {
+		t.Fatalf("Opus 4.8 must use portable off -> disabled: %#v", opus.ThinkingLevelMap)
+	}
+	fable := byID["anthropic/claude-fable-5"]
+	if value, present := fable.ThinkingLevelMap[provider.ThinkingOff]; !present || value != nil {
+		t.Fatalf("Fable 5 must explicitly omit disabled thinking: %#v", fable.ThinkingLevelMap)
 	}
 }
 
@@ -309,9 +605,9 @@ func newTestRuntime(t *testing.T, models, settings string, trusted bool) (*Runti
 
 func TestRuntimeModelsJSONCOverlayAndCustomModel(t *testing.T) {
 	r, _, _ := newTestRuntime(t, `// accepted comment
-{"providers":{"openai":{"baseUrl":"https://example.test/v1","api":"openai-responses","headers":{"X-Base":"one"},"models":[{"id":"custom","api":"openai-responses","headers":{"x-base":"two"}},],"future":{"preserve":true}}}}`, "", false)
+{"providers":{"openai":{"baseUrl":"https://example.test/v1","api":"openai-responses","headers":{"X-Base":"one"},"models":[{"id":"custom","api":"openai-responses","headers":{"x-base":"two"}},]}}}`, "", false)
 	s := r.Snapshot()
-	if len(s.Models) != 2 {
+	if len(s.Models) != len(builtinModels())+1 {
 		t.Fatalf("models = %#v", s.Models)
 	}
 	got, err := r.Resolve(Selection{Provider: "openai", Model: "custom"})
@@ -321,8 +617,11 @@ func TestRuntimeModelsJSONCOverlayAndCustomModel(t *testing.T) {
 	if got.Model.API != OpenAIResponsesAPI || got.Model.BaseURL != "https://example.test/v1" {
 		t.Fatalf("custom overlay = %#v", got.Model)
 	}
-	if err := r.ValidateRoute(got.Model); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("headers must fail at selected route: %v", err)
+	if err := r.ValidateRoute(got.Model); err != nil {
+		t.Fatalf("configured headers are part of the supported request path: %v", err)
+	}
+	if got.Model.Headers["x-base"] != "two" || len(got.Model.Headers) != 1 {
+		t.Fatalf("model header precedence = %#v", got.Model.Headers)
 	}
 	if _, err := r.Resolve(Selection{Provider: "openai", Model: "not-listed"}); err != nil {
 		t.Fatalf("explicit custom model: %v", err)
@@ -365,8 +664,11 @@ func TestRuntimeModelOverrideDoesNotEraseBuiltinMetadata(t *testing.T) {
 	if got.Model.Name != "renamed" || got.Model.API != OpenAIResponsesAPI {
 		t.Fatalf("override = %#v", got.Model)
 	}
-	if err := r.ValidateRoute(got.Model); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("override options must fail at selected route: %v", err)
+	if err := r.ValidateRoute(got.Model); err != nil {
+		t.Fatalf("implemented override options must be routable: %v", err)
+	}
+	if got.Model.Headers["x-base"] != "two" || got.Model.ContextWindow != 272_000 || got.Model.MaxTokens != 128_000 || len(got.Model.Input) != 2 {
+		t.Fatalf("override erased builtin metadata: %#v", got.Model)
 	}
 }
 
@@ -384,20 +686,119 @@ func TestRuntimeDuplicateJSONCFieldsAreRejectedAtEveryDepth(t *testing.T) {
 	}
 }
 
-func TestRuntimeOnlySelectedProviderRejectsFutureFields(t *testing.T) {
+func TestRuntimeRejectsMissingModelIDAndNullModelsArray(t *testing.T) {
+	for _, models := range []string{
+		`{"providers":{"custom":{"api":"openai-completions","models":[{"name":"missing id"}]}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","models":null}}}`,
+	} {
+		if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil {
+			t.Fatalf("invalid models.json was accepted: %s", models)
+		} else if strings.Contains(err.Error(), "missing id") {
+			t.Fatalf("diagnostic leaked model metadata: %v", err)
+		}
+	}
+}
+
+func TestRuntimeRejectsNullKnownModelFieldsWithoutLeakingUnknownMetadata(t *testing.T) {
+	for _, models := range []string{
+		`{"providers":{"custom":{"api":"openai-completions","authHeader":null,"future":"secret-value"}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","headers":null,"future":"secret-value"}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","reasoning":null,"future":"secret-value"}]}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","headers":null,"future":"secret-value"}]}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","thinkingLevelMap":null,"future":"secret-value"}]}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"reasoning":null,"future":"secret-value"}}}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"headers":null,"future":"secret-value"}}}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"thinkingLevelMap":null,"future":"secret-value"}}}}}`,
+	} {
+		if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil {
+			t.Fatalf("invalid known models.json field was accepted: %s", models)
+		} else if strings.Contains(err.Error(), "secret-value") {
+			t.Fatalf("diagnostic leaked unknown metadata: %v", err)
+		}
+	}
+}
+
+func TestRuntimeUnknownModelsJSONFieldsAreIgnoredLikeOpenTypeBoxObjects(t *testing.T) {
 	r, _, _ := newTestRuntime(t, `{"providers":{"future":{"compat":{"token":"do-not-leak"},"models":[{"id":"ignored","api":"openai-responses"}]},"openai":{"models":[{"id":"supported","api":"openai-responses"}]}}}`, "", false)
 	openAI, err := r.Resolve(Selection{Provider: "openai", Model: "supported"})
 	if err != nil || r.ValidateRoute(openAI.Model) != nil {
 		t.Fatalf("unselected future provider must not block openai: %#v, %v", openAI, err)
 	}
 	future, err := r.Resolve(Selection{Provider: "future", Model: "ignored"})
-	if err != nil || !errors.Is(r.ValidateRoute(future.Model), ErrUnsupported) {
-		t.Fatalf("selected future provider must fail safely: %#v, %v", future, err)
+	if err != nil || r.ValidateRoute(future.Model) != nil {
+		t.Fatalf("unknown compat members must be ignored on a supported route: %#v, %v", future, err)
 	}
-	r, _, _ = newTestRuntime(t, `{"providers":{"openai":{"modelOverrides":{"custom":{"compat":{"token":"do-not-leak"}}}}}}`, "", false)
-	custom, err := r.Resolve(Selection{Provider: "openai", Model: "custom"})
-	if err != nil || !errors.Is(r.ValidateRoute(custom.Model), ErrUnsupported) {
-		t.Fatalf("selected custom override must fail safely at the compatibility boundary: %#v, %v", custom, err)
+	overridden, _, err := newTestRuntimeNoFatal(t, `{"providers":{"openai":{"modelOverrides":{"custom":{"compat":{"token":"do-not-leak"}}}}}}`, "", false)
+	if err != nil {
+		t.Fatalf("unknown override compatibility must be ignored without leaking values: %v", err)
+	}
+	resolved, err := overridden.Resolve(Selection{Provider: "openai", Model: "custom"})
+	if err != nil || overridden.ValidateRoute(resolved.Model) != nil || strings.Contains(fmt.Sprintf("%#v", resolved.Model.Compat), "do-not-leak") {
+		t.Fatalf("unknown override changed the supported projection: %#v, %v", resolved, err)
+	}
+}
+
+func TestRuntimeRejectsNullAndInvalidKnownCompatFieldsAtProviderAndModelLevel(t *testing.T) {
+	testCases := []struct {
+		name, api, compat string
+	}{
+		{name: "responses bool null", api: OpenAIResponsesAPI, compat: `{"supportsDeveloperRole":null}`},
+		{name: "chat bool null", api: OpenAICompletionsAPI, compat: `{"supportsStore":null}`},
+		{name: "chat literal null", api: OpenAICompletionsAPI, compat: `{"maxTokensField":null}`},
+		{name: "chat literal invalid", api: OpenAICompletionsAPI, compat: `{"thinkingFormat":"future"}`},
+		{name: "cache literal invalid", api: OpenAICompletionsAPI, compat: `{"cacheControlFormat":"openai"}`},
+		{name: "deferred literal invalid", api: OpenAICompletionsAPI, compat: `{"deferredToolsMode":"all"}`},
+		{name: "chat template descriptor null", api: OpenAICompletionsAPI, compat: `{"chatTemplateKwargs":{"effort":{"$var":null}}}`},
+		{name: "openrouter nested null", api: OpenAICompletionsAPI, compat: `{"openRouterRouting":{"allow_fallbacks":null}}`},
+		{name: "vercel nested type", api: OpenAICompletionsAPI, compat: `{"vercelGatewayRouting":{"only":[1]}}`},
+		{name: "anthropic bool null", api: AnthropicMessagesAPI, compat: `{"forceAdaptiveThinking":null}`},
+	}
+	for _, level := range []string{"provider", "model"} {
+		for _, testCase := range testCases {
+			t.Run(level+"/"+testCase.name, func(t *testing.T) {
+				providerCompat, modelCompat := "", ""
+				if level == "provider" {
+					providerCompat = `,"compat":` + testCase.compat
+				} else {
+					modelCompat = `,"compat":` + testCase.compat
+				}
+				models := fmt.Sprintf(`{"providers":{"fixture":{"api":%q%s,"models":[{"id":"m"%s}]}}}`, testCase.api, providerCompat, modelCompat)
+				if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "compat") {
+					t.Fatalf("NewRuntime() error = %v, want compat validation failure", err)
+				}
+			})
+		}
+	}
+	// Provider compat is schema-checked before a per-model API is selected. An
+	// omitted provider API must not turn a known null field into opaque metadata.
+	models := `{"providers":{"fixture":{"compat":{"supportsStore":null},"models":[{"id":"m","api":"openai-completions"}]}}}`
+	if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "compat") {
+		t.Fatalf("provider compat without provider API error = %v, want schema failure", err)
+	}
+}
+
+func TestRuntimeKeepsCompatObjectsOpenForUnknownKeys(t *testing.T) {
+	runtime, _, _ := newTestRuntime(t, `{"providers":{"fixture":{"api":"openai-completions","compat":{"futureSetting":null},"models":[{"id":"m","compat":{"futureNested":{"secret":true}}}]}}}`, "", false)
+	resolved, err := runtime.Resolve(Selection{Provider: "fixture", Model: "m"})
+	if err != nil || resolved.Model.Compat.OpenAICompletions == nil {
+		t.Fatalf("open compat object = %#v, %v", resolved, err)
+	}
+}
+
+func TestRuntimeUnknownNestedOverrideFieldsDoNotEnterProjection(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{"modelOverrides":{"gpt-5.5":{"future":"secret","thinkingLevelMap":{"future-level":"secret","high":"high"},"cost":{"input":7,"futureRate":999},"compat":{"futureCompat":"secret"}}}}}}`, "", false)
+	resolved, err := r.Resolve(Selection{Provider: "openai", Model: "gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ValidateRoute(resolved.Model); err != nil {
+		t.Fatalf("unknown nested fields blocked route: %v", err)
+	}
+	if resolved.Model.Cost.Input != 7 || resolved.Model.ThinkingLevelMap[provider.ThinkingHigh] == nil || *resolved.Model.ThinkingLevelMap[provider.ThinkingHigh] != "high" {
+		t.Fatalf("known overrides were not applied: %#v", resolved.Model)
+	}
+	if _, present := resolved.Model.ThinkingLevelMap[provider.ThinkingLevel("future-level")]; present || strings.Contains(fmt.Sprintf("%#v", resolved.Model), "secret") {
+		t.Fatalf("unknown nested fields entered runtime projection: %#v", resolved.Model)
 	}
 }
 
@@ -420,15 +821,18 @@ func TestRuntimeCanonicalIdentifiersRejectDuplicatesAndApplyOverrides(t *testing
 			t.Fatalf("case-fold duplicate = %v", err)
 		}
 	}
-	r, _, _ := newTestRuntime(t, `{"providers":{"OpEnAi":{"modelOverrides":{"GPT-5.5":{"compat":{"token":"case-secret"}},"CUSTOM":{"futureOption":"case-secret"}}}}}`, "", false)
+	r, _, _ := newTestRuntime(t, `{"providers":{"OpEnAi":{"modelOverrides":{"GPT-5.5":{"compat":{"supportsStore":false}},"CUSTOM":{"futureOption":"case-secret"}}}}}`, "", false)
 	for _, selection := range []Selection{{Provider: "OPENAI", Model: "gPt-5.5"}, {Provider: "openai", Model: "custom"}} {
 		resolved, err := r.Resolve(selection)
 		if err != nil {
 			t.Fatalf("resolve %#v: %v", selection, err)
 		}
 		err = r.ValidateRoute(resolved.Model)
-		if !errors.Is(err, ErrUnsupported) || strings.Contains(err.Error(), "case-secret") {
-			t.Fatalf("canonical selected override = %v", err)
+		if err != nil {
+			t.Fatalf("canonical supported builtin override = %v", err)
+		}
+		if strings.Contains(fmt.Sprintf("%#v", resolved.Model), "case-secret") {
+			t.Fatalf("unknown custom override entered runtime behavior: %#v", resolved.Model)
 		}
 		if resolved.Model.Provider != OpenAIProviderID {
 			t.Fatalf("provider was not canonical: %#v", resolved.Model)
@@ -444,10 +848,11 @@ func TestRuntimeCustomFallbackUsesOriginalProviderDefaultBaseline(t *testing.T) 
 		t.Fatal(err)
 	}
 	model := resolved.Model
-	if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != "provider-api" || model.BaseURL != "https://provider.invalid/v1" {
+	if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != OpenAIResponsesAPI || model.BaseURL != "https://provider.invalid/v1" {
 		t.Fatalf("custom baseline = %#v", model)
 	}
-	if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") {
+	if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") ||
+		!model.Reasoning || len(model.Input) != 2 || model.ContextWindow != 272_000 || model.MaxTokens != 128_000 {
 		t.Fatalf("custom inherited non-default per-model metadata: %#v", model)
 	}
 	if err := r.ValidateRoute(model); err != nil {

@@ -482,6 +482,77 @@ func TestFinalAuthorizationDeletionFailsBeforeHTTPForBothAdapters(t *testing.T) 
 	}
 }
 
+func TestOpenAIAdaptersAcceptCloudflareGatewayAuthorizationButNotAnEmptyValue(t *testing.T) {
+	tests := []struct {
+		name string
+		api  string
+		body string
+		new  func(headers map[string]string, client provider.HTTPDoer) (provider.Provider, error)
+	}{
+		{
+			name: "responses", api: provider.OpenAIResponsesAPI,
+			body: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+			new: func(headers map[string]string, client provider.HTTPDoer) (provider.Provider, error) {
+				return provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{BaseURL: "https://fixture.test/v1", Headers: headers, Client: client})
+			},
+		},
+		{
+			name: "completions", api: provider.OpenAICompletionsAPI,
+			body: "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+			new: func(headers map[string]string, client provider.HTTPDoer) (provider.Provider, error) {
+				return provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: "https://fixture.test/v1", Headers: headers, Client: client})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model, err := newModel(provider.ModelSpec{Provider: "gateway", API: test.api, ID: "model"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustProviderUser(t, "hi")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			client := responsesDoerFunc(func(incoming *http.Request) (*http.Response, error) {
+				calls++
+				if got := incoming.Header.Get("cf-aig-authorization"); got != "Bearer gateway-token" {
+					t.Errorf("cf-aig-authorization = %q", got)
+				}
+				if values := incoming.Header.Values("X-Empty"); len(values) != 1 || values[0] != "" {
+					t.Errorf("empty header values = %#v", values)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(test.body))}, nil
+			})
+			implementation, err := test.new(map[string]string{"cf-aig-authorization": "Bearer gateway-token", "X-Empty": ""}, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if calls != 1 {
+				t.Fatalf("HTTP calls = %d", calls)
+			}
+			if _, failed := terminal.(llm.AssistantFailureMessage); failed {
+				t.Fatalf("header-owned auth failed: %#v", terminal)
+			}
+
+			calls = 0
+			emptyImplementation, err := test.new(map[string]string{"cf-aig-authorization": "", "X-Empty": ""}, client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal = collectStream(t, emptyImplementation.Stream(context.Background(), request))
+			if calls != 0 {
+				t.Fatalf("empty gateway authorization reached HTTP %d time(s)", calls)
+			}
+			if _, failed := terminal.(llm.AssistantFailureMessage); !failed {
+				t.Fatalf("empty gateway authorization terminal = %T", terminal)
+			}
+		})
+	}
+}
+
 func headerHookValue(headers map[string]*string, name string) string {
 	for key, value := range headers {
 		if strings.EqualFold(key, name) && value != nil {

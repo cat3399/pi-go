@@ -100,6 +100,164 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 	}
 }
 
+func TestOpenAICompletionsUsesAmbientLongCacheRetention(t *testing.T) {
+	t.Setenv("PI_CACHE_RETENTION", "long")
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "cache-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var captured map[string]any
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "key",
+		Client: responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+				return nil, err
+			}
+			return responsesHTTPResponse(http.StatusOK, "text/event-stream", completionsSSE(
+				map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}},
+			)+"data: [DONE]\n\n"), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	if terminal.FinishReason() != llm.FinishStop || captured["prompt_cache_retention"] != "24h" {
+		t.Fatalf("terminal/payload = %#v / %#v", terminal, captured)
+	}
+}
+
+func TestOpenAICompletionsAutoDetectsCloudflareGatewayCompatAndHonorsExplicitOverrides(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
+			compat := provider.ModelCompat{}
+			if explicit {
+				valueTrue := true
+				maxField := "max_completion_tokens"
+				compat.OpenAICompletions = &provider.OpenAICompletionsCompat{
+					SupportsStore: &valueTrue, SupportsDeveloperRole: &valueTrue, SupportsReasoningEffort: &valueTrue,
+					SupportsStrictMode: &valueTrue, MaxTokensField: &maxField,
+				}
+			}
+			model, err := newModel(provider.ModelSpec{
+				Provider: "gateway", API: provider.OpenAICompletionsAPI, ID: "reasoning-model",
+				BaseURL: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai", Reasoning: true,
+				ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingHigh: ptr("high")},
+				ContextWindow:    100_000, MaxTokens: 8_000, Compat: compat,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, err := provider.NewToolDefinitionWithConstrainedSampling(
+				"read", "Read", []byte(`{"type":"object","properties":{},"required":[],"additionalProperties":false}`),
+				&provider.ConstrainedSampling{Kind: provider.ConstrainedSamplingJSONSchema, Strict: provider.JSONSchemaStrictPrefer},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			maxTokens := uint64(77)
+			request, err := provider.NewRequestWithOptions(model, "system", []llm.ConversationMessage{mustUser(t, "hi")}, provider.RequestOptions{
+				ThinkingLevel: provider.ThinkingHigh, Tools: []provider.ToolDefinition{definition}, Stream: provider.StreamOptions{MaxTokens: &maxTokens},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var captured map[string]any
+			implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+				BaseURL: "https://fixture.test/v1", APIKey: "key",
+				Client: responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
+					if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+						return nil, err
+					}
+					return responsesHTTPResponse(http.StatusOK, "text/event-stream", completionsSSE(
+						map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}},
+					)+"data: [DONE]\n\n"), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if terminal.FinishReason() != llm.FinishStop {
+				t.Fatalf("terminal = %#v", terminal)
+			}
+			wireTool := captured["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+			role := captured["messages"].([]any)[0].(map[string]any)["role"]
+			if explicit {
+				if captured["store"] != false || captured["max_completion_tokens"] != float64(77) || captured["reasoning_effort"] != "high" || wireTool["strict"] != true || role != "developer" {
+					t.Fatalf("explicit compat payload = %#v", captured)
+				}
+			} else {
+				if _, present := captured["store"]; present || captured["max_tokens"] != float64(77) || captured["reasoning_effort"] != nil || wireTool["strict"] != nil || role != "system" {
+					t.Fatalf("detected Cloudflare compat payload = %#v", captured)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenAICompletionsAutoDetectsDeepSeekAndOpenRouterThinkingFormats(t *testing.T) {
+	for _, testCase := range []struct {
+		name, providerID, baseURL, modelID string
+		assertPayload                      func(*testing.T, map[string]any)
+	}{
+		{
+			name: "deepseek", providerID: "custom", baseURL: "https://api.deepseek.com/v1", modelID: "deepseek-reasoner",
+			assertPayload: func(t *testing.T, payload map[string]any) {
+				thinking, _ := payload["thinking"].(map[string]any)
+				if thinking["type"] != "enabled" {
+					t.Fatalf("DeepSeek thinking = %#v", payload["thinking"])
+				}
+			},
+		},
+		{
+			name: "openrouter", providerID: "custom", baseURL: "https://openrouter.ai/api/v1", modelID: "anthropic/claude-test",
+			assertPayload: func(t *testing.T, payload map[string]any) {
+				messages := payload["messages"].([]any)
+				if messages[0].(map[string]any)["role"] != "developer" {
+					t.Fatalf("OpenRouter system role = %#v", messages[0])
+				}
+				if reasoning, _ := payload["reasoning"].(map[string]any); reasoning["effort"] != "high" {
+					t.Fatalf("OpenRouter reasoning = %#v", payload["reasoning"])
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, err := newModel(provider.ModelSpec{
+				Provider: testCase.providerID, API: provider.OpenAICompletionsAPI, ID: testCase.modelID, BaseURL: testCase.baseURL,
+				Reasoning: true, ThinkingLevelMap: map[provider.ThinkingLevel]*string{provider.ThinkingHigh: ptr("high")}, ContextWindow: 100_000, MaxTokens: 8_000,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := provider.NewRequestWithOptions(model, "system", []llm.ConversationMessage{mustUser(t, "hi")}, provider.RequestOptions{ThinkingLevel: provider.ThinkingHigh})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var captured map[string]any
+			implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+				BaseURL: "https://fixture.test/v1", APIKey: "key",
+				Client: responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
+					if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+						return nil, err
+					}
+					return responsesHTTPResponse(http.StatusOK, "text/event-stream", completionsSSE(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}})+"data: [DONE]\n\n"), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = collectStream(t, implementation.Stream(context.Background(), request))
+			testCase.assertPayload(t, captured)
+		})
+	}
+}
+
 func TestOpenAICompletionsMapsDeepSeekThinkingFormat(t *testing.T) {
 	supportsStore := false
 	thinkingFormat := "deepseek"
@@ -309,6 +467,139 @@ func TestOpenAICompletionsInterleavedToolCalls(t *testing.T) {
 	}
 	if usage := toolUse.Usage(); usage.Input() != 9 || usage.Output() != 4 || usage.TotalTokens() != 13 {
 		t.Fatalf("usage=%#v", usage)
+	}
+}
+
+func TestOpenAICompletionsAcceptsLateToolIdentity(t *testing.T) {
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "run")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := completionsSSE(
+		map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"index": 0, "function": map[string]any{"arguments": "{"}},
+		}}, "finish_reason": nil}}},
+		map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"index": 0, "id": "call-a", "type": "function", "function": map[string]any{"name": "alpha", "arguments": "}"}},
+		}}, "finish_reason": "tool_calls"}}},
+	) + "data: [DONE]\n\n"
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "key",
+		Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+			return responsesHTTPResponse(http.StatusOK, "text/event-stream", body), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	if got, want := eventKinds(events), []string{"start", "toolcall_start", "toolcall_delta", "toolcall_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	toolUse, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || len(toolUse.Blocks()) != 1 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	call := toolUse.Blocks()[0].(llm.ToolCallBlock)
+	if call.ID() != "call-a" || call.Name() != "alpha" || string(call.ArgumentsJSON()) != `{}` {
+		t.Fatalf("late-identity call = %#v", call)
+	}
+}
+
+func TestOpenAICompletionsRoutesIndexlessParallelDeltasByID(t *testing.T) {
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "run")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := completionsSSE(
+		map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"index": 0, "id": "call-a", "type": "function", "function": map[string]any{"name": "alpha", "arguments": "{\"a\":"}},
+			map[string]any{"index": 1, "id": "call-b", "type": "function", "function": map[string]any{"name": "alpha", "arguments": "{\"b\":"}},
+		}}, "finish_reason": nil}}},
+		map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"id": "call-b", "function": map[string]any{"arguments": "2}"}},
+		}}, "finish_reason": nil}}},
+		map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{
+			map[string]any{"id": "call-a", "function": map[string]any{"arguments": "1}"}},
+		}}, "finish_reason": "tool_calls"}}},
+	) + "data: [DONE]\n\n"
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "key",
+		Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+			return responsesHTTPResponse(http.StatusOK, "text/event-stream", body), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	toolUse, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || len(toolUse.Blocks()) != 2 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	first := toolUse.Blocks()[0].(llm.ToolCallBlock)
+	second := toolUse.Blocks()[1].(llm.ToolCallBlock)
+	if first.ID() != "call-a" || string(first.ArgumentsJSON()) != `{"a":1}` || second.ID() != "call-b" || string(second.ArgumentsJSON()) != `{"b":2}` {
+		t.Fatalf("parallel calls = %#v", toolUse.Blocks())
+	}
+}
+
+func TestOpenAICompletionsChoiceUsageSupportsPromptCacheHitFallback(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		usage      map[string]any
+		wantInput  uint64
+		wantCached uint64
+	}{
+		{
+			name:      "legacy cache hit tokens",
+			usage:     map[string]any{"prompt_tokens": 10, "completion_tokens": 2, "prompt_cache_hit_tokens": 3},
+			wantInput: 7, wantCached: 3,
+		},
+		{
+			name: "standard cached tokens take precedence",
+			usage: map[string]any{
+				"prompt_tokens": 10, "completion_tokens": 2, "prompt_cache_hit_tokens": 3,
+				"prompt_tokens_details": map[string]any{"cached_tokens": 1},
+			},
+			wantInput: 9, wantCached: 1,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := completionsSSE(map[string]any{"choices": []any{map[string]any{
+				"delta": map[string]any{"content": "ok"}, "finish_reason": "stop", "usage": testCase.usage,
+			}}}) + "data: [DONE]\n\n"
+			implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{
+				BaseURL: "https://fixture.test/v1", APIKey: "key",
+				Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+					return responsesHTTPResponse(http.StatusOK, "text/event-stream", body), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			usage := terminal.Usage()
+			if usage.Input() != testCase.wantInput || usage.CacheRead() != testCase.wantCached || usage.Output() != 2 || usage.TotalTokens() != 12 {
+				t.Fatalf("usage = input %d cache %d output %d total %d", usage.Input(), usage.CacheRead(), usage.Output(), usage.TotalTokens())
+			}
+		})
 	}
 }
 
@@ -562,8 +853,8 @@ func TestOpenAICompletionsNormalizesCrossModelHistoryAndUnsupportedImages(t *tes
 		t.Fatalf("foreign opaque reasoning leaked: %s", encodedAssistant)
 	}
 	normalizedID := assistant["tool_calls"].([]any)[0].(map[string]any)["id"].(string)
-	if normalizedID == sourceID || len(normalizedID) > 40 || strings.ContainsAny(normalizedID, "|+/=.") {
-		t.Fatalf("normalized tool id=%q", normalizedID)
+	if want := "call____xxxxxxxxxxxxxxxxxxxxxxx_15z2bpwo"; normalizedID != want {
+		t.Fatalf("normalized tool id=%q, want upstream shortHash id %q", normalizedID, want)
 	}
 	tool := messages[1].(map[string]any)
 	if tool["tool_call_id"] != normalizedID || !strings.Contains(tool["content"].(string), "tool image omitted") {

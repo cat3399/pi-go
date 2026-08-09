@@ -88,7 +88,7 @@ func (s *Store) SetOAuth(ctx context.Context, provider string, credential OAuthC
 	if !validProviderID(provider) {
 		return failure(KindInvalid, "set OAuth credential", provider, nil)
 	}
-	encoded, err := encodeOAuthCredential(credential)
+	encoded, err := encodeOAuthCredential(credential, provider)
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func (s *Store) ModifyOAuth(ctx context.Context, provider string, fn func(OAuthC
 	// A token endpoint may add metadata, but it is not authoritative for
 	// unrelated auth.json future fields. Preserve those across rotation.
 	next.Extra = mergeOAuthExtra(current.OAuth.Extra, next.Extra)
-	encoded, err := encodeOAuthCredential(next)
+	encoded, err := encodeOAuthCredential(next, provider)
 	if err != nil {
 		return OAuthCredential{}, false, err
 	}

@@ -48,6 +48,52 @@ func TestOpenAIResponsesAcceptsRequestAuthorizationWithoutAPIKey(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesCacheRetentionUsesRequestThenAmbientWhitelist(t *testing.T) {
+	t.Setenv("PI_CACHE_RETENTION", "long")
+	for _, testCase := range []struct {
+		name    string
+		env     map[string]string
+		wantTTL bool
+	}{
+		{name: "ambient long", wantTTL: true},
+		{name: "request short overrides ambient", env: map[string]string{"PI_CACHE_RETENTION": "short", "UNRELATED_SECRET": "must-not-be-consumed"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var captured map[string]any
+			implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
+				BaseURL: "https://fixture.test/v1", APIKey: "secret",
+				Client: responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
+					if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+						return nil, err
+					}
+					return responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(map[string]any{
+						"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 1, "output_tokens": 0, "total_tokens": 1}},
+					})), nil
+				}),
+			})
+			model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "cache-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustUser(t, "hi")}, provider.RequestOptions{
+				Stream: provider.StreamOptions{Env: testCase.env},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if terminal.FinishReason() != llm.FinishStop {
+				t.Fatalf("terminal = %#v", terminal)
+			}
+			if got := captured["prompt_cache_retention"]; testCase.wantTTL && got != "24h" {
+				t.Fatalf("prompt_cache_retention = %#v, want 24h", got)
+			} else if !testCase.wantTTL && got != nil {
+				t.Fatalf("prompt_cache_retention = %#v, want omitted", got)
+			}
+		})
+	}
+}
+
 func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 	prior := mustTextTerminal(t, "prior answer")
 	request := mustResponsesRequest(t, "system", []llm.ConversationMessage{
@@ -313,7 +359,6 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 		{name: "malformed JSON", contentType: "text/event-stream", body: "data: {\n\n"},
 		{name: "early EOF", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.created"})},
 		{name: "DONE before terminal", contentType: "text/event-stream", body: "data: [DONE]\n\n"},
-		{name: "unknown done progress event", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.unrecognized.done"})},
 		{name: "delta without item", contentType: "text/event-stream", body: responsesSSE(map[string]any{"type": "response.output_text.delta", "output_index": 0, "delta": "x"})},
 		{
 			name: "final text mismatch", contentType: "text/event-stream",
@@ -619,6 +664,61 @@ func TestOpenAIResponsesUsesExplicitDeveloperRoleAndStableReplayIDs(t *testing.T
 		if item["id"] != wantID || item["type"] != "message" || item["status"] != "completed" {
 			t.Fatalf("replay item %d = %#v", index, item)
 		}
+	}
+}
+
+func TestOpenAIResponsesDefaultSystemRoleTracksReasoningCompatibility(t *testing.T) {
+	unsupported := false
+	tests := []struct {
+		name      string
+		reasoning bool
+		compat    *provider.OpenAIResponsesCompat
+		wantRole  string
+	}{
+		{name: "non-reasoning model", wantRole: "system"},
+		{name: "reasoning model", reasoning: true, wantRole: "developer"},
+		{name: "reasoning model without developer support", reasoning: true, compat: &provider.OpenAIResponsesCompat{SupportsDeveloperRole: &unsupported}, wantRole: "system"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model, err := newModel(provider.ModelSpec{
+				Provider:  provider.OpenAIProviderID,
+				API:       provider.OpenAIResponsesAPI,
+				ID:        "test-model",
+				Reasoning: test.reasoning,
+				Compat:    provider.ModelCompat{OpenAIResponses: test.compat},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := provider.NewRequest(model, "instructions", []llm.ConversationMessage{mustUser(t, "hi")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var received map[string]any
+			implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
+				BaseURL: "https://fixture.test/v1", APIKey: "secret",
+				Client: responsesDoerFunc(func(incoming *http.Request) (*http.Response, error) {
+					if err := json.NewDecoder(incoming.Body).Decode(&received); err != nil {
+						return nil, err
+					}
+					return responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(
+						map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},
+					)), nil
+				}),
+			})
+			_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+			if _, ok := terminal.(llm.AssistantTextMessage); !ok {
+				t.Fatalf("terminal = %T", terminal)
+			}
+			input, ok := received["input"].([]any)
+			if !ok || len(input) == 0 {
+				t.Fatalf("input = %#v", received["input"])
+			}
+			if role := input[0].(map[string]any)["role"]; role != test.wantRole {
+				t.Fatalf("system role = %v, want %q", role, test.wantRole)
+			}
+		})
 	}
 }
 

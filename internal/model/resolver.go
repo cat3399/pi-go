@@ -76,13 +76,20 @@ func DefaultModelID(providerID string) (string, bool) {
 // credential and registered-route predicates; the model package never infers
 // runnability from catalog presence.
 type Availability struct {
-	HasConfiguredAuth func(providerID string) bool
-	SupportsRoute     func(Model) bool
+	HasConfiguredAuth      func(providerID string) bool
+	HasConfiguredModelAuth func(Model) bool
+	SupportsRoute          func(Model) bool
 }
 
 func (a Availability) Available(model Model) bool {
-	return a.HasConfiguredAuth != nil && a.SupportsRoute != nil &&
-		a.HasConfiguredAuth(model.Provider) && a.SupportsRoute(model)
+	return a.hasAuth(model) && a.SupportsRoute != nil && a.SupportsRoute(model)
+}
+
+func (a Availability) hasAuth(model Model) bool {
+	if a.HasConfiguredModelAuth != nil {
+		return a.HasConfiguredModelAuth(model)
+	}
+	return a.HasConfiguredAuth != nil && a.HasConfiguredAuth(model.Provider)
 }
 
 func FilterAvailableModels(models []Model, availability Availability) []Model {
@@ -242,11 +249,12 @@ func ResolveModelScope(patterns []string, availableModels []Model) ScopeResult {
 }
 
 type CLIModelOptions struct {
-	Provider          string
-	Model             string
-	ThinkingLevel     *provider.ThinkingLevel
-	AllModels         []Model
-	HasConfiguredAuth func(providerID string) bool
+	Provider               string
+	Model                  string
+	ThinkingLevel          *provider.ThinkingLevel
+	AllModels              []Model
+	HasConfiguredAuth      func(providerID string) bool
+	HasConfiguredModelAuth func(Model) bool
 }
 
 type CLIModelResult struct {
@@ -316,10 +324,10 @@ func ResolveCLIModel(options CLIModelOptions) CLIModelResult {
 					rawMatches = append(rawMatches, candidate)
 				}
 			}
-			if len(rawMatches) > 0 && !hasAuth(options.HasConfiguredAuth, parsed.Model.Provider) {
+			if len(rawMatches) > 0 && !hasModelAuth(options, *parsed.Model) {
 				authenticated := make([]Model, 0, len(rawMatches))
 				for _, candidate := range rawMatches {
-					if hasAuth(options.HasConfiguredAuth, candidate.Provider) {
+					if hasModelAuth(options, candidate) {
 						authenticated = append(authenticated, candidate)
 					}
 				}
@@ -412,6 +420,7 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 		resolved := ResolveCLIModel(CLIModelOptions{
 			Provider: options.CLIProvider, Model: options.CLIModel, ThinkingLevel: options.CLIThinkingLevel,
 			AllModels: options.AllModels, HasConfiguredAuth: options.Availability.HasConfiguredAuth,
+			HasConfiguredModelAuth: options.Availability.HasConfiguredModelAuth,
 		})
 		thinking := resolveInitialThinking(options.CLIThinkingLevel, resolved.ThinkingLevel, options.DefaultThinkingLevel)
 		if resolved.Model != nil && (options.Availability.SupportsRoute == nil || !options.Availability.SupportsRoute(*resolved.Model)) {
@@ -485,7 +494,7 @@ func RestoreModelFromSession(options RestoreModelOptions) RestoreModelResult {
 	reason := "model no longer exists"
 	if restored != nil {
 		switch {
-		case options.Availability.HasConfiguredAuth == nil || !options.Availability.HasConfiguredAuth(restored.Provider):
+		case !options.Availability.hasAuth(*restored):
 			reason = "no auth configured"
 		case options.Availability.SupportsRoute == nil || !options.Availability.SupportsRoute(*restored):
 			reason = "model route is not registered"
@@ -663,4 +672,11 @@ func cloneThinkingPointer(level *provider.ThinkingLevel) *provider.ThinkingLevel
 
 func hasAuth(predicate func(string) bool, providerID string) bool {
 	return predicate != nil && predicate(providerID)
+}
+
+func hasModelAuth(options CLIModelOptions, candidate Model) bool {
+	if options.HasConfiguredModelAuth != nil {
+		return options.HasConfiguredModelAuth(candidate)
+	}
+	return hasAuth(options.HasConfiguredAuth, candidate.Provider)
 }

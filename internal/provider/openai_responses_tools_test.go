@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"reflect"
@@ -179,7 +180,10 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 }
 
 func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
-	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	model, err := newModel(provider.ModelSpec{
+		Provider: "openai", API: provider.OpenAIResponsesAPI, ID: "gpt-test",
+		Input: []provider.InputKind{provider.InputText, provider.InputImage},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +228,68 @@ func TestOpenAIResponsesReplaysReasoningAndImageInputs(t *testing.T) {
 	output := input[3].(map[string]any)["output"].([]any)
 	if len(output) != 2 || output[1].(map[string]any)["type"] != "input_image" {
 		t.Fatalf("tool output = %#v", output)
+	}
+}
+
+func TestOpenAIResponsesDowngradesImagesForTextOnlyModels(t *testing.T) {
+	t.Parallel()
+
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := llm.NewImageDataBlock("image/png", mustOnePixelPNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := llm.NewUserContentMessage(
+		[]llm.UserContentBlock{mustTextBlock(t, "inspect"), image, image},
+		responsesTestTime,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := mustReplayCall(t, "call_1|fc_1", "bash")
+	assistant, err := llm.NewAssistantToolUseMessageWithMetadata(
+		[]llm.AssistantBlock{call},
+		llm.Usage{},
+		responsesTestTime,
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultContentMessage(
+		call.ID(),
+		call.Name(),
+		[]llm.ToolResultContentBlock{mustTextBlock(t, "ok"), image, image},
+		false,
+		responsesTestTime,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{user, assistant, result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := payload["input"].([]any)
+	userContent := input[0].(map[string]any)["content"].([]any)
+	if len(userContent) != 2 || userContent[0].(map[string]any)["text"] != "inspect" || userContent[1].(map[string]any)["text"] != "(image omitted: model does not support images)" {
+		t.Fatalf("user image downgrade = %#v", userContent)
+	}
+	output := input[2].(map[string]any)["output"]
+	if output != "ok\n(tool image omitted: model does not support images)" {
+		t.Fatalf("tool image downgrade = %#v", output)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", input), "input_image") {
+		t.Fatalf("text-only payload retained an image: %#v", input)
 	}
 }
 
@@ -631,6 +697,44 @@ func TestOpenAIResponsesStreamsReasoningThenText(t *testing.T) {
 	replay := responsesReasoningSignatureForTest(t, blocks[0].(llm.ThinkingBlock))
 	if replay["encrypted_content"] != "cipher" || blocks[1].(llm.TextBlock).Text() != "answer" {
 		t.Fatalf("blocks=%#v", blocks)
+	}
+}
+
+func TestOpenAIResponsesAssemblesMultipartReasoningAndIgnoresProgressMetadata(t *testing.T) {
+	body := responsesSSE(
+		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_multi"}},
+		map[string]any{"type": "response.reasoning_summary_part.added", "output_index": 0, "item_id": "rs_multi", "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}},
+		map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_multi", "summary_index": 0, "delta": "first"},
+		map[string]any{"type": "response.reasoning_summary_text.done", "output_index": 0, "item_id": "rs_multi", "summary_index": 0, "text": "first"},
+		map[string]any{"type": "response.reasoning_summary_part.done", "output_index": 0, "item_id": "rs_multi", "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": "first"}},
+		map[string]any{"type": "response.future_metadata", "payload": map[string]any{"ignored": true}},
+		map[string]any{"type": "response.reasoning_summary_part.added", "output_index": 0, "item_id": "rs_multi", "summary_index": 1, "part": map[string]any{"type": "summary_text", "text": ""}},
+		map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_multi", "summary_index": 1, "delta": "draft"},
+		map[string]any{"type": "response.reasoning_summary_text.done", "output_index": 0, "item_id": "rs_multi", "summary_index": 1, "text": "second"},
+		map[string]any{"type": "response.reasoning_summary_part.done", "output_index": 0, "item_id": "rs_multi", "summary_index": 1, "part": map[string]any{"type": "summary_text", "text": "second"}},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{
+			"type": "reasoning", "id": "rs_multi", "encrypted_content": "cipher",
+			"summary": []any{
+				map[string]any{"type": "summary_text", "text": "first"},
+				map[string]any{"type": "summary_text", "text": "second"},
+			},
+		}},
+		map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},
+	)
+	implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "secret",
+		Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", body)),
+	})
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
+	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_delta", "thinking_delta", "thinking_delta", "thinking_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	message, ok := terminal.(llm.AssistantRichMessage)
+	if !ok || len(message.Blocks()) != 1 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	if got := message.Blocks()[0].(llm.ThinkingBlock).Thinking(); got != "first\n\nsecond" {
+		t.Fatalf("thinking = %q", got)
 	}
 }
 
@@ -1095,6 +1199,9 @@ func TestOpenAIResponsesReplayNormalizesAndGatesOriginlessItemIDs(t *testing.T) 
 
 	firstID := firstFunctions[0]["id"].(string)
 	secondID := firstFunctions[1]["id"].(string)
+	if got, want := []string{firstID, secondID}, []string{"fc_k5jick10uwlgj", "fc_nfysba1ubx4qb"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("foreign item hashes = %#v, want production shortHash values %#v", got, want)
+	}
 	for _, itemID := range []string{firstID, secondID} {
 		if !isBoundedResponsesFunctionItemID(itemID) {
 			t.Fatalf("normalized item id = %q, want bounded fc_ ASCII shape", itemID)
@@ -1152,6 +1259,95 @@ func TestOpenAIResponsesReplayAssignsDistinctIDsToMultipleTextBlocks(t *testing.
 	messages := replayItemsOfType(t, payload, "message")
 	if len(messages) != 2 || messages[0]["id"] != "msg_pi_1" || messages[1]["id"] != "msg_pi_1_1" {
 		t.Fatalf("assistant message IDs = %#v, want msg_pi_1 and msg_pi_1_1", messages)
+	}
+}
+
+func TestOpenAIResponsesReplayDropsCustomItemIDWhenGrammarToolIsAbsent(t *testing.T) {
+	t.Parallel()
+
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := mustReplayCall(t, "call_1|ctc_1", "sample_tool")
+	assistant, err := llm.NewAssistantToolUseMessageWithMetadata(
+		[]llm.AssistantBlock{call},
+		llm.Usage{},
+		responsesTestTime,
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{
+		assistant,
+		mustToolResult(t, call.ID(), call.Name(), "done"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	functions := replayItemsOfType(t, payload, "function_call")
+	if len(functions) != 1 || functions[0]["call_id"] != "call_1" {
+		t.Fatalf("function replay = %#v", functions)
+	}
+	if id, present := functions[0]["id"]; present {
+		t.Fatalf("function replay retained custom item id = %#v", id)
+	}
+}
+
+func TestOpenAIResponsesReplayBoundsLongSignedMessageID(t *testing.T) {
+	t.Parallel()
+
+	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	longID := strings.Repeat("response-message-id-", 8)
+	block := responsesTextBlock(t, "answer", longID, "final_answer")
+	assistant, err := llm.NewAssistantTextMessageWithMetadata(
+		[]llm.TextBlock{block},
+		llm.FinishStop,
+		llm.Usage{},
+		responsesTestTime,
+		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "go"), assistant})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstPayload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPayload, err := encodeReplayForTest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMessages := replayItemsOfType(t, firstPayload, "message")
+	secondMessages := replayItemsOfType(t, secondPayload, "message")
+	if len(firstMessages) != 1 || len(secondMessages) != 1 {
+		t.Fatalf("replayed messages = %#v / %#v", firstMessages, secondMessages)
+	}
+	gotID, ok := firstMessages[0]["id"].(string)
+	if !ok || gotID != "msg_3wmdvi1bd58hj" || len(gotID) > 64 || gotID == longID {
+		t.Fatalf("replayed message id = %#v, want bounded msg_ hash", firstMessages[0]["id"])
+	}
+	if secondMessages[0]["id"] != gotID {
+		t.Fatalf("replayed message id is not stable: %q != %q", secondMessages[0]["id"], gotID)
+	}
+	if phase := firstMessages[0]["phase"]; phase != "final_answer" {
+		t.Fatalf("replayed phase = %#v", phase)
 	}
 }
 

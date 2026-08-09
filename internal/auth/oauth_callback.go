@@ -35,6 +35,9 @@ type callbackResult struct {
 }
 type callbackWaiter struct {
 	state       string
+	provider    string
+	path        string
+	successText string
 	listener    net.Listener
 	server      *http.Server
 	result      chan callbackResult
@@ -47,22 +50,27 @@ type callbackWaiter struct {
 }
 
 func startCallbackWaiter(host string, port int, state string, factory ListenerFactory) (*callbackWaiter, error) {
+	return startProviderCallbackWaiter(host, port, state, factory, OpenAICodexProviderID, "/auth/callback", "OpenAI authentication completed. You can close this window.")
+}
+
+func startProviderCallbackWaiter(host string, port int, state string, factory ListenerFactory, provider, path, successText string) (*callbackWaiter, error) {
 	if factory == nil {
 		factory = systemListener{}
 	}
 	listener, err := factory.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
-		return nil, failure(KindOAuth, "bind OAuth callback listener", "openai", err)
+		return nil, failure(KindOAuth, "bind OAuth callback listener", provider, err)
 	}
 	w := &callbackWaiter{
-		state: state, listener: listener, result: make(chan callbackResult, 1), closed: make(chan struct{}), publishDone: make(chan struct{}),
+		state: state, provider: provider, path: path, successText: successText,
+		listener: listener, result: make(chan callbackResult, 1), closed: make(chan struct{}), publishDone: make(chan struct{}),
 		hosts: map[string]struct{}{net.JoinHostPort("localhost", strconv.Itoa(port)): {}, net.JoinHostPort(host, strconv.Itoa(port)): {}},
 	}
 	w.server = &http.Server{Handler: http.HandlerFunc(w.handle), ReadHeaderTimeout: callbackReadHeaderTimeout, MaxHeaderBytes: callbackMaxHeaderBytes}
 	go func() {
 		if err := w.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			if w.claim() {
-				w.publish(callbackResult{err: failure(KindOAuth, "serve OAuth callback", "openai", err)})
+				w.publish(callbackResult{err: failure(KindOAuth, "serve OAuth callback", provider, err)})
 			}
 		}
 	}()
@@ -96,14 +104,14 @@ func (w *callbackWaiter) Close() {
 		return
 	}
 	if w.claim() {
-		w.publish(callbackResult{err: failure(KindCancelled, "cancel OAuth callback", "openai", context.Canceled)})
+		w.publish(callbackResult{err: failure(KindCancelled, "cancel OAuth callback", w.provider, context.Canceled)})
 	}
 	<-w.publishDone
 	_ = w.server.Close()
 	_ = w.listener.Close()
 }
 func (w *callbackWaiter) handle(response http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet || request.URL.Path != "/auth/callback" || request.URL.RawPath != "" {
+	if request.Method != http.MethodGet || request.URL.Path != w.path || request.URL.RawPath != "" {
 		_ = writeCallbackPage(response, http.StatusNotFound, "Authentication failed", "Callback route not found.")
 		return
 	}
@@ -136,10 +144,10 @@ func (w *callbackWaiter) handle(response http.ResponseWriter, request *http.Requ
 			return
 		}
 		if err := writeCallbackPage(response, http.StatusBadRequest, "Authentication failed", "Authorization was rejected."); err != nil {
-			w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", "openai", err)})
+			w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", w.provider, err)})
 			return
 		}
-		w.publish(callbackResult{err: failure(KindOAuth, "receive OAuth callback", "openai", nil)})
+		w.publish(callbackResult{err: failure(KindOAuth, "receive OAuth callback", w.provider, nil)})
 		return
 	}
 	code := query.Get("code")
@@ -151,8 +159,8 @@ func (w *callbackWaiter) handle(response http.ResponseWriter, request *http.Requ
 		_ = writeCallbackPage(response, http.StatusGone, "Authentication failed", "This login has already completed.")
 		return
 	}
-	if err := writeCallbackPage(response, http.StatusOK, "Authentication successful", "OpenAI authentication completed. You can close this window."); err != nil {
-		w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", "openai", err)})
+	if err := writeCallbackPage(response, http.StatusOK, "Authentication successful", w.successText); err != nil {
+		w.publish(callbackResult{err: failure(KindIO, "write OAuth callback", w.provider, err)})
 		return
 	}
 	w.publish(callbackResult{code: code})

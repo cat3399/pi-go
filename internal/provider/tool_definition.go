@@ -29,6 +29,49 @@ type ToolDefinition struct {
 	description string
 	strict      bool
 	parameters  []byte
+	constrained *ConstrainedSampling
+}
+
+// JSONSchemaStrictPreference mirrors pi's constrainedSampling JSON-schema
+// policy. Prefer uses strict mode when the selected adapter supports it;
+// Require turns missing strict-mode support into a request error.
+type JSONSchemaStrictPreference string
+
+const (
+	JSONSchemaStrictPrefer  JSONSchemaStrictPreference = "prefer"
+	JSONSchemaStrictRequire JSONSchemaStrictPreference = "require"
+)
+
+// GrammarVariants contains equivalent provider encodings of one grammar.
+// OpenAI adapters prefer Lark and fall back to regular expressions, matching
+// pi's constrained-sampling resolver.
+type GrammarVariants struct {
+	OpenAILark  string
+	OpenAIRegex string
+}
+
+type ConstrainedSamplingKind string
+
+const (
+	ConstrainedSamplingJSONSchema ConstrainedSamplingKind = "json_schema"
+	ConstrainedSamplingGrammar    ConstrainedSamplingKind = "grammar"
+)
+
+// ConstrainedSampling is the provider-neutral constrained-sampling contract.
+// Exactly one branch is selected by Kind.
+type ConstrainedSampling struct {
+	Kind     ConstrainedSamplingKind
+	Strict   JSONSchemaStrictPreference
+	Variants GrammarVariants
+}
+
+// ResolvedGrammar is the OpenAI custom-tool projection of a grammar tool.
+// InputProperty identifies the single required string argument used to bridge
+// custom-tool input back into pi's ordinary JSON tool-call contract.
+type ResolvedGrammar struct {
+	Syntax        string
+	Definition    string
+	InputProperty string
 }
 
 func NewToolDefinition(name, description string, strict bool, parametersJSON []byte) (ToolDefinition, error) {
@@ -37,6 +80,23 @@ func NewToolDefinition(name, description string, strict bool, parametersJSON []b
 		description: description,
 		strict:      strict,
 		parameters:  bytes.Clone(parametersJSON),
+	}
+	if err := definition.validate(); err != nil {
+		return ToolDefinition{}, err
+	}
+	return definition, nil
+}
+
+// NewToolDefinitionWithConstrainedSampling constructs the complete pi tool
+// contract. A nil constrained value is equivalent to an omitted
+// constrainedSampling field; the legacy strict flag remains available through
+// NewToolDefinition for existing callers.
+func NewToolDefinitionWithConstrainedSampling(name, description string, parametersJSON []byte, constrained *ConstrainedSampling) (ToolDefinition, error) {
+	definition := ToolDefinition{
+		name:        name,
+		description: description,
+		parameters:  bytes.Clone(parametersJSON),
+		constrained: cloneConstrainedSampling(constrained),
 	}
 	if err := definition.validate(); err != nil {
 		return ToolDefinition{}, err
@@ -89,7 +149,111 @@ func (d ToolDefinition) validate() error {
 			return fmt.Errorf("%w: strict parameters: %v", ErrInvalidToolDefinition, err)
 		}
 	}
+	if d.constrained != nil {
+		switch d.constrained.Kind {
+		case ConstrainedSamplingJSONSchema:
+			if d.constrained.Strict != JSONSchemaStrictPrefer && d.constrained.Strict != JSONSchemaStrictRequire {
+				return fmt.Errorf("%w: constrained JSON-schema strict preference must be prefer or require", ErrInvalidToolDefinition)
+			}
+			if strings.TrimSpace(d.constrained.Variants.OpenAILark) != "" || strings.TrimSpace(d.constrained.Variants.OpenAIRegex) != "" {
+				return fmt.Errorf("%w: JSON-schema constrained sampling cannot contain grammar variants", ErrInvalidToolDefinition)
+			}
+		case ConstrainedSamplingGrammar:
+			if d.constrained.Strict != "" {
+				return fmt.Errorf("%w: grammar constrained sampling cannot contain a strict preference", ErrInvalidToolDefinition)
+			}
+			for _, definition := range []string{d.constrained.Variants.OpenAILark, d.constrained.Variants.OpenAIRegex} {
+				if !utf8.ValidString(definition) {
+					return fmt.Errorf("%w: grammar definition must be valid UTF-8", ErrInvalidToolDefinition)
+				}
+			}
+		default:
+			return fmt.Errorf("%w: unknown constrained sampling kind %q", ErrInvalidToolDefinition, d.constrained.Kind)
+		}
+	}
 	return nil
+}
+
+func cloneConstrainedSampling(value *ConstrainedSampling) *ConstrainedSampling {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+// ResolveJSONSchemaStrict implements pi's strict-mode compatibility rule.
+// The second return value distinguishes an omitted strict field from false.
+func (d ToolDefinition) ResolveJSONSchemaStrict(supportsStrictMode bool) (bool, bool, error) {
+	if d.constrained == nil || d.constrained.Kind != ConstrainedSamplingJSONSchema {
+		if d.strict {
+			// Legacy Go callers explicitly requested strict mode before the full
+			// constrained-sampling contract existed. Preserve that request; new
+			// callers should use JSONSchemaStrictRequire/Prefer.
+			return true, true, nil
+		}
+		if supportsStrictMode {
+			return false, true, nil
+		}
+		return false, false, nil
+	}
+	if supportsStrictMode {
+		return true, true, nil
+	}
+	if d.constrained.Strict == JSONSchemaStrictRequire {
+		return false, false, fmt.Errorf("%w: tool %q requires JSON-schema constrained sampling, but strict tools are unsupported", ErrInvalidToolDefinition, d.name)
+	}
+	return false, false, nil
+}
+
+// ResolveGrammar implements pi's Lark-first OpenAI grammar selection. When an
+// adapter does not support grammar tools the configuration is deliberately
+// ignored and the tool falls back to an ordinary function definition.
+func (d ToolDefinition) ResolveGrammar(supportsOpenAIGrammarTools bool) (ResolvedGrammar, bool, error) {
+	if d.constrained == nil || d.constrained.Kind != ConstrainedSamplingGrammar || !supportsOpenAIGrammarTools {
+		return ResolvedGrammar{}, false, nil
+	}
+	definition, syntax := strings.TrimSpace(d.constrained.Variants.OpenAILark), "lark"
+	if definition == "" {
+		definition, syntax = strings.TrimSpace(d.constrained.Variants.OpenAIRegex), "regex"
+	}
+	if definition == "" {
+		return ResolvedGrammar{}, false, fmt.Errorf("%w: tool %q cannot use grammar constrained sampling: no supported grammar variant was provided", ErrInvalidToolDefinition, d.name)
+	}
+	property, err := inferGrammarInputProperty(d.parameters)
+	if err != nil {
+		return ResolvedGrammar{}, false, fmt.Errorf("%w: tool %q cannot use grammar constrained sampling: %v", ErrInvalidToolDefinition, d.name, err)
+	}
+	return ResolvedGrammar{Syntax: syntax, Definition: definition, InputProperty: property}, true, nil
+}
+
+func inferGrammarInputProperty(parameters []byte) (string, error) {
+	var schema struct {
+		Type       any                        `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []any                      `json:"required"`
+	}
+	if err := json.Unmarshal(parameters, &schema); err != nil || schema.Type != "object" {
+		return "", errors.New("grammar constrained sampling requires an object parameter schema")
+	}
+	if len(schema.Required) != 1 {
+		return "", errors.New("grammar constrained sampling requires exactly one required string property")
+	}
+	property, ok := schema.Required[0].(string)
+	if !ok || property == "" {
+		return "", errors.New("grammar constrained sampling requires exactly one required string property")
+	}
+	raw, ok := schema.Properties[property]
+	if !ok {
+		return "", fmt.Errorf("grammar constrained sampling requires a properties entry for %s", property)
+	}
+	var propertySchema struct {
+		Type any `json:"type"`
+	}
+	if json.Unmarshal(raw, &propertySchema) != nil || propertySchema.Type != "string" {
+		return "", fmt.Errorf("grammar constrained sampling property %s must have type string", property)
+	}
+	return property, nil
 }
 
 // validateStrictFunctionParameters enforces the structural invariants OpenAI
@@ -485,6 +649,12 @@ func strictJSONArrayIndex(token string) (int, error) {
 func (d ToolDefinition) Name() string        { return d.name }
 func (d ToolDefinition) Description() string { return d.description }
 func (d ToolDefinition) Strict() bool        { return d.strict }
+func (d ToolDefinition) ConstrainedSampling() (ConstrainedSampling, bool) {
+	if d.constrained == nil {
+		return ConstrainedSampling{}, false
+	}
+	return *cloneConstrainedSampling(d.constrained), true
+}
 func (d ToolDefinition) ParametersJSON() []byte {
 	return bytes.Clone(d.parameters)
 }

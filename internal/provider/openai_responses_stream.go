@@ -20,12 +20,13 @@ import (
 )
 
 type responsesFailureSpec struct {
-	kind       FailureKind
-	cause      error
-	message    string
-	httpStatus *int
-	vendorCode string
-	retryAfter *time.Duration
+	kind        FailureKind
+	cause       error
+	message     string
+	httpStatus  *int
+	vendorCode  string
+	retryAfter  *time.Duration
+	shouldRetry *bool
 }
 
 type responsesTextSlot struct {
@@ -36,17 +37,23 @@ type responsesTextSlot struct {
 }
 
 type responsesToolSlot struct {
-	contentIndex  int
-	itemID        string
-	callID        string
-	name          string
-	arguments     []byte
-	argumentsDone bool
+	contentIndex   int
+	itemID         string
+	callID         string
+	name           string
+	arguments      []byte
+	argumentsDone  bool
+	customProperty string
+	customCurrent  string
+	customEncoded  string
+	customStarted  bool
+	customClosed   bool
 }
 type responsesReasoningSlot struct {
 	contentIndex int
 	itemID       string
 	text         strings.Builder
+	summaryParts map[int]*strings.Builder
 }
 
 type responsesCompletedReasoning struct {
@@ -64,23 +71,31 @@ type responsesDeferredEvent struct {
 }
 
 type openAIResponsesStream struct {
-	ctx               context.Context
-	cancel            context.CancelCauseFunc
-	endpoint          string
-	apiKey            string
-	client            HTTPDoer
-	clock             Clock
-	timestamp         time.Time
-	payload           []byte
-	model             Model
-	headers           map[string]string
-	maxEventBytes     int
-	maxErrorBodyBytes int
-	onResponse        ResponseHook
-	onHeaders         HeaderHook
-	headerOverrides   map[string]*string
-	configurationFail *responsesFailureSpec
-	preflight         *responsesFailureSpec
+	ctx                context.Context
+	cancel             context.CancelCauseFunc
+	timeoutCancel      context.CancelFunc
+	endpoint           string
+	apiKey             string
+	client             HTTPDoer
+	clock              Clock
+	timestamp          time.Time
+	payload            []byte
+	model              Model
+	headers            map[string]string
+	maxEventBytes      int
+	maxErrorBodyBytes  int
+	onResponse         ResponseHook
+	onHeaders          HeaderHook
+	headerOverrides    map[string]*string
+	maxRetries         uint32
+	maxRetryDelayMS    *uint64
+	serviceTier        string
+	codexServiceTier   bool
+	codexRetry         bool
+	terminalEndsStream bool
+	grammarProperties  map[string]string
+	configurationFail  *responsesFailureSpec
+	preflight          *responsesFailureSpec
 
 	lifecycleMu sync.Mutex
 	body        io.ReadCloser
@@ -107,6 +122,23 @@ type openAIResponsesStream struct {
 	sawFunctionCall  bool
 	sawFinalAnswer   bool
 	pendingDone      *llm.DoneEvent
+}
+
+type responsesTerminalCommitter interface {
+	commitResponsesTerminal(responseID string)
+}
+
+// commitResponsesTerminal is deliberately invoked only after all terminal
+// response validation and usage normalization succeeds. WebSocket-cached Codex
+// must not retain a connection or continuation for a response the adapter
+// ultimately rejects.
+func (s *openAIResponsesStream) commitResponsesTerminal(responseID string) {
+	s.lifecycleMu.Lock()
+	body := s.body
+	s.lifecycleMu.Unlock()
+	if committer, ok := body.(responsesTerminalCommitter); ok {
+		committer.commitResponsesTerminal(responseID)
+	}
 }
 
 func newResponsesFailureStream(
@@ -173,6 +205,11 @@ func (s *openAIResponsesStream) Next() (event llm.StreamEvent, err error) {
 	}
 	if len(s.queue) != 0 {
 		return s.popEvent(), nil
+	}
+	if s.terminalEndsStream && s.pendingDone != nil {
+		done := *s.pendingDone
+		s.finishTransport()
+		return done, nil
 	}
 	if s.preflight != nil {
 		spec := *s.preflight
@@ -272,10 +309,43 @@ func (s *openAIResponsesStream) Next() (event llm.StreamEvent, err error) {
 		if len(s.queue) != 0 {
 			return s.popEvent(), nil
 		}
+		if s.terminalEndsStream && s.pendingDone != nil {
+			done := *s.pendingDone
+			s.finishTransport()
+			return done, nil
+		}
 	}
 }
 
 func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
+	for retryIndex := uint32(0); ; retryIndex++ {
+		failure = s.initializeAttempt()
+		if failure == nil {
+			return nil
+		}
+		shouldRetry := providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry)
+		if s.codexRetry {
+			shouldRetry = codexShouldRetry(failure)
+		}
+		if retryIndex >= s.maxRetries || !shouldRetry {
+			return failure
+		}
+		wait := waitProviderRetry
+		if s.codexRetry {
+			wait = waitCodexRetry
+		}
+		if err := wait(s.ctx, retryIndex, failure.retryAfter, s.maxRetryDelayMS, failure.message); err != nil {
+			if retryWaitCancellation(err) {
+				return s.cancellationFailure(err)
+			}
+			failure.cause = errors.Join(failure.cause, err)
+			failure.message = safeResponsesErrorText(err, failure.message)
+			return failure
+		}
+	}
+}
+
+func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSpec) {
 	var ownedBody io.ReadCloser
 	defer func() {
 		if ownedBody == nil {
@@ -305,7 +375,7 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 	if err := applyFinalHeaders(request.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
 		return &responsesFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Responses header hook failed"}
 	}
-	if strings.TrimSpace(request.Header.Get("Authorization")) == "" {
+	if !openAIHTTPHeadersHaveAuthorization(request.Header) {
 		if s.configurationFail != nil {
 			spec := *s.configurationFail
 			return &spec
@@ -421,14 +491,15 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 		cause.readError = readErr
 	}
 	status := response.StatusCode
-	retryAfter := responsesRetryAfter(response.Header.Get("Retry-After"), s.clock())
+	retryAfter := providerRetryAfter(response.Header, s.clock())
 	return &responsesFailureSpec{
-		kind:       FailureHTTPStatus,
-		cause:      cause,
-		message:    message,
-		httpStatus: &status,
-		vendorCode: vendorCode,
-		retryAfter: retryAfter,
+		kind:        FailureHTTPStatus,
+		cause:       cause,
+		message:     message,
+		httpStatus:  &status,
+		vendorCode:  vendorCode,
+		retryAfter:  retryAfter,
+		shouldRetry: providerRetryOverride(response.Header),
 	}
 }
 
@@ -553,6 +624,9 @@ func (s *openAIResponsesStream) finishTransport() {
 	body := s.takeBodyForCloseLocked()
 	s.lifecycleMu.Unlock()
 	s.cancel(errOpenAIResponsesStreamFinished)
+	if s.timeoutCancel != nil {
+		s.timeoutCancel()
+	}
 	if body != nil {
 		s.recordCloseError(safeCloseResponsesBody(body))
 	}
@@ -567,6 +641,9 @@ func (s *openAIResponsesStream) Close() error {
 	body := s.takeBodyForCloseLocked()
 	s.lifecycleMu.Unlock()
 	s.cancel(errOpenAIResponsesStreamClosed)
+	if s.timeoutCancel != nil {
+		s.timeoutCancel()
+	}
 	if body != nil {
 		s.recordCloseError(safeCloseResponsesBody(body))
 	}

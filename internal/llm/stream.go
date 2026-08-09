@@ -910,9 +910,11 @@ func (c *StreamCollector) Accept(event StreamEvent) error {
 		if c.phase != streamActive || !ok || slot.kind != AssistantBlockThinking {
 			return c.fail(nil, "thinking_end arrived without open thinking")
 		}
-		if event.content.Thinking() != slot.text.String() {
-			return c.fail(nil, "thinking_end content does not match accumulated deltas")
-		}
+		// Provider terminal items are authoritative for reasoning summaries. A
+		// compatible endpoint may revise an advisory streamed summary at
+		// output_item.done, so retain the final block carried by thinking_end.
+		// Consumers still receive all progress deltas and can reconcile their
+		// display from this closing event, matching pi's stream contract.
 		c.closeSlot(event.contentIndex, event.content)
 		return nil
 

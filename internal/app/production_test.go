@@ -168,7 +168,7 @@ func TestRunProductionRoutesOpenAIChatCompletionsModel(t *testing.T) {
 	}))
 	defer server.Close()
 	key := "key"
-	writeModelsJSON(t, agentDir, server.URL+"/v1", &key, map[string]any{"api": "openai-completions"})
+	writeModelsJSON(t, agentDir, server.URL+"/v1", &key, map[string]any{"models": []map[string]any{{"id": "gpt-5.5", "api": "openai-completions"}}})
 	config := productionTestConfig(workingDir, agentDir, nil)
 	var stdout, stderr bytes.Buffer
 	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-5.5", "--session", filepath.Join(workingDir, "session.jsonl"), "-p", "hello"}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "completion answer\n" || stderr.Len() != 0 {
@@ -937,7 +937,11 @@ func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *t
 			}
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(writer, `{"access_token":`+jsonString(access)+`,"refresh_token":"new-refresh","expires_in":3600}`)
-		case "/v1/responses":
+		case "/codex/responses":
+			if strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
+				http.Error(writer, "SSE fixture", http.StatusBadRequest)
+				return
+			}
 			responseAuthorization = request.Header.Get("Authorization")
 			_, _ = io.Copy(io.Discard, request.Body)
 			writer.Header().Set("Content-Type", "text/event-stream")
@@ -951,13 +955,14 @@ func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *t
 		}
 	}))
 	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", nil, nil)
-	writeAuthJSON(t, agentDir, `{"openai":{"type":"oauth","access":`+jsonString(productionOAuthJWT("old-account"))+`,"refresh":"old-refresh","expires":1,"accountId":"old-account"}}`)
+	writeProviderModelsJSON(t, agentDir, map[string]any{"openai-codex": map[string]any{"baseUrl": server.URL}})
+	writeAuthJSON(t, agentDir, `{"openai-codex":{"type":"oauth","access":`+jsonString(productionOAuthJWT("old-account"))+`,"refresh":"old-refresh","expires":1,"accountId":"old-account"}}`)
 	config := productionTestConfig(workingDir, agentDir, nil)
 	config.OpenAIOAuthBaseURL = server.URL
 	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-oauth", "--session", filepath.Join(workingDir, "oauth.jsonl"), "-p", "hello"}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "oauth answer\n" || stderr.String() != customModelWarning("gpt-oauth") || tokenCalls.Load() != 1 || responseAuthorization != "Bearer "+access {
+	code := app.RunProduction(context.Background(), config, []string{"--model", "openai-codex/gpt-oauth", "--session", filepath.Join(workingDir, "oauth.jsonl"), "-p", "hello"}, &stdout, &stderr)
+	warning := "Warning: Model \"gpt-oauth\" not found for provider \"openai-codex\". Using custom model id.\n"
+	if code != app.ExitSuccess || stdout.String() != "oauth answer\n" || stderr.String() != warning || tokenCalls.Load() != 1 || responseAuthorization != "Bearer "+access {
 		t.Fatalf("RunProduction OAuth = code %d stdout %q stderr %q tokens %d authorization %q", code, stdout.String(), stderr.String(), tokenCalls.Load(), responseAuthorization)
 	}
 	data, err := os.ReadFile(filepath.Join(agentDir, "auth.json"))
@@ -1020,13 +1025,13 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			storedFile: true,
 		},
 		{
-			name:        "command-backed configured key is explicit",
+			name:        "failed command-backed configured key is explicit",
 			args:        []string{"--model", "openai/gpt-test", "-p", "hello"},
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare: func(t *testing.T, agentDir string) {
-				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("!printf command-secret"), nil)
+				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("!exit 7 # command-secret"), nil)
 			},
-			want:    "command-backed configured OpenAI API key is not migrated",
+			want:    "cannot resolve command-backed configured provider credential",
 			secrets: []string{"ambient-secret", "command-secret"},
 		},
 		{
@@ -1041,43 +1046,6 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			},
 			want:    "parse models.json",
 			secrets: []string{"ambient-secret", "models-secret", "trailing-secret"},
-		},
-		{
-			name:        "unsupported models request configuration",
-			args:        []string{"--model", "openai/gpt-test", "-p", "hello"},
-			environment: []string{"OPENAI_API_KEY=ambient-secret"},
-			prepare: func(t *testing.T, agentDir string) {
-				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, map[string]any{
-					"futureRequestOption": map[string]any{"X-Secret": "models-secret"},
-				})
-			},
-			want:    "selected provider/API is not supported",
-			secrets: []string{"ambient-secret", "models-secret"},
-		},
-		{
-			name:        "unknown selected models field is not ignored",
-			args:        []string{"--model", "openai/gpt-test", "-p", "hello"},
-			environment: []string{"OPENAI_API_KEY=ambient-secret"},
-			prepare: func(t *testing.T, agentDir string) {
-				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, map[string]any{
-					"futureRequestOption": "future-secret",
-				})
-			},
-			want:    "selected provider/API is not supported",
-			secrets: []string{"ambient-secret", "future-secret"},
-		},
-		{
-			name:        "mixed-case selected custom override is not ignored",
-			args:        []string{"--model", "OPENAI/gpt-5.5", "-p", "hello"},
-			environment: []string{"OPENAI_API_KEY=ambient-secret"},
-			prepare: func(t *testing.T, agentDir string) {
-				content := `{"providers":{"OpEnAi":{"baseUrl":"https://fixture.invalid/v1","modelOverrides":{"GPT-5.5":{"compat":{"token":"case-secret"}}}}}}`
-				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(content), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-			want:    "selected provider/API is not supported",
-			secrets: []string{"ambient-secret", "case-secret"},
 		},
 		{
 			name: "missing all credential sources",
@@ -1177,6 +1145,79 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			}
 			if _, statErr := os.Stat(sessionParent); statErr != nil {
 				t.Fatalf("session-first startup did not prepare session tree: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRunProductionIgnoresUnknownModelsJSONFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   string
+		prepare func(*testing.T, string, string)
+	}{
+		{
+			name:  "provider object",
+			model: "openai/gpt-test",
+			prepare: func(t *testing.T, agentDir, baseURL string) {
+				writeModelsJSON(t, agentDir, baseURL, stringPointer("fixture-key"), map[string]any{
+					"futureRequestOption": map[string]any{"Authorization": "must-not-become-a-header"},
+				})
+			},
+		},
+		{
+			name:  "provider scalar",
+			model: "openai/gpt-test",
+			prepare: func(t *testing.T, agentDir, baseURL string) {
+				writeModelsJSON(t, agentDir, baseURL, stringPointer("fixture-key"), map[string]any{
+					"futureRequestOption": "must-not-enter-request",
+				})
+			},
+		},
+		{
+			name:  "mixed-case model override compat",
+			model: "OPENAI/gpt-5.5",
+			prepare: func(t *testing.T, agentDir, baseURL string) {
+				content, err := json.Marshal(map[string]any{"providers": map[string]any{"OpEnAi": map[string]any{
+					"baseUrl": baseURL, "apiKey": "fixture-key",
+					"modelOverrides": map[string]any{"GPT-5.5": map[string]any{"compat": map[string]any{"token": "must-not-enter-request"}}},
+				}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workingDir, agentDir := t.TempDir(), t.TempDir()
+			capture := &capturedProductionRequest{}
+			server := newProductionTextServer(t, capture, "ok")
+			defer server.Close()
+			test.prepare(t, agentDir, server.URL+"/v1")
+			var stdout, stderr bytes.Buffer
+			code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
+				"--model", test.model, "-p", "hello", "--session", filepath.Join(workingDir, "session.jsonl"),
+			}, &stdout, &stderr)
+			if code != app.ExitSuccess || stdout.String() != "ok\n" {
+				t.Fatalf("RunProduction() = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+			}
+			request := capture.snapshot()
+			capturedPayload, err := json.Marshal(request.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			captured := string(capturedPayload)
+			for _, forbidden := range []string{"must-not-become-a-header", "must-not-enter-request"} {
+				if strings.Contains(captured, forbidden) {
+					t.Fatalf("unknown models.json value entered payload: %s", captured)
+				}
+			}
+			if request.authorization != "Bearer fixture-key" {
+				t.Fatalf("authorization = %q", request.authorization)
 			}
 		})
 	}

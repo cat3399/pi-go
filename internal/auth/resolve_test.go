@@ -2,28 +2,65 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestResolveValueTemplatesAndCommandRejectionAreSecretSafe(t *testing.T) {
+func TestResolveValueTemplatesAndCommandsAreSecretSafe(t *testing.T) {
+	ClearConfigValueCache()
+	t.Cleanup(ClearConfigValueCache)
 	value, err := ResolveValue(context.Background(), "prefix-${SCOPED}-$$-$!-$AMBIENT", "test key", map[string]string{"SCOPED": "left"}, map[string]string{"SCOPED": "wrong", "AMBIENT": "right"})
 	if err != nil || value != "prefix-left-$-!-right" {
 		t.Fatalf("ResolveValue() = %q, %v", value, err)
 	}
-	marker := filepath.Join(t.TempDir(), "must-not-exist")
-	_, err = ResolveValue(context.Background(), "!sh -c 'touch "+marker+"; printf super-secret'", "test key", nil, nil)
-	if !IsKind(err, KindUnsupported) || strings.Contains(err.Error(), "super-secret") {
-		t.Fatalf("command error = %v", err)
+	value, err = ResolveValue(context.Background(), "!echo command-key", "test key", nil, nil)
+	if err != nil || value != "command-key" {
+		t.Fatalf("command value = %q, %v", value, err)
 	}
-	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
-		t.Fatalf("rejected command ran: %v", statErr)
+	_, err = ResolveValue(context.Background(), "!exit 7 # never-leak-command-secret", "test key", nil, nil)
+	if !IsKind(err, KindNotConfigured) || strings.Contains(err.Error(), "never-leak-command-secret") {
+		t.Fatalf("command failure = %v", err)
 	}
 	_, err = ResolveValue(context.Background(), "${MISSING}", "test key", nil, nil)
 	if !IsKind(err, KindNotConfigured) {
 		t.Fatalf("missing variable error = %v", err)
+	}
+}
+
+func TestResolveHeadersAcceptsEmptyLiteralValues(t *testing.T) {
+	resolved, err := ResolveHeaders(context.Background(), map[string]string{
+		"X-Empty": "",
+		"X-Space": "  ",
+	}, "provider test", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, present := resolved["X-Empty"]; !present || value != "" {
+		t.Fatalf("empty header = %q, present=%t", value, present)
+	}
+	if resolved["X-Space"] != "  " {
+		t.Fatalf("space header = %q", resolved["X-Space"])
+	}
+}
+
+func TestResolveValueUncachedExecutesModelsJSONCommandForEveryRequest(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "runs")
+	command := fmt.Sprintf("!printf x >> %q; printf request-key", marker)
+	for index := 0; index < 2; index++ {
+		value, err := ResolveValueUncached(context.Background(), command, "configured provider API key", nil, nil)
+		if err != nil || value != "request-key" {
+			t.Fatalf("resolution %d = %q, %v", index, value, err)
+		}
+	}
+	runs, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(runs) != "xx" {
+		t.Fatalf("command executions = %q, want two request-time runs", runs)
 	}
 }
 

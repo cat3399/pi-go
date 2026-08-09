@@ -159,6 +159,44 @@ func TestStreamCollectorErrorRetainsThinkingAndCompleteToolCall(t *testing.T) {
 	}
 }
 
+func TestStreamCollectorThinkingEndContentIsAuthoritative(t *testing.T) {
+	t.Parallel()
+
+	collector := &llm.StreamCollector{}
+	accept(t, collector, newStartEvent(t))
+	thinkingStart, err := llm.NewThinkingStartEvent(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingDelta, err := llm.NewThinkingDeltaEvent(0, "draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := llm.NewThinkingBlock("authoritative final")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingEnd, err := llm.NewThinkingEndEvent(0, final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept(t, collector, thinkingStart)
+	accept(t, collector, thinkingDelta)
+	accept(t, collector, thinkingEnd)
+	accept(t, collector, done(t, llm.FinishStop, time.Time{}))
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := collector.Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rich, ok := result.(llm.AssistantRichMessage)
+	if !ok || len(rich.Blocks()) != 1 || rich.Blocks()[0].(llm.ThinkingBlock).Thinking() != "authoritative final" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestStreamCollectorAndAssistantRebuildersPreserveLengthToolUse(t *testing.T) {
 	t.Parallel()
 

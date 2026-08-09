@@ -242,7 +242,7 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 		t.Fatal(err)
 	}
 	old := OAuthCredential{Access: oauthJWT("old-account"), Refresh: "old-refresh", Expires: time.Now().Add(-time.Hour).UnixMilli(), AccountID: "old-account", Extra: map[string]json.RawMessage{"future-field": json.RawMessage(`{"keep":true}`)}}
-	if err := store.SetOAuth(context.Background(), "openai", old); err != nil {
+	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, old); err != nil {
 		t.Fatal(err)
 	}
 	flow, _ := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL})
@@ -253,7 +253,7 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			result, err := ResolveOpenAIAuth(context.Background(), runtime, nil, nil, map[string]string{"OPENAI_API_KEY": "must-not-fallback"}, OpenAIResolveOptions{OAuth: flow})
+			result, err := ResolveOpenAICodexAuth(context.Background(), runtime, nil, nil, map[string]string{"OPENAI_API_KEY": "must-not-fallback"}, OpenAIResolveOptions{OAuth: flow})
 			if err != nil || result.APIKey != oauthJWT("fresh-account") {
 				errorsOut <- errors.New("unexpected resolved OAuth")
 			}
@@ -267,25 +267,98 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 	if refreshes.Load() != 1 {
 		t.Fatalf("refreshes = %d", refreshes.Load())
 	}
-	stored, exists, err := store.Read(context.Background(), "openai")
+	stored, exists, err := store.Read(context.Background(), OpenAICodexProviderID)
 	var preserved map[string]bool
 	_ = json.Unmarshal(stored.OAuth.Extra["future-field"], &preserved)
 	if err != nil || !exists || stored.OAuth.Refresh != "fresh-refresh" || !preserved["keep"] {
 		t.Fatalf("stored = %#v exists %t err %v", stored, exists, err)
 	}
 
-	if err := store.SetOAuth(context.Background(), "openai", old); err != nil {
+	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, old); err != nil {
 		t.Fatal(err)
 	}
 	store.beforeRename = func() error { return errors.New("durability fault") }
-	_, err = ResolveOpenAIAuth(context.Background(), runtime, nil, nil, nil, OpenAIResolveOptions{OAuth: flow})
+	_, err = ResolveOpenAICodexAuth(context.Background(), runtime, nil, nil, nil, OpenAIResolveOptions{OAuth: flow})
 	if !IsKind(err, KindIO) {
 		t.Fatalf("refresh write error = %v", err)
 	}
 	store.beforeRename = nil
-	stored, exists, err = store.Read(context.Background(), "openai")
+	stored, exists, err = store.Read(context.Background(), OpenAICodexProviderID)
 	if err != nil || !exists || stored.OAuth.Refresh != "old-refresh" {
 		t.Fatalf("failed refresh overwrote old credential: %#v, %t, %v", stored, exists, err)
+	}
+}
+
+func TestResolveStoredOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *testing.T) {
+	requirePersistentAuth(t)
+	now := time.Unix(2_100_000_000, 0)
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		refreshes.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"access_token":`+strconvQuote(oauthJWT("short-account"))+`,"refresh_token":"short-refresh","expires_in":600}`)
+	}))
+	defer server.Close()
+
+	store, err := NewStore(Options{Path: filepath.Join(t.TempDir(), "auth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, OAuthCredential{
+		Access: oauthJWT("old-account"), Refresh: "old-refresh", Expires: now.Add(time.Hour).UnixMilli(), AccountID: "old-account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, Clock: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveOpenAICodexAuth(context.Background(), NewRuntime(store), nil, nil, nil, OpenAIResolveOptions{
+		OAuth: flow, Clock: func() time.Time { return now }, MinimumValidity: 2 * time.Hour,
+	})
+	if !IsKind(err, KindOAuth) || refreshes.Load() != 1 {
+		t.Fatalf("short refreshed credential = %v, refreshes=%d", err, refreshes.Load())
+	}
+	stored, exists, readErr := store.Read(context.Background(), OpenAICodexProviderID)
+	if readErr != nil || !exists || stored.OAuth.Refresh != "short-refresh" {
+		t.Fatalf("rotated credential was not persisted: %#v exists=%t err=%v", stored, exists, readErr)
+	}
+}
+
+func TestResolveStoredOAuthDistinguishesOmittedAndExplicitZeroMinimum(t *testing.T) {
+	requirePersistentAuth(t)
+	now := time.Unix(2_100_000_000, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"access_token":`+strconvQuote(oauthJWT("short-account"))+`,"refresh_token":"short-refresh","expires_in":60}`)
+	}))
+	defer server.Close()
+	store, err := NewStore(Options{Path: filepath.Join(t.TempDir(), "auth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := OAuthCredential{Access: oauthJWT("old-account"), Refresh: "old-refresh", Expires: now.Add(time.Minute).UnixMilli(), AccountID: "old-account"}
+	flow, err := NewOpenAICodexOAuth(OpenAICodexOAuthConfig{AuthBaseURL: server.URL, Clock: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, old); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveOpenAICodexAuth(context.Background(), NewRuntime(store), nil, nil, nil, OpenAIResolveOptions{
+		OAuth: flow, Clock: func() time.Time { return now },
+	})
+	if err != nil || resolved.APIKey != oauthJWT("short-account") {
+		t.Fatalf("omitted minimum = %#v, %v", resolved, err)
+	}
+	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, old); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveOpenAICodexAuth(context.Background(), NewRuntime(store), nil, nil, nil, OpenAIResolveOptions{
+		OAuth: flow, Clock: func() time.Time { return now }, MinimumValiditySet: true,
+	})
+	if !IsKind(err, KindOAuth) {
+		t.Fatalf("explicit zero minimum error = %v", err)
 	}
 }
 

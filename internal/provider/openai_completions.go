@@ -8,7 +8,6 @@ package provider
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -148,6 +147,10 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
 		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
+	grammarProperties, err := completionsGrammarToolProperties(request)
+	if err != nil {
+		return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
+	}
 	endpoint := p.endpoint
 	if base := request.Model().BaseURL(); base != "" {
 		endpoint, err = completionsEndpoint(base)
@@ -155,7 +158,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 			return newCompletionsFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 		}
 	}
-	streamCtx, cancel := context.WithCancelCause(ctx)
+	streamCtx, cancel, timeoutCancel := streamContextWithTimeout(ctx, options.TimeoutMS)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone && completionsSendSessionAffinity(request.Model()) {
 		switch completionsSessionAffinityFormat(request.Model()) {
@@ -174,13 +177,13 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if options.Fetch != nil {
 		client = options.Fetch
 	}
-	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides), configurationFail: p.configurationFail, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
+	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, timeoutCancel: timeoutCancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides), configurationFail: p.configurationFail, maxRetries: valueOrZero32(options.MaxRetries), maxRetryDelayMS: cloneUint64(options.MaxRetryDelayMS), grammarProperties: grammarProperties, tools: make(map[int]*completionsToolSlot), toolsByID: make(map[string]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
 }
 
 func completionsHasAuthorization(groups ...map[string]string) bool {
 	for _, group := range groups {
 		for name, value := range group {
-			if strings.EqualFold(name, "authorization") && strings.TrimSpace(value) != "" {
+			if (strings.EqualFold(name, "authorization") || strings.EqualFold(name, "cf-aig-authorization")) && strings.TrimSpace(value) != "" {
 				return true
 			}
 		}
@@ -189,7 +192,118 @@ func completionsHasAuthorization(groups ...map[string]string) bool {
 }
 
 func completionsCompat(model Model) *OpenAICompletionsCompat {
-	return model.Compat().OpenAICompletions
+	detected := detectCompletionsCompat(model)
+	explicit := model.Compat().OpenAICompletions
+	if explicit == nil {
+		return detected
+	}
+	overlayCompletionBool(&detected.SupportsStore, explicit.SupportsStore)
+	overlayCompletionBool(&detected.SupportsDeveloperRole, explicit.SupportsDeveloperRole)
+	overlayCompletionBool(&detected.SupportsReasoningEffort, explicit.SupportsReasoningEffort)
+	overlayCompletionBool(&detected.SupportsUsageInStreaming, explicit.SupportsUsageInStreaming)
+	overlayCompletionBool(&detected.SupportsFinishReason, explicit.SupportsFinishReason)
+	overlayCompletionString(&detected.MaxTokensField, explicit.MaxTokensField)
+	overlayCompletionBool(&detected.RequiresToolResultName, explicit.RequiresToolResultName)
+	overlayCompletionBool(&detected.RequiresAssistantAfterToolResult, explicit.RequiresAssistantAfterToolResult)
+	overlayCompletionBool(&detected.RequiresThinkingAsText, explicit.RequiresThinkingAsText)
+	overlayCompletionBool(&detected.RequiresReasoningContentOnAssistantMessages, explicit.RequiresReasoningContentOnAssistantMessages)
+	overlayCompletionString(&detected.ThinkingFormat, explicit.ThinkingFormat)
+	overlayCompletionBool(&detected.SupportsOpenAIGrammarTools, explicit.SupportsOpenAIGrammarTools)
+	overlayCompletionBool(&detected.SupportsStrictMode, explicit.SupportsStrictMode)
+	overlayCompletionBool(&detected.SendSessionAffinityHeaders, explicit.SendSessionAffinityHeaders)
+	overlayCompletionString(&detected.SessionAffinityFormat, explicit.SessionAffinityFormat)
+	overlayCompletionBool(&detected.SupportsLongCacheRetention, explicit.SupportsLongCacheRetention)
+	overlayCompletionString(&detected.CacheControlFormat, explicit.CacheControlFormat)
+	overlayCompletionString(&detected.DeferredToolsMode, explicit.DeferredToolsMode)
+	overlayCompletionBool(&detected.ZaiToolStream, explicit.ZaiToolStream)
+	if explicit.ChatTemplateKwargs != nil {
+		detected.ChatTemplateKwargs = cloneAny(explicit.ChatTemplateKwargs)
+	}
+	if explicit.OpenRouterRouting != nil {
+		detected.OpenRouterRouting = cloneAny(explicit.OpenRouterRouting)
+	}
+	if explicit.VercelGatewayRouting != nil {
+		detected.VercelGatewayRouting = cloneAny(explicit.VercelGatewayRouting)
+	}
+	return detected
+}
+
+func detectCompletionsCompat(model Model) *OpenAICompletionsCompat {
+	providerID := strings.ToLower(model.Provider())
+	baseURL := strings.ToLower(model.BaseURL())
+	isZai := providerID == "zai" || providerID == "zai-coding-cn" || strings.Contains(baseURL, "api.z.ai") || strings.Contains(baseURL, "open.bigmodel.cn")
+	isTogether := providerID == "together" || strings.Contains(baseURL, "api.together.ai") || strings.Contains(baseURL, "api.together.xyz")
+	isMoonshot := providerID == "moonshotai" || providerID == "moonshotai-cn" || strings.Contains(baseURL, "api.moonshot.")
+	isOpenRouter := providerID == "openrouter" || strings.Contains(baseURL, "openrouter.ai")
+	isCloudflareWorkers := providerID == "cloudflare-workers-ai" || strings.Contains(baseURL, "api.cloudflare.com")
+	isCloudflareGateway := providerID == "cloudflare-ai-gateway" || strings.Contains(baseURL, "gateway.ai.cloudflare.com")
+	isNVIDIA := providerID == "nvidia" || strings.Contains(baseURL, "integrate.api.nvidia.com")
+	isAntLing := providerID == "ant-ling" || strings.Contains(baseURL, "api.ant-ling.com")
+	isNonStandard := isNVIDIA || providerID == "cerebras" || strings.Contains(baseURL, "cerebras.ai") ||
+		providerID == "xai" || strings.Contains(baseURL, "api.x.ai") || isTogether || strings.Contains(baseURL, "chutes.ai") ||
+		strings.Contains(baseURL, "deepseek.com") || isZai || isMoonshot || providerID == "opencode" ||
+		strings.Contains(baseURL, "opencode.ai") || isCloudflareWorkers || isCloudflareGateway || isAntLing
+	useMaxTokens := strings.Contains(baseURL, "chutes.ai") || isMoonshot || isCloudflareGateway || isTogether || isNVIDIA || isAntLing || isZai
+	isGrok := providerID == "xai" || strings.Contains(baseURL, "api.x.ai")
+	isDeepSeek := providerID == "deepseek" || strings.Contains(baseURL, "deepseek.com")
+	isOpenRouterDeveloperModel := isOpenRouter && (strings.HasPrefix(model.ID(), "anthropic/") || strings.HasPrefix(model.ID(), "openai/"))
+
+	thinkingFormat := "openai"
+	switch {
+	case isDeepSeek:
+		thinkingFormat = "deepseek"
+	case isZai:
+		thinkingFormat = "zai"
+	case isTogether:
+		thinkingFormat = "together"
+	case isAntLing:
+		thinkingFormat = "ant-ling"
+	case isOpenRouter:
+		thinkingFormat = "openrouter"
+	}
+	maxTokensField := "max_completion_tokens"
+	if useMaxTokens {
+		maxTokensField = "max_tokens"
+	}
+	sessionAffinityFormat := "openai"
+	if isOpenRouter {
+		sessionAffinityFormat = "openrouter"
+	}
+	var cacheControlFormat *string
+	if providerID == "openrouter" && strings.HasPrefix(model.ID(), "anthropic/") {
+		value := "anthropic"
+		cacheControlFormat = &value
+	}
+	return &OpenAICompletionsCompat{
+		SupportsStore:            completionBoolPointer(!isNonStandard),
+		SupportsDeveloperRole:    completionBoolPointer(isOpenRouterDeveloperModel || (!isNonStandard && !isOpenRouter)),
+		SupportsReasoningEffort:  completionBoolPointer(!isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareGateway && !isNVIDIA && !isAntLing),
+		SupportsUsageInStreaming: completionBoolPointer(true), SupportsFinishReason: completionBoolPointer(true),
+		MaxTokensField: &maxTokensField, RequiresToolResultName: completionBoolPointer(false),
+		RequiresAssistantAfterToolResult: completionBoolPointer(false), RequiresThinkingAsText: completionBoolPointer(false),
+		RequiresReasoningContentOnAssistantMessages: completionBoolPointer(isDeepSeek), ThinkingFormat: &thinkingFormat,
+		SupportsOpenAIGrammarTools: completionBoolPointer(false), SupportsStrictMode: completionBoolPointer(!isMoonshot && !isTogether && !isCloudflareGateway && !isNVIDIA),
+		SendSessionAffinityHeaders: completionBoolPointer(false), SessionAffinityFormat: &sessionAffinityFormat,
+		SupportsLongCacheRetention: completionBoolPointer(!(isTogether || isCloudflareWorkers || isCloudflareGateway || isNVIDIA || isAntLing)),
+		CacheControlFormat:         cacheControlFormat, ZaiToolStream: completionBoolPointer(false),
+		ChatTemplateKwargs: map[string]any{}, OpenRouterRouting: map[string]any{}, VercelGatewayRouting: map[string]any{},
+	}
+}
+
+func completionBoolPointer(value bool) *bool { return &value }
+
+func overlayCompletionBool(target **bool, value *bool) {
+	if value != nil {
+		copy := *value
+		*target = &copy
+	}
+}
+
+func overlayCompletionString(target **string, value *string) {
+	if value != nil {
+		copy := *value
+		*target = &copy
+	}
 }
 func completionsSupportsUsage(model Model) bool {
 	compat := completionsCompat(model)
@@ -210,6 +324,14 @@ func completionsSupportsDeveloperRole(model Model) bool {
 func completionsSupportsStrict(model Model) bool {
 	compat := completionsCompat(model)
 	return compat == nil || compat.SupportsStrictMode == nil || *compat.SupportsStrictMode
+}
+func completionsSupportsGrammarTools(model Model) bool {
+	compat := completionsCompat(model)
+	return compat != nil && compat.SupportsOpenAIGrammarTools != nil && *compat.SupportsOpenAIGrammarTools
+}
+func completionsSupportsLongCacheRetention(model Model) bool {
+	compat := completionsCompat(model)
+	return compat == nil || compat.SupportsLongCacheRetention == nil || *compat.SupportsLongCacheRetention
 }
 func completionsRequiresToolResultName(model Model) bool {
 	compat := completionsCompat(model)
@@ -265,19 +387,44 @@ func completionsSupportsImages(model Model) bool {
 	return false
 }
 
+func completionsHasToolHistory(messages []llm.ConversationMessage) bool {
+	for _, message := range messages {
+		switch value := message.(type) {
+		case llm.AssistantToolUseMessage:
+			for _, block := range value.Blocks() {
+				if _, ok := block.(llm.ToolCallBlock); ok {
+					return true
+				}
+			}
+		case llm.ToolResultMessage, llm.ToolResultContentMessage:
+			return true
+		}
+	}
+	return false
+}
+
 type completionsRequestPayload struct {
 	Model               string                    `json:"model"`
 	Messages            []any                     `json:"messages"`
-	Tools               []completionsFunctionTool `json:"tools,omitempty"`
+	Tools               *[]any                    `json:"tools,omitempty"`
 	ToolChoice          any                       `json:"tool_choice,omitempty"`
 	ParallelToolCalls   *bool                     `json:"parallel_tool_calls,omitempty"`
 	Stream              bool                      `json:"stream"`
 	StreamOptions       *completionsStreamOptions `json:"stream_options,omitempty"`
 	MaxCompletionTokens uint64                    `json:"max_completion_tokens,omitempty"`
 	ReasoningEffort     string                    `json:"reasoning_effort,omitempty"`
-	Thinking            *completionsThinking      `json:"thinking,omitempty"`
+	Thinking            any                       `json:"thinking,omitempty"`
 	MaxTokens           uint64                    `json:"max_tokens,omitempty"`
 	Store               *bool                     `json:"store,omitempty"`
+	Temperature         *float64                  `json:"temperature,omitempty"`
+	PromptCacheKey      string                    `json:"prompt_cache_key,omitempty"`
+	PromptCacheTTL      string                    `json:"prompt_cache_retention,omitempty"`
+	EnableThinking      *bool                     `json:"enable_thinking,omitempty"`
+	ChatTemplateKwargs  map[string]any            `json:"chat_template_kwargs,omitempty"`
+	Reasoning           any                       `json:"reasoning,omitempty"`
+	ToolStream          *bool                     `json:"tool_stream,omitempty"`
+	ProviderRouting     map[string]any            `json:"provider,omitempty"`
+	ProviderOptions     map[string]any            `json:"providerOptions,omitempty"`
 }
 type completionsStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
@@ -286,8 +433,28 @@ type completionsThinking struct {
 	Type string `json:"type"`
 }
 type completionsFunctionTool struct {
-	Type     string              `json:"type"`
-	Function completionsFunction `json:"function"`
+	Type         string                   `json:"type"`
+	Function     completionsFunction      `json:"function"`
+	CacheControl *completionsCacheControl `json:"cache_control,omitempty"`
+}
+type completionsCustomTool struct {
+	Type         string                   `json:"type"`
+	CacheControl *completionsCacheControl `json:"cache_control,omitempty"`
+	Custom       struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Format      struct {
+			Type    string `json:"type"`
+			Grammar struct {
+				Syntax     string `json:"syntax"`
+				Definition string `json:"definition"`
+			} `json:"grammar"`
+		} `json:"format"`
+	} `json:"custom"`
+}
+type completionsCacheControl struct {
+	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 type completionsFunction struct {
 	Name        string          `json:"name"`
@@ -297,7 +464,11 @@ type completionsFunction struct {
 }
 
 func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
-	messages := make([]any, 0, len(request.Messages())+1)
+	transformedMessages, err := transformConversationMessages(request.Messages())
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrOpenAICompletionsRequest, err)
+	}
+	messages := make([]any, 0, len(transformedMessages)+1)
 	if request.SystemPrompt() != "" {
 		role := "system"
 		if request.Model().Reasoning() && completionsSupportsDeveloperRole(request.Model()) {
@@ -306,8 +477,9 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		messages = append(messages, map[string]any{"role": role, "content": request.SystemPrompt()})
 	}
 	thinkingFormat := completionsThinkingFormat(request.Model())
-	if request.Model().Reasoning() && thinkingFormat != "openai" && thinkingFormat != "deepseek" {
-		return nil, fmt.Errorf("%w: thinking format %q is not implemented", ErrOpenAICompletionsRequest, thinkingFormat)
+	grammarProperties, err := completionsGrammarToolProperties(request)
+	if err != nil {
+		return nil, err
 	}
 	lastToolResult := false
 	pendingToolImages := make([]any, 0)
@@ -350,7 +522,7 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		pendingToolImages = pendingToolImages[:0]
 		lastToolResult = false
 	}
-	for i, message := range request.Messages() {
+	for i, message := range transformedMessages {
 		_, toolText := message.(llm.ToolResultMessage)
 		_, toolContent := message.(llm.ToolResultContentMessage)
 		if !toolText && !toolContent {
@@ -367,7 +539,7 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		if _, user := message.(llm.UserContentMessage); user && lastToolResult && completionsRequiresAssistantAfterToolResult(request.Model()) {
 			messages = append(messages, map[string]any{"role": "assistant", "content": "I have processed the tool results."})
 		}
-		encoded, include, err := encodeCompletionsMessage(message, request.ReplayTarget(), request.Model(), toolCallIDs)
+		encoded, include, err := encodeCompletionsMessage(message, request.ReplayTarget(), request.Model(), toolCallIDs, grammarProperties)
 		if err != nil {
 			return nil, fmt.Errorf("%w: message %d: %w", ErrOpenAICompletionsRequest, i, err)
 		}
@@ -414,13 +586,33 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := completionsRequestPayload{Model: request.Model().ID(), Messages: messages, Tools: tools, Stream: true}
+	p := completionsRequestPayload{Model: request.Model().ID(), Messages: messages, Stream: true}
+	if len(tools) > 0 || completionsHasToolHistory(transformedMessages) {
+		copy := tools
+		p.Tools = &copy
+	}
 	if completionsSupportsUsage(request.Model()) {
 		p.StreamOptions = &completionsStreamOptions{IncludeUsage: true}
 	}
 	if len(tools) > 0 {
 		parallel := request.ParallelToolCalls()
 		p.ParallelToolCalls = &parallel
+	}
+	options := request.StreamOptions()
+	p.Temperature = options.Temperature
+	cacheRetention := resolveOpenAICacheRetention(options)
+	if (strings.Contains(request.Model().BaseURL(), "api.openai.com") && cacheRetention != CacheRetentionNone) || (cacheRetention == CacheRetentionLong && completionsSupportsLongCacheRetention(request.Model())) {
+		p.PromptCacheKey = clampOpenAIPromptCacheKey(options.SessionID)
+	}
+	if cacheRetention == CacheRetentionLong && completionsSupportsLongCacheRetention(request.Model()) {
+		p.PromptCacheTTL = "24h"
+	}
+	if completionsUsesAnthropicCacheControl(request.Model()) && cacheRetention != CacheRetentionNone {
+		control := &completionsCacheControl{Type: "ephemeral"}
+		if cacheRetention == CacheRetentionLong && completionsSupportsLongCacheRetention(request.Model()) {
+			control.TTL = "1h"
+		}
+		applyCompletionsAnthropicCacheControl(messages, tools, control)
 	}
 	if choice, ok := request.ToolChoice(); ok {
 		if choice.Name != "" {
@@ -442,28 +634,25 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 		value := false
 		p.Store = &value
 	}
-	if request.Model().Reasoning() && thinkingFormat == "deepseek" {
-		level := request.ThinkingLevel()
-		if level == "" {
-			level = ThinkingOff
-		}
-		if level == ThinkingOff {
-			off, configured := request.Model().ThinkingLevelMap()[ThinkingOff]
-			if !configured || off != nil {
-				p.Thinking = &completionsThinking{Type: "disabled"}
-			}
-		} else {
-			p.Thinking = &completionsThinking{Type: "enabled"}
-			if completionsSupportsReasoningEffort(request.Model()) {
-				effort := string(level)
-				if mapped, configured := request.Model().ThinkingLevelMap()[level]; configured && mapped != nil {
-					effort = *mapped
+	applyCompletionsThinkingOptions(&p, request, thinkingFormat)
+	compat := completionsCompat(request.Model())
+	if compat != nil {
+		p.ProviderRouting = cloneAny(compat.OpenRouterRouting)
+		if len(compat.VercelGatewayRouting) != 0 {
+			gateway := map[string]any{}
+			for _, key := range []string{"only", "order"} {
+				if value, ok := compat.VercelGatewayRouting[key]; ok {
+					gateway[key] = cloneJSONLike(value)
 				}
-				p.ReasoningEffort = effort
+			}
+			if len(gateway) != 0 {
+				p.ProviderOptions = map[string]any{"gateway": gateway}
 			}
 		}
-	} else if effort, ok := request.Model().ThinkingEffort(request.ThinkingLevel()); ok && effort != "" && completionsSupportsReasoningEffort(request.Model()) {
-		p.ReasoningEffort = effort
+		if compat.ZaiToolStream != nil && *compat.ZaiToolStream && len(tools) != 0 {
+			value := true
+			p.ToolStream = &value
+		}
 	}
 	encoded, err := json.Marshal(p)
 	if err != nil {
@@ -472,15 +661,227 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	return encoded, nil
 }
 
-func encodeCompletionsTools(definitions []ToolDefinition, model Model) ([]completionsFunctionTool, error) {
-	tools := make([]completionsFunctionTool, 0, len(definitions))
+func completionsGrammarToolProperties(request Request) (map[string]string, error) {
+	properties := make(map[string]string)
+	for index, tool := range request.Tools() {
+		grammar, ok, err := tool.ResolveGrammar(completionsSupportsGrammarTools(request.Model()))
+		if err != nil {
+			return nil, fmt.Errorf("%w: tool %d: %w", ErrOpenAICompletionsRequest, index, err)
+		}
+		if ok {
+			properties[tool.Name()] = grammar.InputProperty
+		}
+	}
+	return properties, nil
+}
+
+func completionsUsesAnthropicCacheControl(model Model) bool {
+	compat := completionsCompat(model)
+	return compat != nil && compat.CacheControlFormat != nil && *compat.CacheControlFormat == "anthropic"
+}
+
+func applyCompletionsAnthropicCacheControl(messages []any, tools []any, control *completionsCacheControl) {
+	for _, message := range messages {
+		value, ok := message.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := value["role"].(string)
+		if role == "system" || role == "developer" {
+			if addCompletionsCacheControl(value, control) {
+				break
+			}
+		}
+	}
+	if len(tools) != 0 {
+		switch tool := tools[len(tools)-1].(type) {
+		case completionsFunctionTool:
+			tool.CacheControl = control
+			tools[len(tools)-1] = tool
+		case completionsCustomTool:
+			tool.CacheControl = control
+			tools[len(tools)-1] = tool
+		}
+	}
+	for index := len(messages) - 1; index >= 0; index-- {
+		value, ok := messages[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := value["role"].(string)
+		if (role == "user" || role == "assistant" || role == "tool") && addCompletionsCacheControl(value, control) {
+			break
+		}
+	}
+}
+
+func addCompletionsCacheControl(message map[string]any, control *completionsCacheControl) bool {
+	content := message["content"]
+	if text, ok := content.(string); ok {
+		if text == "" {
+			return false
+		}
+		message["content"] = []any{map[string]any{"type": "text", "text": text, "cache_control": control}}
+		return true
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return false
+	}
+	for index := len(parts) - 1; index >= 0; index-- {
+		part, ok := parts[index].(map[string]any)
+		if !ok || part["type"] != "text" {
+			continue
+		}
+		part["cache_control"] = control
+		return true
+	}
+	return false
+}
+
+func applyCompletionsThinkingOptions(payload *completionsRequestPayload, request Request, format string) {
+	if payload == nil || !request.Model().Reasoning() {
+		return
+	}
+	level := request.ThinkingLevel()
+	explicitEffort := request.StreamOptions().ReasoningEffort
+	enabled := explicitEffort != ""
+	if explicitEffort != "" {
+		level = ThinkingLevel(explicitEffort)
+	} else {
+		if level == "" {
+			level = ThinkingOff
+		}
+		enabled = level != ThinkingOff
+	}
+	effort, hasEffort := completionsThinkingEffort(request.Model(), level)
+	supportsEffort := completionsSupportsReasoningEffort(request.Model())
+
+	switch format {
+	case "zai":
+		if enabled {
+			payload.Thinking = map[string]any{"type": "enabled", "clear_thinking": false}
+		} else if hasEffort {
+			payload.Thinking = map[string]any{"type": "disabled"}
+		}
+		if enabled && supportsEffort {
+			payload.ReasoningEffort = effort
+		}
+	case "qwen":
+		value := enabled
+		payload.EnableThinking = &value
+		if enabled && supportsEffort {
+			payload.ReasoningEffort = effort
+		}
+	case "qwen-chat-template":
+		payload.ChatTemplateKwargs = map[string]any{"enable_thinking": enabled, "preserve_thinking": true}
+	case "chat-template":
+		payload.ChatTemplateKwargs = resolveCompletionsChatTemplateKwargs(request, enabled, effort, hasEffort)
+	case "deepseek":
+		if enabled {
+			payload.Thinking = map[string]any{"type": "enabled"}
+		} else if hasEffort {
+			payload.Thinking = map[string]any{"type": "disabled"}
+		}
+		if enabled && supportsEffort {
+			payload.ReasoningEffort = effort
+		}
+	case "openrouter":
+		if enabled || hasEffort {
+			payload.Reasoning = map[string]any{"effort": effort}
+		}
+	case "ant-ling":
+		if enabled && hasEffort {
+			payload.Reasoning = map[string]any{"effort": effort}
+		}
+	case "together":
+		payload.Reasoning = map[string]any{"enabled": enabled}
+		if enabled && supportsEffort {
+			payload.ReasoningEffort = effort
+		}
+	case "string-thinking":
+		if enabled || hasEffort {
+			payload.Thinking = effort
+		}
+	default:
+		if supportsEffort && (enabled || hasEffort) {
+			payload.ReasoningEffort = effort
+		}
+	}
+}
+
+func completionsThinkingEffort(model Model, level ThinkingLevel) (string, bool) {
+	mapping := model.ThinkingLevelMap()
+	if level == ThinkingOff {
+		value, configured := mapping[ThinkingOff]
+		if configured && value == nil {
+			return "", false
+		}
+		if configured {
+			return *value, true
+		}
+		return "none", true
+	}
+	if value, configured := mapping[level]; configured && value != nil {
+		return *value, true
+	}
+	return string(level), true
+}
+
+func resolveCompletionsChatTemplateKwargs(request Request, enabled bool, effort string, hasEffort bool) map[string]any {
+	compat := completionsCompat(request.Model())
+	if compat == nil || len(compat.ChatTemplateKwargs) == 0 {
+		return nil
+	}
+	result := make(map[string]any)
+	for key, raw := range compat.ChatTemplateKwargs {
+		variable, ok := raw.(map[string]any)
+		if !ok {
+			result[key] = cloneJSONLike(raw)
+			continue
+		}
+		name, _ := variable["$var"].(string)
+		omitWhenOff, _ := variable["omitWhenOff"].(bool)
+		if !enabled && omitWhenOff {
+			continue
+		}
+		switch name {
+		case "thinking.enabled":
+			result[key] = enabled
+		case "thinking.effort":
+			if enabled || hasEffort {
+				result[key] = effort
+			}
+		default:
+			result[key] = cloneJSONLike(raw)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func encodeCompletionsTools(definitions []ToolDefinition, model Model) ([]any, error) {
+	tools := make([]any, 0, len(definitions))
 	for _, tool := range definitions {
 		if err := tool.validate(); err != nil {
 			return nil, err
 		}
+		if grammar, ok, err := tool.ResolveGrammar(completionsSupportsGrammarTools(model)); err != nil {
+			return nil, err
+		} else if ok {
+			custom := completionsCustomTool{Type: "custom"}
+			custom.Custom.Name, custom.Custom.Description = tool.Name(), tool.Description()
+			custom.Custom.Format.Type = "grammar"
+			custom.Custom.Format.Grammar.Syntax, custom.Custom.Format.Grammar.Definition = grammar.Syntax, grammar.Definition
+			tools = append(tools, custom)
+			continue
+		}
 		function := completionsFunction{Name: tool.Name(), Description: tool.Description(), Parameters: json.RawMessage(tool.ParametersJSON())}
-		if completionsSupportsStrict(model) {
-			strict := tool.Strict()
+		if strict, include, err := tool.ResolveJSONSchemaStrict(completionsSupportsStrict(model)); err != nil {
+			return nil, err
+		} else if include {
 			function.Strict = &strict
 		}
 		tools = append(tools, completionsFunctionTool{Type: "function", Function: function})
@@ -488,7 +889,7 @@ func encodeCompletionsTools(definitions []ToolDefinition, model Model) ([]comple
 	return tools, nil
 }
 
-func encodeCompletionsMessage(message llm.ConversationMessage, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string) (any, bool, error) {
+func encodeCompletionsMessage(message llm.ConversationMessage, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string, grammarProperties map[string]string) (any, bool, error) {
 	switch m := message.(type) {
 	case llm.UserTextMessage:
 		blocks := m.Content()
@@ -510,11 +911,11 @@ func encodeCompletionsMessage(message llm.ConversationMessage, target llm.Assist
 		}
 		return map[string]any{"role": "user", "content": parts}, true, nil
 	case llm.AssistantTextMessage:
-		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs)
+		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs, grammarProperties)
 	case llm.AssistantRichMessage:
-		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs)
+		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs, grammarProperties)
 	case llm.AssistantToolUseMessage:
-		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs)
+		return encodeCompletionsAssistant(m.Blocks(), m, target, model, toolCallIDs, grammarProperties)
 	case llm.AssistantFailureMessage:
 		return nil, false, nil
 	case llm.ToolResultMessage:
@@ -573,7 +974,7 @@ type completionsProvenanceCarrier interface {
 	AssistantProvenance() llm.AssistantProvenance
 }
 
-func encodeCompletionsAssistant(blocks []llm.AssistantBlock, source completionsProvenanceCarrier, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string) (any, bool, error) {
+func encodeCompletionsAssistant(blocks []llm.AssistantBlock, source completionsProvenanceCarrier, target llm.AssistantProvenance, model Model, toolCallIDs map[string]string, grammarProperties map[string]string) (any, bool, error) {
 	var text strings.Builder
 	calls := make([]any, 0)
 	reasoningField, reasoningText := "", ""
@@ -605,7 +1006,19 @@ func encodeCompletionsAssistant(blocks []llm.AssistantBlock, source completionsP
 			if callID != b.ID() {
 				toolCallIDs[b.ID()] = callID
 			}
-			calls = append(calls, map[string]any{"id": callID, "type": "function", "function": map[string]string{"name": b.Name(), "arguments": string(b.ArgumentsJSON())}})
+			if property, custom := grammarProperties[b.Name()]; custom {
+				var arguments map[string]any
+				if err := json.Unmarshal(b.ArgumentsJSON(), &arguments); err != nil {
+					return nil, false, err
+				}
+				input, ok := arguments[property].(string)
+				if !ok {
+					return nil, false, fmt.Errorf("grammar tool call %q requires argument %q to be a string", b.Name(), property)
+				}
+				calls = append(calls, map[string]any{"id": callID, "type": "custom", "custom": map[string]string{"name": b.Name(), "input": input}})
+			} else {
+				calls = append(calls, map[string]any{"id": callID, "type": "function", "function": map[string]string{"name": b.Name(), "arguments": string(b.ArgumentsJSON())}})
+			}
 			if signature, ok := b.ThoughtSignature(); ok && same {
 				if detail, valid := decodeCompletionsReasoningDetail(signature); valid {
 					reasoningDetails = append(reasoningDetails, detail)
@@ -651,8 +1064,10 @@ func normalizeCompletionsToolCallID(value string, openAI bool) string {
 		if len(combined) <= 40 {
 			return combined
 		}
-		sum := sha256.Sum256([]byte(value))
-		hash := fmt.Sprintf("%x", sum[:4])
+		hash := responsesShortHash(value)
+		if len(hash) > 8 {
+			hash = hash[:8]
+		}
 		prefixLength := 40 - len(hash) - 1
 		if prefixLength < 1 {
 			prefixLength = 1
@@ -744,12 +1159,13 @@ func completionsToolResult(blocks []llm.ToolResultContentBlock, model Model) (st
 }
 
 type completionsFailureSpec struct {
-	kind       FailureKind
-	cause      error
-	message    string
-	httpStatus *int
-	vendorCode string
-	retryAfter *time.Duration
+	kind        FailureKind
+	cause       error
+	message     string
+	httpStatus  *int
+	vendorCode  string
+	retryAfter  *time.Duration
+	shouldRetry *bool
 }
 type completionsReasoningDetail struct {
 	Type string `json:"type"`
@@ -782,14 +1198,25 @@ func validCompletionsReasoningField(value string) bool {
 }
 
 type completionsToolSlot struct {
-	contentIndex    int
-	id, name        string
-	arguments       []byte
-	reasoningDetail *completionsReasoningDetail
+	contentIndex     int
+	id, name         string
+	arguments        []byte
+	emittedArguments int
+	streamIndex      *int
+	started          bool
+	kindConfigured   bool
+	custom           bool
+	reasoningDetail  *completionsReasoningDetail
+	customProperty   string
+	customCurrent    string
+	customEncoded    string
+	customStarted    bool
+	customClosed     bool
 }
 type openAICompletionsStream struct {
 	ctx                                    context.Context
 	cancel                                 context.CancelCauseFunc
+	timeoutCancel                          context.CancelFunc
 	endpoint, apiKey                       string
 	client                                 HTTPDoer
 	clock                                  Clock
@@ -801,6 +1228,9 @@ type openAICompletionsStream struct {
 	onResponse                             ResponseHook
 	onHeaders                              HeaderHook
 	headerOverrides                        map[string]*string
+	maxRetries                             uint32
+	maxRetryDelayMS                        *uint64
+	grammarProperties                      map[string]string
 	configurationFail                      *completionsFailureSpec
 	mu                                     sync.Mutex
 	body                                   io.ReadCloser
@@ -815,6 +1245,8 @@ type openAICompletionsStream struct {
 	thinkingField                          string
 	thinkingIndex                          int
 	tools                                  map[int]*completionsToolSlot
+	toolsByID                              map[string]*completionsToolSlot
+	toolSlots                              []*completionsToolSlot
 	pendingReasoningDetails                map[string]completionsReasoningDetail
 	nextContentIndex                       int
 	usage                                  llm.Usage
@@ -833,7 +1265,7 @@ func newCompletionsFailureStream(ctx context.Context, clock Clock, model Model, 
 		clock = time.Now
 	}
 	c, cancel := context.WithCancelCause(ctx)
-	return &openAICompletionsStream{ctx: c, cancel: cancel, clock: clock, timestamp: clock(), model: model, preflight: &completionsFailureSpec{kind: kind, cause: cause, message: message}, tools: make(map[int]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail), textIndex: -1, thinkingIndex: -1}
+	return &openAICompletionsStream{ctx: c, cancel: cancel, clock: clock, timestamp: clock(), model: model, preflight: &completionsFailureSpec{kind: kind, cause: cause, message: message}, tools: make(map[int]*completionsToolSlot), toolsByID: make(map[string]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail), textIndex: -1, thinkingIndex: -1}
 }
 
 func (s *openAICompletionsStream) Next() (llm.StreamEvent, error) {
@@ -913,6 +1345,23 @@ func (s *openAICompletionsStream) settle() (llm.StreamEvent, error) {
 }
 
 func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
+	for retryIndex := uint32(0); ; retryIndex++ {
+		failure := s.initializeAttempt()
+		if failure == nil || retryIndex >= s.maxRetries || !providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry) {
+			return failure
+		}
+		if err := waitProviderRetry(s.ctx, retryIndex, failure.retryAfter, s.maxRetryDelayMS, failure.message); err != nil {
+			if retryWaitCancellation(err) {
+				return s.cancelled(err)
+			}
+			failure.cause = errors.Join(failure.cause, err)
+			failure.message = safeResponsesErrorText(err, failure.message)
+			return failure
+		}
+	}
+}
+
+func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
 	req, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
 	if err != nil {
 		return &completionsFailureSpec{kind: FailureInvalidRequest, cause: err, message: "Could not construct OpenAI Chat Completions request"}
@@ -928,7 +1377,7 @@ func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 	if err := applyFinalHeaders(req.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
 		return &completionsFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Chat Completions header hook failed"}
 	}
-	if strings.TrimSpace(req.Header.Get("Authorization")) == "" {
+	if !openAIHTTPHeadersHaveAuthorization(req.Header) {
 		if s.configurationFail != nil {
 			spec := *s.configurationFail
 			return &spec
@@ -1003,14 +1452,28 @@ func (s *openAICompletionsStream) httpFailure(resp *http.Response) *completionsF
 		}
 	}
 	status := resp.StatusCode
-	return &completionsFailureSpec{kind: FailureHTTPStatus, cause: fmt.Errorf("OpenAI API HTTP %d: %s", resp.StatusCode, message), message: message, httpStatus: &status, vendorCode: code, retryAfter: responsesRetryAfter(resp.Header.Get("Retry-After"), s.clock())}
+	return &completionsFailureSpec{kind: FailureHTTPStatus, cause: fmt.Errorf("OpenAI API HTTP %d: %s", resp.StatusCode, message), message: message, httpStatus: &status, vendorCode: code, retryAfter: providerRetryAfter(resp.Header, s.clock()), shouldRetry: providerRetryOverride(resp.Header)}
+}
+
+type completionsUsageWire struct {
+	PromptTokens         uint64  `json:"prompt_tokens"`
+	CompletionTokens     uint64  `json:"completion_tokens"`
+	PromptCacheHitTokens *uint64 `json:"prompt_cache_hit_tokens"`
+	PromptDetails        *struct {
+		CachedTokens     *uint64 `json:"cached_tokens"`
+		CacheWriteTokens uint64  `json:"cache_write_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionDetails *struct {
+		ReasoningTokens uint64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 type completionsChunk struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
 	Choices []struct {
-		FinishReason *string `json:"finish_reason"`
+		FinishReason *string               `json:"finish_reason"`
+		Usage        *completionsUsageWire `json:"usage"`
 		Delta        struct {
 			Content          *string                      `json:"content"`
 			ToolCalls        []completionsToolCall        `json:"tool_calls"`
@@ -1020,17 +1483,7 @@ type completionsChunk struct {
 			ReasoningDetails []completionsReasoningDetail `json:"reasoning_details"`
 		} `json:"delta"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     uint64 `json:"prompt_tokens"`
-		CompletionTokens uint64 `json:"completion_tokens"`
-		PromptDetails    *struct {
-			CachedTokens     uint64 `json:"cached_tokens"`
-			CacheWriteTokens uint64 `json:"cache_write_tokens"`
-		} `json:"prompt_tokens_details"`
-		CompletionDetails *struct {
-			ReasoningTokens uint64 `json:"reasoning_tokens"`
-		} `json:"completion_tokens_details"`
-	} `json:"usage"`
+	Usage *completionsUsageWire `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 		Code    string `json:"code"`
@@ -1041,10 +1494,14 @@ type completionsToolCall struct {
 	Index    *int   `json:"index"`
 	ID       string `json:"id"`
 	Type     string `json:"type"`
-	Function struct {
+	Function *struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+	Custom *struct {
+		Name  string `json:"name"`
+		Input string `json:"input"`
+	} `json:"custom"`
 }
 
 func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
@@ -1076,6 +1533,17 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 		return nil
 	}
 	choice := c.Choices[0]
+	if c.Usage == nil && choice.Usage != nil {
+		u, err := completionsUsage(choice.Usage)
+		if err != nil {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
+		}
+		u, err = u.WithCost(s.model.CalculateCost(u))
+		if err != nil {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
+		}
+		s.usage = u
+	}
 	if choice.FinishReason != nil {
 		s.sawFinish = true
 		s.rawStopReason = *choice.FinishReason
@@ -1111,7 +1579,7 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: invalid reasoning detail", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned invalid reasoning detail"}
 		}
 		attached := false
-		for _, slot := range s.tools {
+		for _, slot := range s.toolSlots {
 			if slot.id == detail.ID {
 				copy := detail
 				slot.reasoningDetail = &copy
@@ -1123,33 +1591,25 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 			s.pendingReasoningDetails[detail.ID] = detail
 		}
 	}
-	for fallback, call := range d.ToolCalls {
-		index := fallback
-		if call.Index != nil {
-			index = *call.Index
-		}
-		if f := s.toolDelta(index, call); f != nil {
+	for _, call := range d.ToolCalls {
+		if f := s.toolDelta(call); f != nil {
 			return f
 		}
 	}
 	return nil
 }
 
-func completionsUsage(raw *struct {
-	PromptTokens     uint64 `json:"prompt_tokens"`
-	CompletionTokens uint64 `json:"completion_tokens"`
-	PromptDetails    *struct {
-		CachedTokens     uint64 `json:"cached_tokens"`
-		CacheWriteTokens uint64 `json:"cache_write_tokens"`
-	} `json:"prompt_tokens_details"`
-	CompletionDetails *struct {
-		ReasoningTokens uint64 `json:"reasoning_tokens"`
-	} `json:"completion_tokens_details"`
-}) (llm.Usage, error) {
+func completionsUsage(raw *completionsUsageWire) (llm.Usage, error) {
 	cacheRead, cacheWrite := uint64(0), uint64(0)
 	if raw.PromptDetails != nil {
-		cacheRead = raw.PromptDetails.CachedTokens
+		if raw.PromptDetails.CachedTokens != nil {
+			cacheRead = *raw.PromptDetails.CachedTokens
+		} else if raw.PromptCacheHitTokens != nil {
+			cacheRead = *raw.PromptCacheHitTokens
+		}
 		cacheWrite = raw.PromptDetails.CacheWriteTokens
+	} else if raw.PromptCacheHitTokens != nil {
+		cacheRead = *raw.PromptCacheHitTokens
 	}
 	input := uint64(0)
 	if cacheRead <= raw.PromptTokens && cacheWrite <= raw.PromptTokens-cacheRead {
@@ -1210,43 +1670,158 @@ func (s *openAICompletionsStream) thinkingDelta(delta, field string) *completion
 	s.queue = append(s.queue, e)
 	return nil
 }
-func (s *openAICompletionsStream) toolDelta(index int, call completionsToolCall) *completionsFailureSpec {
-	if index < 0 {
+func (s *openAICompletionsStream) toolDelta(call completionsToolCall) *completionsFailureSpec {
+	if call.Index != nil && *call.Index < 0 {
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: negative tool call index", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned invalid tool call"}
 	}
-	slot := s.tools[index]
+	var slot *completionsToolSlot
+	if call.Index != nil {
+		slot = s.tools[*call.Index]
+	}
+	if slot == nil && call.ID != "" {
+		slot = s.toolsByID[call.ID]
+	}
 	if slot == nil {
-		if call.ID == "" || call.Function.Name == "" {
-			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: new tool call %d has no id/name", ErrOpenAICompletionsStream, index), message: "OpenAI Chat Completions returned invalid tool call"}
+		slot = &completionsToolSlot{contentIndex: s.nextContentIndex}
+		s.nextContentIndex++
+		s.toolSlots = append(s.toolSlots, slot)
+	}
+	if call.Index != nil {
+		if bound := s.tools[*call.Index]; bound != nil && bound != slot {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool index %d changed identity", ErrOpenAICompletionsStream, *call.Index), message: "OpenAI Chat Completions returned inconsistent tool call"}
 		}
-		slot = &completionsToolSlot{contentIndex: s.nextContentIndex, id: call.ID, name: call.Function.Name}
+		if slot.streamIndex != nil && *slot.streamIndex != *call.Index {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool call changed index", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		index := *call.Index
+		slot.streamIndex = &index
+		s.tools[index] = slot
+	}
+	if call.ID != "" && call.ID != slot.id {
+		if slot.id != "" {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool call changed id", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		if bound := s.toolsByID[call.ID]; bound != nil && bound != slot {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: duplicate tool call id", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		slot.id = call.ID
+		s.toolsByID[call.ID] = slot
 		if detail, ok := s.pendingReasoningDetails[call.ID]; ok {
 			copy := detail
 			slot.reasoningDetail = &copy
 			delete(s.pendingReasoningDetails, call.ID)
 		}
-		s.nextContentIndex++
-		s.tools[index] = slot
+	}
+	callName := ""
+	custom := call.Custom != nil && call.Function == nil
+	if call.Function != nil {
+		callName = call.Function.Name
+	}
+	if call.Custom != nil {
+		callName = call.Custom.Name
+	}
+	if call.Function != nil || call.Custom != nil {
+		if slot.kindConfigured && slot.custom != custom {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool call changed wire kind", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		slot.kindConfigured = true
+		slot.custom = custom
+	}
+	if callName != "" && callName != slot.name {
+		if slot.name != "" {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool call changed name", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		slot.name = callName
+		if custom {
+			slot.customProperty = s.grammarProperties[callName]
+			if slot.customProperty == "" {
+				slot.customProperty = "input"
+			}
+		}
+	}
+	if call.Function != nil && call.Function.Arguments != "" {
+		if slot.kindConfigured && slot.custom {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: custom tool changed to function tool", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		slot.arguments = append(slot.arguments, call.Function.Arguments...)
+	}
+	if call.Custom != nil && call.Custom.Input != "" {
+		if slot.kindConfigured && !slot.custom {
+			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: function tool changed to custom tool", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent tool call"}
+		}
+		slot.customCurrent += call.Custom.Input
+	}
+	if failure := s.startAndFlushCompletionsTool(slot); failure != nil {
+		return failure
+	}
+	return nil
+}
+
+func (s *openAICompletionsStream) startAndFlushCompletionsTool(slot *completionsToolSlot) *completionsFailureSpec {
+	if slot == nil || slot.id == "" || slot.name == "" || !slot.kindConfigured {
+		return nil
+	}
+	if !slot.started {
 		start, err := llm.NewToolCallStartEvent(slot.contentIndex, slot.id, slot.name)
 		if err != nil {
 			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "invalid tool stream event"}
 		}
 		s.queue = append(s.queue, start)
+		slot.started = true
 	}
-	if call.ID != "" && call.ID != slot.id {
-		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool index %d changed id", ErrOpenAICompletionsStream, index), message: "OpenAI Chat Completions returned inconsistent tool call"}
+	if slot.custom {
+		return s.appendCompletionsCustomToolInput(slot, slot.customCurrent, false)
 	}
-	if call.Function.Name != "" && call.Function.Name != slot.name {
-		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: tool index %d changed name", ErrOpenAICompletionsStream, index), message: "OpenAI Chat Completions returned inconsistent tool call"}
-	}
-	if call.Function.Arguments != "" {
-		slot.arguments = append(slot.arguments, call.Function.Arguments...)
-		delta, err := llm.NewToolCallDeltaEvent(slot.contentIndex, []byte(call.Function.Arguments))
+	if slot.emittedArguments < len(slot.arguments) {
+		deltaBytes := append([]byte(nil), slot.arguments[slot.emittedArguments:]...)
+		delta, err := llm.NewToolCallDeltaEvent(slot.contentIndex, deltaBytes)
 		if err != nil {
 			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "invalid tool stream event"}
 		}
+		slot.emittedArguments = len(slot.arguments)
 		s.queue = append(s.queue, delta)
 	}
+	return nil
+}
+
+func (s *openAICompletionsStream) appendCompletionsCustomToolInput(slot *completionsToolSlot, next string, close bool) *completionsFailureSpec {
+	if slot.customClosed {
+		if close && next == slot.customEncoded {
+			return nil
+		}
+		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: grammar tool input changed after close", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent grammar tool input"}
+	}
+	if !strings.HasPrefix(next, slot.customEncoded) {
+		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: grammar tool input changed non-monotonically", ErrOpenAICompletionsStream), message: "OpenAI Chat Completions returned inconsistent grammar tool input"}
+	}
+	inputDelta := next[len(slot.customEncoded):]
+	if !close && inputDelta == "" {
+		return nil
+	}
+	var encoded strings.Builder
+	if !slot.customStarted {
+		propertyJSON, _ := json.Marshal(slot.customProperty)
+		encoded.WriteByte('{')
+		encoded.Write(propertyJSON)
+		encoded.WriteString(":\"")
+		slot.customStarted = true
+	}
+	deltaJSON, _ := json.Marshal(inputDelta)
+	if len(deltaJSON) >= 2 {
+		encoded.Write(deltaJSON[1 : len(deltaJSON)-1])
+	}
+	slot.customEncoded = next
+	if close {
+		encoded.WriteString("\"}")
+		slot.customClosed = true
+	}
+	deltaBytes := []byte(encoded.String())
+	slot.arguments = append(slot.arguments, deltaBytes...)
+	delta, err := llm.NewToolCallDeltaEvent(slot.contentIndex, deltaBytes)
+	if err != nil {
+		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "invalid custom tool stream event"}
+	}
+	s.queue = append(s.queue, delta)
 	return nil
 }
 func (s *openAICompletionsStream) finishBlocks() error {
@@ -1256,15 +1831,21 @@ func (s *openAICompletionsStream) finishBlocks() error {
 	if err := s.finishTextBlock(); err != nil {
 		return err
 	}
-	indices := make([]int, 0, len(s.tools))
-	for index := range s.tools {
-		indices = append(indices, index)
-	}
-	sort.Slice(indices, func(left, right int) bool {
-		return s.tools[indices[left]].contentIndex < s.tools[indices[right]].contentIndex
+	sort.SliceStable(s.toolSlots, func(left, right int) bool {
+		return s.toolSlots[left].contentIndex < s.toolSlots[right].contentIndex
 	})
-	for _, i := range indices {
-		slot := s.tools[i]
+	for _, slot := range s.toolSlots {
+		if slot.id == "" || slot.name == "" || !slot.kindConfigured {
+			return fmt.Errorf("%w: tool call completed without id/name", ErrOpenAICompletionsStream)
+		}
+		if failure := s.startAndFlushCompletionsTool(slot); failure != nil {
+			return failure.cause
+		}
+		if slot.customProperty != "" && !slot.customClosed {
+			if failure := s.appendCompletionsCustomToolInput(slot, slot.customCurrent, true); failure != nil {
+				return failure.cause
+			}
+		}
 		signature := ""
 		if slot.reasoningDetail != nil {
 			var err error
@@ -1393,6 +1974,9 @@ func (s *openAICompletionsStream) finish() {
 	s.body = nil
 	s.mu.Unlock()
 	s.cancel(errOpenAICompletionsStreamDone)
+	if s.timeoutCancel != nil {
+		s.timeoutCancel()
+	}
 	if b != nil {
 		_ = b.Close()
 	}
@@ -1407,6 +1991,9 @@ func (s *openAICompletionsStream) Close() error {
 	s.body = nil
 	s.mu.Unlock()
 	s.cancel(errOpenAICompletionsStreamClosed)
+	if s.timeoutCancel != nil {
+		s.timeoutCancel()
+	}
 	if b != nil {
 		return b.Close()
 	}
