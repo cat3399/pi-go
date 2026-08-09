@@ -118,6 +118,28 @@ func TestRunCompletesToolWorkflowAndReopensSession(t *testing.T) {
 	}
 }
 
+func TestRunTreatsHandledExtensionCommandAsSuccessfulPreflight(t *testing.T) {
+	workingDir := t.TempDir()
+	providerImpl := newScriptedProvider(t)
+	deps := testDependencies(t, workingDir, providerImpl, &scriptedRunner{})
+	var args string
+	deps.Hooks.Commands = []agent.ExtensionCommand{{
+		Name: "noop",
+		Handler: func(_ context.Context, value string, _ *agent.AgentSession) error {
+			args = value
+			return nil
+		},
+	}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := app.Run(context.Background(), deps, []string{
+		"-p", "/noop accepted", "--session", filepath.Join(workingDir, "handled.jsonl"),
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || args != "accepted" || stdout.Len() != 0 || stderr.Len() != 0 || providerImpl.CallCount() != 0 {
+		t.Fatalf("handled command = code %d args %q stdout %q stderr %q calls %d", code, args, stdout.String(), stderr.String(), providerImpl.CallCount())
+	}
+}
+
 func TestRunUsesInjectedDefaultSessionPath(t *testing.T) {
 	workingDir := t.TempDir()
 	sessionPath := filepath.Join(workingDir, "state", "sessions", "default.jsonl")

@@ -345,6 +345,26 @@ func (a *Agent) SetMessages(messages []agentmsg.Message) error {
 	return nil
 }
 
+// appendSettledMessage publishes a finalized non-streaming message directly
+// into Agent state. AgentSession uses this for extension custom messages that
+// participate in context without triggering a turn, matching pi.sendMessage's
+// idle path. The session lifecycle reservation guarantees no low run is active.
+func (a *Agent) appendSettledMessage(message agentmsg.Message) error {
+	if a == nil || isNilInterface(message) {
+		return fmt.Errorf("%w: invalid settled message", ErrInvalidRun)
+	}
+	if isAssistantPartialMessage(message) {
+		return fmt.Errorf("%w: partial settled message", ErrInvalidRun)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.active != nil {
+		return ErrBusy
+	}
+	a.messages = append(a.messages, agentmsg.CloneOne(message))
+	return nil
+}
+
 // Reset mirrors the original mutable wrapper: it neither aborts nor rejects
 // an active run and leaves model/system/thinking/tools/options unchanged.
 func (a *Agent) Reset() {

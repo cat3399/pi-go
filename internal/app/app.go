@@ -177,6 +177,9 @@ func runApplication(
 		}
 		return ExitFailure
 	}
+	if result.Handled() {
+		return ExitSuccess
+	}
 	terminal, ok := result.Terminal()
 	if !ok {
 		writeDiagnostic(stderr, errors.New("agent completed without a terminal result"))

@@ -44,7 +44,8 @@ type SessionConfig struct {
 	ActiveToolNames []string
 	// Resources is the last-healthy resource snapshot owned through the
 	// AgentSession lifecycle. It rebuilds the prompt when active tools change
-	// and expands skill/template commands before message construction.
+	// and expands skill/template commands after extension command/input
+	// preflight and before message construction.
 	Resources      SessionResources
 	BeforeToolCall BeforeToolCallHook
 	AfterToolCall  AfterToolCallHook
@@ -338,6 +339,13 @@ type AgentSession struct {
 	// and post-run continuations remain active too.
 	lifecycleMu sync.Mutex
 	run         *sessionRun
+	// pendingNextTurn mirrors coding-agent's deliverAs:"nextTurn" buffer. It is
+	// consumed only by the next ordinary prompt, after model/compaction
+	// preflight and before before_agent_start messages are injected.
+	pendingNextTurn []agentmsg.Message
+	// standaloneMutation reserves the idle transcript while an extension custom
+	// message is durably appended without triggering an agent turn.
+	standaloneMutation bool
 	// idleWait is the shared idle-generation latch. A run admitted from an
 	// agent_settled callback joins the same generation, so callers that began
 	// waiting on the preceding run do not return until the replacement run also
@@ -371,6 +379,7 @@ type sessionRun struct {
 	cancel                       context.CancelCauseFunc
 	done                         chan struct{}
 	phase                        Phase
+	acceptingQueues              bool
 	retryAttempt                 uint32
 	retrySeries                  bool
 	retryDelay                   time.Duration
@@ -470,6 +479,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.BranchSummaryReserveTokens == 0 && !config.BranchSummaryReserveSet {
 		config.BranchSummaryReserveTokens = session.BranchSummaryDefaultReserveTokens
 	}
+	if err := validateExtensionCommands(config.Hooks.Commands); err != nil {
+		return nil, err
+	}
 	compactionEnabled := true
 	if config.CompactionEnabled != nil {
 		compactionEnabled = *config.CompactionEnabled
@@ -497,6 +509,8 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		systemOptions = cloneBuildSystemPromptOptions(options)
 	}
 	hooks := config.Hooks
+	hooks.InputHandlers = append([]InputHook(nil), config.Hooks.InputHandlers...)
+	hooks.Commands = append([]ExtensionCommand(nil), config.Hooks.Commands...)
 	hooks.MessageHandlers = append([]MessageHook(nil), config.Hooks.MessageHandlers...)
 	hooks.ToolResultHandlers = append([]AfterToolCallHook(nil), config.Hooks.ToolResultHandlers...)
 	config.Hooks = hooks
@@ -1527,37 +1541,7 @@ func (s *AgentSession) expandUserContentInput(content []llm.UserContentBlock) ([
 }
 
 func (s *AgentSession) Run(ctx context.Context, prompt string) (Result, error) {
-	if err := s.rejectIfClosed(); err != nil {
-		return Result{}, err
-	}
-	if s.loop == nil {
-		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	expanded, err := s.expandPromptInput(prompt)
-	if err != nil {
-		return Result{}, err
-	}
-	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
-		timestamp, err := s.loop.now()
-		if err != nil {
-			return sessionPromptInput{}, err
-		}
-		text, err := llm.NewTextBlock(expanded)
-		if err != nil {
-			return sessionPromptInput{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
-		}
-		user, err := llm.NewUserContentMessage([]llm.UserContentBlock{text}, timestamp)
-		if err != nil {
-			return sessionPromptInput{}, fmt.Errorf("%w: prompt: %w", ErrInvalidRun, err)
-		}
-		wrapper, err := agentmsg.NewLLM(user)
-		if err != nil {
-			return sessionPromptInput{}, err
-		}
-		return sessionPromptInput{Text: expanded, Messages: []agentmsg.Message{wrapper}}, nil
-	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
-		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
-	})
+	return s.runTextWithOptions(ctx, prompt, PromptOptions{})
 }
 func (s *AgentSession) Prompt(ctx context.Context, prompt string) (Result, error) {
 	return s.Run(ctx, prompt)
@@ -1566,35 +1550,7 @@ func (s *AgentSession) Prompt(ctx context.Context, prompt string) (Result, error
 // RunContent is the rich-input counterpart to Run and follows the same
 // admission, lifecycle, and persistence boundaries.
 func (s *AgentSession) RunContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
-	if err := s.rejectIfClosed(); err != nil {
-		return Result{}, err
-	}
-	if s.loop == nil {
-		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
-	}
-	input, err := s.expandUserContentInput(content)
-	if err != nil {
-		return Result{}, err
-	}
-	return s.runSession(ctx, true, func() (sessionPromptInput, error) {
-		timestamp, err := s.loop.now()
-		if err != nil {
-			return sessionPromptInput{}, err
-		}
-		user, err := llm.NewUserContentMessage(input, timestamp)
-		if err != nil {
-			return sessionPromptInput{}, fmt.Errorf("%w: prompt content: %w", ErrInvalidRun, err)
-		}
-		wrapper, err := agentmsg.NewLLM(user)
-		if err != nil {
-			return sessionPromptInput{}, err
-		}
-		messages := []agentmsg.Message{wrapper}
-		prompt, images := promptTextAndImages(messages)
-		return sessionPromptInput{Text: prompt, Messages: messages, Images: images}, nil
-	}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
-		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
-	})
+	return s.runContentWithOptions(ctx, content, PromptOptions{})
 }
 func (s *AgentSession) PromptContent(ctx context.Context, content []llm.UserContentBlock) (Result, error) {
 	return s.RunContent(ctx, content)
@@ -1722,6 +1678,15 @@ func (s *AgentSession) runSession(
 		if cause := context.Cause(run.ctx); cause != nil {
 			return Result{}, cause
 		}
+		// coding-agent consumes deliverAs:"nextTurn" only after model/auth and
+		// pre-prompt compaction succeed. Pending custom messages follow the user
+		// message and precede before_agent_start injections.
+		s.lifecycleMu.Lock()
+		if s.run == run && len(s.pendingNextTurn) != 0 {
+			input.Messages = append(input.Messages, agentmsg.Clone(s.pendingNextTurn)...)
+			s.pendingNextTurn = nil
+		}
+		s.lifecycleMu.Unlock()
 	}
 	var extra []agentmsg.Message
 	if hook := s.hooks.BeforeAgentStart; prePromptCheck && hook != nil {
@@ -1836,9 +1801,19 @@ func (s *AgentSession) runSession(
 		// agent_end observers run synchronously before the low run returns. A
 		// newly queued message is therefore visible here and gets its own low
 		// continuation while the top-level admission remains held.
+		s.lifecycleMu.Lock()
+		if s.run == run {
+			run.acceptingQueues = false
+		}
+		s.lifecycleMu.Unlock()
 		if !s.loop.HasQueuedMessages() {
 			return result, runErr
 		}
+		s.lifecycleMu.Lock()
+		if s.run == run {
+			run.acceptingQueues = true
+		}
+		s.lifecycleMu.Unlock()
 		s.setSessionPhase(run, PhaseProvider)
 		result, runErr = s.loop.Continue(run.ctx)
 		result = accumulate(result)
@@ -2372,7 +2347,7 @@ func (s *AgentSession) ReloadMessagesFromSession() error {
 	if s.closed || s.closing {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	if s.run != nil {
+	if s.run != nil || s.standaloneMutation {
 		return fmt.Errorf("%w: cannot reload messages while the agent is running", ErrInvalidRun)
 	}
 	return s.reloadAgentMessagesFromSession()
@@ -2690,11 +2665,11 @@ func (s *AgentSession) admitSessionRun(ctx context.Context) (*sessionRun, error)
 	if s.closed || s.closing {
 		return nil, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
-	if s.run != nil {
+	if s.run != nil || s.standaloneMutation {
 		return nil, ErrBusy
 	}
 	runCtx, cancel := context.WithCancelCause(ctx)
-	run := &sessionRun{ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider}
+	run := &sessionRun{ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, acceptingQueues: true}
 	if s.idleWait == nil {
 		s.idleWait = make(chan struct{})
 	}
@@ -2767,7 +2742,7 @@ func (s *AgentSession) endSessionSettlement(run *sessionRun) {
 func (s *AgentSession) resolveSessionIdle() {
 	var idle chan struct{}
 	s.lifecycleMu.Lock()
-	if s.run == nil && s.settlingCallbacks == 0 && s.idleWait != nil {
+	if s.run == nil && !s.standaloneMutation && s.settlingCallbacks == 0 && s.idleWait != nil {
 		idle = s.idleWait
 		s.idleWait = nil
 	}
@@ -2861,6 +2836,9 @@ func (s *AgentSession) enqueueText(prompt string, steering bool) error {
 	if s == nil || s.loop == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
+	if err := s.rejectQueuedExtensionCommand(prompt); err != nil {
+		return err
+	}
 	expanded, err := s.expandPromptInput(prompt)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidQueueMessage, err)
@@ -2883,6 +2861,10 @@ func (s *AgentSession) enqueueText(prompt string, steering bool) error {
 func (s *AgentSession) enqueueContent(content []llm.UserContentBlock, steering bool) error {
 	if s == nil || s.loop == nil {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	prompt, _ := promptContentTextAndImages(content)
+	if err := s.rejectQueuedExtensionCommand(prompt); err != nil {
+		return err
 	}
 	expanded, err := s.expandUserContentInput(content)
 	if err != nil {
@@ -2915,6 +2897,10 @@ func (s *AgentSession) enqueueAgentMessage(message agentmsg.Message, steering bo
 	if s.closed || s.closing {
 		s.lifecycleMu.Unlock()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
+	}
+	if s.run != nil && !s.run.acceptingQueues {
+		s.lifecycleMu.Unlock()
+		return ErrBusy
 	}
 	// enqueueMessage only takes Agent.mu and invokes no clock/provider/tool or
 	// observer callback, so it is safe to make close/admission atomic here.
@@ -3066,7 +3052,7 @@ func (s *AgentSession) WaitForIdle(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.lifecycleMu.Lock()
-	if s.run == nil {
+	if s.run == nil && !s.standaloneMutation {
 		s.lifecycleMu.Unlock()
 		return nil
 	}
@@ -3189,8 +3175,11 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	run := s.run
 	var idle chan struct{}
 	var cancelRetry context.CancelCauseFunc
-	if run != nil {
+	busy := run != nil || s.standaloneMutation
+	if busy {
 		idle = s.idleWait
+	}
+	if run != nil {
 		cancelRetry = run.retryCancel
 		run.cancel(ErrAgentAborted)
 	}
@@ -3202,7 +3191,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		cancelRetry(errRetryCancelled)
 	}
 	_ = s.loop.Abort(ctx)
-	if run != nil {
+	if busy {
 		select {
 		case <-idle:
 		case <-ctx.Done():

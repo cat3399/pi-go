@@ -33,7 +33,10 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 - stats、context usage、last assistant text 和 runtime policy controls；
 - 完整 built-in tool registry 与独立 active tool set，默认启用 read/bash/edit/write；
 - active tools、provider-visible schemas 和 system prompt 的原子联动更新；
-- prompt template 与 `/skill:*` 在 AgentSession 输入边界展开，展开结果进入 hook、Provider 和持久化会话。
+- extension command → input hook → `/skill:*`/prompt template 的统一 preflight 顺序；
+- input handler 的有序 transform/handled/error isolation，以及流式 prompt 的 steer/follow-up 投递；
+- custom message 的空闲持久化、`triggerTurn`、运行中 steer/follow-up 和 `deliverAs: nextTurn` 调度；
+- 展开或 transform 后的真实输入进入 before-agent hook、Provider 和持久化会话。
 
 ### Runtime、Provider、工具和服务
 
@@ -55,10 +58,10 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ### 产品级 AgentSession
 
-- extension commands 和 input hook 尚未进入统一 prompt preprocessing；template 与 skills 已接入。
 - 缺少 settings/resources/providers/tools/queue modes 的完整 reload。
 - 缺少 standalone bash 及其流式更新、abort 和 BashExecution session 记录。
-- custom message 的 `triggerTurn`/`deliverAs: nextTurn` 产品调度仍不完整。
+- extension-neutral command/input 契约已经接入 AgentSession；完整 JS extension loader、动态失效与
+  command context actions 属于后续 Runtime/扩展宿主工作。
 
 ### Provider、Model、Auth 和内置工具
 
@@ -71,7 +74,8 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 ### Runtime 与外部边界
 
-- 尚无统一 command dispatch、权威 state snapshot、canonical wire DTO 和单一有序 event stream。
+- AgentSession 已有 extension command dispatch；Runtime/Host 尚无覆盖内置命令的统一 dispatch、
+  权威 state snapshot、canonical wire DTO 和单一有序 event stream。
 - 当前 CLI 只执行一次 prompt 后退出，没有长期 JSONL RPC host。
 - pi-web 仍在服务端直接使用 TypeScript AgentSession、SessionManager、model 和 auth 服务。
 

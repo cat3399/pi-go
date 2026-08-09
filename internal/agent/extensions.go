@@ -98,6 +98,70 @@ type BeforeAgentStartResult struct {
 }
 type BeforeAgentStartHook func(context.Context, BeforeAgentStartEvent) (BeforeAgentStartResult, error)
 
+// InputSource identifies the surface that submitted a prompt. Values match
+// coding-agent's input extension event exactly.
+type InputSource string
+
+const (
+	InputInteractive InputSource = "interactive"
+	InputRPC         InputSource = "rpc"
+	InputExtension   InputSource = "extension"
+)
+
+func (s InputSource) Valid() bool {
+	return s == InputInteractive || s == InputRPC || s == InputExtension
+}
+
+// StreamingBehavior selects the queue used when prompt preflight observes an
+// active AgentSession run. The empty value means no delivery mode was supplied.
+type StreamingBehavior string
+
+const (
+	StreamingSteer    StreamingBehavior = "steer"
+	StreamingFollowUp StreamingBehavior = "followUp"
+)
+
+func (b StreamingBehavior) Valid() bool {
+	return b == "" || b == StreamingSteer || b == StreamingFollowUp
+}
+
+type InputEvent struct {
+	Text              string
+	Images            []llm.ImageBlock
+	Source            InputSource
+	StreamingBehavior StreamingBehavior
+}
+
+type InputAction string
+
+const (
+	InputContinue  InputAction = "continue"
+	InputTransform InputAction = "transform"
+	InputHandled   InputAction = "handled"
+)
+
+// InputResult is applied in registration order. A nil Images slice on a
+// transform retains the images from the preceding handler; a non-nil empty
+// slice explicitly removes them.
+type InputResult struct {
+	Action InputAction
+	Text   string
+	Images []llm.ImageBlock
+}
+
+type InputHook func(context.Context, InputEvent) (InputResult, error)
+
+// ExtensionCommand is the resolved, transport-neutral command registration
+// consumed by AgentSession prompt preflight. Duplicate Name values receive the
+// same :1, :2 invocation suffixes as coding-agent's ExtensionRunner.
+type ExtensionCommand struct {
+	Name        string
+	Description string
+	Handler     ExtensionCommandHandler
+}
+
+type ExtensionCommandHandler func(context.Context, string, *AgentSession) error
+
 // Provider hooks live in provider.StreamOptions at the exact payload/header/
 // response boundary. These aliases make that relationship explicit to Agent
 // callers while preserving the provider package as the transport owner.
@@ -415,8 +479,12 @@ type SessionBeforeForkHook func(context.Context, SessionBeforeForkEvent) (Sessio
 // dispatch are used. Nil fields deliberately mean the corresponding runtime
 // surface is not enabled by this host.
 type Hooks struct {
-	Context               ContextHook
-	BeforeAgentStart      BeforeAgentStartHook
+	Context          ContextHook
+	BeforeAgentStart BeforeAgentStartHook
+	// InputHandlers run before skill/template expansion. Their transformations
+	// chain in registration order and InputHandled stops prompt processing.
+	InputHandlers         []InputHook
+	Commands              []ExtensionCommand
 	BeforeProviderRequest BeforeProviderRequestHook
 	BeforeProviderHeaders BeforeProviderHeadersHook
 	AfterProviderResponse AfterProviderResponseHook

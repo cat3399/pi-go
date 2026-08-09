@@ -959,6 +959,7 @@ type Result struct {
 	terminal       llm.AssistantTerminal
 	providerTurns  uint32
 	toolExecutions uint32
+	handled        bool
 }
 
 func (r Result) RunID() uint64 { return r.runID }
@@ -967,7 +968,15 @@ func (r Result) Terminal() (llm.AssistantTerminal, bool) {
 }
 func (r Result) ProviderTurns() uint32  { return r.providerTurns }
 func (r Result) ToolExecutions() uint32 { return r.toolExecutions }
+
+// Handled reports that prompt preflight was fully consumed by an extension
+// command or input hook, or was successfully queued onto an existing run.
+// Such a result intentionally has no synthetic assistant terminal.
+func (r Result) Handled() bool { return r.handled }
 func (r Result) Succeeded() bool {
+	if r.handled {
+		return true
+	}
 	if r.terminal == nil {
 		return false
 	}
