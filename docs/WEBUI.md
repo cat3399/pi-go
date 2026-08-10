@@ -16,8 +16,9 @@
 
 | 模块 | 状态 | 当前事实 | 主要差异 |
 |---|---|---|---|
-| 视觉系统 | 完整（代码） | 当前依赖闭包中的 67 个原 pi-web 源文件逐文件一致；`globals.css`、ChatMinimap 样式、主题、响应式布局、字体和静态资源原样进入静态构建 | 最终目视验收由用户执行；构建边界所需的 manifest/config/type 解耦不属于样式变更 |
-| 可选 Web 二进制 | 已接通 | `scripts/build-webui.sh` 生成被忽略的 `web/out`，再由 `pi_go_webui` build tag 嵌入二进制；同进程持有 Supervisor/Host/Runtime，默认监听 loopback | 还没有安装器、自动打开浏览器和生产反向代理配置 |
+| 视觉系统 | 完整 | 当前依赖闭包中的 67 个原 pi-web 源文件逐文件一致；`globals.css`、ChatMinimap 样式、主题、响应式布局、字体和静态资源原样进入静态构建，且用户已完成目视验收 | 构建边界所需的 manifest/config/type 解耦不属于样式变更 |
+| 可选 Web 二进制 | 已接通 | `make web-build` 生成被忽略的 `surface/web/_frontend/out`，再由 `pi_go_webui` build tag 嵌入二进制；`make web-run` 不触发重建；目标统一委托 `scripts/webui.sh` | 还没有安装器和生产反向代理配置 |
+| Web 开发循环 | 完整 | `make web-dev` 同时启动 Next HMR 与自动重载的 API-only Go；浏览器 `/api/*` 同源代理到 Go，不执行静态导出 | Go 进程重启会重新打开持久化 Session |
 | Agent chat | 已接通 | `/api/agent/*` 直接 Dispatch Host，SSE 使用同一 canonical JSON projection；prompt/abort/queue/tools/model/thinking/compaction/bash/tree/fork/stats/name/reload 均走真实 Go owner | extension UI response/input 暂缓；更多断线、竞争与长历史组合验收仍需补充 |
 | Session 列表/恢复/tree | 已接通 | Go Supervisor 支持并发打开去重、独立 Runtime、空闲回收、list/restore/detail/context/tree/state/rename 和 running IDs | delete、export、auto-name、按块延迟 thinking 读取尚未实现 |
 | Models/配置 | 已接通（基础） | `/api/models` 读取真实 Go catalog/settings，new session 与 set_model 使用真实 Runtime/Host | auth 可用性过滤、models-config 编辑、provider 登录/API key 管理尚未实现 |
@@ -30,6 +31,8 @@
 ## 已完成验收
 
 - `npm run typecheck`、`npm run lint` 和静态 `npm run build`；
+- API-only Go + Next HMR 的开发栈已通过同源 `/api/health`、models、自动 Go 重载和 SSE curl 验收；
+- tagged production binary 已通过嵌入首页、缓存头、health 和独立 `run` 命令验收；
 - 67 个复用的前端源码文件与 pi-web 基线 `a0668ab5077061a1bd074e11949e0a4b7974db2a`
   字节一致，CSS 哈希一致；
 - 本地 fixture 贯通 `new session → SSE → prompt → AgentLoop → durable JSONL → context reload → fork identity rebind`；
@@ -48,7 +51,7 @@
 
 ## 验收原则
 
-- CSS、组件结构、响应式布局、主题和资源与当前 pi-web 对照；最终像素目视验收不阻塞 Agent 主链路；
+- CSS、组件结构、响应式布局、主题和资源已经由用户完成目视验收，不再重复安排浏览器视觉验收；
 - 未实现能力必须至少在 capability API、本文件和结构化 API 错误中一致，后续再完成前端入口禁用；
 - 小改动使用短程/fixture 测试，大模块完成后才运行 DeepSeek 真实只读任务；
 - 真实验收必须能观察 Agent event、tool call、session JSONL 和最终回复，不只检查页面文本。

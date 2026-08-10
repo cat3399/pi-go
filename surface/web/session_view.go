@@ -1,16 +1,13 @@
-package webui
+package web
 
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/host"
 	"github.com/cat3399/pi-go/internal/session"
 )
@@ -58,109 +55,25 @@ type sessionViewWire struct {
 	Context   sessionContextWire `json:"context"`
 }
 
-func (s *Supervisor) ListSessions() ([]sessionInfoWire, error) {
-	discovered, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
+func listSessions(supervisor *application.Supervisor) ([]sessionInfoWire, error) {
+	values, err := supervisor.ListSessions()
 	if err != nil {
 		return nil, err
 	}
-	pathIDs := make(map[string]string, len(discovered))
-	for _, info := range discovered {
-		pathIDs[cleanPathKey(info.Path)] = info.ID
+	result := make([]sessionInfoWire, 0, len(values))
+	for _, value := range values {
+		result = append(result, sessionInfoToWire(value))
 	}
-	byID := make(map[string]sessionInfoWire, len(discovered))
-	for _, info := range discovered {
-		byID[info.ID] = sessionInfoToWire(info, pathIDs)
-	}
-	for _, managed := range s.ActiveSessions() {
-		managedID, _, _ := managed.identity()
-		if _, exists := byID[managedID]; exists {
-			continue
-		}
-		manager := managed.manager()
-		if manager == nil {
-			continue
-		}
-		byID[managedID] = activeSessionInfo(manager, managed, pathIDs)
-	}
-	result := make([]sessionInfoWire, 0, len(byID))
-	for _, info := range byID {
-		result = append(result, info)
-	}
-	sort.SliceStable(result, func(left, right int) bool { return result[left].Modified > result[right].Modified })
 	return result, nil
 }
 
-func sessionInfoToWire(info session.SessionInfo, pathIDs map[string]string) sessionInfoWire {
-	parentID := ""
-	if info.HasParentSession {
-		parentID = pathIDs[cleanPathKey(info.ParentSessionPath)]
-	}
-	name := ""
-	if info.HasName {
-		name = info.Name
-	}
-	first := info.FirstMessage
-	if first == "" {
-		first = "(no messages)"
-	}
+func sessionInfoToWire(info application.SessionInfo) sessionInfoWire {
 	return sessionInfoWire{
-		Path: info.Path, ID: info.ID, CWD: info.Cwd, Name: name,
+		Path: info.Path, ID: info.ID, CWD: info.CWD, Name: info.Name,
 		Created: formatWebTime(info.Created), Modified: formatWebTime(info.Modified),
-		MessageCount: info.MessageCount, FirstMessage: first,
-		ParentSessionID: parentID, ProjectRoot: info.Cwd,
+		MessageCount: info.MessageCount, FirstMessage: info.FirstMessage,
+		ParentSessionID: info.ParentSessionID, ProjectRoot: info.CWD,
 	}
-}
-
-func activeSessionInfo(manager *session.SessionManager, managed *managedSession, pathIDs map[string]string) sessionInfoWire {
-	header := manager.Header()
-	created := header.Timestamp()
-	var lastActivity time.Time
-	entries := manager.Entries()
-	messageCount := 0
-	firstMessage := "(no messages)"
-	for _, entry := range entries {
-		if entry.Type() != "message" {
-			continue
-		}
-		messageCount++
-		text, role, activity, hasContent := sessionEntryMessage(entry.RawJSON())
-		if (role == "user" || role == "assistant") && hasContent && activity.After(time.UnixMilli(0)) && activity.After(lastActivity) {
-			lastActivity = activity
-		}
-		if firstMessage == "(no messages)" && role == "user" && text != "" {
-			firstMessage = text
-		}
-	}
-	modified := created
-	if !lastActivity.IsZero() {
-		modified = lastActivity
-	}
-	name, _ := manager.SessionName()
-	parentID := ""
-	if parent, ok := header.ParentSession(); ok {
-		parentID = pathIDs[cleanPathKey(parent)]
-	}
-	_, _, path := managed.identity()
-	if current, ok := manager.SessionFile(); ok {
-		path = current
-	}
-	return sessionInfoWire{
-		Path: path, ID: manager.SessionID(), CWD: manager.Cwd(), Name: name,
-		Created: formatWebTime(created), Modified: formatWebTime(modified),
-		MessageCount: messageCount, FirstMessage: firstMessage,
-		ParentSessionID: parentID, ProjectRoot: manager.Cwd(),
-	}
-}
-
-func cleanPathKey(value string) string {
-	if value == "" {
-		return ""
-	}
-	absolute, err := filepath.Abs(value)
-	if err != nil {
-		return filepath.Clean(value)
-	}
-	return filepath.Clean(absolute)
 }
 
 func formatWebTime(value time.Time) string {
@@ -170,138 +83,35 @@ func formatWebTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func sessionEntryMessage(raw []byte) (text, role string, activity time.Time, hasContent bool) {
-	var entry map[string]json.RawMessage
-	if json.Unmarshal(raw, &entry) != nil {
-		return "", "", time.Time{}, false
-	}
-	var message map[string]json.RawMessage
-	if json.Unmarshal(entry["message"], &message) != nil {
-		return "", "", time.Time{}, false
-	}
-	_ = json.Unmarshal(message["role"], &role)
-	content, hasContent := message["content"]
-	var milliseconds int64
-	if json.Unmarshal(message["timestamp"], &milliseconds) == nil {
-		activity = time.UnixMilli(milliseconds)
-	} else {
-		var timestamp string
-		_ = json.Unmarshal(entry["timestamp"], &timestamp)
-		activity, _ = time.Parse(time.RFC3339, timestamp)
-	}
-	if json.Unmarshal(content, &text) == nil {
-		return text, role, activity, hasContent
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(content, &blocks) != nil {
-		return "", role, activity, hasContent
-	}
-	parts := make([]string, 0, len(blocks))
-	for _, block := range blocks {
-		if block.Type == "text" && block.Text != "" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.Join(parts, " "), role, activity, hasContent
-}
-
-func (s *Supervisor) SessionView(id, leafID string, deferThinking, deferMedia bool) (sessionViewWire, error) {
-	manager, managed, info, closeManager, err := s.sessionManagerForRead(id)
+func sessionView(supervisor *application.Supervisor, id, leafID string, deferThinking, deferMedia bool) (sessionViewWire, error) {
+	snapshot, err := supervisor.SnapshotSession(id, leafID)
 	if err != nil {
 		return sessionViewWire{}, err
 	}
-	if closeManager {
-		defer manager.Close()
-	}
-	contextValue, err := buildSessionContext(manager, managed, leafID, deferThinking, deferMedia)
+	contextValue, err := buildSessionContext(snapshot, deferThinking, deferMedia)
 	if err != nil {
 		return sessionViewWire{}, err
 	}
-	tree, err := projectSessionTree(manager.Tree())
+	tree, err := projectSessionTree(snapshot.Tree)
 	if err != nil {
 		return sessionViewWire{}, err
 	}
-	var leaf *string
-	if value, ok := manager.LeafID(); ok {
-		copy := value
-		leaf = &copy
-	}
-	file, _ := manager.SessionFile()
 	return sessionViewWire{
-		SessionID: id, FilePath: file, Info: info, LeafID: leaf,
+		SessionID: id, FilePath: snapshot.FilePath, Info: sessionInfoToWire(snapshot.Info), LeafID: snapshot.LeafID,
 		Tree: tree, Context: contextValue,
 	}, nil
 }
 
-func (s *Supervisor) SessionContext(id, leafID string, deferThinking, deferMedia bool) (sessionContextWire, error) {
-	manager, managed, _, closeManager, err := s.sessionManagerForRead(id)
+func sessionContext(supervisor *application.Supervisor, id, leafID string, deferThinking, deferMedia bool) (sessionContextWire, error) {
+	snapshot, err := supervisor.SnapshotSession(id, leafID)
 	if err != nil {
 		return sessionContextWire{}, err
 	}
-	if closeManager {
-		defer manager.Close()
-	}
-	return buildSessionContext(manager, managed, leafID, deferThinking, deferMedia)
+	return buildSessionContext(snapshot, deferThinking, deferMedia)
 }
 
-func (s *Supervisor) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, sessionInfoWire, bool, error) {
-	if managed, ok := s.Active(id); ok {
-		manager := managed.manager()
-		if manager == nil {
-			return nil, nil, sessionInfoWire{}, false, errors.New("active session manager is unavailable")
-		}
-		infos, err := s.ListSessions()
-		if err != nil {
-			return nil, nil, sessionInfoWire{}, false, err
-		}
-		for _, info := range infos {
-			if info.ID == id {
-				return manager, managed, info, false, nil
-			}
-		}
-		return manager, managed, activeSessionInfo(manager, managed, nil), false, nil
-	}
-	info, found, err := s.findSession(id)
-	if err != nil {
-		return nil, nil, sessionInfoWire{}, false, err
-	}
-	if !found {
-		return nil, nil, sessionInfoWire{}, false, os.ErrNotExist
-	}
-	manager, err := session.OpenSessionManager(info.Path, filepath.Dir(info.Path), "")
-	if err != nil {
-		return nil, nil, sessionInfoWire{}, false, err
-	}
-	all, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
-	if err != nil {
-		_ = manager.Close()
-		return nil, nil, sessionInfoWire{}, false, err
-	}
-	pathIDs := make(map[string]string, len(all))
-	for _, item := range all {
-		pathIDs[cleanPathKey(item.Path)] = item.ID
-	}
-	return manager, nil, sessionInfoToWire(info, pathIDs), true, nil
-}
-
-func buildSessionContext(manager *session.SessionManager, managed *managedSession, leafID string, deferThinking, deferMedia bool) (sessionContextWire, error) {
-	var (
-		entries []session.Entry
-		value   session.Context
-	)
-	if leafID == "" {
-		entries = manager.ContextEntries()
-		value = manager.BuildContext()
-	} else {
-		projection, err := manager.ProjectContextAt(leafID)
-		if err != nil {
-			return sessionContextWire{}, err
-		}
-		entries, value = projection.Entries, projection.Context
-	}
+func buildSessionContext(snapshot application.SessionSnapshot, deferThinking, deferMedia bool) (sessionContextWire, error) {
+	value := snapshot.Context
 	result := sessionContextWire{Messages: []json.RawMessage{}, EntryIDs: []string{}, ThinkingLevel: "off"}
 	if thinking, ok := value.ThinkingLevel(); ok {
 		result.ThinkingLevel = thinking
@@ -309,15 +119,13 @@ func buildSessionContext(manager *session.SessionManager, managed *managedSessio
 	if model, ok := value.Model(); ok {
 		result.Model = &selectedModelWire{Provider: model.Provider, ModelID: model.ModelID}
 	}
-	if managed != nil {
-		if state, err := managed.host.State(); err == nil {
-			result.ThinkingLevel = string(state.ThinkingLevel)
-			if state.HasModel {
-				result.Model = &selectedModelWire{Provider: state.Model.Provider(), ModelID: state.Model.ID()}
-			}
+	if snapshot.LiveState != nil {
+		result.ThinkingLevel = string(snapshot.LiveState.ThinkingLevel)
+		if snapshot.LiveState.HasModel {
+			result.Model = &selectedModelWire{Provider: snapshot.LiveState.Model.Provider(), ModelID: snapshot.LiveState.Model.ID()}
 		}
 	}
-	for _, entry := range entries {
+	for _, entry := range snapshot.Entries {
 		message, ok, err := entryToUIMessage(entry, deferThinking, deferMedia)
 		if err != nil {
 			return sessionContextWire{}, err

@@ -1,10 +1,11 @@
-package webui
+package web
 
 import (
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/cat3399/pi-go/internal/application"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
 )
@@ -25,16 +26,16 @@ type modelsWire struct {
 	ModelScopeWarnings []string                                      `json:"modelScopeWarnings,omitempty"`
 }
 
-func (s *Supervisor) Models(cwd string) (modelsWire, error) {
+func models(supervisor *application.Supervisor, cwd string) (modelsWire, error) {
 	if strings.TrimSpace(cwd) == "" {
-		cwd = s.paths.WorkingDir
+		cwd = supervisor.DefaultCWD()
 	}
-	resolved, err := validateCWD(cwd)
+	resolved, err := application.ValidateCWD(cwd)
 	if err != nil {
 		return modelsWire{}, err
 	}
 	runtime, err := modelcatalog.NewRuntime(modelcatalog.Options{
-		AgentDir: s.paths.AgentDir, WorkingDir: resolved, ProjectTrusted: false,
+		AgentDir: supervisor.AgentDir(), WorkingDir: resolved, ProjectTrusted: false,
 	})
 	if err != nil {
 		return modelsWire{}, fmt.Errorf("load model catalog: %w", err)

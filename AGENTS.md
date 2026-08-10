@@ -46,6 +46,21 @@ Go 核心必须对外提供与原版一致的完整 Agent 能力和可观察语�
 核心 API 必须保持 transport-neutral，不包含页面专用状态或 RPC framing。接入者只做薄适配，
 不重新实现半套 Agent。
 
+## Surface 架构
+
+交互层统一放在顶层 `surface/`，按产品方向高内聚组织：`surface/web`、`surface/tui`，以及未来
+的 `surface/gui`、`surface/cli`。每个 Surface 可以拥有自身的渲染状态、输入、HTTP/SSE/IPC、
+静态资源和专属测试，但不得拥有 Agent、Runtime 或 durable Session 的权威产品状态。
+
+多会话发现、打开去重、Host/Runtime 生命周期和中立会话快照属于 `internal/application`；
+`cmd/*` 只作为 composition root。Surface 共用 typed Host/application command、query、snapshot
+和 event；HTTP JSON、SSE、终端事件或 GUI IPC 等传输编码留在对应 Surface。只有出现两个真实
+消费者后才提取共享 wire protocol，禁止为了预想复用提前建立最低公分母交互抽象。
+
+Web 日常开发使用 `make web-dev`（或其无 Make 等价入口 `./scripts/webui.sh dev`），由 Next HMR
+代理 API-only Go 并自动重载 Go 服务，不执行生产静态构建。`make web-build` 与 `make web-run`
+必须保持分离；生产二进制嵌入静态导出，运行时不依赖 Node。
+
 ## 移植范围与原则
 
 Go 与 TypeScript 语言机制不同的部分可以采用合理的 Go 写法，包括类型表示、并发、错误和

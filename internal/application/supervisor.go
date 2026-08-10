@@ -1,4 +1,7 @@
-package webui
+// Package application owns process-local application services shared by every
+// product surface. It coordinates Host/Runtime lifecycles without owning a
+// second copy of Agent or Session product state.
+package application
 
 import (
 	"context"
@@ -21,13 +24,13 @@ import (
 
 const defaultSessionIdleTimeout = 10 * time.Minute
 
-type runtimeOpener func(context.Context, app.ProductionConfig, app.ProductionRuntimeOptions) (*agentruntime.Runtime, error)
+type RuntimeOpener func(context.Context, app.ProductionConfig, app.ProductionRuntimeOptions) (*agentruntime.Runtime, error)
 
-type supervisorOptions struct {
+type SupervisorOptions struct {
 	Context       context.Context
 	Production    app.ProductionConfig
 	IdleTimeout   time.Duration
-	OpenRuntime   runtimeOpener
+	OpenRuntime   RuntimeOpener
 	DisableReaper bool
 }
 
@@ -111,7 +114,7 @@ type Supervisor struct {
 	production  app.ProductionConfig
 	paths       app.ProductionPaths
 	idle        time.Duration
-	openRuntime runtimeOpener
+	openRuntime RuntimeOpener
 
 	mu         sync.Mutex
 	sessions   map[string]*managedSession
@@ -120,14 +123,14 @@ type Supervisor struct {
 	reaperDone chan struct{}
 }
 
-func newSupervisor(options supervisorOptions) (*Supervisor, error) {
+func NewSupervisor(options SupervisorOptions) (*Supervisor, error) {
 	ctx := options.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	paths, err := app.ResolveProductionPaths(options.Production)
 	if err != nil {
-		return nil, fmt.Errorf("resolve WebUI production paths: %w", err)
+		return nil, fmt.Errorf("resolve application production paths: %w", err)
 	}
 	idle := options.IdleTimeout
 	if idle <= 0 {
@@ -178,7 +181,7 @@ func (s *Supervisor) DefaultCWD() string {
 	return s.paths.WorkingDir
 }
 
-func validateCWD(value string) (string, error) {
+func ValidateCWD(value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return "", errors.New("cwd is required")
@@ -198,17 +201,17 @@ func validateCWD(value string) (string, error) {
 	return resolved, nil
 }
 
-func (s *Supervisor) NewSession(ctx context.Context, options NewSessionOptions) (*managedSession, host.State, error) {
+func (s *Supervisor) NewSession(ctx context.Context, options NewSessionOptions) (host.State, error) {
 	if s == nil {
-		return nil, host.State{}, errors.New("WebUI supervisor is unavailable")
+		return host.State{}, errors.New("application supervisor is unavailable")
 	}
 	ctx = normalizeSupervisorContext(ctx)
-	cwd, err := validateCWD(options.CWD)
+	cwd, err := ValidateCWD(options.CWD)
 	if err != nil {
-		return nil, host.State{}, err
+		return host.State{}, err
 	}
 	if (options.Provider == "") != (options.ModelID == "") {
-		return nil, host.State{}, errors.New("provider and modelId must be provided together")
+		return host.State{}, errors.New("provider and modelId must be provided together")
 	}
 	config := cloneProductionConfig(s.production)
 	config.WorkingDir = cwd
@@ -221,11 +224,11 @@ func (s *Supervisor) NewSession(ctx context.Context, options NewSessionOptions) 
 		ModelID:    options.ModelID,
 	})
 	if err != nil {
-		return nil, host.State{}, err
+		return host.State{}, err
 	}
 	managed, err := s.adoptRuntime(ctx, runtime)
 	if err != nil {
-		return nil, host.State{}, err
+		return host.State{}, err
 	}
 	cleanup := true
 	defer func() {
@@ -235,24 +238,24 @@ func (s *Supervisor) NewSession(ctx context.Context, options NewSessionOptions) 
 	}()
 	if options.HasToolNames {
 		if _, err := managed.host.Dispatch(ctx, host.SetToolsCommand{ToolNames: append([]string(nil), options.ToolNames...)}); err != nil {
-			return nil, host.State{}, fmt.Errorf("set initial tools: %w", err)
+			return host.State{}, fmt.Errorf("set initial tools: %w", err)
 		}
 	}
 	if options.ThinkingLevel != nil {
 		if _, err := managed.host.Dispatch(ctx, host.SetThinkingLevelCommand{Level: *options.ThinkingLevel}); err != nil {
-			return nil, host.State{}, fmt.Errorf("set initial thinking level: %w", err)
+			return host.State{}, fmt.Errorf("set initial thinking level: %w", err)
 		}
 	}
 	state, err := managed.host.State()
 	if err != nil {
-		return nil, host.State{}, err
+		return host.State{}, err
 	}
 	if err := s.register(managed); err != nil {
-		return nil, host.State{}, err
+		return host.State{}, err
 	}
 	managed.touch()
 	cleanup = false
-	return managed, state, nil
+	return state, nil
 }
 
 func (s *Supervisor) adoptRuntime(_ context.Context, runtime *agentruntime.Runtime) (*managedSession, error) {
@@ -291,7 +294,7 @@ func (s *Supervisor) register(managed *managedSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return errors.New("WebUI supervisor is closed")
+		return errors.New("application supervisor is closed")
 	}
 	if existing := s.sessions[id]; existing != nil && existing != managed {
 		return fmt.Errorf("session %s is already active", id)
@@ -300,7 +303,7 @@ func (s *Supervisor) register(managed *managedSession) error {
 	return nil
 }
 
-func (s *Supervisor) Active(id string) (*managedSession, bool) {
+func (s *Supervisor) active(id string) (*managedSession, bool) {
 	if s == nil {
 		return nil, false
 	}
@@ -314,23 +317,23 @@ func (s *Supervisor) Active(id string) (*managedSession, bool) {
 	return managed, true
 }
 
-func (s *Supervisor) Open(ctx context.Context, id string) (*managedSession, error) {
+func (s *Supervisor) open(ctx context.Context, id string) (*managedSession, error) {
 	if s == nil {
-		return nil, errors.New("WebUI supervisor is unavailable")
+		return nil, errors.New("application supervisor is unavailable")
 	}
 	ctx = normalizeSupervisorContext(ctx)
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil, errors.New("session id is required")
 	}
-	if managed, ok := s.Active(id); ok {
+	if managed, ok := s.active(id); ok {
 		return managed, nil
 	}
 
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, errors.New("WebUI supervisor is closed")
+		return nil, errors.New("application supervisor is closed")
 	}
 	if call := s.opening[id]; call != nil {
 		s.mu.Unlock()
@@ -409,7 +412,7 @@ func (s *Supervisor) findSession(id string) (session.SessionInfo, bool, error) {
 
 func (s *Supervisor) Dispatch(ctx context.Context, id string, command host.Command) (host.CommandResult, error) {
 	ctx = normalizeSupervisorContext(ctx)
-	managed, err := s.Open(ctx, id)
+	managed, err := s.open(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -453,10 +456,10 @@ func (s *Supervisor) reconcileIdentity(managed *managedSession) error {
 
 func (s *Supervisor) State(ctx context.Context, id string, open bool) (host.State, bool, error) {
 	ctx = normalizeSupervisorContext(ctx)
-	managed, ok := s.Active(id)
+	managed, ok := s.active(id)
 	if !ok && open {
 		var err error
-		managed, err = s.Open(ctx, id)
+		managed, err = s.open(ctx, id)
 		if err != nil {
 			return host.State{}, false, err
 		}
@@ -471,7 +474,7 @@ func (s *Supervisor) State(ctx context.Context, id string, open bool) (host.Stat
 
 func (s *Supervisor) Subscribe(ctx context.Context, id string, observer host.Observer) (func(), error) {
 	ctx = normalizeSupervisorContext(ctx)
-	managed, err := s.Open(ctx, id)
+	managed, err := s.open(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +512,7 @@ func (s *Supervisor) RunningIDs() []string {
 	return result
 }
 
-func (s *Supervisor) ActiveSessions() []*managedSession {
+func (s *Supervisor) activeSessions() []*managedSession {
 	if s == nil {
 		return nil
 	}

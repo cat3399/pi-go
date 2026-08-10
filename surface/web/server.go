@@ -1,49 +1,32 @@
-// Package webui implements the optional HTTP surface above pi-go's
-// transport-neutral Application Host. It must never own Agent product state.
-package webui
+// Package web implements the browser, HTTP, and SSE surface above pi-go's
+// transport-neutral application services. It owns presentation and transport
+// state only, never Agent or durable Session product state.
+package web
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
 	"path"
 	"strings"
-	"time"
 
-	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/application"
 )
 
 type Options struct {
-	Version     string
-	Assets      fs.FS
-	Context     context.Context
-	Production  app.ProductionConfig
-	IdleTimeout time.Duration
-
-	// Test seams remain package-private so product callers always use the real
-	// production assembler and idle lifecycle.
-	openRuntime   runtimeOpener
-	disableReaper bool
+	Version    string
+	Assets     fs.FS
+	Supervisor *application.Supervisor
 }
 
 type Server struct {
-	handler    http.Handler
-	supervisor *Supervisor
+	handler http.Handler
 }
 
 func New(options Options) (*Server, error) {
-	assets := options.Assets
-	if assets == nil {
-		return nil, errors.New("WebUI assets are required")
-	}
-	supervisor, err := newSupervisor(supervisorOptions{
-		Context: options.Context, Production: options.Production, IdleTimeout: options.IdleTimeout,
-		OpenRuntime: options.openRuntime, DisableReaper: options.disableReaper,
-	})
-	if err != nil {
-		return nil, err
+	if options.Supervisor == nil {
+		return nil, errors.New("Web surface supervisor is required")
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(writer http.ResponseWriter, _ *http.Request) {
@@ -52,10 +35,14 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("GET /api/capabilities", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"capabilities": Capabilities()})
 	})
-	registerAPIRoutes(mux, supervisor)
+	registerAPIRoutes(mux, options.Supervisor)
 	mux.HandleFunc("/api/", unsupportedAPI)
-	mux.Handle("/", staticHandler(assets))
-	return &Server{handler: mux, supervisor: supervisor}, nil
+	if options.Assets == nil {
+		mux.Handle("/", http.NotFoundHandler())
+	} else {
+		mux.Handle("/", staticHandler(options.Assets))
+	}
+	return &Server{handler: mux}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -63,13 +50,6 @@ func (s *Server) Handler() http.Handler {
 		return http.NotFoundHandler()
 	}
 	return s.handler
-}
-
-func (s *Server) Close(ctx context.Context) error {
-	if s == nil || s.supervisor == nil {
-		return nil
-	}
-	return s.supervisor.Close(ctx)
 }
 
 func unsupportedAPI(writer http.ResponseWriter, request *http.Request) {

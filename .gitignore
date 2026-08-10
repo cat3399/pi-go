@@ -9,7 +9,7 @@
 .env.*
 !.env.example
 
-/web/node_modules/
-/web/.next/
-/web/out/
-/web/*.tsbuildinfo
+/surface/web/_frontend/node_modules/
+/surface/web/_frontend/.next/
+/surface/web/_frontend/out/
+/surface/web/_frontend/*.tsbuildinfo

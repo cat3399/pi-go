@@ -2,9 +2,14 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+frontend_dir="$repo_dir/surface/web/_frontend"
 
-npm --prefix "$repo_dir/web" install
-npm --prefix "$repo_dir/web" run build
+if [ ! -x "$frontend_dir/node_modules/.bin/next" ]; then
+	printf '%s\n' "WebUI dependencies are missing; run ./scripts/setup-webui.sh first" >&2
+	exit 1
+fi
+
+npm --prefix "$frontend_dir" run build
 mkdir -p "$repo_dir/bin"
 
 cd "$repo_dir"

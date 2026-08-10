@@ -88,6 +88,8 @@ Next → `pi-go-rpc` 接入已经完成可行性验证，不再作为产品兼�
 2. 以现有 pi-web 为基准迁移布局、主题、响应式样式和静态资源，并通过静态构建；
 3. 接通 Agent chat、SSE、session browsing/restore/context/tree/state/rename 与基础 model discovery/selection；
 4. 使用 DeepSeek V4 Flash 完成真实 `read` 工具短程验收。
+5. 将交互层收拢到 `surface/*`，多 Session 生命周期提取为 `internal/application.Supervisor`；
+6. 完成 Next HMR + API-only Go 的双进程开发模式，以及相互独立的生产 build/run 命令。
 
 后续按高内聚模块推进：
 

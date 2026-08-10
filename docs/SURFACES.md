@@ -6,13 +6,13 @@ pi-go 只有一套 Agent/Application Core。TUI、WebUI、未来 GUI 和 RPC 自
 或 transport，不复制 Runtime、AgentSession、Agent、SessionManager 的产品状态和策略。
 
 ```text
-TUI / WebUI / GUI / RPC
+surface/tui / surface/web / surface/gui / RPC
+            │
+            ▼
+Application Supervisor: multi-session lifecycle and discovery
             │
             ▼
 Application Host: typed commands, queries, events, capabilities
-            │
-            ▼
-Session Supervisor: independent Host/Runtime lifecycles
             │
             ▼
 Runtime → AgentSession → Agent → AgentLoop
@@ -47,6 +47,13 @@ Web/GUI 重连时读取权威 snapshot 和 durable session，而不是回放事�
 
 ## 构建边界
 
+Surface 专属代码按交互方向高内聚组织：
+
+- `surface/web`：React 前端、HTTP/SSE、静态资源和 Web 测试；
+- `surface/tui`：终端输入、渲染和终端生命周期；
+- 未来 `surface/gui`：窗口、IPC 和 GUI 前端；
+- `internal/application`：所有 Surface 共用的 Supervisor、会话快照和应用生命周期。
+
 各 surface 使用独立 composition root：
 
 - `cmd/pi-go`：现有默认入口；
@@ -54,8 +61,8 @@ Web/GUI 重连时读取权威 snapshot 和 durable session，而不是回放事�
 - `cmd/pi-go-web`：可选 WebUI；
 - 未来 `cmd/pi-go-gui`：可选 GUI。
 
-默认构建不导入 Web/GUI 包。静态资源与 surface 专用依赖只进入对应二进制；build tag 只选择
-生成资源和对应 composition root，不切分 Host/Runtime 产品逻辑，避免形成两套难以完整测试的行为。
+普通 Go 构建会编译 Surface 的 Go 边界和测试，但不需要 Node 或静态导出。浏览器静态资源只在
+`pi_go_webui` production build 中进入 `pi-go-web`；build tag 不切分 Host/Runtime 产品逻辑。
 
 ## WebUI 特有边界
 
@@ -67,6 +74,9 @@ Go Web Host 直接调用 Application Host。HTTP 负责请求验证和命令映�
 浏览器界面可以继续使用 TypeScript/React；生产运行时服务端仍只有 Go。前端构建产物作为
 真实静态资源进入可选 Web 二进制，不允许用静态假消息或演示数据替代 API。
 
-当前 `internal/webui.Supervisor` 为每个活动会话持有一个独立 Host/Runtime，完成并发打开去重、
-空闲回收和 shutdown；`internal/hostjson` 是 JSONL RPC 与 Web HTTP/SSE 共用的命令、结果和事件
-投影。Web 请求不启动 RPC 子进程，也不通过 Next Server 转发。
+当前 `internal/application.Supervisor` 为每个活动会话持有一个独立 Host/Runtime，完成并发打开
+去重、空闲回收和 shutdown；`surface/web` 只消费 Supervisor/Host 的命令、快照和事件。
+`internal/hostjson` 是 JSONL RPC 与 Web HTTP/SSE 共用的命令、结果和事件投影。
+
+开发态使用 Next HMR，并将 `/api/*` 代理到 API-only Go 进程；生产态由 Go 直接提供静态资源与
+HTTP/SSE，不需要 Next Server，也不会启动 RPC 子进程。

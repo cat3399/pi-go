@@ -1,6 +1,6 @@
 //go:build pi_go_webui
 
-package webassets
+package web
 
 import (
 	"io/fs"
@@ -8,9 +8,9 @@ import (
 )
 
 func TestExportContainsApplicationAndVisualAssets(t *testing.T) {
-	assets, err := FS()
+	assets, err := EmbeddedAssets()
 	if err != nil {
-		t.Fatalf("FS: %v", err)
+		t.Fatalf("EmbeddedAssets: %v", err)
 	}
 	for _, name := range []string{"index.html", "manifest.webmanifest", "sw.js", "icons/icon-192.png"} {
 		info, err := fs.Stat(assets, name)

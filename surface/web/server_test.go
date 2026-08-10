@@ -1,4 +1,4 @@
-package webui
+package web
 
 import (
 	"bufio"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
@@ -25,20 +26,34 @@ import (
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
+	cwd := t.TempDir()
+	agentDir := filepath.Join(t.TempDir(), "agent")
+	supervisor := testSupervisor(t, app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir}, nil)
 	server, err := New(Options{Version: "test", Assets: fstest.MapFS{
 		"index.html":        {Data: []byte("<!doctype html><title>real webui</title>")},
 		"sw.js":             {Data: []byte("self.addEventListener('fetch',()=>{})")},
 		"_next/static/a.js": {Data: []byte("console.log('asset')")},
-	}})
+	}, Supervisor: supervisor})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	return server
+}
+
+func testSupervisor(t *testing.T, config app.ProductionConfig, opener application.RuntimeOpener) *application.Supervisor {
+	t.Helper()
+	supervisor, err := application.NewSupervisor(application.SupervisorOptions{
+		Context: context.Background(), Production: config, OpenRuntime: opener, DisableReaper: true,
+	})
+	if err != nil {
+		t.Fatalf("NewSupervisor: %v", err)
+	}
 	t.Cleanup(func() {
-		if err := server.Close(context.Background()); err != nil {
-			t.Errorf("Close: %v", err)
+		if err := supervisor.Close(context.Background()); err != nil {
+			t.Errorf("close Supervisor: %v", err)
 		}
 	})
-	return server
+	return supervisor
 }
 
 func TestCapabilitiesReportUnavailableModulesExplicitly(t *testing.T) {
@@ -74,7 +89,31 @@ func TestUnknownAPIReturnsStructuredNotImplemented(t *testing.T) {
 	}
 }
 
-func scriptedWebRuntimeOpener(t *testing.T, steps ...provider.ScriptStep) runtimeOpener {
+func TestAPIOnlyServerKeepsAPIRoutesAndDoesNotServeAnApplicationShell(t *testing.T) {
+	cwd := t.TempDir()
+	supervisor := testSupervisor(t, app.ProductionConfig{
+		WorkingDir: cwd,
+		AgentDir:   filepath.Join(t.TempDir(), "agent"),
+	}, nil)
+	server, err := New(Options{Version: "test", Supervisor: supervisor})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	health := httptest.NewRecorder()
+	server.Handler().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d", health.Code)
+	}
+
+	root := httptest.NewRecorder()
+	server.Handler().ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
+	if root.Code != http.StatusNotFound {
+		t.Fatalf("API-only root status = %d", root.Code)
+	}
+}
+
+func scriptedWebRuntimeOpener(t *testing.T, steps ...provider.ScriptStep) application.RuntimeOpener {
 	t.Helper()
 	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time {
 		return time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
@@ -203,15 +242,14 @@ func TestNativeWebAgentSessionAndSSEFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	supervisor := testSupervisor(t, app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir}, scriptedWebRuntimeOpener(t, step))
 	surface, err := New(Options{
 		Version: "test", Assets: fstest.MapFS{"index.html": {Data: []byte("web")}},
-		Production:  app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir},
-		openRuntime: scriptedWebRuntimeOpener(t, step), disableReaper: true,
+		Supervisor: supervisor,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = surface.Close(context.Background()) })
 	httpServer := httptest.NewServer(surface.Handler())
 	t.Cleanup(httpServer.Close)
 

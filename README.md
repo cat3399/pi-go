@@ -34,9 +34,9 @@ AgentSession 已组合 SessionManager，AgentLoop、stateful Agent、JSONL sessi
 compaction、会话树和 Runtime replacement 生命周期均有真实实现。普通生产入口使用真实
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
-项目仍未达到完整移植验收。当前主要缺口是 reload 中的动态 extension runtime 重建、
-standalone bash 的 `user_bash` Host hook 集成、provider/model/auth breadth、原版 RPC 的辅助命令，
-以及完整的 TypeScript/Go 跨实现验收。Host 已有权威 state、跨 session
+项目仍未达到完整移植验收。当前主线差距是完整的 TypeScript/Go AgentSession 跨实现验收、
+原版 RPC 的辅助命令，以及面向多种交互层的稳定 application contract。Provider/Auth 与完整插件
+宿主不作为当前 Agent 主线的完成阻塞。Host 已有权威 state、跨 session
 replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展 UI 外的全部直接 Agent 命令；
 `prompt` 按原版 preflight 时点异步确认。
 
@@ -46,7 +46,7 @@ WebUI 的长期产品内核路径。`cmd/pi-go -p` 仍是一次性 headless 诊�
 长期产品形态是一个 transport-neutral Application Host，以及按需编译的 TUI、WebUI 和未来
 GUI surface。每个 surface 只拥有呈现状态，通过同一套 command/query/event 边界驱动权威
 `Runtime → AgentSession → Agent → AgentLoop`。首个原生 WebUI 主链已经由可选的 `pi-go-web`
-进程内承载，不经过 Next Server 或 JSONL 子进程。
+进程内承载，不经过 JSONL 子进程；开发态仅使用 Next Server 提供 HMR 和 `/api` 代理。
 
 ## JSONL Agent Host
 
@@ -65,19 +65,41 @@ composition root 中直接装配 Application Host。
 ## 可选 Surface
 
 - 默认核心构建不依赖 WebUI 或未来 GUI；
+- `surface/web` 高内聚地拥有 React、HTTP/SSE、静态资源和 Web 测试；
+- `surface/tui` 拥有终端输入、渲染和终端生命周期；
+- `internal/application.Supervisor` 统一管理多会话 Host/Runtime 生命周期；
 - WebUI 作为独立 `cmd/pi-go-web` 目标构建，静态前端只进入该二进制；
 - TUI、WebUI、GUI 共享 Agent/Application 能力，不共享渲染抽象；
 - 浏览器前端可以继续使用适合 DOM 的 TypeScript/React，生产服务端和 Agent 运行时只使用 Go。
 
-构建和运行当前原生 WebUI：
+首次安装前端依赖：
 
 ```sh
-./scripts/build-webui.sh
-./bin/pi-go-web --cwd /path/to/project
+make web-setup
+# 无 make 环境可直接使用：./scripts/webui.sh setup
+```
+
+日常开发使用双进程模式，不执行静态导出：
+
+```sh
+make web-dev WEB_ARGS='--cwd /path/to/project'
+# 等价：./scripts/webui.sh dev --cwd /path/to/project
+```
+
+Next HMR 监听 `127.0.0.1:30141`，并把 `/api/*` 代理到 `127.0.0.1:30142` 的 API-only Go
+进程。修改前端由 Next 立即 HMR；修改 Go 会先在后台重新构建，成功后只重启 API，构建失败时
+保留上一版可用进程并等待下一次修改。
+
+生产构建和运行彼此独立：
+
+```sh
+make web-build
+make web-run WEB_ARGS='--cwd /path/to/project'
+# 等价：./scripts/webui.sh build && ./scripts/webui.sh run --cwd /path/to/project
 ```
 
 默认监听 `127.0.0.1:30141`。可使用 `--listen`、`--agent-dir` 和 `--docs-dir` 覆盖装配路径。
-`build-webui.sh` 在本地生成被 Git 忽略的 `web/out`，再用 `pi_go_webui` build tag 把它嵌入
+`build-webui.sh` 在本地生成被 Git 忽略的 `surface/web/_frontend/out`，再用 `pi_go_webui` build tag 把它嵌入
 可选二进制。默认 `go build ./...`/`go test ./...` 不需要这些产物；最终二进制运行时也不需要
 Next Server、Node 或 `pi-go-rpc` 子进程。
 
@@ -101,7 +123,8 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build ./...
-./scripts/build-webui.sh
+make web-check
+make web-build
 git diff --check
 ```
 

@@ -14,7 +14,8 @@ Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验
 
 当前并行推进两条长期工作：继续关闭产品级 AgentSession 差异，以及在同一 Go Application
 Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经完成：静态 pi-web 前端由
-`cmd/pi-go-web` 嵌入，HTTP/SSE 直接调用进程内 Supervisor/Host/Runtime。此前 Next → JSONL RPC
+`surface/web` 与 `cmd/pi-go-web` 承载，HTTP/SSE 直接调用进程内
+`internal/application.Supervisor`/Host/Runtime。此前 Next → JSONL RPC
 接入只保留为可行性记录，不再作为产品架构扩展。
 
 ## 已实现
@@ -96,13 +97,15 @@ Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经
   `cmd/pi-go-rpc` 使用生产 assembly 打开或恢复 Runtime，并在 EOF/signal 时等待已接纳命令和
   Host 生命周期完整收束。
 - Host 尚未覆盖原版 RPC 的全部辅助命令（例如 cycle/list/new/switch/clone/entries/tree/messages）；
-  WebUI 所需的多 session registry 已由 `internal/webui.Supervisor` 实现，每个会话仍持有独立
+  多 session registry 已由 `internal/application.Supervisor` 实现，每个会话仍持有独立
   Runtime/Host，不合并 Agent 状态。
 - 已完成的 pi-web opt-in Go backend 证明 Next → `pi-go-rpc` → Agent tool-loop 可以真实工作，
   但它只是迁移验证，不是后续产品路径；不再围绕该 adapter 补功能或做性能优化。
 - 原生 `pi-go-web` 已完成静态资源装配、进程内 Session supervisor、共享 Host JSON projection、
   Agent command API、SSE、session list/restore/context/tree/state/rename、基础 models 与 cwd API。
   DeepSeek V4 Flash 已通过一次真实 `read` 工具短程验收。
+- `surface/web` 已高内聚拥有 React、HTTP/SSE、静态资源和 Web 测试；日常开发使用 Next HMR
+  代理 API-only Go 进程，不执行 `npm build`，生产构建与运行命令彼此独立。
 - WebUI 仍缺 files/Git/worktree、models/auth 配置管理、session delete/export/auto-name、前端 capability
   禁用和插件/skills 管理；这些 API 返回结构化 unsupported，详细账本见 `docs/WEBUI.md`。
 
@@ -126,7 +129,7 @@ Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经
 - `go test -race ./...`
 - `go vet ./...`
 - `go build ./...`
-- `./scripts/build-webui.sh`（包含静态前端构建与 tagged Go build）
+- `make web-check` 与 `make web-build`（均委托 `scripts/webui.sh`；静态前端构建与 tagged Go build）
 - `git diff --check`
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
