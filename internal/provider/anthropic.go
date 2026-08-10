@@ -1637,7 +1637,10 @@ func (s *anthropicStream) fail(spec *anthropicFailureSpec) (llm.StreamEvent, err
 	if strings.TrimSpace(message) == "" {
 		message = safeResponsesErrorText(spec.cause, "Anthropic Messages request failed")
 	}
-	failure, err := NewProviderFailure(ProviderFailureSpec{Kind: spec.kind, Message: message, Cause: spec.cause, HTTPStatus: spec.httpStatus, VendorCode: spec.vendorCode, RetryAfter: spec.retryAfter})
+	failure, err := NewProviderFailure(ProviderFailureSpec{
+		Kind: spec.kind, Message: message, RetryMessage: httpRetryMessage("Anthropic API", spec.kind, spec.httpStatus),
+		Cause: spec.cause, HTTPStatus: spec.httpStatus, VendorCode: spec.vendorCode, RetryAfter: spec.retryAfter,
+	})
 	if err != nil {
 		s.finish()
 		return nil, closedStreamError(err)

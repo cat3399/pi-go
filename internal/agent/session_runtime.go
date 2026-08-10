@@ -1084,10 +1084,7 @@ func retryFinalError(event AgentEndEvent) string {
 	if event.Err != nil {
 		return event.Err.Error()
 	}
-	if failure, ok := event.Terminal.(llm.AssistantFailureMessage); ok {
-		return failure.ErrorMessage()
-	}
-	return ""
+	return retryTerminalErrorMessage(event.Terminal)
 }
 
 func (s *AgentSession) resetSessionTurn(_ agentRuntimeEvent) {
@@ -1927,8 +1924,11 @@ func (s *AgentSession) runSession(
 		}
 		if retryAttempt != 0 {
 			nextAttempt := retryAttempt + 1
-			failure := providerFailureFromTerminalForSession(result)
-			delay := retryController.Delay(nextAttempt, failure)
+			// Provider adapters already apply Retry-After to their own request
+			// retries. coding-agent starts a separate Agent retry series here and
+			// bases it only on settings.retry.baseDelayMs, avoiding a second
+			// application of the server delay after provider exhaustion.
+			delay := retryController.Delay(nextAttempt, nil)
 			errorMessage := retryErrorMessage(result)
 			maxRetries := retryBudget(retryController.MaxAttempts())
 			s.beginRetrySeries(run, delay, errorMessage, maxRetries)
@@ -2009,21 +2009,20 @@ func (s *AgentSession) runSession(
 }
 
 func retryErrorMessage(result Result) string {
-	if failure := providerFailureFromTerminalForSession(result); failure != nil {
-		switch failure.Kind() {
-		case provider.FailureHTTPStatus:
-			return "http failure"
-		case provider.FailureTransport:
-			return "provider transport failure"
-		default:
-			return "provider request failed"
-		}
-	}
 	terminal, ok := result.Terminal()
 	if !ok {
 		return ""
 	}
+	return retryTerminalErrorMessage(terminal)
+}
+
+func retryTerminalErrorMessage(terminal llm.AssistantTerminal) string {
 	if failure, ok := terminal.(llm.AssistantFailureMessage); ok {
+		if providerFailure := providerFailureFromTerminalForSession(Result{terminal: terminal}); providerFailure != nil {
+			if message, exists := providerFailure.RetryMessage(); exists {
+				return message
+			}
+		}
 		return failure.ErrorMessage()
 	}
 	return ""

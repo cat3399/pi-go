@@ -72,8 +72,20 @@ Agent 或 durable session 的第二套状态。
   69 个事件、11 条 JSONL entry、最终 idle/settled 及 reopen。
 - 该场景修复了公开 `queue_update` 事件在观察者克隆后把空数组降为 `nil/null` 的偏差；两类队列
   现在始终保持原版数组契约，同时仍为每个观察者提供独立副本。
-- retry、compaction、model/tools/reload 和 branch/fork 的共同 workflow 尚未建立，
-  Provider retry/Retry-After/context overflow/compaction 是下一项任务。
+- 已建立 `provider_retry_after_recovery` 共同 workflow，逐字段对齐 2 次 Provider 输入、29 个事件、
+  5 条 JSONL entry、失败历史持久化与 retry live context。Agent 高层退避不再重复套用 Provider
+  已消费的 Retry-After，`auto_retry_start` 保留真实 assistant 错误文本；真实 HTTP adapter 若错误
+  来自不可信响应 body，则使用单独的脱敏 retry lifecycle 文本，避免回显请求 secret。
+- 已建立 `manual_compaction_reopen` 共同 workflow，逐字段对齐真实摘要 Provider 请求、26 个事件、
+  `compact()` 结果、7 条 JSONL entry、compactionSummary 当前上下文及 reopen。压缩后 token 估算、
+  摘要 transport 隔离和显式 `fromHook:false` 已与原版一致。
+- 已建立 `context_overflow_compact_continue` 共同 workflow，逐字段对齐 4 次 Provider 输入、45 个
+  事件、8 条 JSONL entry，以及“失败持久化但立即重发上下文排除 → 自动摘要 → continue 恢复 →
+  reopen 保留完整历史”的状态差异。
+- 静态 `CreateAgentSession` 现在和带动态 ModelRuntime 的生产装配一样应用 retry budget/base delay、
+  compaction reserve/keepRecent 与 branch-summary reserve，不再静默回退默认值。
+- model/thinking/tools/reload 和 branch/fork 的共同 workflow 尚未建立；运行中配置 turn snapshot
+  是下一项任务。
 
 ### 产品级 AgentSession
 
@@ -116,12 +128,12 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及首个完整
-AgentSession rich/tool/reopen workflow。尚未共同验证：
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及五个完整
+AgentSession workflow。尚未共同验证：
 
-- retry、Retry-After、context overflow 和 compaction 竞争；
 - model/thinking/tools/reload；
 - fork、tree 和损坏恢复；
+- retry/compaction 与 abort、reload、tree navigation 的更复杂竞争；
 - 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
 
 在这些场景通过前，不能称为“完整 Agent 重写”。
@@ -136,7 +148,8 @@ AgentSession rich/tool/reopen workflow。尚未共同验证：
 - `go build ./...`
 - `make web-check` 与 `make web-build`（均委托 `scripts/webui.sh`；静态前端构建与 tagged Go build）
 - `git diff --check`
-- 固定上游 `createAgentSession()` 的 rich/tool/multi-turn/reopen 与 queue/clear/abort/settled workflow oracle；
+- 固定上游 `createAgentSession()` 的 rich/tool/reopen、queue/abort/settled、retry/Retry-After、
+  manual compaction 与 overflow compact/continue workflow oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

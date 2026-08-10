@@ -200,6 +200,16 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	config.CompactionEnabled = &compactionEnabled
 	config.AutoRetryEnabled = &retryEnabled
 	baseRetry := config.Retry
+	// Static factory users receive the same effective settings as the full
+	// production runtime. ModelRuntime replaces these values dynamically below,
+	// but its absence must not silently discard retry/compaction configuration.
+	config.Retry = retryPolicyFromSettings(options.Settings.Retry, baseRetry)
+	config.ContextReserve = options.Settings.Compaction.ReserveTokensOrDefault()
+	config.ContextReserveSet = true
+	config.KeepRecentTokens = options.Settings.Compaction.KeepRecentTokensOrDefault()
+	config.KeepRecentTokensSet = true
+	config.BranchSummaryReserveTokens = options.Settings.BranchSummary.ReserveTokensOrDefault()
+	config.BranchSummaryReserveSet = true
 	if options.Services.ModelRuntime != nil && config.ResolveRuntimeSettings == nil {
 		config.ResolveRuntimeSettings = func() agent.RuntimeControlSettings {
 			settings := options.Services.ModelRuntime.Snapshot().Settings

@@ -37,6 +37,41 @@ type Corpus = {
     abortError: string;
     responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
   };
+  retryScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    prompt: string;
+    maxRetries: number;
+    baseDelayMs: number;
+    retryAfterMs: number;
+    failure: { message: string; httpStatus: number };
+    response: { text: string; inputTokens: number; outputTokens: number };
+  };
+  manualCompactionScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    firstPrompt: string;
+    secondPrompt: string;
+    customInstructions: string;
+    reserveTokens: number;
+    keepRecentTokens: number;
+    responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
+  };
+  overflowCompactionScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    firstPrompt: string;
+    overflowPrompt: string;
+    errorMessage: string;
+    reserveTokens: number;
+    keepRecentTokens: number;
+    seedResponse: { text: string; inputTokens: number; outputTokens: number };
+    summaryResponse: { text: string; inputTokens: number; outputTokens: number };
+    recoveryResponse: { text: string; inputTokens: number; outputTokens: number };
+  };
 };
 
 type EntryIDMap = Map<string, string>;
@@ -118,7 +153,28 @@ function normalizeMessage(message: any): Record<string, unknown> {
     if (message.addedToolNames !== undefined) normalized.addedToolNames = message.addedToolNames;
     return normalized;
   }
+  if (message.role === "compactionSummary") {
+    return {
+      role: "compactionSummary",
+      summary: message.summary,
+      tokensBefore: message.tokensBefore,
+    };
+  }
   throw new Error(`unsupported message role ${String(message?.role)}`);
+}
+
+function normalizeCompactionResult(result: any, ids: EntryIDMap): Record<string, unknown> {
+  const firstKeptEntryId = ids.get(result.firstKeptEntryId);
+  if (!firstKeptEntryId) throw new Error(`unknown compaction firstKeptEntryId ${String(result.firstKeptEntryId)}`);
+  const normalized: Record<string, unknown> = {
+    summary: result.summary,
+    firstKeptEntryId,
+    tokensBefore: result.tokensBefore,
+  };
+  if (result.estimatedTokensAfter !== undefined) normalized.estimatedTokensAfter = result.estimatedTokensAfter;
+  if (result.usage !== undefined) normalized.usage = normalizeUsage(result.usage);
+  if (result.details !== undefined) normalized.details = JSON.parse(JSON.stringify(result.details));
+  return normalized;
 }
 
 function normalizeEntry(entry: any, ids: EntryIDMap): Record<string, unknown> {
@@ -137,6 +193,20 @@ function normalizeEntry(entry: any, ids: EntryIDMap): Record<string, unknown> {
       return { ...base, thinkingLevel: entry.thinkingLevel };
     case "message":
       return { ...base, message: normalizeMessage(entry.message) };
+    case "compaction": {
+      const firstKeptEntryId = ids.get(entry.firstKeptEntryId);
+      if (!firstKeptEntryId) throw new Error(`unknown compaction firstKeptEntryId ${String(entry.firstKeptEntryId)}`);
+      const normalized: Record<string, unknown> = {
+        ...base,
+        summary: entry.summary,
+        firstKeptEntryId,
+        tokensBefore: entry.tokensBefore,
+      };
+      if (entry.details !== undefined) normalized.details = JSON.parse(JSON.stringify(entry.details));
+      if (entry.usage !== undefined) normalized.usage = normalizeUsage(entry.usage);
+      if (entry.fromHook !== undefined) normalized.fromHook = entry.fromHook;
+      return normalized;
+    }
     default:
       throw new Error(`unexpected entry type in first workflow: ${entry.type}`);
   }
@@ -215,6 +285,36 @@ function normalizeEvent(event: any, ids: EntryIDMap): Record<string, unknown> {
       return { type: event.type, entry: normalizeEntry(event.entry, ids) };
     case "queue_update":
       return { type: event.type, steering: event.steering, followUp: event.followUp };
+    case "auto_retry_start":
+      return {
+        type: event.type,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+        errorMessage: event.errorMessage,
+      };
+    case "auto_retry_end": {
+      const normalized: Record<string, unknown> = {
+        type: event.type,
+        success: event.success,
+        attempt: event.attempt,
+      };
+      if (event.finalError !== undefined) normalized.finalError = event.finalError;
+      return normalized;
+    }
+    case "compaction_start":
+      return { type: event.type, reason: event.reason };
+    case "compaction_end": {
+      const normalized: Record<string, unknown> = {
+        type: event.type,
+        reason: event.reason,
+        aborted: event.aborted,
+        willRetry: event.willRetry,
+      };
+      if (event.result !== undefined) normalized.result = normalizeCompactionResult(event.result, ids);
+      if (event.errorMessage !== undefined) normalized.errorMessage = event.errorMessage;
+      return normalized;
+    }
     default:
       throw new Error(`unexpected AgentSession event in first workflow: ${event.type}`);
   }
@@ -234,14 +334,16 @@ function normalizeProviderInput(
   options: any,
   root: string,
   cwd: string,
+  sessionId: string,
 ): Record<string, unknown> {
+  const requestSessionId = options?.sessionId ?? "";
   return {
     model: { provider: model.provider, api: model.api, id: model.id },
     systemPrompt: normalizePathText(context.systemPrompt, root, cwd),
     messages: context.messages.map(normalizeMessage),
     tools: (context.tools ?? []).map(normalizeTool),
     stream: {
-      sessionId: options?.sessionId ?? "",
+      sessionId: requestSessionId === sessionId || requestSessionId === "" ? requestSessionId : "<summary-session-id>",
       reasoning: options?.reasoning ?? null,
       transport: options?.transport ?? "",
     },
@@ -488,7 +590,535 @@ async function runQueueAbortScenario(
       settledSnapshots,
     },
     providerInputs: providerContexts.map((context: any, index: number) =>
-      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd)),
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
+async function runRetryScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.retryScenario;
+  const scenarioRoot = join(root, "retry");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const faux = harnessModule.createFauxStreamFn([
+    {
+      text: "",
+      stopReason: "error",
+      error: scenario.failure.message,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+    {
+      text: scenario.response.text,
+      stopReason: "stop",
+      usage: {
+        input: scenario.response.inputTokens,
+        output: scenario.response.outputTokens,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: scenario.response.inputTokens + scenario.response.outputTokens,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  ]);
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    streamOptions.push(options);
+    return faux.streamFn(model, context, options);
+  };
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: {
+      enabled: true,
+      maxRetries: scenario.maxRetries,
+      baseDelayMs: scenario.baseDelayMs,
+      provider: { maxRetries: 0, maxRetryDelayMs: scenario.retryAfterMs },
+    },
+    transport: "sse",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader(),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model,
+    thinkingLevel: "off",
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  const settledSnapshots: Array<Record<string, unknown>> = [];
+  session.subscribe((event: any) => {
+    events.push(event);
+    if (event.type === "agent_settled") {
+      settledSnapshots.push({
+        isStreaming: session.isStreaming,
+        isIdle: session.isIdle,
+        isRetrying: session.isRetrying,
+        ...queueSnapshot(session),
+      });
+    }
+  });
+
+  await session.prompt(scenario.prompt);
+  const promptReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isRetrying: session.isRetrying,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+  if (faux.state.callCount !== 2 || streamOptions.length !== 2) {
+    throw new Error(`retry provider calls ${faux.state.callCount}/${streamOptions.length}, want 2/2`);
+  }
+  if (settledSnapshots.length !== 1) {
+    throw new Error(`retry settled events ${settledSnapshots.length}, want 1`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent retry AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: { promptReturn, settledSnapshots },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
+async function runManualCompactionScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.manualCompactionScenario;
+  if (scenario.responses.length !== 3) {
+    throw new Error("manual compaction workflow requires two Agent responses and one summary response");
+  }
+  const scenarioRoot = join(root, "manual-compaction");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const faux = harnessModule.createFauxStreamFn(scenario.responses.map((response) => ({
+    text: response.text,
+    stopReason: "stop",
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  })));
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    streamOptions.push(options);
+    return faux.streamFn(model, context, options);
+  };
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: {
+      enabled: true,
+      reserveTokens: scenario.reserveTokens,
+      keepRecentTokens: scenario.keepRecentTokens,
+    },
+    retry: { enabled: false, provider: { maxRetries: 0 } },
+    transport: "sse",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader(),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model,
+    thinkingLevel: "off",
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  session.subscribe((event: any) => events.push(event));
+
+  await session.prompt(scenario.firstPrompt);
+  await session.prompt(scenario.secondPrompt);
+  const beforeCompact = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isCompacting: session.isCompacting,
+    ...queueSnapshot(session),
+  };
+  const compactResult = await session.compact(scenario.customInstructions);
+  const afterCompact = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isCompacting: session.isCompacting,
+    ...queueSnapshot(session),
+  };
+  if (faux.state.callCount !== 3 || streamOptions.length !== 3) {
+    throw new Error(`manual compaction provider calls ${faux.state.callCount}/${streamOptions.length}, want 3/3`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent manual compaction AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      beforeCompact,
+      compactReturn: normalizeCompactionResult(compactResult, ids),
+      afterCompact,
+    },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
+async function runOverflowCompactionScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.overflowCompactionScenario;
+  const scenarioRoot = join(root, "overflow-compaction");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const successResponse = (response: { text: string; inputTokens: number; outputTokens: number }) => ({
+    text: response.text,
+    stopReason: "stop",
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  });
+  const faux = harnessModule.createFauxStreamFn([
+    successResponse(scenario.seedResponse),
+    {
+      text: "",
+      stopReason: "error",
+      error: scenario.errorMessage,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+    successResponse(scenario.summaryResponse),
+    successResponse(scenario.recoveryResponse),
+  ]);
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    streamOptions.push(options);
+    return faux.streamFn(model, context, options);
+  };
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: {
+      enabled: true,
+      reserveTokens: scenario.reserveTokens,
+      keepRecentTokens: scenario.keepRecentTokens,
+    },
+    retry: { enabled: false, provider: { maxRetries: 0 } },
+    transport: "sse",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader(),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model,
+    thinkingLevel: "off",
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  const settledSnapshots: Array<Record<string, unknown>> = [];
+  session.subscribe((event: any) => {
+    events.push(event);
+    if (event.type === "agent_settled") {
+      settledSnapshots.push({
+        isStreaming: session.isStreaming,
+        isIdle: session.isIdle,
+        isCompacting: session.isCompacting,
+        ...queueSnapshot(session),
+      });
+    }
+  });
+
+  await session.prompt(scenario.firstPrompt);
+  const seedReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isCompacting: session.isCompacting,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+  await session.prompt(scenario.overflowPrompt);
+  const overflowReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isCompacting: session.isCompacting,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+  if (faux.state.callCount !== 4 || streamOptions.length !== 4) {
+    throw new Error(`overflow compaction provider calls ${faux.state.callCount}/${streamOptions.length}, want 4/4`);
+  }
+  if (settledSnapshots.length !== 2) {
+    throw new Error(`overflow compaction settled events ${settledSnapshots.length}, want 2`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent overflow compaction AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: { seedReturn, overflowReturn, settledSnapshots },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
     events: events.map((event) => normalizeEvent(event, ids)),
     finalState,
     session: {
@@ -668,6 +1298,36 @@ async function main(): Promise<void> {
       harnessModule,
       eventStreamModule,
     );
+    const retryScenario = await runRetryScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+    );
+    const manualCompactionScenario = await runManualCompactionScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+    );
+    const overflowCompactionScenario = await runOverflowCompactionScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -676,7 +1336,7 @@ async function main(): Promise<void> {
         name: corpus.scenario.name,
         input: corpus.scenario,
         providerInputs: faux.state.contexts.map((context: any, index: number) =>
-          normalizeProviderInput(model, context, streamOptions[index], root, cwd)),
+          normalizeProviderInput(model, context, streamOptions[index], root, cwd, corpus.scenario.sessionId)),
         toolRuns,
         events: events.map((event) => normalizeEvent(event, ids)),
         finalState,
@@ -696,6 +1356,9 @@ async function main(): Promise<void> {
         },
       },
       queueAbortScenario,
+      retryScenario,
+      manualCompactionScenario,
+      overflowCompactionScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {

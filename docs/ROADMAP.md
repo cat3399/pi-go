@@ -13,15 +13,16 @@
 原版 `AgentHarness` 仍在演进且尚未取代 coding-agent 生产链；只跟踪已经稳定并进入生产调用方的
 契约，不提前把 pi-go 改写为另一套未落地架构。
 
-`multi_turn_rich_tool_reopen` 和 `queue_clear_abort_settled` 已经固定并通过，覆盖 rich input、工具
-循环、多轮上下文、混合 queue mode、queue recall、abort 后续跑、最终 settled、完整事件、JSONL 与
-reopen。当前从 retry/compaction 场景继续推进。
+`multi_turn_rich_tool_reopen`、`queue_clear_abort_settled`、`provider_retry_after_recovery`、
+`manual_compaction_reopen` 和 `context_overflow_compact_continue` 已经固定并通过，覆盖 rich input、
+工具循环、多轮上下文、混合 queue mode、queue recall、abort 后续跑、Agent retry、手动/自动压缩、
+overflow continue、最终 settled、完整事件、JSONL 与 reopen。当前进入运行中配置快照场景。
 
 ### 第一批共同场景
 
-1. provider retry、Retry-After、context overflow、自动/手动 compaction；
-2. model、thinking、active tools、system prompt 与 reload 的 turn snapshot；
-3. branch、tree navigation、fork 和损坏 session 恢复。
+1. model、thinking、active tools、system prompt 与 reload 的 turn snapshot；
+2. branch、tree navigation、fork 和损坏 session 恢复；
+3. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径。
 
 每个场景必须同时比较：
 

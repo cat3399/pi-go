@@ -1938,7 +1938,10 @@ func (s *openAICompletionsStream) failure(spec *completionsFailureSpec) (llm.Str
 	if strings.TrimSpace(message) == "" {
 		message = safeResponsesErrorText(spec.cause, "OpenAI Chat Completions request failed")
 	}
-	f, err := NewProviderFailure(ProviderFailureSpec{Kind: spec.kind, Message: message, Cause: spec.cause, HTTPStatus: spec.httpStatus, VendorCode: spec.vendorCode, RetryAfter: spec.retryAfter})
+	f, err := NewProviderFailure(ProviderFailureSpec{
+		Kind: spec.kind, Message: message, RetryMessage: httpRetryMessage("OpenAI API", spec.kind, spec.httpStatus),
+		Cause: spec.cause, HTTPStatus: spec.httpStatus, VendorCode: spec.vendorCode, RetryAfter: spec.retryAfter,
+	})
 	if err != nil {
 		return nil, closedStreamError(err)
 	}

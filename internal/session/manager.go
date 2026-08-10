@@ -616,8 +616,8 @@ func (m *SessionManager) CommitCompaction(ctx context.Context, input SummaryInpu
 		return CompactResult{}, err
 	}
 	var estimatedTokensAfter uint64
-	if estimate, estimateErr := EstimateAgentContextTokens(m.store.BuildContext().AgentMessages()); estimateErr == nil {
-		estimatedTokensAfter = estimate.Tokens
+	if estimate, estimateErr := EstimateAgentMessagesTokens(m.store.BuildContext().AgentMessages()); estimateErr == nil {
+		estimatedTokensAfter = estimate
 	}
 	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil
 }

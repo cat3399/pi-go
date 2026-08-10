@@ -584,12 +584,13 @@ func (s *openAIResponsesStream) finishFailure(spec responsesFailureSpec) (llm.St
 		message = safeResponsesErrorText(spec.cause, "OpenAI Responses request failed")
 	}
 	failure, err := NewProviderFailure(ProviderFailureSpec{
-		Kind:       spec.kind,
-		Message:    message,
-		Cause:      spec.cause,
-		HTTPStatus: spec.httpStatus,
-		VendorCode: spec.vendorCode,
-		RetryAfter: spec.retryAfter,
+		Kind:         spec.kind,
+		Message:      message,
+		RetryMessage: httpRetryMessage("OpenAI API", spec.kind, spec.httpStatus),
+		Cause:        spec.cause,
+		HTTPStatus:   spec.httpStatus,
+		VendorCode:   spec.vendorCode,
+		RetryAfter:   spec.retryAfter,
 	})
 	if err != nil {
 		s.finishTransport()

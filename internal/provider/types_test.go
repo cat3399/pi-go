@@ -252,11 +252,12 @@ func TestProviderFailurePreservesCategoryCauseAndOptionalMetadata(t *testing.T) 
 	cause := errors.New("rate limited")
 	status := 429
 	failure, err := provider.NewProviderFailure(provider.ProviderFailureSpec{
-		Kind:       provider.FailureInvalidResponse,
-		Message:    "provider rejected request",
-		Cause:      cause,
-		HTTPStatus: &status,
-		VendorCode: "rate_limit",
+		Kind:         provider.FailureInvalidResponse,
+		Message:      "provider rejected request",
+		RetryMessage: "provider request failed safely",
+		Cause:        cause,
+		HTTPStatus:   &status,
+		VendorCode:   "rate_limit",
 	})
 	if err != nil {
 		t.Fatalf("NewProviderFailure() error = %v", err)
@@ -270,6 +271,9 @@ func TestProviderFailurePreservesCategoryCauseAndOptionalMetadata(t *testing.T) 
 	if got, ok := failure.VendorCode(); !ok || got != "rate_limit" {
 		t.Fatalf("VendorCode() = (%q, %t), want (rate_limit, true)", got, ok)
 	}
+	if got, ok := failure.RetryMessage(); !ok || got != "provider request failed safely" {
+		t.Fatalf("RetryMessage() = (%q, %t), want sanitized message", got, ok)
+	}
 
 	invalidStatus := 99
 	invalid := []provider.ProviderFailureSpec{
@@ -278,6 +282,7 @@ func TestProviderFailurePreservesCategoryCauseAndOptionalMetadata(t *testing.T) 
 		{Kind: provider.FailureFactory, Message: " ", Cause: cause},
 		{Kind: provider.FailureFactory, Message: "bad status", Cause: cause, HTTPStatus: &invalidStatus},
 		{Kind: provider.FailureFactory, Message: "bad code", Cause: cause, VendorCode: " "},
+		{Kind: provider.FailureFactory, Message: "bad retry message", RetryMessage: " ", Cause: cause},
 	}
 	for _, spec := range invalid {
 		if _, err := provider.NewProviderFailure(spec); !errors.Is(err, provider.ErrInvalidProviderFailure) {

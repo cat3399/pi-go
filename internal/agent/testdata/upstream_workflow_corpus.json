@@ -78,5 +78,75 @@
         "outputTokens": 3
       }
     ]
+  },
+  "retryScenario": {
+    "name": "provider_retry_after_recovery",
+    "sessionId": "session-agent-retry-parity",
+    "systemPrompt": "You are the deterministic retry parity oracle.",
+    "prompt": "recover from the transient provider failure",
+    "maxRetries": 2,
+    "baseDelayMs": 2,
+    "retryAfterMs": 7,
+    "failure": {
+      "message": "overloaded_error",
+      "httpStatus": 429
+    },
+    "response": {
+      "text": "recovered after retry",
+      "inputTokens": 8,
+      "outputTokens": 3
+    }
+  },
+  "manualCompactionScenario": {
+    "name": "manual_compaction_reopen",
+    "sessionId": "session-agent-manual-compaction-parity",
+    "systemPrompt": "You are the deterministic manual compaction parity oracle.",
+    "firstPrompt": "alpha",
+    "secondPrompt": "beta",
+    "customInstructions": "Preserve the alpha decision.",
+    "reserveTokens": 100,
+    "keepRecentTokens": 2,
+    "responses": [
+      {
+        "text": "one",
+        "inputTokens": 3,
+        "outputTokens": 1
+      },
+      {
+        "text": "two",
+        "inputTokens": 4,
+        "outputTokens": 1
+      },
+      {
+        "text": "manual summary",
+        "inputTokens": 6,
+        "outputTokens": 2
+      }
+    ]
+  },
+  "overflowCompactionScenario": {
+    "name": "context_overflow_compact_continue",
+    "sessionId": "session-agent-overflow-compaction-parity",
+    "systemPrompt": "You are the deterministic overflow compaction parity oracle.",
+    "firstPrompt": "seed",
+    "overflowPrompt": "overflow",
+    "errorMessage": "context_length_exceeded",
+    "reserveTokens": 100,
+    "keepRecentTokens": 1,
+    "seedResponse": {
+      "text": "seed done",
+      "inputTokens": 4,
+      "outputTokens": 2
+    },
+    "summaryResponse": {
+      "text": "overflow summary",
+      "inputTokens": 7,
+      "outputTokens": 2
+    },
+    "recoveryResponse": {
+      "text": "recovered after compaction",
+      "inputTokens": 5,
+      "outputTokens": 3
+    }
   }
 }

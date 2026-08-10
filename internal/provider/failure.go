@@ -58,11 +58,15 @@ func (k FailureKind) valid() bool {
 }
 
 type ProviderFailureSpec struct {
-	Kind       FailureKind
-	Message    string
-	Cause      error
-	HTTPStatus *int
-	VendorCode string
+	Kind    FailureKind
+	Message string
+	// RetryMessage optionally supplies a separately sanitized public lifecycle
+	// message. Message remains the assistant terminal text; adapters use this
+	// field when a vendor HTTP body may contain echoed request secrets.
+	RetryMessage string
+	Cause        error
+	HTTPStatus   *int
+	VendorCode   string
 	// RetryAfter is an optional server-provided delay. It is deliberately
 	// normalized at the adapter boundary so the coordinator never parses
 	// vendor headers or guesses clock semantics.
@@ -75,6 +79,7 @@ type ProviderFailureSpec struct {
 type ProviderFailure struct {
 	kind          FailureKind
 	message       string
+	retryMessage  string
 	cause         error
 	httpStatus    int
 	hasHTTPStatus bool
@@ -90,6 +95,9 @@ func NewProviderFailure(spec ProviderFailureSpec) (*ProviderFailure, error) {
 	if !utf8.ValidString(spec.Message) || strings.TrimSpace(spec.Message) == "" {
 		return nil, fmt.Errorf("%w: message must be non-empty valid UTF-8", ErrInvalidProviderFailure)
 	}
+	if !utf8.ValidString(spec.RetryMessage) || (spec.RetryMessage != "" && strings.TrimSpace(spec.RetryMessage) == "") {
+		return nil, fmt.Errorf("%w: retry message must be empty or non-blank valid UTF-8", ErrInvalidProviderFailure)
+	}
 	if spec.Cause == nil {
 		return nil, fmt.Errorf("%w: cause is required", ErrInvalidProviderFailure)
 	}
@@ -104,10 +112,11 @@ func NewProviderFailure(spec ProviderFailureSpec) (*ProviderFailure, error) {
 	}
 
 	failure := &ProviderFailure{
-		kind:       spec.Kind,
-		message:    spec.Message,
-		cause:      spec.Cause,
-		vendorCode: spec.VendorCode,
+		kind:         spec.Kind,
+		message:      spec.Message,
+		retryMessage: spec.RetryMessage,
+		cause:        spec.Cause,
+		vendorCode:   spec.VendorCode,
 	}
 	if spec.HTTPStatus != nil {
 		failure.httpStatus = *spec.HTTPStatus
@@ -146,6 +155,22 @@ func (e *ProviderFailure) Cause() error {
 		return nil
 	}
 	return e.cause
+}
+
+// RetryMessage returns an adapter-sanitized lifecycle message when the
+// assistant terminal message was derived from an untrusted provider body.
+func (e *ProviderFailure) RetryMessage() (string, bool) {
+	if e == nil || e.retryMessage == "" {
+		return "", false
+	}
+	return e.retryMessage, true
+}
+
+func httpRetryMessage(providerName string, kind FailureKind, status *int) string {
+	if kind != FailureHTTPStatus || status == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s request failed with HTTP status %d", providerName, *status)
 }
 
 func (e *ProviderFailure) HTTPStatus() (int, bool) {

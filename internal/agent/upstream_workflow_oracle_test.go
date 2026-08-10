@@ -33,10 +33,13 @@ var upstreamWorkflowCorpusJSON []byte
 var upstreamWorkflowOracleJSON []byte
 
 type upstreamWorkflowCorpus struct {
-	UpstreamCommit     string                     `json:"upstreamCommit"`
-	NodeVersion        string                     `json:"nodeVersion"`
-	Scenario           upstreamWorkflowScenario   `json:"scenario"`
-	QueueAbortScenario upstreamQueueAbortScenario `json:"queueAbortScenario"`
+	UpstreamCommit     string                             `json:"upstreamCommit"`
+	NodeVersion        string                             `json:"nodeVersion"`
+	Scenario           upstreamWorkflowScenario           `json:"scenario"`
+	QueueAbortScenario upstreamQueueAbortScenario         `json:"queueAbortScenario"`
+	RetryScenario      upstreamRetryScenario              `json:"retryScenario"`
+	ManualCompaction   upstreamManualCompactionScenario   `json:"manualCompactionScenario"`
+	OverflowCompaction upstreamOverflowCompactionScenario `json:"overflowCompactionScenario"`
 }
 
 type upstreamWorkflowScenario struct {
@@ -300,7 +303,7 @@ func TestUpstreamAgentSessionWorkflowOracle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow stats: %v", err)
 	}
-	providerInputs, err := normalizeWorkflowProviderInputs(implementation.Requests(), root, cwd)
+	providerInputs, err := normalizeWorkflowProviderInputs(implementation.Requests(), root, cwd, corpus.Scenario.SessionID)
 	if err != nil {
 		t.Fatalf("normalize workflow provider inputs: %v", err)
 	}
@@ -356,7 +359,7 @@ func TestUpstreamAgentSessionWorkflowOracle(t *testing.T) {
 		t.Fatalf("normalize reopened entries: %v", err)
 	}
 	reopenedContext := reopened.BuildContext()
-	reopenedMessages, err := normalizeWorkflowMessages(reopenedContext.Messages())
+	reopenedMessages, err := normalizeWorkflowAgentMessages(reopenedContext.AgentMessages())
 	if err != nil {
 		t.Fatalf("normalize reopened messages: %v", err)
 	}
@@ -481,20 +484,27 @@ func normalizeWorkflowMessages(messages []llm.ConversationMessage) ([]any, error
 func normalizeWorkflowAgentMessages(messages []agentmsg.Message) ([]any, error) {
 	result := make([]any, 0, len(messages))
 	for index, message := range messages {
-		wrapped, ok := message.(agentmsg.LLM)
-		if !ok {
+		var normalized map[string]any
+		switch value := message.(type) {
+		case agentmsg.LLM:
+			var err error
+			normalized, err = normalizeWorkflowMessage(value.Conversation())
+			if err != nil {
+				return nil, fmt.Errorf("agent message %d: %w", index, err)
+			}
+		case agentmsg.CompactionSummary:
+			normalized = map[string]any{
+				"role": "compactionSummary", "summary": value.Summary, "tokensBefore": value.TokensBefore,
+			}
+		default:
 			return nil, fmt.Errorf("agent message %d has unsupported type %T", index, message)
-		}
-		normalized, err := normalizeWorkflowMessage(wrapped.Conversation())
-		if err != nil {
-			return nil, fmt.Errorf("agent message %d: %w", index, err)
 		}
 		result = append(result, normalized)
 	}
 	return result, nil
 }
 
-func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd string) ([]any, error) {
+func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd, sessionID string) ([]any, error) {
 	result := make([]any, 0, len(requests))
 	for requestIndex, request := range requests {
 		messages, err := normalizeWorkflowMessages(request.Messages())
@@ -512,6 +522,10 @@ func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd stri
 			})
 		}
 		stream := request.StreamOptions()
+		requestSessionID := stream.SessionID
+		if requestSessionID != "" && requestSessionID != sessionID {
+			requestSessionID = "<summary-session-id>"
+		}
 		var reasoning any
 		if level := request.ThinkingLevel(); level != "" && level != provider.ThinkingOff {
 			reasoning = string(level)
@@ -523,7 +537,7 @@ func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd stri
 			"messages":     messages,
 			"tools":        tools,
 			"stream": map[string]any{
-				"sessionId": stream.SessionID, "reasoning": reasoning, "transport": string(stream.Transport),
+				"sessionId": requestSessionID, "reasoning": reasoning, "transport": string(stream.Transport),
 			},
 		})
 	}
@@ -620,6 +634,37 @@ func normalizeWorkflowEvent(event agent.SessionEvent, ids map[string]string) (ma
 		return map[string]any{"type": "entry_appended", "entry": entry}, nil
 	case agent.SessionQueueUpdateEvent:
 		return map[string]any{"type": "queue_update", "steering": value.Steering, "followUp": value.FollowUp}, nil
+	case agent.AutoRetryStartEvent:
+		return map[string]any{
+			"type": "auto_retry_start", "attempt": value.Attempt, "maxAttempts": value.MaxAttempts,
+			"delayMs": value.Delay.Milliseconds(), "errorMessage": value.ErrorMessage,
+		}, nil
+	case agent.AutoRetryEndEvent:
+		normalized := map[string]any{
+			"type": "auto_retry_end", "success": value.Success, "attempt": value.Attempt,
+		}
+		if value.FinalError != "" {
+			normalized["finalError"] = value.FinalError
+		}
+		return normalized, nil
+	case agent.CompactionStartEvent:
+		return map[string]any{"type": "compaction_start", "reason": value.Reason.String()}, nil
+	case agent.CompactionEndEvent:
+		normalized := map[string]any{
+			"type": "compaction_end", "reason": value.Reason.String(),
+			"aborted": value.Aborted, "willRetry": value.WillRetry,
+		}
+		if value.Result != nil {
+			result, err := normalizeWorkflowCompactionResult(*value.Result, ids)
+			if err != nil {
+				return nil, err
+			}
+			normalized["result"] = result
+		}
+		if value.ErrorMessage != "" {
+			normalized["errorMessage"] = value.ErrorMessage
+		}
+		return normalized, nil
 	default:
 		return nil, fmt.Errorf("unsupported workflow event %T (%s)", event, event.Type())
 	}
@@ -673,6 +718,51 @@ func normalizeWorkflowToolOutput(output agent.ToolOutput) map[string]any {
 	return map[string]any{"content": content, "details": output.Details}
 }
 
+func normalizeWorkflowCompactionUsage(value *session.CompactionUsage) any {
+	if value == nil {
+		return nil
+	}
+	usage := value.Usage
+	return map[string]any{
+		"input": usage.Input(), "output": usage.Output(),
+		"cacheRead": usage.CacheRead(), "cacheWrite": usage.CacheWrite(),
+		"totalTokens": usage.TotalTokens(),
+		"cost": map[string]any{
+			"input": value.Cost.Input, "output": value.Cost.Output,
+			"cacheRead": value.Cost.CacheRead, "cacheWrite": value.Cost.CacheWrite,
+			"total": value.Cost.Total,
+		},
+	}
+}
+
+func normalizeWorkflowCompactionResult(value session.CompactResult, ids map[string]string) (map[string]any, error) {
+	firstKeptEntryID := value.Input.FirstKeptEntryID
+	tokensBefore := value.Input.TokensBefore
+	if value.Output.FromExtension {
+		firstKeptEntryID = value.Output.FirstKeptEntryID
+		tokensBefore = value.Output.TokensBefore
+	}
+	firstKept, ok := ids[firstKeptEntryID]
+	if !ok {
+		return nil, fmt.Errorf("compaction first kept id %q is outside normalized log", firstKeptEntryID)
+	}
+	normalized := map[string]any{
+		"summary": value.Output.Text, "firstKeptEntryId": firstKept,
+		"tokensBefore": tokensBefore, "estimatedTokensAfter": value.EstimatedTokensAfter,
+	}
+	if value.Output.Usage != nil {
+		normalized["usage"] = normalizeWorkflowCompactionUsage(value.Output.Usage)
+	}
+	if len(value.Output.Details) != 0 {
+		details, err := decodeWorkflowJSON(value.Output.Details)
+		if err != nil {
+			return nil, fmt.Errorf("compaction result details: %w", err)
+		}
+		normalized["details"] = details
+	}
+	return normalized, nil
+}
+
 func workflowEntryIDs(entries []session.Entry) map[string]string {
 	ids := make(map[string]string, len(entries))
 	for index, entry := range entries {
@@ -723,6 +813,27 @@ func normalizeWorkflowEntry(entry session.Entry, ids map[string]string) (map[str
 			return nil, err
 		}
 		base["message"] = message
+	case session.CompactionPayload:
+		firstKept, exists := ids[payload.Record.FirstKeptEntryID]
+		if !exists {
+			return nil, fmt.Errorf("compaction first kept id %q is outside normalized log", payload.Record.FirstKeptEntryID)
+		}
+		base["summary"] = payload.Record.Summary
+		base["firstKeptEntryId"] = firstKept
+		base["tokensBefore"] = payload.Record.TokensBefore
+		if len(payload.Details) != 0 {
+			details, err := decodeWorkflowJSON(payload.Details)
+			if err != nil {
+				return nil, fmt.Errorf("compaction details: %w", err)
+			}
+			base["details"] = details
+		}
+		if payload.Record.Usage != nil {
+			base["usage"] = normalizeWorkflowCompactionUsage(payload.Record.Usage)
+		}
+		if payload.HasFromHook {
+			base["fromHook"] = payload.FromHook
+		}
 	default:
 		return nil, fmt.Errorf("unsupported workflow entry payload %T", payload)
 	}
@@ -795,6 +906,23 @@ func normalizeWorkflowJSONL(path string, ids map[string]string, root, cwd string
 				return nil, nil, err
 			}
 			normalized["message"] = message
+		case "compaction":
+			firstKept, exists := ids[fmt.Sprint(raw["firstKeptEntryId"])]
+			if !exists {
+				return nil, nil, fmt.Errorf("entry line %d has unknown compaction firstKeptEntryId", index+2)
+			}
+			normalized["summary"] = raw["summary"]
+			normalized["firstKeptEntryId"] = firstKept
+			normalized["tokensBefore"] = raw["tokensBefore"]
+			if details, exists := raw["details"]; exists {
+				normalized["details"] = details
+			}
+			if usage, exists := raw["usage"]; exists {
+				normalized["usage"] = usage
+			}
+			if fromHook, exists := raw["fromHook"]; exists {
+				normalized["fromHook"] = fromHook
+			}
 		default:
 			return nil, nil, fmt.Errorf("entry line %d has unsupported type %v", index+2, raw["type"])
 		}

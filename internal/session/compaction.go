@@ -105,6 +105,25 @@ func EstimateAgentContextTokens(messages []agentmsg.Message) (ContextTokenEstima
 	return result, nil
 }
 
+// EstimateAgentMessagesTokens mirrors coding-agent's compaction-result
+// estimator: every rebuilt AgentMessage is estimated independently and summed.
+// This is intentionally distinct from EstimateAgentContextTokens, whose latest
+// provider usage boundary is the source of truth for automatic threshold checks.
+func EstimateAgentMessagesTokens(messages []agentmsg.Message) (uint64, error) {
+	var total uint64
+	for _, message := range messages {
+		tokens, err := estimateAgentMessageTokens(message)
+		if err != nil {
+			return 0, err
+		}
+		total, err = checkedAddTokens(total, tokens)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
 func usableAssistantUsage(message llm.ConversationMessage) (llm.Usage, bool) {
 	switch message := message.(type) {
 	case llm.AssistantTextMessage:
@@ -309,8 +328,8 @@ func (s *Session) Compact(ctx context.Context, request CompactRequest) (CompactR
 	// estimator can only fail on arithmetic overflow; retain zero in that
 	// unreachable-in-practice case and preserve the known committed outcome.
 	var estimatedTokensAfter uint64
-	if contextEstimate, estimateErr := EstimateAgentContextTokens(s.BuildContext().AgentMessages()); estimateErr == nil {
-		estimatedTokensAfter = contextEstimate.Tokens
+	if estimate, estimateErr := EstimateAgentMessagesTokens(s.BuildContext().AgentMessages()); estimateErr == nil {
+		estimatedTokensAfter = estimate
 	}
 	return CompactResult{Entry: entry, Input: input, Output: cloneSummaryOutput(output), EstimatedTokensAfter: estimatedTokensAfter, Committed: true}, nil
 }
@@ -452,8 +471,10 @@ func (s *Session) commitCompaction(ctx context.Context, input SummaryInput, outp
 		firstKeptEntryID, tokensBefore = output.FirstKeptEntryID, output.TokensBefore
 	}
 	payload := CompactionPayload{
-		Record:  CompactionRecord{Summary: output.Text, FirstKeptEntryID: firstKeptEntryID, TokensBefore: tokensBefore, Usage: output.Usage},
-		Details: bytes.Clone(output.Details), FromHook: output.FromExtension, HasFromHook: output.FromExtension,
+		Record: CompactionRecord{Summary: output.Text, FirstKeptEntryID: firstKeptEntryID, TokensBefore: tokensBefore, Usage: output.Usage},
+		// AgentSession always passes the explicit fromHook boolean to upstream's
+		// appendCompaction(), including false for a core-generated summary.
+		Details: bytes.Clone(output.Details), FromHook: output.FromExtension, HasFromHook: true,
 	}
 	raw, err := encodeCompactionEntry(entryID, input.SelectedLeafID, timestamp, payload)
 	if err != nil {

@@ -169,6 +169,11 @@ func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, pro
 	}
 	requestOptions := s.request
 	requestOptions.Stream = CloneStreamOptions(requestOptions.Stream)
+	// coding-agent invokes the Agent's stream function directly for summaries;
+	// transport is an Agent-turn option and is not copied into the isolated
+	// summarization request. An empty transport lets the adapter use its normal
+	// default while keeping model/auth routing intact.
+	requestOptions.Stream.Transport = ""
 	requestOptions.Stream.CacheRetention = CacheRetentionNone
 	requestOptions.Stream.SessionID = summarySessionID
 	if maxTokens != nil {
@@ -322,6 +327,12 @@ func summaryRetryError(terminal llm.AssistantTerminal, streamErr error) string {
 		return "summary stream failed"
 	}
 	if failure, ok := terminal.(llm.AssistantFailureMessage); ok {
+		var providerFailure *ProviderFailure
+		if errors.As(failure.Failure().Cause(), &providerFailure) {
+			if message, exists := providerFailure.RetryMessage(); exists {
+				return message
+			}
+		}
 		return failure.ErrorMessage()
 	}
 	return ""

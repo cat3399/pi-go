@@ -597,7 +597,10 @@ func buildEvents(terminal llm.AssistantTerminal, chunkRunes int) ([]llm.StreamEv
 
 func splitRunes(value string, maximum int) []string {
 	if value == "" {
-		return nil
+		// coding-agent's faux provider emits one empty delta between start/end.
+		// Retaining that event matters for deterministic lifecycle oracles and is
+		// also a valid stream shape accepted by the real collector.
+		return []string{""}
 	}
 	runes := []rune(value)
 	capacity := 1 + (len(runes)-1)/maximum
