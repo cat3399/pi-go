@@ -226,5 +226,24 @@
         "outputTokens": 3
       }
     ]
+  },
+  "damagedSessionScenario": {
+    "name": "damaged_session_resume_continue",
+    "sessionId": "session-agent-damaged-parity",
+    "systemPrompt": "You are the deterministic damaged session parity oracle.",
+    "rootPrompt": "intact root question",
+    "rootResponse": {
+      "text": "intact root answer",
+      "inputTokens": 3,
+      "outputTokens": 2
+    },
+    "malformedLine": "not-json-middle",
+    "orphanPrompt": "orphan recovery question",
+    "continuationPrompt": "continue recovered branch",
+    "response": {
+      "text": "recovered branch answer",
+      "inputTokens": 7,
+      "outputTokens": 4
+    }
   }
 }

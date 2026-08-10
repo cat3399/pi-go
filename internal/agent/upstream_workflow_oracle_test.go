@@ -42,6 +42,7 @@ type upstreamWorkflowCorpus struct {
 	OverflowCompaction upstreamOverflowCompactionScenario `json:"overflowCompactionScenario"`
 	TurnSnapshot       upstreamTurnSnapshotScenario       `json:"turnSnapshotScenario"`
 	TreeFork           upstreamTreeForkScenario           `json:"treeForkScenario"`
+	DamagedSession     upstreamDamagedSessionScenario     `json:"damagedSessionScenario"`
 }
 
 type upstreamWorkflowScenario struct {

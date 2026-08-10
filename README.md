@@ -40,11 +40,12 @@ HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 Host 已有权威 state、跨 session replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展
 UI 外的全部直接 Agent 命令；`prompt` 按原版 preflight 时点异步确认。
 
-七个固定上游 workflow 已经逐字段通过：rich image/tool/multi-turn/reopen；混合 queue mode、
+八个固定上游 workflow 已经逐字段通过：rich image/tool/multi-turn/reopen；混合 queue mode、
 clear queue、abort 后续跑与最终 `agent_settled`；Provider Retry-After 后的 Agent 自动重试；手动
 compaction；context overflow 自动压缩并 continue 恢复；以及运行中 model/thinking/active tools/
 system prompt 切换、同一 run 下一 tool turn 刷新与 reload；以及 tree navigation、源分支保留、
-Runtime fork replacement、父会话与双 JSONL reopen。下一项聚焦损坏 session 的生产链恢复与续写。
+Runtime fork replacement、父会话与双 JSONL reopen；以及含坏行/orphan 的 session 恢复、原位续写
+与再次打开。下一组聚焦 `images.blockImages`、`thinkingBudgets` 和 production resources。
 
 `cmd/pi-go-rpc` 已提供长期 stdio JSONL Runtime，用于协议验证、自动化和跨实现验收；它不再是
 WebUI 的长期产品内核路径。`cmd/pi-go -p` 仍是一次性 headless 诊断入口。

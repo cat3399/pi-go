@@ -90,9 +90,12 @@ Agent 或 durable session 的第二套状态。
   事件与 fork 会话 20 个事件。无摘要 navigation 把用户目标文本送回编辑区并把叶节点移到其父项，
   废弃分支仍完整留在源 JSONL；默认 `fork(before)` 通过 Runtime.Factory 替换 AgentSession，新会话
   记录源文件为 `parentSession`，源/分支的 entries、tree、context、物理 JSONL 与 reopen 全部一致。
+- 已建立 `damaged_session_resume_continue` 共同 workflow，逐字段对齐含 malformed line 与 orphan
+  parent 的既有 JSONL、Runtime 初始化、1 次 Provider 输入、19 个事件、8 条有效 entry 及 reopen。
+  坏行不会在打开或续写时被静默重写，orphan 作为独立根成为当前分支，新增 thinking/user/assistant
+  记录沿该分支持久化，原始物理前缀和坏行位置保持不变。
 - 静态 `CreateAgentSession` 现在和带动态 ModelRuntime 的生产装配一样应用 retry budget/base delay、
   compaction reserve/keepRecent 与 branch-summary reserve，不再静默回退默认值。
-- 损坏 session 恢复与 AgentSession 续写的共同 workflow 尚未建立，是下一项任务。
 
 ### 产品级 AgentSession
 
@@ -110,7 +113,9 @@ Agent 或 durable session 的第二套状态。
   动态模型目录和全部 API dialect 当前后置。
 - read image、edit normalization、grep/find/ls、glob/gitignore 已有真实实现和 upstream fixture；
   仍需更多跨平台与跨实现验收。
-- SessionManager 已容忍坏行和 orphan，并有 TypeScript golden；复杂损坏恢复仍需扩大共同语料。
+- SessionManager 已容忍坏行和 orphan，并有 TypeScript golden；生产 AgentSession 的坏行/orphan 恢复
+  与续写也已通过共同 workflow。unterminated tail、无效 UTF-8 和结构损坏仍由更广的 SessionManager
+  golden/本地恢复测试覆盖，后续可继续扩大产品级组合语料。
 
 ### Runtime 与外部边界
 
@@ -135,10 +140,10 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及七个完整
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及八个完整
 AgentSession workflow。尚未共同验证：
 
-- 损坏 session 的生产链恢复与续写；
+- `images.blockImages`、thinking budget 与额外 production resource 路径；
 - retry/compaction 与 abort、reload、tree navigation 的更复杂竞争；
 - 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
 
@@ -156,7 +161,7 @@ AgentSession workflow。尚未共同验证：
 - `git diff --check`
 - 固定上游 `createAgentSession()` 的 rich/tool/reopen、queue/abort/settled、retry/Retry-After、
   manual compaction、overflow compact/continue 与 model/thinking/tools/reload turn snapshot
-  workflow，以及 tree navigation/Runtime fork oracle；
+  workflow，以及 tree navigation/Runtime fork、damaged session resume/continue oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

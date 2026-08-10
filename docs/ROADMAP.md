@@ -20,12 +20,13 @@ overflow continue、最终 settled、完整事件、JSONL 与 reopen。`turn_sna
 逐字段通过，固定了运行中请求不可变、同一 run 下一 tool turn 刷新 model/thinking/tools/prompt，
 以及 reload 后资源 prompt 和 durable state 的语义。`tree_navigation_runtime_fork` 已逐字段固定
 无摘要 tree navigation、废弃分支保留、Runtime session replacement、fork `parentSession`、源与分支
-双 JSONL 及 reopen。当前进入损坏 session 的生产链恢复与续写场景。
+双 JSONL 及 reopen。`damaged_session_resume_continue` 也已固定坏行保留、orphan 根投影、恢复分支的
+初始化选择、真实 Provider 续写和再次打开。当前进入图片过滤、thinking budget 与资源装配场景。
 
 ### 下一批共同场景
 
-1. 损坏 session 恢复与 AgentSession 续写；
-2. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径。
+1. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径；
+2. retry/compaction、abort、reload 和 tree navigation 的复杂竞争组合。
 
 每个场景必须同时比较：
 

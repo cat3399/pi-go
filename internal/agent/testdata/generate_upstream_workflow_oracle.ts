@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -95,6 +95,17 @@ type Corpus = {
     abandonedPrompt: string;
     branchPrompt: string;
     responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
+  };
+  damagedSessionScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    rootPrompt: string;
+    rootResponse: { text: string; inputTokens: number; outputTokens: number };
+    malformedLine: string;
+    orphanPrompt: string;
+    continuationPrompt: string;
+    response: { text: string; inputTokens: number; outputTokens: number };
   };
 };
 
@@ -1804,6 +1815,262 @@ async function runTreeForkScenario(
   };
 }
 
+function normalizeDamagedContext(context: any): Record<string, unknown> {
+  return {
+    messages: context.messages.map(normalizeMessage),
+    model: context.model ?? null,
+    thinkingLevel: context.thinkingLevel,
+  };
+}
+
+function normalizeDamagedPhysicalLines(
+  data: string,
+  ids: EntryIDMap,
+  root: string,
+  cwd: string,
+): Array<Record<string, unknown>> {
+  return data.trimEnd().split("\n").map((line) => {
+    let value: any;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      return { kind: "malformed", text: line };
+    }
+    if (value.type === "session") {
+      return { kind: "header", value: normalizeHeader(value, root, cwd) };
+    }
+    return { kind: "entry", value: normalizeEntry(value, ids) };
+  });
+}
+
+async function runDamagedSessionScenario(
+  root: string,
+  runtimeModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.damagedSessionScenario;
+  const scenarioRoot = join(root, "damaged-session");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const model = harnessModule.fauxModel;
+  const seedUsage = {
+    input: scenario.rootResponse.inputTokens,
+    output: scenario.rootResponse.outputTokens,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: scenario.rootResponse.inputTokens + scenario.rootResponse.outputTokens,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+  const seedRecords = [
+    {
+      type: "session", version: 3, id: scenario.sessionId,
+      timestamp: "2026-08-10T00:00:00.000Z", cwd,
+    },
+    {
+      type: "model_change", id: "seed-model", parentId: null,
+      timestamp: "2026-08-10T00:00:01.000Z", provider: model.provider, modelId: model.id,
+    },
+    {
+      type: "thinking_level_change", id: "seed-thinking", parentId: "seed-model",
+      timestamp: "2026-08-10T00:00:02.000Z", thinkingLevel: "off",
+    },
+    {
+      type: "message", id: "seed-user", parentId: "seed-thinking",
+      timestamp: "2026-08-10T00:00:03.000Z",
+      message: { role: "user", content: scenario.rootPrompt, timestamp: 1000 },
+    },
+    {
+      type: "message", id: "seed-assistant", parentId: "seed-user",
+      timestamp: "2026-08-10T00:00:04.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: scenario.rootResponse.text }],
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: seedUsage,
+        stopReason: "stop",
+        timestamp: 2000,
+      },
+    },
+    scenario.malformedLine,
+    {
+      type: "message", id: "seed-orphan", parentId: "missing-parent",
+      timestamp: "2026-08-10T00:00:05.000Z",
+      message: { role: "user", content: scenario.orphanPrompt, timestamp: 3000 },
+    },
+  ];
+  const sourceData = `${seedRecords.map((record) =>
+    typeof record === "string" ? record : JSON.stringify(record)).join("\n")}\n`;
+  const sessionFile = join(sessionDir, "damaged.jsonl");
+  writeFileSync(sessionFile, sourceData, "utf8");
+
+  const faux = harnessModule.createFauxStreamFn([{
+    text: scenario.response.text,
+    stopReason: "stop",
+    usage: {
+      input: scenario.response.inputTokens,
+      output: scenario.response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: scenario.response.inputTokens + scenario.response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  }]);
+  const providerModels: any[] = [];
+  const streamOptions: any[] = [];
+  const streamSimple = (requestModel: any, context: any, options: any) => {
+    providerModels.push(requestModel);
+    streamOptions.push(options);
+    return faux.streamFn(requestModel, context, options);
+  };
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+  const modelRuntime = modelTestModule.getModelRuntime(modelRegistry);
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+  });
+  const createRuntime = async ({ cwd: runtimeCwd, sessionManager, sessionStartEvent }: any) => {
+    const services = await runtimeModule.createAgentSessionServices({
+      cwd: runtimeCwd,
+      agentDir,
+      modelRuntime,
+      settingsManager,
+      resourceLoaderOptions: {
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: scenario.systemPrompt,
+      },
+    });
+    return {
+      ...(await runtimeModule.createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+        model,
+        thinkingLevel: "off",
+        tools: [],
+        customTools: [],
+      })),
+      services,
+      diagnostics: services.diagnostics,
+    };
+  };
+  const manager = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const runtimeHost = await runtimeModule.createAgentSessionRuntime(createRuntime, {
+    cwd,
+    agentDir,
+    sessionManager: manager,
+  });
+  const agentSession = runtimeHost.session;
+  const events: any[] = [];
+  agentSession.subscribe((event: any) => events.push(event));
+  const captureProjection = (sessionManager: any) => ({
+    header: sessionManager.getHeader(),
+    leafId: sessionManager.getLeafId(),
+    entries: sessionManager.getEntries(),
+    tree: sessionManager.getTree(),
+    context: sessionManager.buildSessionContext(),
+  });
+  const beforeResume = captureProjection(agentSession.sessionManager);
+  await agentSession.prompt(scenario.continuationPrompt);
+  if (faux.state.callCount !== 1 || providerModels.length !== 1 || streamOptions.length !== 1) {
+    throw new Error(
+      `damaged session provider calls ${faux.state.callCount}/${providerModels.length}/${streamOptions.length}, want 1/1/1`,
+    );
+  }
+
+  const finalProjection = captureProjection(agentSession.sessionManager);
+  const entries = finalProjection.entries;
+  const ids: EntryIDMap = new Map();
+  addEntryIDs(entries, ids);
+  ids.set("missing-parent", "<missing-parent>");
+  const stats = agentSession.getSessionStats();
+  const finalState = {
+    isStreaming: agentSession.isStreaming,
+    pendingMessageCount: agentSession.pendingMessageCount,
+    model: { provider: agentSession.model.provider, api: agentSession.model.api, id: agentSession.model.id },
+    thinkingLevel: agentSession.thinkingLevel,
+    activeTools: agentSession.getActiveToolNames(),
+    systemPrompt: normalizePathText(agentSession.systemPrompt, scenarioRoot, cwd),
+    messages: agentSession.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  const afterData = readFileSync(sessionFile, "utf8");
+  await runtimeHost.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedProjection = captureProjection(reopened);
+  const normalizeProjection = (projection: any) => ({
+    header: normalizeHeader(projection.header, scenarioRoot, cwd),
+    leafId: projection.leafId === null ? null : ids.get(projection.leafId),
+    entries: projection.entries.map((entry: any) => normalizeEntry(entry, ids)),
+    tree: normalizeSessionTree(projection.tree, ids),
+    context: normalizeDamagedContext(projection.context),
+  });
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      sourcePrefixPreserved: afterData.startsWith(sourceData),
+      malformedLineCountBefore: normalizeDamagedPhysicalLines(sourceData, ids, scenarioRoot, cwd)
+        .filter((line) => line.kind === "malformed").length,
+      malformedLineCountAfter: normalizeDamagedPhysicalLines(afterData, ids, scenarioRoot, cwd)
+        .filter((line) => line.kind === "malformed").length,
+    },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(
+        providerModels[index],
+        context,
+        streamOptions[index],
+        scenarioRoot,
+        cwd,
+        scenario.sessionId,
+      )),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    beforeResume: normalizeProjection(beforeResume),
+    finalState,
+    session: {
+      ...normalizeProjection(finalProjection),
+      physicalLinesBefore: normalizeDamagedPhysicalLines(sourceData, ids, scenarioRoot, cwd),
+      physicalLinesAfter: normalizeDamagedPhysicalLines(afterData, ids, scenarioRoot, cwd),
+      reopened: normalizeProjection(reopenedProjection),
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const commit = execFileSync("git", ["-C", upstreamRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (commit !== corpus.upstreamCommit) throw new Error(`upstream commit ${commit}, want ${corpus.upstreamCommit}`);
@@ -2018,6 +2285,15 @@ async function main(): Promise<void> {
       modelTestModule,
       harnessModule,
     );
+    const damagedSessionScenario = await runDamagedSessionScenario(
+      root,
+      runtimeModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      modelTestModule,
+      harnessModule,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -2051,6 +2327,7 @@ async function main(): Promise<void> {
       overflowCompactionScenario,
       turnSnapshotScenario,
       treeForkScenario,
+      damagedSessionScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
