@@ -12,11 +12,10 @@ AgentSession 已组合 SessionManager，生产入口没有使用 scripted/fake P
 AgentLoop、stateful Agent 和当前生产版 SessionManager 的主体完成度较高；AgentSession 与
 Runtime 已实现大量产品能力，但尚未达到与原版等价的整体验收。
 
-当前并行推进两条长期工作：继续关闭产品级 AgentSession 差异，以及在同一 Go Application
-Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经完成：静态 pi-web 前端由
-`surface/web` 与 `cmd/pi-go-web` 承载，HTTP/SSE 直接调用进程内
-`internal/application.Supervisor`/Host/Runtime。此前 Next → JSONL RPC
-接入只保留为可行性记录，不再作为产品架构扩展。
+Surface/Application 基础架构已经完成，当前停止扩展 WebUI 功能，单线聚焦产品级 AgentSession
+与 Runtime 的 TypeScript/Go 跨实现验收。静态 pi-web 前端由 `surface/web` 与 `cmd/pi-go-web`
+承载，HTTP/SSE 直接调用进程内 `internal/application.Supervisor`/Host/Runtime；Surface 不维护
+Agent 或 durable session 的第二套状态。
 
 ## 已实现
 
@@ -56,31 +55,28 @@ Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经
 
 ## 尚未对齐
 
-### Agent 状态与事件
+### Agent 状态与事件验收
 
 - Agent 已是 model/thinking/system prompt/active tools/messages 的运行时唯一事实源；AgentSession
   只保留完整工具目录和构建 system prompt 所需的产品元数据。
 - `agent_settled` 回调观察到的是 idle session，并允许立即开始下一次 prompt。
-- 仍需通过跨实现用例继续验证 queue、abort、retry、compaction、branch-summary 和扩展回调的
-  完整组合顺序。
+- 尚未使用同一套原版/Go workflow fixture 验证 queue、abort、retry、compaction、branch-summary
+  和多轮工具调用的完整组合顺序；这是当前首要缺口。
 
 ### 产品级 AgentSession
 
 - settings、resources、queue/retry/compaction 参数及 active tools/system prompt 的 reload 已接入；
-  production 的内置 tool/standalone bash runtime 已按新设置整代重建并保留 active tool 名称；
-  Provider reset 暂按当前阶段约定后置，动态 extension runtime、flag 保留和扩展资源二次发现仍未实现，
-  因此尚不能称为原版完整 reload。
-- standalone bash 的 AgentSession 核心已实现；外层 Runtime/Host 仍缺 `user_bash` hook dispatch，
-  production settings 已把 `shellPath`/`shellCommandPrefix` 注入执行器，并在 reload 时连同 read image
-  `autoResize` 设置一起重建。
-- extension-neutral command/input 契约已经接入 AgentSession；完整 JS extension loader、动态失效与
-  command context actions 属于后续 Runtime/扩展宿主工作。
+  production 的内置 tool/standalone bash runtime 已按新设置整代重建并保留 active tool 名称。
+- `images.blockImages`、settings `thinkingBudgets` 和额外 prompt/skill 路径尚未完整进入 production
+  Agent 请求与 resource assembly，需要纳入共同场景后按原版行为补齐。
+- Provider reset、动态 extension runtime、`user_bash` hook dispatch、flag 保留和扩展资源二次发现
+  尚未完成，但 Provider/插件宿主当前明确后置，不阻塞第一轮 Agent workflow 等价验收。
 
-### Provider、Model、Auth 和内置工具
+### 非阻塞覆盖面与内置工具
 
 - production 已支持 OpenAI Responses、OpenAI Chat Completions、OpenAI Codex Responses
-  （含 WebSocket）和 Anthropic Messages；完整 provider catalog/composition 暂不在当前阶段处理。
-- provider auth/status/login、动态模型目录和原版全部 API dialect 仍未齐全。
+  （含 WebSocket）和 Anthropic Messages；完整 provider catalog/composition、auth/status/login、
+  动态模型目录和全部 API dialect 当前后置。
 - read image、edit normalization、grep/find/ls、glob/gitignore 已有真实实现和 upstream fixture；
   仍需更多跨平台与跨实现验收。
 - SessionManager 已容忍坏行和 orphan，并有 TypeScript golden；复杂损坏恢复仍需扩大共同语料。
@@ -99,19 +95,16 @@ Host 之上扩展可选 surface。原生 WebUI 的第一条高内聚主链已经
 - Host 尚未覆盖原版 RPC 的全部辅助命令（例如 cycle/list/new/switch/clone/entries/tree/messages）；
   多 session registry 已由 `internal/application.Supervisor` 实现，每个会话仍持有独立
   Runtime/Host，不合并 Agent 状态。
-- 已完成的 pi-web opt-in Go backend 证明 Next → `pi-go-rpc` → Agent tool-loop 可以真实工作，
-  但它只是迁移验证，不是后续产品路径；不再围绕该 adapter 补功能或做性能优化。
 - 原生 `pi-go-web` 已完成静态资源装配、进程内 Session supervisor、共享 Host JSON projection、
   Agent command API、SSE、session list/restore/context/tree/state/rename、基础 models 与 cwd API。
   DeepSeek V4 Flash 已通过一次真实 `read` 工具短程验收。
 - `surface/web` 已高内聚拥有 React、HTTP/SSE、静态资源和 Web 测试；日常开发使用 Next HMR
   代理 API-only Go 进程，不执行 `npm build`，生产构建与运行命令彼此独立。
-- WebUI 仍缺 files/Git/worktree、models/auth 配置管理、session delete/export/auto-name、前端 capability
-  禁用和插件/skills 管理；这些 API 返回结构化 unsupported，详细账本见 `docs/WEBUI.md`。
+- WebUI 未实现能力继续由 `docs/WEBUI.md` 和结构化 unsupported 响应记录；当前不进入 Agent 主线。
 
 ### 整体验收
 
-当前跨实现 golden 主要覆盖 SessionManager 的少量场景。尚未共同验证：
+当前跨实现 golden 主要覆盖 SessionManager、resource 和 tool 的局部场景。尚未共同验证：
 
 - 连续对话与 rich input；
 - queue、retry、abort 和 compaction 竞争；

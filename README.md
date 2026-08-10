@@ -34,11 +34,11 @@ AgentSession 已组合 SessionManager，AgentLoop、stateful Agent、JSONL sessi
 compaction、会话树和 Runtime replacement 生命周期均有真实实现。普通生产入口使用真实
 HTTP Provider 和本地工具，deterministic fake 仅用于测试。
 
-项目仍未达到完整移植验收。当前主线差距是完整的 TypeScript/Go AgentSession 跨实现验收、
-原版 RPC 的辅助命令，以及面向多种交互层的稳定 application contract。Provider/Auth 与完整插件
-宿主不作为当前 Agent 主线的完成阻塞。Host 已有权威 state、跨 session
-replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展 UI 外的全部直接 Agent 命令；
-`prompt` 按原版 preflight 时点异步确认。
+项目仍未达到完整移植验收。当前唯一主线差距是完整的 TypeScript/Go AgentSession/Runtime
+跨实现 workflow 验收，以及由共同场景证明的行为偏差。Surface/Application 基础架构已经完成；
+原版 RPC 辅助命令、Provider/Auth 覆盖面、完整插件宿主和 WebUI 功能不作为当前 Agent 主线阻塞。
+Host 已有权威 state、跨 session replacement 的单一有序 event stream，并覆盖 pi-web 当前除扩展
+UI 外的全部直接 Agent 命令；`prompt` 按原版 preflight 时点异步确认。
 
 `cmd/pi-go-rpc` 已提供长期 stdio JSONL Runtime，用于协议验证、自动化和跨实现验收；它不再是
 WebUI 的长期产品内核路径。`cmd/pi-go -p` 仍是一次性 headless 诊断入口。
