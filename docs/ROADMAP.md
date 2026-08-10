@@ -16,13 +16,14 @@
 `multi_turn_rich_tool_reopen`、`queue_clear_abort_settled`、`provider_retry_after_recovery`、
 `manual_compaction_reopen` 和 `context_overflow_compact_continue` 已经固定并通过，覆盖 rich input、
 工具循环、多轮上下文、混合 queue mode、queue recall、abort 后续跑、Agent retry、手动/自动压缩、
-overflow continue、最终 settled、完整事件、JSONL 与 reopen。当前进入运行中配置快照场景。
+overflow continue、最终 settled、完整事件、JSONL 与 reopen。`turn_snapshot_model_tools_reload` 也已
+逐字段通过，固定了运行中请求不可变、同一 run 下一 tool turn 刷新 model/thinking/tools/prompt，
+以及 reload 后资源 prompt 和 durable state 的语义。当前进入会话树场景。
 
-### 第一批共同场景
+### 下一批共同场景
 
-1. model、thinking、active tools、system prompt 与 reload 的 turn snapshot；
-2. branch、tree navigation、fork 和损坏 session 恢复；
-3. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径。
+1. branch、tree navigation、fork 和损坏 session 恢复；
+2. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径。
 
 每个场景必须同时比较：
 
@@ -44,7 +45,7 @@ Provider/工具。完成一个高内聚场景组后，再用 DeepSeek 做一次�
 - `images.blockImages` 的全上下文图片过滤；
 - settings `thinkingBudgets` 到每次 Provider turn 的动态传递；
 - 额外 prompt/skill 路径进入 production resource assembly；
-- reload 后 settings/resources/tools/system prompt 的完整一致性。
+- reload 后动态 settings 与额外 production resource 路径的完整一致性。
 
 Provider/API/Auth 数量扩展、完整 JS extension/plugin runtime、extension custom UI 和 WebUI 功能不作为
 当前 Agent 等价验收的前置条件。相关核心数据若已经存在于 session/message/event 契约中，仍必须

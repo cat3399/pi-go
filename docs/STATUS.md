@@ -82,10 +82,13 @@ Agent 或 durable session 的第二套状态。
 - 已建立 `context_overflow_compact_continue` 共同 workflow，逐字段对齐 4 次 Provider 输入、45 个
   事件、8 条 JSONL entry，以及“失败持久化但立即重发上下文排除 → 自动摘要 → continue 恢复 →
   reopen 保留完整历史”的状态差异。
+- 已建立 `turn_snapshot_model_tools_reload` 共同 workflow，逐字段对齐 3 次 Provider 输入、62 个
+  事件和 10 条 JSONL entry。首个运行中请求保持旧 model/low/旧 prompt/旧工具快照；控制切换后，
+  同一 run 的下一 tool turn 立即使用新 model/high/新工具；reload 刷新 resource prompt，同时保留
+  Agent、消息、模型/思考选择、工具选择和 reopen 状态。
 - 静态 `CreateAgentSession` 现在和带动态 ModelRuntime 的生产装配一样应用 retry budget/base delay、
   compaction reserve/keepRecent 与 branch-summary reserve，不再静默回退默认值。
-- model/thinking/tools/reload 和 branch/fork 的共同 workflow 尚未建立；运行中配置 turn snapshot
-  是下一项任务。
+- branch/tree/fork 和损坏 session 恢复的共同 workflow 尚未建立，是下一项任务。
 
 ### 产品级 AgentSession
 
@@ -128,10 +131,9 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及五个完整
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及六个完整
 AgentSession workflow。尚未共同验证：
 
-- model/thinking/tools/reload；
 - fork、tree 和损坏恢复；
 - retry/compaction 与 abort、reload、tree navigation 的更复杂竞争；
 - 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
@@ -149,7 +151,8 @@ AgentSession workflow。尚未共同验证：
 - `make web-check` 与 `make web-build`（均委托 `scripts/webui.sh`；静态前端构建与 tagged Go build）
 - `git diff --check`
 - 固定上游 `createAgentSession()` 的 rich/tool/reopen、queue/abort/settled、retry/Retry-After、
-  manual compaction 与 overflow compact/continue workflow oracle；
+  manual compaction、overflow compact/continue 与 model/thinking/tools/reload turn snapshot
+  workflow oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

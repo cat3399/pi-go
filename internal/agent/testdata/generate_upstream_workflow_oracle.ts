@@ -72,6 +72,21 @@ type Corpus = {
     summaryResponse: { text: string; inputTokens: number; outputTokens: number };
     recoveryResponse: { text: string; inputTokens: number; outputTokens: number };
   };
+  turnSnapshotScenario: {
+    name: string;
+    sessionId: string;
+    initialSystemPrompt: string;
+    reloadedSystemPrompt: string;
+    initialPrompt: string;
+    postReloadPrompt: string;
+    initialModel: { id: string; name: string };
+    nextModel: { id: string; name: string };
+    initialThinkingLevel: "low";
+    nextThinkingLevel: "high";
+    initialTool: { name: string; callId: string; description: string; result: string };
+    nextTool: { name: string; description: string };
+    responses: Array<{ text: string; toolCall: boolean; inputTokens: number; outputTokens: number }>;
+  };
 };
 
 type EntryIDMap = Map<string, string>;
@@ -285,6 +300,8 @@ function normalizeEvent(event: any, ids: EntryIDMap): Record<string, unknown> {
       return { type: event.type, entry: normalizeEntry(event.entry, ids) };
     case "queue_update":
       return { type: event.type, steering: event.steering, followUp: event.followUp };
+    case "thinking_level_changed":
+      return { type: event.type, level: event.level };
     case "auto_retry_start":
       return {
         type: event.type,
@@ -1138,6 +1155,322 @@ async function runOverflowCompactionScenario(
   };
 }
 
+async function runTurnSnapshotScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+  eventStreamModule: any,
+  Type: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.turnSnapshotScenario;
+  if (scenario.responses.length !== 3 || !scenario.responses[0]?.toolCall) {
+    throw new Error("turn snapshot workflow requires one tool-use response followed by two text responses");
+  }
+
+  const scenarioRoot = join(root, "turn-snapshot");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const initialModel = {
+    ...harnessModule.fauxModel,
+    id: scenario.initialModel.id,
+    name: scenario.initialModel.name,
+    reasoning: true,
+  };
+  const nextModel = {
+    ...harnessModule.fauxModel,
+    id: scenario.nextModel.id,
+    name: scenario.nextModel.name,
+    reasoning: true,
+  };
+  const faux = harnessModule.createFauxStreamFn(scenario.responses.map((response, index) => ({
+    text: response.text,
+    toolCalls: response.toolCall
+      ? [{ id: scenario.initialTool.callId, name: scenario.initialTool.name, args: {} }]
+      : undefined,
+    stopReason: response.toolCall ? "toolUse" : "stop",
+    model: { provider: initialModel.provider, id: index === 0 ? initialModel.id : nextModel.id },
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  })));
+  const providerModels: any[] = [];
+  const streamOptions: any[] = [];
+  let signalFirstCallStarted!: () => void;
+  const firstCallStarted = new Promise<void>((resolve) => {
+    signalFirstCallStarted = resolve;
+  });
+  let releaseFirstCall!: () => void;
+  const firstCallReleased = new Promise<void>((resolve) => {
+    releaseFirstCall = resolve;
+  });
+  const streamSimple = (model: any, context: any, options: any) => {
+    const callIndex = providerModels.length;
+    providerModels.push(model);
+    streamOptions.push(options);
+    const source = faux.streamFn(model, context, options);
+    if (callIndex !== 0) return source;
+
+    const blocked = eventStreamModule.createAssistantMessageEventStream();
+    signalFirstCallStarted();
+    void (async () => {
+      await firstCallReleased;
+      for await (const event of source) blocked.push(event);
+    })();
+    return blocked;
+  };
+
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(initialModel.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(initialModel.provider, {
+    baseUrl: initialModel.baseUrl,
+    apiKey: "faux-key",
+    api: initialModel.api,
+    streamSimple,
+    models: [initialModel, nextModel].map((model) => ({
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    })),
+  });
+
+  const controlActions: string[] = [];
+  const extensionsResult = await utilityModule.createTestExtensionsResult([
+    {
+      factory: (pi: any) => {
+        pi.on("session_start", async (event: any) => controlActions.push(`session_start:${event.reason}`));
+        pi.on("session_shutdown", async (event: any) => controlActions.push(`session_shutdown:${event.reason}`));
+        pi.on("model_select", async (event: any) => {
+          controlActions.push(`model_select:${event.previousModel?.id ?? "none"}->${event.model.id}:${event.source}`);
+        });
+        pi.on("thinking_level_select", async (event: any) => {
+          controlActions.push(`thinking_level_select:${event.previousLevel}->${event.level}`);
+        });
+      },
+      path: "<turn-snapshot-extension>",
+    },
+  ], cwd);
+  let loadedResourceGeneration = 0;
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader({ extensionsResult }),
+    getSystemPrompt: () => loadedResourceGeneration === 0
+      ? scenario.initialSystemPrompt
+      : scenario.reloadedSystemPrompt,
+    reload: async () => {
+      controlActions.push("resource_reload");
+      loadedResourceGeneration++;
+    },
+  };
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const toolRuns: Array<Record<string, unknown>> = [];
+  const initialTool = {
+    name: scenario.initialTool.name,
+    label: "Initial Snapshot Tool",
+    description: scenario.initialTool.description,
+    parameters: Type.Object({}, { additionalProperties: false }),
+    execute: async (toolCallId: string) => {
+      toolRuns.push({ toolCallId, toolName: scenario.initialTool.name });
+      return {
+        content: [{ type: "text", text: scenario.initialTool.result }],
+        details: { generation: "initial" },
+      };
+    },
+  };
+  const nextTool = {
+    name: scenario.nextTool.name,
+    label: "Next Snapshot Tool",
+    description: scenario.nextTool.description,
+    parameters: Type.Object({}, { additionalProperties: false }),
+    execute: async (toolCallId: string) => {
+      toolRuns.push({ toolCallId, toolName: scenario.nextTool.name });
+      return {
+        content: [{ type: "text", text: "next snapshot tool executed" }],
+        details: { generation: "next" },
+      };
+    },
+  };
+
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model: initialModel,
+    thinkingLevel: scenario.initialThinkingLevel,
+    tools: [scenario.initialTool.name, scenario.nextTool.name],
+    customTools: [initialTool, nextTool],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  session.setActiveToolsByName([scenario.initialTool.name]);
+  const events: any[] = [];
+  const settledSnapshots: Array<Record<string, unknown>> = [];
+  session.subscribe((event: any) => {
+    events.push(event);
+    if (event.type === "agent_settled") {
+      settledSnapshots.push({
+        isStreaming: session.isStreaming,
+        isIdle: session.isIdle,
+        model: session.model.id,
+        thinkingLevel: session.thinkingLevel,
+        activeTools: session.getActiveToolNames(),
+        systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+      });
+    }
+  });
+  await session.bindExtensions({ shutdownHandler: () => {} });
+
+  const firstRun = session.prompt(scenario.initialPrompt);
+  await firstCallStarted;
+  await session.setModel(nextModel);
+  session.setThinkingLevel(scenario.nextThinkingLevel);
+  session.setActiveToolsByName([scenario.nextTool.name]);
+  const duringFirstRequest = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    model: session.model.id,
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+  };
+  releaseFirstCall();
+  await firstRun;
+  const afterFirstRun = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    model: session.model.id,
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+  };
+
+  session.setActiveToolsByName([scenario.nextTool.name, scenario.initialTool.name]);
+  const beforeReload = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    model: session.model.id,
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+  };
+
+  await session.reload({
+    beforeSessionStart: async () => {
+      controlActions.push("before_session_start");
+    },
+  });
+  const afterReload = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    model: session.model.id,
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+  };
+  await session.prompt(scenario.postReloadPrompt);
+  const promptReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    settledEventCount: settledSnapshots.length,
+  };
+
+  if (faux.state.callCount !== 3 || streamOptions.length !== 3 || providerModels.length !== 3) {
+    throw new Error(
+      `turn snapshot provider calls ${faux.state.callCount}/${streamOptions.length}/${providerModels.length}, want 3/3/3`,
+    );
+  }
+  if (toolRuns.length !== 1 || toolRuns[0]?.toolName !== scenario.initialTool.name) {
+    throw new Error(`turn snapshot tool runs ${JSON.stringify(toolRuns)}, want the initial snapshotted tool once`);
+  }
+  if (settledSnapshots.length !== 2) {
+    throw new Error(`turn snapshot settled events ${settledSnapshots.length}, want 2`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent turn snapshot AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      duringFirstRequest,
+      afterFirstRun,
+      beforeReload,
+      afterReload,
+      promptReturn,
+      settledSnapshots,
+      controlActions,
+      loadedResourceGeneration,
+    },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(providerModels[index], context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
+    toolRuns,
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const commit = execFileSync("git", ["-C", upstreamRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (commit !== corpus.upstreamCommit) throw new Error(`upstream commit ${commit}, want ${corpus.upstreamCommit}`);
@@ -1328,6 +1661,18 @@ async function main(): Promise<void> {
       modelTestModule,
       harnessModule,
     );
+    const turnSnapshotScenario = await runTurnSnapshotScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+      eventStreamModule,
+      Type,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -1359,6 +1704,7 @@ async function main(): Promise<void> {
       retryScenario,
       manualCompactionScenario,
       overflowCompactionScenario,
+      turnSnapshotScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {

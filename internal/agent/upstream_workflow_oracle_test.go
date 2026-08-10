@@ -40,6 +40,7 @@ type upstreamWorkflowCorpus struct {
 	RetryScenario      upstreamRetryScenario              `json:"retryScenario"`
 	ManualCompaction   upstreamManualCompactionScenario   `json:"manualCompactionScenario"`
 	OverflowCompaction upstreamOverflowCompactionScenario `json:"overflowCompactionScenario"`
+	TurnSnapshot       upstreamTurnSnapshotScenario       `json:"turnSnapshotScenario"`
 }
 
 type upstreamWorkflowScenario struct {
@@ -634,6 +635,8 @@ func normalizeWorkflowEvent(event agent.SessionEvent, ids map[string]string) (ma
 		return map[string]any{"type": "entry_appended", "entry": entry}, nil
 	case agent.SessionQueueUpdateEvent:
 		return map[string]any{"type": "queue_update", "steering": value.Steering, "followUp": value.FollowUp}, nil
+	case agent.ThinkingLevelChangedEvent:
+		return map[string]any{"type": "thinking_level_changed", "level": string(value.Level)}, nil
 	case agent.AutoRetryStartEvent:
 		return map[string]any{
 			"type": "auto_retry_start", "attempt": value.Attempt, "maxAttempts": value.MaxAttempts,

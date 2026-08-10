@@ -6692,5 +6692,1793 @@
         }
       }
     }
+  },
+  "turnSnapshotScenario": {
+    "name": "turn_snapshot_model_tools_reload",
+    "input": {
+      "name": "turn_snapshot_model_tools_reload",
+      "sessionId": "session-agent-turn-snapshot-parity",
+      "initialSystemPrompt": "You are the initial turn snapshot oracle.",
+      "reloadedSystemPrompt": "You are the reloaded turn snapshot oracle.",
+      "initialPrompt": "hold the first provider request",
+      "postReloadPrompt": "verify the reloaded runtime",
+      "initialModel": {
+        "id": "faux-1",
+        "name": "Faux One"
+      },
+      "nextModel": {
+        "id": "faux-2",
+        "name": "Faux Two"
+      },
+      "initialThinkingLevel": "low",
+      "nextThinkingLevel": "high",
+      "initialTool": {
+        "name": "switch_snapshot",
+        "callId": "call-switch-snapshot",
+        "description": "Finish the request that began with the initial tool snapshot",
+        "result": "initial snapshot tool executed"
+      },
+      "nextTool": {
+        "name": "after_switch",
+        "description": "Tool visible after the runtime configuration switch"
+      },
+      "responses": [
+        {
+          "text": "switching",
+          "toolCall": true,
+          "inputTokens": 9,
+          "outputTokens": 3
+        },
+        {
+          "text": "same run used the next snapshot",
+          "toolCall": false,
+          "inputTokens": 10,
+          "outputTokens": 4
+        },
+        {
+          "text": "reload used the refreshed snapshot",
+          "toolCall": false,
+          "inputTokens": 11,
+          "outputTokens": 4
+        }
+      ]
+    },
+    "actions": {
+      "duringFirstRequest": {
+        "isStreaming": true,
+        "isIdle": false,
+        "model": "faux-2",
+        "thinkingLevel": "high",
+        "activeTools": [
+          "after_switch"
+        ],
+        "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>"
+      },
+      "afterFirstRun": {
+        "isStreaming": false,
+        "isIdle": true,
+        "model": "faux-2",
+        "thinkingLevel": "high",
+        "activeTools": [
+          "after_switch"
+        ],
+        "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>"
+      },
+      "beforeReload": {
+        "isStreaming": false,
+        "isIdle": true,
+        "model": "faux-2",
+        "thinkingLevel": "high",
+        "activeTools": [
+          "after_switch",
+          "switch_snapshot"
+        ],
+        "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>"
+      },
+      "afterReload": {
+        "isStreaming": false,
+        "isIdle": true,
+        "model": "faux-2",
+        "thinkingLevel": "high",
+        "activeTools": [
+          "after_switch",
+          "switch_snapshot"
+        ],
+        "systemPrompt": "You are the reloaded turn snapshot oracle.\nCurrent working directory: <cwd>"
+      },
+      "promptReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "settledEventCount": 2
+      },
+      "settledSnapshots": [
+        {
+          "isStreaming": false,
+          "isIdle": true,
+          "model": "faux-2",
+          "thinkingLevel": "high",
+          "activeTools": [
+            "after_switch"
+          ],
+          "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>"
+        },
+        {
+          "isStreaming": false,
+          "isIdle": true,
+          "model": "faux-2",
+          "thinkingLevel": "high",
+          "activeTools": [
+            "after_switch",
+            "switch_snapshot"
+          ],
+          "systemPrompt": "You are the reloaded turn snapshot oracle.\nCurrent working directory: <cwd>"
+        }
+      ],
+      "controlActions": [
+        "session_start:startup",
+        "model_select:faux-1->faux-2:set",
+        "thinking_level_select:low->high",
+        "session_shutdown:reload",
+        "resource_reload",
+        "before_session_start",
+        "session_start:reload"
+      ],
+      "loadedResourceGeneration": 1
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold the first provider request"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "switch_snapshot",
+            "description": "Finish the request that began with the initial tool snapshot",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-turn-snapshot-parity",
+          "reasoning": "low",
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-2"
+        },
+        "systemPrompt": "You are the initial turn snapshot oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold the first provider request"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "switching"
+              },
+              {
+                "type": "toolCall",
+                "id": "call-switch-snapshot",
+                "name": "switch_snapshot",
+                "arguments": {}
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 12,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          },
+          {
+            "role": "toolResult",
+            "toolCallId": "call-switch-snapshot",
+            "toolName": "switch_snapshot",
+            "content": [
+              {
+                "type": "text",
+                "text": "initial snapshot tool executed"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "generation": "initial"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "after_switch",
+            "description": "Tool visible after the runtime configuration switch",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-turn-snapshot-parity",
+          "reasoning": "high",
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-2"
+        },
+        "systemPrompt": "You are the reloaded turn snapshot oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold the first provider request"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "switching"
+              },
+              {
+                "type": "toolCall",
+                "id": "call-switch-snapshot",
+                "name": "switch_snapshot",
+                "arguments": {}
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 12,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          },
+          {
+            "role": "toolResult",
+            "toolCallId": "call-switch-snapshot",
+            "toolName": "switch_snapshot",
+            "content": [
+              {
+                "type": "text",
+                "text": "initial snapshot tool executed"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "generation": "initial"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "same run used the next snapshot"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-2",
+            "usage": {
+              "input": 10,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 14,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "verify the reloaded runtime"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "after_switch",
+            "description": "Tool visible after the runtime configuration switch",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "switch_snapshot",
+            "description": "Finish the request that began with the initial tool snapshot",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-turn-snapshot-parity",
+          "reasoning": "high",
+          "transport": "sse"
+        }
+      }
+    ],
+    "toolRuns": [
+      {
+        "toolCallId": "call-switch-snapshot",
+        "toolName": "switch_snapshot"
+      }
+    ],
+    "events": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hold the first provider request"
+            }
+          ]
+        }
+      },
+      {
+        "type": "thinking_level_changed",
+        "level": "high"
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "swi"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "tch"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ing"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "switching"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_start",
+          "contentIndex": 1
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "{}"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_end",
+          "contentIndex": 1,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call-switch-snapshot",
+            "name": "switch_snapshot",
+            "arguments": {}
+          }
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "switching"
+            },
+            {
+              "type": "toolCall",
+              "id": "call-switch-snapshot",
+              "name": "switch_snapshot",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 9,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 12,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "toolUse"
+        }
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "call-switch-snapshot",
+        "toolName": "switch_snapshot",
+        "arguments": {}
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "call-switch-snapshot",
+        "toolName": "switch_snapshot",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "initial snapshot tool executed"
+            }
+          ],
+          "details": {
+            "generation": "initial"
+          }
+        },
+        "isError": false
+      },
+      {
+        "type": "message_start",
+        "role": "toolResult"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "call-switch-snapshot",
+          "toolName": "switch_snapshot",
+          "content": [
+            {
+              "type": "text",
+              "text": "initial snapshot tool executed"
+            }
+          ],
+          "isError": false,
+          "details": {
+            "generation": "initial"
+          }
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": [
+          "toolResult"
+        ]
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "sam"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "e r"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "un "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "use"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "d t"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "he "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nex"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "t s"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nap"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "sho"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "t"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "same run used the next snapshot"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "same run used the next snapshot"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-2",
+          "usage": {
+            "input": 10,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 14,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant",
+          "toolResult",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "verify the reloaded runtime"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "rel"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "oad"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " us"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ed "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "the"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " re"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "fre"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "she"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "d s"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nap"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "sho"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "t"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "reload used the refreshed snapshot"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "reload used the refreshed snapshot"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-2",
+          "usage": {
+            "input": 11,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 15,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-2"
+      },
+      "thinkingLevel": "high",
+      "activeTools": [
+        "after_switch",
+        "switch_snapshot"
+      ],
+      "systemPrompt": "You are the reloaded turn snapshot oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hold the first provider request"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "switching"
+            },
+            {
+              "type": "toolCall",
+              "id": "call-switch-snapshot",
+              "name": "switch_snapshot",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 9,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 12,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "toolUse"
+        },
+        {
+          "role": "toolResult",
+          "toolCallId": "call-switch-snapshot",
+          "toolName": "switch_snapshot",
+          "content": [
+            {
+              "type": "text",
+              "text": "initial snapshot tool executed"
+            }
+          ],
+          "isError": false,
+          "details": {
+            "generation": "initial"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "same run used the next snapshot"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-2",
+          "usage": {
+            "input": 10,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 14,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "verify the reloaded runtime"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "reload used the refreshed snapshot"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-2",
+          "usage": {
+            "input": 11,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 15,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-turn-snapshot-parity",
+        "userMessages": 2,
+        "assistantMessages": 3,
+        "toolCalls": 1,
+        "toolResults": 1,
+        "totalMessages": 6,
+        "tokens": {
+          "input": 30,
+          "output": 11,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 41
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 15,
+          "contextWindow": 128000,
+          "percent": 0.01171875
+        }
+      }
+    },
+    "session": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-turn-snapshot-parity",
+        "cwd": "<cwd>"
+      },
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "low"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold the first provider request"
+              }
+            ]
+          }
+        },
+        {
+          "type": "model_change",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "provider": "faux",
+          "modelId": "faux-2"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "switching"
+              },
+              {
+                "type": "toolCall",
+                "id": "call-switch-snapshot",
+                "name": "switch_snapshot",
+                "arguments": {}
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 12,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "toolResult",
+            "toolCallId": "call-switch-snapshot",
+            "toolName": "switch_snapshot",
+            "content": [
+              {
+                "type": "text",
+                "text": "initial snapshot tool executed"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "generation": "initial"
+            }
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "same run used the next snapshot"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-2",
+            "usage": {
+              "input": 10,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 14,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "verify the reloaded runtime"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "reload used the refreshed snapshot"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-2",
+            "usage": {
+              "input": 11,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 15,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "low"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold the first provider request"
+              }
+            ]
+          }
+        },
+        {
+          "type": "model_change",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "provider": "faux",
+          "modelId": "faux-2"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "switching"
+              },
+              {
+                "type": "toolCall",
+                "id": "call-switch-snapshot",
+                "name": "switch_snapshot",
+                "arguments": {}
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 12,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "toolResult",
+            "toolCallId": "call-switch-snapshot",
+            "toolName": "switch_snapshot",
+            "content": [
+              {
+                "type": "text",
+                "text": "initial snapshot tool executed"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "generation": "initial"
+            }
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "same run used the next snapshot"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-2",
+            "usage": {
+              "input": 10,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 14,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "verify the reloaded runtime"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "reload used the refreshed snapshot"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-2",
+            "usage": {
+              "input": 11,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 15,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-turn-snapshot-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "low"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hold the first provider request"
+                }
+              ]
+            }
+          },
+          {
+            "type": "model_change",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "provider": "faux",
+            "modelId": "faux-2"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "thinkingLevel": "high"
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "switching"
+                },
+                {
+                  "type": "toolCall",
+                  "id": "call-switch-snapshot",
+                  "name": "switch_snapshot",
+                  "arguments": {}
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 9,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 12,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "toolUse"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-7",
+            "parentId": "entry-6",
+            "message": {
+              "role": "toolResult",
+              "toolCallId": "call-switch-snapshot",
+              "toolName": "switch_snapshot",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "initial snapshot tool executed"
+                }
+              ],
+              "isError": false,
+              "details": {
+                "generation": "initial"
+              }
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "same run used the next snapshot"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-2",
+              "usage": {
+                "input": 10,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 14,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-9",
+            "parentId": "entry-8",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "verify the reloaded runtime"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-10",
+            "parentId": "entry-9",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "reload used the refreshed snapshot"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-2",
+              "usage": {
+                "input": 11,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 15,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hold the first provider request"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "switching"
+                },
+                {
+                  "type": "toolCall",
+                  "id": "call-switch-snapshot",
+                  "name": "switch_snapshot",
+                  "arguments": {}
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 9,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 12,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "toolUse"
+            },
+            {
+              "role": "toolResult",
+              "toolCallId": "call-switch-snapshot",
+              "toolName": "switch_snapshot",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "initial snapshot tool executed"
+                }
+              ],
+              "isError": false,
+              "details": {
+                "generation": "initial"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "same run used the next snapshot"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-2",
+              "usage": {
+                "input": 10,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 14,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "verify the reloaded runtime"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "reload used the refreshed snapshot"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-2",
+              "usage": {
+                "input": 11,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 15,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-2"
+          },
+          "thinkingLevel": "high"
+        }
+      }
+    }
   }
 }

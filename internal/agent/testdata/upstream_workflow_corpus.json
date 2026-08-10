@@ -148,5 +148,53 @@
       "inputTokens": 5,
       "outputTokens": 3
     }
+  },
+  "turnSnapshotScenario": {
+    "name": "turn_snapshot_model_tools_reload",
+    "sessionId": "session-agent-turn-snapshot-parity",
+    "initialSystemPrompt": "You are the initial turn snapshot oracle.",
+    "reloadedSystemPrompt": "You are the reloaded turn snapshot oracle.",
+    "initialPrompt": "hold the first provider request",
+    "postReloadPrompt": "verify the reloaded runtime",
+    "initialModel": {
+      "id": "faux-1",
+      "name": "Faux One"
+    },
+    "nextModel": {
+      "id": "faux-2",
+      "name": "Faux Two"
+    },
+    "initialThinkingLevel": "low",
+    "nextThinkingLevel": "high",
+    "initialTool": {
+      "name": "switch_snapshot",
+      "callId": "call-switch-snapshot",
+      "description": "Finish the request that began with the initial tool snapshot",
+      "result": "initial snapshot tool executed"
+    },
+    "nextTool": {
+      "name": "after_switch",
+      "description": "Tool visible after the runtime configuration switch"
+    },
+    "responses": [
+      {
+        "text": "switching",
+        "toolCall": true,
+        "inputTokens": 9,
+        "outputTokens": 3
+      },
+      {
+        "text": "same run used the next snapshot",
+        "toolCall": false,
+        "inputTokens": 10,
+        "outputTokens": 4
+      },
+      {
+        "text": "reload used the refreshed snapshot",
+        "toolCall": false,
+        "inputTokens": 11,
+        "outputTokens": 4
+      }
+    ]
   }
 }
