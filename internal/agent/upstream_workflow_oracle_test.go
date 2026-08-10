@@ -33,9 +33,10 @@ var upstreamWorkflowCorpusJSON []byte
 var upstreamWorkflowOracleJSON []byte
 
 type upstreamWorkflowCorpus struct {
-	UpstreamCommit string                   `json:"upstreamCommit"`
-	NodeVersion    string                   `json:"nodeVersion"`
-	Scenario       upstreamWorkflowScenario `json:"scenario"`
+	UpstreamCommit     string                     `json:"upstreamCommit"`
+	NodeVersion        string                     `json:"nodeVersion"`
+	Scenario           upstreamWorkflowScenario   `json:"scenario"`
+	QueueAbortScenario upstreamQueueAbortScenario `json:"queueAbortScenario"`
 }
 
 type upstreamWorkflowScenario struct {

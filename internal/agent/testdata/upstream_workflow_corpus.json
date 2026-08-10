@@ -38,5 +38,45 @@
         "outputTokens": 1
       }
     ]
+  },
+  "queueAbortScenario": {
+    "name": "queue_clear_abort_settled",
+    "sessionId": "session-agent-queue-abort-parity",
+    "systemPrompt": "You are the deterministic queue and abort parity oracle.",
+    "initialPrompt": "hold this response until it is aborted",
+    "steeringMode": "all",
+    "followUpMode": "one-at-a-time",
+    "recalled": {
+      "steering": "recall this steering message",
+      "followUp": "recall this follow-up message"
+    },
+    "surviving": {
+      "steering": [
+        "steering one",
+        "steering two"
+      ],
+      "followUp": [
+        "follow-up one",
+        "follow-up two"
+      ]
+    },
+    "abortError": "scripted provider request aborted",
+    "responses": [
+      {
+        "text": "steering batch done",
+        "inputTokens": 5,
+        "outputTokens": 2
+      },
+      {
+        "text": "first follow-up done",
+        "inputTokens": 6,
+        "outputTokens": 2
+      },
+      {
+        "text": "second follow-up done",
+        "inputTokens": 7,
+        "outputTokens": 3
+      }
+    ]
   }
 }

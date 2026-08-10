@@ -25,6 +25,18 @@ type Corpus = {
     secondPrompt: string;
     responses: ResponseInput[];
   };
+  queueAbortScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    initialPrompt: string;
+    steeringMode: "all" | "one-at-a-time";
+    followUpMode: "all" | "one-at-a-time";
+    recalled: { steering: string; followUp: string };
+    surviving: { steering: string[]; followUp: string[] };
+    abortError: string;
+    responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
+  };
 };
 
 type EntryIDMap = Map<string, string>;
@@ -260,6 +272,242 @@ function normalizeHeader(header: any, root: string, cwd: string): Record<string,
   };
 }
 
+function queueSnapshot(session: any): Record<string, unknown> {
+  return {
+    steering: [...session.getSteeringMessages()],
+    followUp: [...session.getFollowUpMessages()],
+    pendingMessageCount: session.pendingMessageCount,
+  };
+}
+
+async function runQueueAbortScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+  eventStreamModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.queueAbortScenario;
+  if (scenario.responses.length !== 3 || scenario.surviving.steering.length !== 2 || scenario.surviving.followUp.length !== 2) {
+    throw new Error("queue/abort workflow requires two surviving messages per queue and three continuation responses");
+  }
+
+  const scenarioRoot = join(root, "queue-abort");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const normal = harnessModule.createFauxStreamFn(
+    scenario.responses.map((response) => ({
+      text: response.text,
+      stopReason: "stop",
+      usage: {
+        input: response.inputTokens,
+        output: response.outputTokens,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: response.inputTokens + response.outputTokens,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    })),
+  );
+  const providerContexts: any[] = [];
+  const streamOptions: any[] = [];
+  let resolveFirstCall!: () => void;
+  const firstCallStarted = new Promise<void>((resolve) => {
+    resolveFirstCall = resolve;
+  });
+  const model = harnessModule.fauxModel;
+  const streamSimple = (streamModel: any, context: any, options: any) => {
+    const callIndex = providerContexts.length;
+    providerContexts.push(context);
+    streamOptions.push(options);
+    if (callIndex !== 0) {
+      return normal.streamFn(streamModel, context, options);
+    }
+
+    const stream = eventStreamModule.createAssistantMessageEventStream();
+    let finished = false;
+    const abort = () => {
+      if (finished) return;
+      finished = true;
+      const message = {
+        role: "assistant",
+        content: [],
+        api: streamModel.api,
+        provider: streamModel.provider,
+        model: streamModel.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "aborted",
+        errorMessage: scenario.abortError,
+        timestamp: Date.now(),
+      };
+      stream.push({ type: "error", reason: "aborted", error: message });
+    };
+    if (options?.signal?.aborted) abort();
+    else options?.signal?.addEventListener("abort", abort, { once: true });
+    resolveFirstCall();
+    return stream;
+  };
+
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+    steeringMode: scenario.steeringMode,
+    followUpMode: scenario.followUpMode,
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader(),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model,
+    thinkingLevel: "off",
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  const settledSnapshots: Array<Record<string, unknown>> = [];
+  session.subscribe((event: any) => {
+    events.push(event);
+    if (event.type === "agent_settled") {
+      settledSnapshots.push({
+        isStreaming: session.isStreaming,
+        isIdle: session.isIdle,
+        ...queueSnapshot(session),
+      });
+    }
+  });
+
+  const initialRun = session.prompt(scenario.initialPrompt);
+  await firstCallStarted;
+  await session.prompt(scenario.recalled.steering, { streamingBehavior: "steer" });
+  await session.prompt(scenario.recalled.followUp, { streamingBehavior: "followUp" });
+  const queueBeforeClear = queueSnapshot(session);
+  const cleared = session.clearQueue();
+  const clearResult = { steering: [...cleared.steering], followUp: [...cleared.followUp] };
+  const queueAfterClear = queueSnapshot(session);
+
+  for (const text of scenario.surviving.steering) await session.steer(text);
+  for (const text of scenario.surviving.followUp) await session.followUp(text);
+  const queueBeforeAbort = queueSnapshot(session);
+  const abortRun = session.abort();
+  await Promise.all([initialRun, abortRun]);
+  const abortReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+
+  if (providerContexts.length !== 4 || streamOptions.length !== 4 || normal.state.callCount !== 3) {
+    throw new Error(
+      `queue/abort provider calls ${providerContexts.length}/${streamOptions.length}/${normal.state.callCount}, want 4/4/3`,
+    );
+  }
+  if (settledSnapshots.length !== 1) {
+    throw new Error(`queue/abort settled events ${settledSnapshots.length}, want 1`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent queue/abort AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      queueBeforeClear,
+      clearResult,
+      queueAfterClear,
+      queueBeforeAbort,
+      abortReturn,
+      settledSnapshots,
+    },
+    providerInputs: providerContexts.map((context: any, index: number) =>
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd)),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const commit = execFileSync("git", ["-C", upstreamRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (commit !== corpus.upstreamCommit) throw new Error(`upstream commit ${commit}, want ${corpus.upstreamCommit}`);
@@ -286,6 +534,7 @@ async function main(): Promise<void> {
     const utilityModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/test/utilities.ts")));
     const modelTestModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/test/model-runtime-test-utils.ts")));
     const harnessModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/test/test-harness.ts")));
+    const eventStreamModule = await import(moduleURL(join(upstreamRoot, "packages/ai/src/utils/event-stream.ts")));
     const upstreamRequire = createRequire(join(upstreamRoot, "package.json"));
     const { Type } = upstreamRequire("typebox");
 
@@ -408,6 +657,17 @@ async function main(): Promise<void> {
     const reopenedContext = reopened.buildSessionContext();
     const reopenedEntries = reopened.getEntries();
 
+    const queueAbortScenario = await runQueueAbortScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+      eventStreamModule,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -435,6 +695,7 @@ async function main(): Promise<void> {
           },
         },
       },
+      queueAbortScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {

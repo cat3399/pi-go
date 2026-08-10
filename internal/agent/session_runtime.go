@@ -2806,10 +2806,13 @@ func cloneSessionEvent(event SessionEvent) SessionEvent {
 		SessionSummarizationRetryFinishedEvent, EntryAppendedEvent:
 		return value
 	case SessionQueueUpdateEvent:
-		value.Steering = append([]string(nil), value.Steering...)
-		value.FollowUp = append([]string(nil), value.FollowUp...)
-		value.SteeringMessages = append([]llm.ConversationMessage(nil), value.SteeringMessages...)
-		value.FollowUpMessages = append([]llm.ConversationMessage(nil), value.FollowUpMessages...)
+		// coding-agent publishes queue_update arrays even when a side is empty.
+		// Preserve that wire distinction while still handing each observer an
+		// owned slice; append-to-nil would silently turn [] into null.
+		value.Steering = append([]string{}, value.Steering...)
+		value.FollowUp = append([]string{}, value.FollowUp...)
+		value.SteeringMessages = append([]llm.ConversationMessage{}, value.SteeringMessages...)
+		value.FollowUpMessages = append([]llm.ConversationMessage{}, value.FollowUpMessages...)
 		return value
 	case SessionInfoChangeEvent:
 		if value.Name != nil {

@@ -1645,5 +1645,2022 @@
         }
       }
     }
+  },
+  "queueAbortScenario": {
+    "name": "queue_clear_abort_settled",
+    "input": {
+      "name": "queue_clear_abort_settled",
+      "sessionId": "session-agent-queue-abort-parity",
+      "systemPrompt": "You are the deterministic queue and abort parity oracle.",
+      "initialPrompt": "hold this response until it is aborted",
+      "steeringMode": "all",
+      "followUpMode": "one-at-a-time",
+      "recalled": {
+        "steering": "recall this steering message",
+        "followUp": "recall this follow-up message"
+      },
+      "surviving": {
+        "steering": [
+          "steering one",
+          "steering two"
+        ],
+        "followUp": [
+          "follow-up one",
+          "follow-up two"
+        ]
+      },
+      "abortError": "scripted provider request aborted",
+      "responses": [
+        {
+          "text": "steering batch done",
+          "inputTokens": 5,
+          "outputTokens": 2
+        },
+        {
+          "text": "first follow-up done",
+          "inputTokens": 6,
+          "outputTokens": 2
+        },
+        {
+          "text": "second follow-up done",
+          "inputTokens": 7,
+          "outputTokens": 3
+        }
+      ]
+    },
+    "actions": {
+      "queueBeforeClear": {
+        "steering": [
+          "recall this steering message"
+        ],
+        "followUp": [
+          "recall this follow-up message"
+        ],
+        "pendingMessageCount": 2
+      },
+      "clearResult": {
+        "steering": [
+          "recall this steering message"
+        ],
+        "followUp": [
+          "recall this follow-up message"
+        ]
+      },
+      "queueAfterClear": {
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "queueBeforeAbort": {
+        "steering": [
+          "steering one",
+          "steering two"
+        ],
+        "followUp": [
+          "follow-up one",
+          "follow-up two"
+        ],
+        "pendingMessageCount": 4
+      },
+      "abortReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "settledEventCount": 1,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "settledSnapshots": [
+        {
+          "isStreaming": false,
+          "isIdle": true,
+          "steering": [],
+          "followUp": [],
+          "pendingMessageCount": 0
+        }
+      ]
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic queue and abort parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-queue-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic queue and abort parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering one"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering two"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-queue-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic queue and abort parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering one"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering two"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering batch done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 7,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up one"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-queue-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic queue and abort parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering one"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering two"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering batch done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 7,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up one"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "first follow-up done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up two"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-queue-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      }
+    ],
+    "events": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hold this response until it is aborted"
+            }
+          ]
+        }
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "recall this steering message"
+        ],
+        "followUp": []
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "recall this steering message"
+        ],
+        "followUp": [
+          "recall this follow-up message"
+        ]
+      },
+      {
+        "type": "queue_update",
+        "steering": [],
+        "followUp": []
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "steering one"
+        ],
+        "followUp": []
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "steering one",
+          "steering two"
+        ],
+        "followUp": []
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "steering one",
+          "steering two"
+        ],
+        "followUp": [
+          "follow-up one"
+        ]
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "steering one",
+          "steering two"
+        ],
+        "followUp": [
+          "follow-up one",
+          "follow-up two"
+        ]
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "aborted",
+          "errorMessage": "scripted provider request aborted"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "queue_update",
+        "steering": [
+          "steering two"
+        ],
+        "followUp": [
+          "follow-up one",
+          "follow-up two"
+        ]
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering one"
+            }
+          ]
+        }
+      },
+      {
+        "type": "queue_update",
+        "steering": [],
+        "followUp": [
+          "follow-up one",
+          "follow-up two"
+        ]
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering two"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ste"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "eri"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ng "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "bat"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ch "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "don"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "e"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "steering batch done"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering batch done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 7,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "queue_update",
+        "steering": [],
+        "followUp": [
+          "follow-up two"
+        ]
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "follow-up one"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "fir"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "st "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "fol"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "low"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "-up"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " do"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ne"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "first follow-up done"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "first follow-up done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 6,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "queue_update",
+        "steering": [],
+        "followUp": []
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "follow-up two"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "sec"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ond"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " fo"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "llo"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "w-u"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "p d"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "one"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "second follow-up done"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "second follow-up done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 7,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 10,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "user",
+          "assistant",
+          "user",
+          "assistant",
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-1"
+      },
+      "thinkingLevel": "off",
+      "activeTools": [],
+      "systemPrompt": "You are the deterministic queue and abort parity oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hold this response until it is aborted"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "aborted",
+          "errorMessage": "scripted provider request aborted"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering one"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering two"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "steering batch done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 7,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "follow-up one"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "first follow-up done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 6,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "follow-up two"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "second follow-up done"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 7,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 10,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-queue-abort-parity",
+        "userMessages": 5,
+        "assistantMessages": 4,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 9,
+        "tokens": {
+          "input": 18,
+          "output": 7,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 25
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 10,
+          "contextWindow": 128000,
+          "percent": 0.0078125
+        }
+      }
+    },
+    "session": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-queue-abort-parity",
+        "cwd": "<cwd>"
+      },
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering one"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering two"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering batch done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 7,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up one"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "first follow-up done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up two"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-11",
+          "parentId": "entry-10",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "second follow-up done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 7,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 10,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "hold this response until it is aborted"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering one"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering two"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "steering batch done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 7,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up one"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "first follow-up done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "follow-up two"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-11",
+          "parentId": "entry-10",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "second follow-up done"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 7,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 10,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-queue-abort-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hold this response until it is aborted"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "aborted",
+              "errorMessage": "scripted provider request aborted"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering one"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering two"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-7",
+            "parentId": "entry-6",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering batch done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 7,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "follow-up one"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-9",
+            "parentId": "entry-8",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "first follow-up done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-10",
+            "parentId": "entry-9",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "follow-up two"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-11",
+            "parentId": "entry-10",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "second follow-up done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 7,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 10,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hold this response until it is aborted"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "aborted",
+              "errorMessage": "scripted provider request aborted"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering one"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering two"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "steering batch done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 7,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "follow-up one"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "first follow-up done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "follow-up two"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "second follow-up done"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 7,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 10,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    }
   }
 }
