@@ -41,6 +41,7 @@ type upstreamWorkflowCorpus struct {
 	ManualCompaction   upstreamManualCompactionScenario   `json:"manualCompactionScenario"`
 	OverflowCompaction upstreamOverflowCompactionScenario `json:"overflowCompactionScenario"`
 	TurnSnapshot       upstreamTurnSnapshotScenario       `json:"turnSnapshotScenario"`
+	TreeFork           upstreamTreeForkScenario           `json:"treeForkScenario"`
 }
 
 type upstreamWorkflowScenario struct {
@@ -506,6 +507,10 @@ func normalizeWorkflowAgentMessages(messages []agentmsg.Message) ([]any, error) 
 }
 
 func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd, sessionID string) ([]any, error) {
+	return normalizeWorkflowProviderInputsWithForeignLabel(requests, root, cwd, sessionID, "<summary-session-id>")
+}
+
+func normalizeWorkflowProviderInputsWithForeignLabel(requests []provider.Request, root, cwd, sessionID, foreignSessionIDLabel string) ([]any, error) {
 	result := make([]any, 0, len(requests))
 	for requestIndex, request := range requests {
 		messages, err := normalizeWorkflowMessages(request.Messages())
@@ -525,7 +530,7 @@ func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd, ses
 		stream := request.StreamOptions()
 		requestSessionID := stream.SessionID
 		if requestSessionID != "" && requestSessionID != sessionID {
-			requestSessionID = "<summary-session-id>"
+			requestSessionID = foreignSessionIDLabel
 		}
 		var reasoning any
 		if level := request.ThinkingLevel(); level != "" && level != provider.ThinkingOff {
@@ -768,10 +773,17 @@ func normalizeWorkflowCompactionResult(value session.CompactResult, ids map[stri
 
 func workflowEntryIDs(entries []session.Entry) map[string]string {
 	ids := make(map[string]string, len(entries))
-	for index, entry := range entries {
-		ids[entry.ID()] = fmt.Sprintf("entry-%d", index+1)
-	}
+	addWorkflowEntryIDs(entries, ids)
 	return ids
+}
+
+func addWorkflowEntryIDs(entries []session.Entry, ids map[string]string) {
+	for _, entry := range entries {
+		if _, exists := ids[entry.ID()]; exists {
+			continue
+		}
+		ids[entry.ID()] = fmt.Sprintf("entry-%d", len(ids)+1)
+	}
 }
 
 func normalizeWorkflowEntries(entries []session.Entry, ids map[string]string) ([]any, error) {
@@ -870,6 +882,9 @@ func normalizeWorkflowJSONL(path string, ids map[string]string, root, cwd string
 	header := map[string]any{
 		"type": rawHeader["type"], "version": rawHeader["version"], "id": rawHeader["id"],
 		"cwd": normalizeWorkflowPath(fmt.Sprint(rawHeader["cwd"]), root, cwd),
+	}
+	if parentSession, exists := rawHeader["parentSession"]; exists {
+		header["parentSession"] = normalizeWorkflowPath(fmt.Sprint(parentSession), root, cwd)
 	}
 	entries := make([]any, 0, len(lines)-1)
 	for index, line := range lines[1:] {

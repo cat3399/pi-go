@@ -196,5 +196,35 @@
         "outputTokens": 4
       }
     ]
+  },
+  "treeForkScenario": {
+    "name": "tree_navigation_runtime_fork",
+    "sourceSessionId": "session-agent-tree-fork-parity",
+    "systemPrompt": "You are the deterministic tree and fork parity oracle.",
+    "rootPrompt": "root question",
+    "abandonedPrompt": "abandoned branch question",
+    "branchPrompt": "replacement branch question",
+    "responses": [
+      {
+        "text": "root answer",
+        "inputTokens": 3,
+        "outputTokens": 2
+      },
+      {
+        "text": "abandoned branch answer",
+        "inputTokens": 5,
+        "outputTokens": 3
+      },
+      {
+        "text": "replacement branch answer",
+        "inputTokens": 5,
+        "outputTokens": 3
+      },
+      {
+        "text": "forked replacement answer",
+        "inputTokens": 5,
+        "outputTokens": 3
+      }
+    ]
   }
 }

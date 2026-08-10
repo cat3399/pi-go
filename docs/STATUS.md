@@ -86,9 +86,13 @@ Agent 或 durable session 的第二套状态。
   事件和 10 条 JSONL entry。首个运行中请求保持旧 model/low/旧 prompt/旧工具快照；控制切换后，
   同一 run 的下一 tool turn 立即使用新 model/high/新工具；reload 刷新 resource prompt，同时保留
   Agent、消息、模型/思考选择、工具选择和 reopen 状态。
+- 已建立 `tree_navigation_runtime_fork` 共同 workflow，逐字段对齐 4 次 Provider 输入、源会话 54 个
+  事件与 fork 会话 20 个事件。无摘要 navigation 把用户目标文本送回编辑区并把叶节点移到其父项，
+  废弃分支仍完整留在源 JSONL；默认 `fork(before)` 通过 Runtime.Factory 替换 AgentSession，新会话
+  记录源文件为 `parentSession`，源/分支的 entries、tree、context、物理 JSONL 与 reopen 全部一致。
 - 静态 `CreateAgentSession` 现在和带动态 ModelRuntime 的生产装配一样应用 retry budget/base delay、
   compaction reserve/keepRecent 与 branch-summary reserve，不再静默回退默认值。
-- branch/tree/fork 和损坏 session 恢复的共同 workflow 尚未建立，是下一项任务。
+- 损坏 session 恢复与 AgentSession 续写的共同 workflow 尚未建立，是下一项任务。
 
 ### 产品级 AgentSession
 
@@ -131,10 +135,10 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及六个完整
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及七个完整
 AgentSession workflow。尚未共同验证：
 
-- fork、tree 和损坏恢复；
+- 损坏 session 的生产链恢复与续写；
 - retry/compaction 与 abort、reload、tree navigation 的更复杂竞争；
 - 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
 
@@ -152,7 +156,7 @@ AgentSession workflow。尚未共同验证：
 - `git diff --check`
 - 固定上游 `createAgentSession()` 的 rich/tool/reopen、queue/abort/settled、retry/Retry-After、
   manual compaction、overflow compact/continue 与 model/thinking/tools/reload turn snapshot
-  workflow oracle；
+  workflow，以及 tree navigation/Runtime fork oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

@@ -18,11 +18,13 @@
 工具循环、多轮上下文、混合 queue mode、queue recall、abort 后续跑、Agent retry、手动/自动压缩、
 overflow continue、最终 settled、完整事件、JSONL 与 reopen。`turn_snapshot_model_tools_reload` 也已
 逐字段通过，固定了运行中请求不可变、同一 run 下一 tool turn 刷新 model/thinking/tools/prompt，
-以及 reload 后资源 prompt 和 durable state 的语义。当前进入会话树场景。
+以及 reload 后资源 prompt 和 durable state 的语义。`tree_navigation_runtime_fork` 已逐字段固定
+无摘要 tree navigation、废弃分支保留、Runtime session replacement、fork `parentSession`、源与分支
+双 JSONL 及 reopen。当前进入损坏 session 的生产链恢复与续写场景。
 
 ### 下一批共同场景
 
-1. branch、tree navigation、fork 和损坏 session 恢复；
+1. 损坏 session 恢复与 AgentSession 续写；
 2. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径。
 
 每个场景必须同时比较：

@@ -8480,5 +8480,3212 @@
         }
       }
     }
+  },
+  "treeForkScenario": {
+    "name": "tree_navigation_runtime_fork",
+    "input": {
+      "name": "tree_navigation_runtime_fork",
+      "sourceSessionId": "session-agent-tree-fork-parity",
+      "systemPrompt": "You are the deterministic tree and fork parity oracle.",
+      "rootPrompt": "root question",
+      "abandonedPrompt": "abandoned branch question",
+      "branchPrompt": "replacement branch question",
+      "responses": [
+        {
+          "text": "root answer",
+          "inputTokens": 3,
+          "outputTokens": 2
+        },
+        {
+          "text": "abandoned branch answer",
+          "inputTokens": 5,
+          "outputTokens": 3
+        },
+        {
+          "text": "replacement branch answer",
+          "inputTokens": 5,
+          "outputTokens": 3
+        },
+        {
+          "text": "forked replacement answer",
+          "inputTokens": 5,
+          "outputTokens": 3
+        }
+      ]
+    },
+    "actions": {
+      "navigation": {
+        "cancelled": false,
+        "editorText": "abandoned branch question",
+        "targetId": "entry-5"
+      },
+      "fork": {
+        "cancelled": false,
+        "selectedText": "replacement branch question",
+        "targetId": "entry-7",
+        "replacedSession": true,
+        "sourceSessionFile": "<source-session-file>",
+        "forkSessionFile": "<fork-session-file>",
+        "forkSessionId": "<fork-session-id>"
+      },
+      "sourceBeforeNavigation": {
+        "leafId": "entry-6",
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      },
+      "sourceAfterNavigation": {
+        "leafId": "entry-4",
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic tree and fork parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-tree-fork-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic tree and fork parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "abandoned branch question"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-tree-fork-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic tree and fork parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-tree-fork-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic tree and fork parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "<fork-session-id>",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      }
+    ],
+    "sourceEvents": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "root question"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "roo"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "t a"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nsw"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "er"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "root answer"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "root answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 3,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 5,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "abandoned branch question"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "aba"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ndo"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ned"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " br"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "anc"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "h a"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nsw"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "er"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "abandoned branch answer"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "abandoned branch answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "replacement branch question"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "rep"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "lac"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "eme"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nt "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "bra"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nch"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " an"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "swe"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "r"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "replacement branch answer"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "replacement branch answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "forkEvents": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "replacement branch question"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "for"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ked"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " re"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "pla"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "cem"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ent"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " an"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "swe"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "r"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "forked replacement answer"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "forked replacement answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-1"
+      },
+      "thinkingLevel": "off",
+      "activeTools": [],
+      "systemPrompt": "You are the deterministic tree and fork parity oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "root question"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "root answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 3,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 5,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "replacement branch question"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "forked replacement answer"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "<fork-session-id>",
+        "userMessages": 2,
+        "assistantMessages": 2,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 4,
+        "tokens": {
+          "input": 8,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 13
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 8,
+          "contextWindow": 128000,
+          "percent": 0.00625
+        }
+      }
+    },
+    "source": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-tree-fork-parity",
+        "cwd": "<cwd>"
+      },
+      "leafId": "entry-8",
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "abandoned branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "abandoned branch answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "abandoned branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "abandoned branch answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "tree": [
+        {
+          "entry": {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "label": null,
+          "children": [
+            {
+              "entry": {
+                "type": "thinking_level_change",
+                "id": "entry-2",
+                "parentId": "entry-1",
+                "thinkingLevel": "off"
+              },
+              "label": null,
+              "children": [
+                {
+                  "entry": {
+                    "type": "message",
+                    "id": "entry-3",
+                    "parentId": "entry-2",
+                    "message": {
+                      "role": "user",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "root question"
+                        }
+                      ]
+                    }
+                  },
+                  "label": null,
+                  "children": [
+                    {
+                      "entry": {
+                        "type": "message",
+                        "id": "entry-4",
+                        "parentId": "entry-3",
+                        "message": {
+                          "role": "assistant",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "root answer"
+                            }
+                          ],
+                          "api": "anthropic-messages",
+                          "provider": "faux",
+                          "model": "faux-1",
+                          "usage": {
+                            "input": 3,
+                            "output": 2,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 5,
+                            "cost": {
+                              "input": 0,
+                              "output": 0,
+                              "cacheRead": 0,
+                              "cacheWrite": 0,
+                              "total": 0
+                            }
+                          },
+                          "stopReason": "stop"
+                        }
+                      },
+                      "label": null,
+                      "children": [
+                        {
+                          "entry": {
+                            "type": "message",
+                            "id": "entry-5",
+                            "parentId": "entry-4",
+                            "message": {
+                              "role": "user",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "abandoned branch question"
+                                }
+                              ]
+                            }
+                          },
+                          "label": null,
+                          "children": [
+                            {
+                              "entry": {
+                                "type": "message",
+                                "id": "entry-6",
+                                "parentId": "entry-5",
+                                "message": {
+                                  "role": "assistant",
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "abandoned branch answer"
+                                    }
+                                  ],
+                                  "api": "anthropic-messages",
+                                  "provider": "faux",
+                                  "model": "faux-1",
+                                  "usage": {
+                                    "input": 5,
+                                    "output": 3,
+                                    "cacheRead": 0,
+                                    "cacheWrite": 0,
+                                    "totalTokens": 8,
+                                    "cost": {
+                                      "input": 0,
+                                      "output": 0,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "total": 0
+                                    }
+                                  },
+                                  "stopReason": "stop"
+                                }
+                              },
+                              "label": null,
+                              "children": []
+                            }
+                          ]
+                        },
+                        {
+                          "entry": {
+                            "type": "message",
+                            "id": "entry-7",
+                            "parentId": "entry-4",
+                            "message": {
+                              "role": "user",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "replacement branch question"
+                                }
+                              ]
+                            }
+                          },
+                          "label": null,
+                          "children": [
+                            {
+                              "entry": {
+                                "type": "message",
+                                "id": "entry-8",
+                                "parentId": "entry-7",
+                                "message": {
+                                  "role": "assistant",
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "replacement branch answer"
+                                    }
+                                  ],
+                                  "api": "anthropic-messages",
+                                  "provider": "faux",
+                                  "model": "faux-1",
+                                  "usage": {
+                                    "input": 5,
+                                    "output": 3,
+                                    "cacheRead": 0,
+                                    "cacheWrite": 0,
+                                    "totalTokens": 8,
+                                    "cost": {
+                                      "input": 0,
+                                      "output": 0,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "total": 0
+                                    }
+                                  },
+                                  "stopReason": "stop"
+                                }
+                              },
+                              "label": null,
+                              "children": []
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "context": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        ],
+        "model": {
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        "thinkingLevel": "off"
+      },
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-tree-fork-parity",
+        "userMessages": 3,
+        "assistantMessages": 3,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 6,
+        "tokens": {
+          "input": 13,
+          "output": 8,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 21
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 8,
+          "contextWindow": 128000,
+          "percent": 0.00625
+        }
+      },
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-tree-fork-parity",
+          "cwd": "<cwd>"
+        },
+        "leafId": "entry-8",
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-7",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "fileEntries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "abandoned branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-7",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "tree": [
+          {
+            "entry": {
+              "type": "model_change",
+              "id": "entry-1",
+              "parentId": null,
+              "provider": "faux",
+              "modelId": "faux-1"
+            },
+            "label": null,
+            "children": [
+              {
+                "entry": {
+                  "type": "thinking_level_change",
+                  "id": "entry-2",
+                  "parentId": "entry-1",
+                  "thinkingLevel": "off"
+                },
+                "label": null,
+                "children": [
+                  {
+                    "entry": {
+                      "type": "message",
+                      "id": "entry-3",
+                      "parentId": "entry-2",
+                      "message": {
+                        "role": "user",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "root question"
+                          }
+                        ]
+                      }
+                    },
+                    "label": null,
+                    "children": [
+                      {
+                        "entry": {
+                          "type": "message",
+                          "id": "entry-4",
+                          "parentId": "entry-3",
+                          "message": {
+                            "role": "assistant",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "root answer"
+                              }
+                            ],
+                            "api": "anthropic-messages",
+                            "provider": "faux",
+                            "model": "faux-1",
+                            "usage": {
+                              "input": 3,
+                              "output": 2,
+                              "cacheRead": 0,
+                              "cacheWrite": 0,
+                              "totalTokens": 5,
+                              "cost": {
+                                "input": 0,
+                                "output": 0,
+                                "cacheRead": 0,
+                                "cacheWrite": 0,
+                                "total": 0
+                              }
+                            },
+                            "stopReason": "stop"
+                          }
+                        },
+                        "label": null,
+                        "children": [
+                          {
+                            "entry": {
+                              "type": "message",
+                              "id": "entry-5",
+                              "parentId": "entry-4",
+                              "message": {
+                                "role": "user",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "abandoned branch question"
+                                  }
+                                ]
+                              }
+                            },
+                            "label": null,
+                            "children": [
+                              {
+                                "entry": {
+                                  "type": "message",
+                                  "id": "entry-6",
+                                  "parentId": "entry-5",
+                                  "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                      {
+                                        "type": "text",
+                                        "text": "abandoned branch answer"
+                                      }
+                                    ],
+                                    "api": "anthropic-messages",
+                                    "provider": "faux",
+                                    "model": "faux-1",
+                                    "usage": {
+                                      "input": 5,
+                                      "output": 3,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "totalTokens": 8,
+                                      "cost": {
+                                        "input": 0,
+                                        "output": 0,
+                                        "cacheRead": 0,
+                                        "cacheWrite": 0,
+                                        "total": 0
+                                      }
+                                    },
+                                    "stopReason": "stop"
+                                  }
+                                },
+                                "label": null,
+                                "children": []
+                              }
+                            ]
+                          },
+                          {
+                            "entry": {
+                              "type": "message",
+                              "id": "entry-7",
+                              "parentId": "entry-4",
+                              "message": {
+                                "role": "user",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "replacement branch question"
+                                  }
+                                ]
+                              }
+                            },
+                            "label": null,
+                            "children": [
+                              {
+                                "entry": {
+                                  "type": "message",
+                                  "id": "entry-8",
+                                  "parentId": "entry-7",
+                                  "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                      {
+                                        "type": "text",
+                                        "text": "replacement branch answer"
+                                      }
+                                    ],
+                                    "api": "anthropic-messages",
+                                    "provider": "faux",
+                                    "model": "faux-1",
+                                    "usage": {
+                                      "input": 5,
+                                      "output": 3,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "totalTokens": 8,
+                                      "cost": {
+                                        "input": 0,
+                                        "output": 0,
+                                        "cacheRead": 0,
+                                        "cacheWrite": 0,
+                                        "total": 0
+                                      }
+                                    },
+                                    "stopReason": "stop"
+                                  }
+                                },
+                                "label": null,
+                                "children": []
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    },
+    "fork": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "<fork-session-id>",
+        "cwd": "<cwd>",
+        "parentSession": "<source-session-file>"
+      },
+      "leafId": "entry-10",
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "forked replacement answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-9",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "forked replacement answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "tree": [
+        {
+          "entry": {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "label": null,
+          "children": [
+            {
+              "entry": {
+                "type": "thinking_level_change",
+                "id": "entry-2",
+                "parentId": "entry-1",
+                "thinkingLevel": "off"
+              },
+              "label": null,
+              "children": [
+                {
+                  "entry": {
+                    "type": "message",
+                    "id": "entry-3",
+                    "parentId": "entry-2",
+                    "message": {
+                      "role": "user",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "root question"
+                        }
+                      ]
+                    }
+                  },
+                  "label": null,
+                  "children": [
+                    {
+                      "entry": {
+                        "type": "message",
+                        "id": "entry-4",
+                        "parentId": "entry-3",
+                        "message": {
+                          "role": "assistant",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "root answer"
+                            }
+                          ],
+                          "api": "anthropic-messages",
+                          "provider": "faux",
+                          "model": "faux-1",
+                          "usage": {
+                            "input": 3,
+                            "output": 2,
+                            "cacheRead": 0,
+                            "cacheWrite": 0,
+                            "totalTokens": 5,
+                            "cost": {
+                              "input": 0,
+                              "output": 0,
+                              "cacheRead": 0,
+                              "cacheWrite": 0,
+                              "total": 0
+                            }
+                          },
+                          "stopReason": "stop"
+                        }
+                      },
+                      "label": null,
+                      "children": [
+                        {
+                          "entry": {
+                            "type": "message",
+                            "id": "entry-9",
+                            "parentId": "entry-4",
+                            "message": {
+                              "role": "user",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "replacement branch question"
+                                }
+                              ]
+                            }
+                          },
+                          "label": null,
+                          "children": [
+                            {
+                              "entry": {
+                                "type": "message",
+                                "id": "entry-10",
+                                "parentId": "entry-9",
+                                "message": {
+                                  "role": "assistant",
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "forked replacement answer"
+                                    }
+                                  ],
+                                  "api": "anthropic-messages",
+                                  "provider": "faux",
+                                  "model": "faux-1",
+                                  "usage": {
+                                    "input": 5,
+                                    "output": 3,
+                                    "cacheRead": 0,
+                                    "cacheWrite": 0,
+                                    "totalTokens": 8,
+                                    "cost": {
+                                      "input": 0,
+                                      "output": 0,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "total": 0
+                                    }
+                                  },
+                                  "stopReason": "stop"
+                                }
+                              },
+                              "label": null,
+                              "children": []
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "context": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "root answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 3,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 5,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "replacement branch question"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "forked replacement answer"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        ],
+        "model": {
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        "thinkingLevel": "off"
+      },
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "<fork-session-id>",
+          "cwd": "<cwd>",
+          "parentSession": "<source-session-file>"
+        },
+        "leafId": "entry-10",
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-9",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-10",
+            "parentId": "entry-9",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "forked replacement answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "fileEntries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-9",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-10",
+            "parentId": "entry-9",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "forked replacement answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "tree": [
+          {
+            "entry": {
+              "type": "model_change",
+              "id": "entry-1",
+              "parentId": null,
+              "provider": "faux",
+              "modelId": "faux-1"
+            },
+            "label": null,
+            "children": [
+              {
+                "entry": {
+                  "type": "thinking_level_change",
+                  "id": "entry-2",
+                  "parentId": "entry-1",
+                  "thinkingLevel": "off"
+                },
+                "label": null,
+                "children": [
+                  {
+                    "entry": {
+                      "type": "message",
+                      "id": "entry-3",
+                      "parentId": "entry-2",
+                      "message": {
+                        "role": "user",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "root question"
+                          }
+                        ]
+                      }
+                    },
+                    "label": null,
+                    "children": [
+                      {
+                        "entry": {
+                          "type": "message",
+                          "id": "entry-4",
+                          "parentId": "entry-3",
+                          "message": {
+                            "role": "assistant",
+                            "content": [
+                              {
+                                "type": "text",
+                                "text": "root answer"
+                              }
+                            ],
+                            "api": "anthropic-messages",
+                            "provider": "faux",
+                            "model": "faux-1",
+                            "usage": {
+                              "input": 3,
+                              "output": 2,
+                              "cacheRead": 0,
+                              "cacheWrite": 0,
+                              "totalTokens": 5,
+                              "cost": {
+                                "input": 0,
+                                "output": 0,
+                                "cacheRead": 0,
+                                "cacheWrite": 0,
+                                "total": 0
+                              }
+                            },
+                            "stopReason": "stop"
+                          }
+                        },
+                        "label": null,
+                        "children": [
+                          {
+                            "entry": {
+                              "type": "message",
+                              "id": "entry-9",
+                              "parentId": "entry-4",
+                              "message": {
+                                "role": "user",
+                                "content": [
+                                  {
+                                    "type": "text",
+                                    "text": "replacement branch question"
+                                  }
+                                ]
+                              }
+                            },
+                            "label": null,
+                            "children": [
+                              {
+                                "entry": {
+                                  "type": "message",
+                                  "id": "entry-10",
+                                  "parentId": "entry-9",
+                                  "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                      {
+                                        "type": "text",
+                                        "text": "forked replacement answer"
+                                      }
+                                    ],
+                                    "api": "anthropic-messages",
+                                    "provider": "faux",
+                                    "model": "faux-1",
+                                    "usage": {
+                                      "input": 5,
+                                      "output": 3,
+                                      "cacheRead": 0,
+                                      "cacheWrite": 0,
+                                      "totalTokens": 8,
+                                      "cost": {
+                                        "input": 0,
+                                        "output": 0,
+                                        "cacheRead": 0,
+                                        "cacheWrite": 0,
+                                        "total": 0
+                                      }
+                                    },
+                                    "stopReason": "stop"
+                                  }
+                                },
+                                "label": null,
+                                "children": []
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "root answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 3,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 5,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "replacement branch question"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "forked replacement answer"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    }
   }
 }

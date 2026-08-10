@@ -87,6 +87,15 @@ type Corpus = {
     nextTool: { name: string; description: string };
     responses: Array<{ text: string; toolCall: boolean; inputTokens: number; outputTokens: number }>;
   };
+  treeForkScenario: {
+    name: string;
+    sourceSessionId: string;
+    systemPrompt: string;
+    rootPrompt: string;
+    abandonedPrompt: string;
+    branchPrompt: string;
+    responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
+  };
 };
 
 type EntryIDMap = Map<string, string>;
@@ -352,6 +361,7 @@ function normalizeProviderInput(
   root: string,
   cwd: string,
   sessionId: string,
+  foreignSessionIdLabel = "<summary-session-id>",
 ): Record<string, unknown> {
   const requestSessionId = options?.sessionId ?? "";
   return {
@@ -360,7 +370,7 @@ function normalizeProviderInput(
     messages: context.messages.map(normalizeMessage),
     tools: (context.tools ?? []).map(normalizeTool),
     stream: {
-      sessionId: requestSessionId === sessionId || requestSessionId === "" ? requestSessionId : "<summary-session-id>",
+      sessionId: requestSessionId === sessionId || requestSessionId === "" ? requestSessionId : foreignSessionIdLabel,
       reasoning: options?.reasoning ?? null,
       transport: options?.transport ?? "",
     },
@@ -1471,6 +1481,329 @@ async function runTurnSnapshotScenario(
   };
 }
 
+function addEntryIDs(entries: any[], ids: EntryIDMap): void {
+  for (const entry of entries) {
+    if (!ids.has(entry.id)) ids.set(entry.id, `entry-${ids.size + 1}`);
+  }
+}
+
+function normalizeSessionTree(nodes: any[], ids: EntryIDMap): Array<Record<string, unknown>> {
+  return nodes.map((node) => ({
+    entry: normalizeEntry(node.entry, ids),
+    label: node.label ?? null,
+    children: normalizeSessionTree(node.children, ids),
+  }));
+}
+
+function normalizeTreeForkHeader(
+  header: any,
+  root: string,
+  cwd: string,
+  forkSessionId: string,
+  sourceSessionFile: string,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {
+    type: header.type,
+    version: header.version,
+    id: header.id === forkSessionId ? "<fork-session-id>" : header.id,
+    cwd: normalizePathText(header.cwd, root, cwd),
+  };
+  if (header.parentSession !== undefined) {
+    normalized.parentSession = header.parentSession === sourceSessionFile
+      ? "<source-session-file>"
+      : normalizePathText(header.parentSession, root, cwd);
+  }
+  return normalized;
+}
+
+function normalizeTreeForkContext(context: any): Record<string, unknown> {
+  return {
+    messages: context.messages.map(normalizeMessage),
+    model: context.model,
+    thinkingLevel: context.thinkingLevel,
+  };
+}
+
+async function runTreeForkScenario(
+  root: string,
+  runtimeModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.treeForkScenario;
+  if (scenario.responses.length !== 4) {
+    throw new Error("tree/fork workflow requires four provider responses");
+  }
+
+  const scenarioRoot = join(root, "tree-fork");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const faux = harnessModule.createFauxStreamFn(scenario.responses.map((response) => ({
+    text: response.text,
+    stopReason: "stop",
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  })));
+  const providerModels: any[] = [];
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    providerModels.push(model);
+    streamOptions.push(options);
+    return faux.streamFn(model, context, options);
+  };
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+  const modelRuntime = modelTestModule.getModelRuntime(modelRegistry);
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+  });
+  const createRuntime = async ({ cwd: runtimeCwd, sessionManager, sessionStartEvent }: any) => {
+    const services = await runtimeModule.createAgentSessionServices({
+      cwd: runtimeCwd,
+      agentDir,
+      modelRuntime,
+      settingsManager,
+      resourceLoaderOptions: {
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: scenario.systemPrompt,
+      },
+    });
+    return {
+      ...(await runtimeModule.createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+        model,
+        thinkingLevel: "off",
+        tools: [],
+        customTools: [],
+      })),
+      services,
+      diagnostics: services.diagnostics,
+    };
+  };
+  const sourceManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sourceSessionId });
+  const runtimeHost = await runtimeModule.createAgentSessionRuntime(createRuntime, {
+    cwd,
+    agentDir,
+    sessionManager: sourceManager,
+  });
+  const sourceSession = runtimeHost.session;
+  const sourceEvents: any[] = [];
+  sourceSession.subscribe((event: any) => sourceEvents.push(event));
+
+  await sourceSession.prompt(scenario.rootPrompt);
+  await sourceSession.prompt(scenario.abandonedPrompt);
+  const usersBeforeNavigation = sourceSession.sessionManager.getEntries().filter(
+    (entry: any) => entry.type === "message" && entry.message.role === "user",
+  );
+  if (usersBeforeNavigation.length !== 2) {
+    throw new Error(`tree/fork source user entries ${usersBeforeNavigation.length}, want 2`);
+  }
+  const abandonedUserEntry = usersBeforeNavigation[1];
+  const sourceBeforeNavigation = {
+    leafId: sourceSession.sessionManager.getLeafId(),
+    context: sourceSession.sessionManager.buildSessionContext(),
+  };
+  const navigation = await sourceSession.navigateTree(abandonedUserEntry.id);
+  const sourceAfterNavigation = {
+    leafId: sourceSession.sessionManager.getLeafId(),
+    context: sourceSession.sessionManager.buildSessionContext(),
+  };
+  await sourceSession.prompt(scenario.branchPrompt);
+  const branchUsers = sourceSession.sessionManager.getEntries().filter(
+    (entry: any) => entry.type === "message" && entry.message.role === "user",
+  );
+  const branchUserEntry = branchUsers.find((entry: any) => {
+    const content = entry.message.content;
+    return typeof content === "string"
+      ? content === scenario.branchPrompt
+      : content.some((part: any) => part.type === "text" && part.text === scenario.branchPrompt);
+  });
+  if (!branchUserEntry) throw new Error("tree/fork replacement branch user entry was not persisted");
+
+  const sourceSessionFile = sourceSession.sessionFile;
+  if (!sourceSessionFile) throw new Error("persistent tree/fork source did not publish a session file");
+  const sourceEntries = sourceSession.sessionManager.getEntries();
+  const sourceHeader = sourceSession.sessionManager.getHeader();
+  if (!sourceHeader) throw new Error("tree/fork source header is missing");
+  const sourceLeafId = sourceSession.sessionManager.getLeafId();
+  const sourceTree = sourceSession.sessionManager.getTree();
+  const sourceContext = sourceSession.sessionManager.buildSessionContext();
+  const sourceStats = sourceSession.getSessionStats();
+
+  const fork = await runtimeHost.fork(branchUserEntry.id);
+  const forkSession = runtimeHost.session;
+  const replacedSession = forkSession !== sourceSession;
+  const forkSessionFile = forkSession.sessionFile;
+  if (!forkSessionFile) throw new Error("persistent tree/fork replacement did not publish a session path");
+  const forkSessionId = forkSession.sessionManager.getSessionId();
+  const forkEvents: any[] = [];
+  forkSession.subscribe((event: any) => forkEvents.push(event));
+  if (fork.selectedText !== scenario.branchPrompt) {
+    throw new Error(`tree/fork selected text ${String(fork.selectedText)}, want ${scenario.branchPrompt}`);
+  }
+  await forkSession.prompt(fork.selectedText);
+  if (faux.state.callCount !== 4 || providerModels.length !== 4 || streamOptions.length !== 4) {
+    throw new Error(
+      `tree/fork provider calls ${faux.state.callCount}/${providerModels.length}/${streamOptions.length}, want 4/4/4`,
+    );
+  }
+
+  const forkEntries = forkSession.sessionManager.getEntries();
+  const ids: EntryIDMap = new Map();
+  addEntryIDs(sourceEntries, ids);
+  addEntryIDs(forkEntries, ids);
+
+  const sourceFileLines = readFileSync(sourceSessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const forkFileLines = readFileSync(forkSessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const forkHeader = forkSession.sessionManager.getHeader();
+  if (!forkHeader) throw new Error("tree/fork replacement header is missing");
+  const forkLeafId = forkSession.sessionManager.getLeafId();
+  const forkTree = forkSession.sessionManager.getTree();
+  const forkContext = forkSession.sessionManager.buildSessionContext();
+  const forkStats = forkSession.getSessionStats();
+  const normalizedForkStats = normalizeStats(forkStats);
+  normalizedForkStats.sessionId = "<fork-session-id>";
+  const finalState = {
+    isStreaming: forkSession.isStreaming,
+    pendingMessageCount: forkSession.pendingMessageCount,
+    model: { provider: forkSession.model.provider, api: forkSession.model.api, id: forkSession.model.id },
+    thinkingLevel: forkSession.thinkingLevel,
+    activeTools: forkSession.getActiveToolNames(),
+    systemPrompt: normalizePathText(forkSession.systemPrompt, scenarioRoot, cwd),
+    messages: forkSession.messages.map(normalizeMessage),
+    stats: normalizedForkStats,
+  };
+  await runtimeHost.dispose();
+
+  const reopenedSource = sessionModule.SessionManager.open(sourceSessionFile, sessionDir);
+  const reopenedFork = sessionModule.SessionManager.open(forkSessionFile, sessionDir);
+  const normalizeProjection = (manager: any, header: any, entries: any[], fileLines: any[]) => ({
+    header: normalizeTreeForkHeader(header, scenarioRoot, cwd, forkSessionId, sourceSessionFile),
+    leafId: ids.get(manager.getLeafId()) ?? null,
+    entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+    fileEntries: fileLines.slice(1).map((entry: any) => normalizeEntry(entry, ids)),
+    tree: normalizeSessionTree(manager.getTree(), ids),
+    context: normalizeTreeForkContext(manager.buildSessionContext()),
+  });
+  const normalizePoint = (point: { leafId: string | null; context: any }) => ({
+    leafId: point.leafId === null ? null : ids.get(point.leafId),
+    context: normalizeTreeForkContext(point.context),
+  });
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      navigation: {
+        cancelled: navigation.cancelled,
+        editorText: navigation.editorText,
+        targetId: ids.get(abandonedUserEntry.id),
+      },
+      fork: {
+        cancelled: fork.cancelled,
+        selectedText: fork.selectedText,
+        targetId: ids.get(branchUserEntry.id),
+        replacedSession,
+        sourceSessionFile: "<source-session-file>",
+        forkSessionFile: "<fork-session-file>",
+        forkSessionId: "<fork-session-id>",
+      },
+      sourceBeforeNavigation: normalizePoint(sourceBeforeNavigation),
+      sourceAfterNavigation: normalizePoint(sourceAfterNavigation),
+    },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(
+        providerModels[index],
+        context,
+        streamOptions[index],
+        scenarioRoot,
+        cwd,
+        scenario.sourceSessionId,
+        "<fork-session-id>",
+      )),
+    sourceEvents: sourceEvents.map((event) => normalizeEvent(event, ids)),
+    forkEvents: forkEvents.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    source: {
+      ...normalizeProjection(
+        {
+          getLeafId: () => sourceLeafId,
+          getTree: () => sourceTree,
+          buildSessionContext: () => sourceContext,
+        },
+        sourceHeader,
+        sourceEntries,
+        sourceFileLines,
+      ),
+      stats: normalizeStats(sourceStats),
+      reopened: normalizeProjection(
+        reopenedSource,
+        reopenedSource.getHeader(),
+        reopenedSource.getEntries(),
+        sourceFileLines,
+      ),
+    },
+    fork: {
+      ...normalizeProjection(
+        {
+          getLeafId: () => forkLeafId,
+          getTree: () => forkTree,
+          buildSessionContext: () => forkContext,
+        },
+        forkHeader,
+        forkEntries,
+        forkFileLines,
+      ),
+      reopened: normalizeProjection(
+        reopenedFork,
+        reopenedFork.getHeader(),
+        reopenedFork.getEntries(),
+        forkFileLines,
+      ),
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const commit = execFileSync("git", ["-C", upstreamRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (commit !== corpus.upstreamCommit) throw new Error(`upstream commit ${commit}, want ${corpus.upstreamCommit}`);
@@ -1491,6 +1824,9 @@ async function main(): Promise<void> {
   Math.random = () => 0;
   try {
     const sdkModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/src/core/sdk.ts")));
+    const runtimeModule = await import(
+      moduleURL(join(upstreamRoot, "packages/coding-agent/src/core/agent-session-runtime.ts"))
+    );
     const sessionModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/src/core/session-manager.ts")));
     const settingsModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/src/core/settings-manager.ts")));
     const authModule = await import(moduleURL(join(upstreamRoot, "packages/coding-agent/src/core/auth-storage.ts")));
@@ -1673,6 +2009,15 @@ async function main(): Promise<void> {
       eventStreamModule,
       Type,
     );
+    const treeForkScenario = await runTreeForkScenario(
+      root,
+      runtimeModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      modelTestModule,
+      harnessModule,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -1705,6 +2050,7 @@ async function main(): Promise<void> {
       manualCompactionScenario,
       overflowCompactionScenario,
       turnSnapshotScenario,
+      treeForkScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {

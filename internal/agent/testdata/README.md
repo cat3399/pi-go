@@ -5,14 +5,15 @@
 `createAgentSession()` path. The generator uses a deterministic stream and tool
 only as test inputs; it does not enter pi-go production assembly.
 
-The oracle currently contains six production workflows: rich/tool/multi-turn/
+The oracle currently contains seven production workflows: rich/tool/multi-turn/
 reopen, mixed-mode queue/clear/abort/settled, retry/Retry-After recovery, manual
 compaction, overflow compaction/continue, and the in-flight model/thinking/
-active-tools snapshot plus resource reload workflow. It records provider inputs,
-every AgentSession event and its semantic payload, action results, final
-state/stats, normalized JSONL entries, and the context obtained by reopening the
-persisted session. Only timestamps, generated entry IDs, and temporary absolute
-paths are normalized.
+active-tools snapshot plus resource reload workflow, as well as tree navigation
+and Runtime fork replacement. It records provider inputs, every AgentSession
+event and its semantic payload, action results, final state/stats, normalized
+JSONL entries/tree structure, and the context obtained by reopening the persisted
+source and fork sessions. Only timestamps, generated entry/session IDs, and
+temporary absolute paths are normalized.
 
 Run from the pinned upstream repository root so `tsx` applies its workspace
 path mappings. A fresh upstream checkout must first materialize its ignored
