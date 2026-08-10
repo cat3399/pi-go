@@ -818,6 +818,6 @@ var _ provider.EventStream = (*panicCloseStream)(nil)
 type panickingNameTool struct{}
 
 func (panickingNameTool) Name() string { panic("name broke") }
-func (panickingNameTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (panickingNameTool) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{}, nil
 }

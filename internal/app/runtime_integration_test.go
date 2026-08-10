@@ -646,7 +646,7 @@ func assertCwdBoundServices(t *testing.T, services *agentruntime.Services, cwd, 
 	if !ok {
 		t.Fatalf("tool executor = %T, want named executor", services.Tool)
 	}
-	output, err := named.ExecuteNamed(context.Background(), "read", []byte(`{"path":"marker.txt"}`), nil)
+	output, err := named.ExecuteNamed(context.Background(), "call-read", "read", []byte(`{"path":"marker.txt"}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

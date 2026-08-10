@@ -27,7 +27,7 @@ func (sequentialRegistryTool) ExecuteJSON(context.Context, []byte) (tool.ToolRes
 
 func (*capabilityTool) Name() string         { return "capability-registry" }
 func (*capabilityTool) Supports(string) bool { return true }
-func (*capabilityTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (*capabilityTool) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{}, nil
 }
 
@@ -74,7 +74,7 @@ func TestRegistryExecutorForwardsSequentialOverrideToProviderCapability(t *testi
 		t.Fatalf("registry request capability = %#v", requests)
 	}
 }
-func (*capabilityTool) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (*capabilityTool) ExecuteNamed(context.Context, string, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{}, nil
 }
 func (t *capabilityTool) ToolExecutionMode(name string) (agent.ToolExecutionMode, bool) {

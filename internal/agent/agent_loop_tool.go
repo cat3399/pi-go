@@ -52,12 +52,12 @@ func (t *AgentLoopToolAdapter) ExecutionMode() ToolExecutionMode {
 	}
 	return ToolExecutionParallel
 }
-func (t *AgentLoopToolAdapter) Execute(ctx context.Context, _ string, arguments any, report func(ToolUpdate)) (ToolOutput, error) {
+func (t *AgentLoopToolAdapter) Execute(ctx context.Context, toolCallID string, arguments any, report func(ToolUpdate)) (ToolOutput, error) {
 	raw, err := json.Marshal(arguments)
 	if err != nil {
 		return ToolOutput{}, err
 	}
-	return executeNamedToolSafely(t.executor, ctx, t.definition.Name(), raw, report)
+	return executeNamedToolSafely(t.executor, ctx, toolCallID, t.definition.Name(), raw, report)
 }
 
 func agentLoopToolDefinitions(tools []AgentLoopTool) []provider.ToolDefinition {

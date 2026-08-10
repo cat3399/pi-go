@@ -495,14 +495,6 @@ func encodeToolCallBlock(block llm.ToolCallBlock) (json.RawMessage, error) {
 	}
 	encoded = append(encoded, `,"arguments":`...)
 	encoded = append(encoded, compactArguments...)
-	// JSONL cannot embed lexical whitespace containing a physical newline. Keep
-	// the upstream-compatible object in arguments and retain the exact provider
-	// bytes in a namespaced string for lossless Go resume.
-	encoded = append(encoded, `,"_piGoRawArguments":`...)
-	encoded, err = appendJSONValue(encoded, string(arguments))
-	if err != nil {
-		return nil, err
-	}
 	if signature, ok := block.ThoughtSignature(); ok {
 		encoded = append(encoded, `,"thoughtSignature":`...)
 		encoded, err = appendJSONValue(encoded, signature)

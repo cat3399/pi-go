@@ -37,10 +37,10 @@ type sessionCatalogExecutor struct{}
 
 func (sessionCatalogExecutor) Name() string         { return "catalog" }
 func (sessionCatalogExecutor) Supports(string) bool { return true }
-func (sessionCatalogExecutor) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (sessionCatalogExecutor) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{Text: "unused"}, nil
 }
-func (sessionCatalogExecutor) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (sessionCatalogExecutor) ExecuteNamed(context.Context, string, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{Text: "unused"}, nil
 }
 

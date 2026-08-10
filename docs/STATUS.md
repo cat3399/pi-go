@@ -60,8 +60,15 @@ Agent 或 durable session 的第二套状态。
 - Agent 已是 model/thinking/system prompt/active tools/messages 的运行时唯一事实源；AgentSession
   只保留完整工具目录和构建 system prompt 所需的产品元数据。
 - `agent_settled` 回调观察到的是 idle session，并允许立即开始下一次 prompt。
-- 尚未使用同一套原版/Go workflow fixture 验证 queue、abort、retry、compaction、branch-summary
-  和多轮工具调用的完整组合顺序；这是当前首要缺口。
+- 已建立固定上游 commit 的 `multi_turn_rich_tool_reopen` TypeScript/Go workflow oracle，生产
+  `CreateAgentSession` 路径逐字段对齐 3 次 Provider 输入、51 个 AgentSession 事件、tool result、
+  最终 state/stats、8 条 JSONL entry 及 reopen context。
+- 该场景发现并移除了上游协议不存在的 `_piGoRawArguments` 持久化/RPC 字段；工具参数恢复现在
+  以原版 `arguments` JSON 值为唯一事实源，不再承诺 Go 私有的词法格式。
+- 工具执行端口现在把 Provider 产生的真实 `toolCallId` 一直传到单工具和命名工具实现，不再在
+  `AgentLoopToolAdapter` 处丢弃原版 `AgentTool.execute` 可见的调用身份。
+- queue、abort、retry、compaction、model/tools/reload 和 branch/fork 的共同 workflow 尚未建立，
+  队列/abort/settled 竞态是下一项任务。
 
 ### 产品级 AgentSession
 
@@ -104,13 +111,13 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 主要覆盖 SessionManager、resource 和 tool 的局部场景。尚未共同验证：
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及首个完整
+AgentSession rich/tool/reopen workflow。尚未共同验证：
 
-- 连续对话与 rich input；
 - queue、retry、abort 和 compaction 竞争；
 - model/thinking/tools/reload；
-- fork、tree、reopen 和损坏恢复；
-- 完整 event、usage/cost、错误分类和 session JSONL。
+- fork、tree 和损坏恢复；
+- 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
 
 在这些场景通过前，不能称为“完整 Agent 重写”。
 
@@ -124,6 +131,7 @@ Agent 或 durable session 的第二套状态。
 - `go build ./...`
 - `make web-check` 与 `make web-build`（均委托 `scripts/webui.sh`；静态前端构建与 tagged Go build）
 - `git diff --check`
+- 固定上游 `createAgentSession()` 的 rich/tool/multi-turn/JSONL/reopen workflow oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

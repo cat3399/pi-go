@@ -1444,18 +1444,6 @@ func decodeBlocks(entryID string, raw []byte, allowToolCalls, allowSignatures bo
 			if !exists {
 				return nil, nil, fmt.Errorf("content block %d is missing tool arguments", index)
 			}
-			if preserved, exists := object["_piGoRawArguments"]; exists {
-				var lexical string
-				if err := json.Unmarshal(preserved, &lexical); err != nil {
-					return nil, nil, fmt.Errorf("content block %d has invalid preserved tool arguments", index)
-				}
-				lexicalJSON := []byte(lexical)
-				equal, err := semanticJSONEqual(lexicalJSON, arguments)
-				if err != nil || !equal {
-					return nil, nil, fmt.Errorf("content block %d preserved tool arguments do not match arguments", index)
-				}
-				arguments = lexicalJSON
-			}
 			thoughtSignature, hasMetadata, trusted := decodeOpaqueSignature(object, "thoughtSignature", allowSignatures)
 			if hasMetadata && !trusted {
 				diagnostics = append(diagnostics, Diagnostic{Code: DiagnosticUnsafeContentOmitted, EntryID: entryID, ContentIndex: index})

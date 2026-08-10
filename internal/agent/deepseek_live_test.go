@@ -347,7 +347,7 @@ type deepSeekLiveEchoTool struct{ calls atomic.Uint32 }
 
 func (*deepSeekLiveEchoTool) Name() string { return "pi_go_live_echo" }
 
-func (t *deepSeekLiveEchoTool) Execute(_ context.Context, arguments []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (t *deepSeekLiveEchoTool) Execute(_ context.Context, _ string, arguments []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	var input struct {
 		Value string `json:"value"`
 	}

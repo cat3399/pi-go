@@ -31,7 +31,7 @@ type hostHarness struct {
 type hostToolExecutor struct{}
 
 func (hostToolExecutor) Name() string { return "host-tools" }
-func (hostToolExecutor) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (hostToolExecutor) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{Text: "ok"}, nil
 }
 

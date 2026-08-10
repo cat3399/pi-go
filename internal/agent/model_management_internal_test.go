@@ -483,7 +483,7 @@ func TestAgentSessionRuntimeSelectionHasOnlyAgentStateOwner(t *testing.T) {
 type internalOwnedTool struct{}
 
 func (internalOwnedTool) Name() string { return "owned" }
-func (internalOwnedTool) Execute(context.Context, []byte, func(ToolUpdate)) (ToolOutput, error) {
+func (internalOwnedTool) Execute(context.Context, string, []byte, func(ToolUpdate)) (ToolOutput, error) {
 	return ToolOutput{Text: "owned"}, nil
 }
 

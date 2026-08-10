@@ -32,7 +32,7 @@ func TestFilesystemExecutorDispatchesRegistryTools(t *testing.T) {
 	if executor.Name() != "filesystem" || !executor.Supports(tool.WriteToolName) || executor.Supports("missing") {
 		t.Fatalf("unexpected support matrix")
 	}
-	output, err := executor.ExecuteNamed(context.Background(), tool.WriteToolName, []byte(`{"path":"nested/a.txt","content":"hello"}`), nil)
+	output, err := executor.ExecuteNamed(context.Background(), "call-write", tool.WriteToolName, []byte(`{"path":"nested/a.txt","content":"hello"}`), nil)
 	if err != nil || !strings.Contains(output.Text, "Successfully wrote") {
 		t.Fatalf("dispatch = %#v, %v", output, err)
 	}
@@ -66,7 +66,7 @@ func TestRegistryAndFilesystemExecutorsPreserveRichToolContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, executor := range map[string]NamedToolExecutor{"registry": registryExecutor, "filesystem": filesystemExecutor} {
-		output, executeErr := executor.ExecuteNamed(context.Background(), "rich", []byte(`{}`), nil)
+		output, executeErr := executor.ExecuteNamed(context.Background(), "call-rich", "rich", []byte(`{}`), nil)
 		if executeErr != nil || output.Text != "fallback" || len(output.Content) != 2 || output.Details.(map[string]any)["rich"] != true {
 			t.Fatalf("%s rich output = %#v, %v", name, output, executeErr)
 		}

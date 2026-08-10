@@ -29,10 +29,10 @@ type reloadGenerationExecutor struct {
 
 func (e *reloadGenerationExecutor) Name() string         { return e.label }
 func (e *reloadGenerationExecutor) Supports(string) bool { return true }
-func (e *reloadGenerationExecutor) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (e *reloadGenerationExecutor) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return e.execute()
 }
-func (e *reloadGenerationExecutor) ExecuteNamed(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (e *reloadGenerationExecutor) ExecuteNamed(context.Context, string, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return e.execute()
 }
 func (e *reloadGenerationExecutor) execute() (agent.ToolOutput, error) {

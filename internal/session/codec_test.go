@@ -479,9 +479,9 @@ func TestOpenAcceptsForwardParentAfterCompleteIndexing(t *testing.T) {
 func TestOpenKeepsUsableEnvelopeWhenPayloadCannotProject(t *testing.T) {
 	t.Parallel()
 	malformedMessage := `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":17,"timestamp":1}}`
-	mismatchedArguments := `{"type":"message","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"echo","arguments":{"x":1},"_piGoRawArguments":"{\"x\":2}"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}`
+	malformedArguments := `{"type":"message","id":"entry-2","parentId":"entry-1","timestamp":"2026-08-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"echo","arguments":[]}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":2}}`
 	validTail := userEntryJSON("tail", "entry-3", `"entry-2"`, 3)
-	data := []byte(testHeader + "\n" + malformedMessage + "\n" + mismatchedArguments + "\n" + validTail + "\n")
+	data := []byte(testHeader + "\n" + malformedMessage + "\n" + malformedArguments + "\n" + validTail + "\n")
 	path := writeSessionFixtureBytes(t, data)
 	session, err := Open(path, OpenOptions{})
 	if err != nil {

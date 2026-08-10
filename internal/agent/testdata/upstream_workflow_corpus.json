@@ -1,0 +1,42 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "nodeVersion": "v24.18.1",
+  "scenario": {
+    "name": "multi_turn_rich_tool_reopen",
+    "sessionId": "session-agent-workflow-parity",
+    "systemPrompt": "You are the deterministic AgentSession parity oracle.",
+    "firstPrompt": "inspect the attached image",
+    "image": {
+      "mimeType": "image/png",
+      "base64": "AQID"
+    },
+    "tool": {
+      "name": "echo",
+      "callId": "call-echo",
+      "description": "Echo text back",
+      "argument": "hello",
+      "result": "echo:hello"
+    },
+    "secondPrompt": "continue from the tool result",
+    "responses": [
+      {
+        "text": "running",
+        "toolCall": true,
+        "inputTokens": 4,
+        "outputTokens": 2
+      },
+      {
+        "text": "first done",
+        "toolCall": false,
+        "inputTokens": 2,
+        "outputTokens": 1
+      },
+      {
+        "text": "second done",
+        "toolCall": false,
+        "inputTokens": 2,
+        "outputTokens": 1
+      }
+    ]
+  }
+}

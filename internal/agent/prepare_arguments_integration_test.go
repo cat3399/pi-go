@@ -17,9 +17,9 @@ type recordingRegistryExecutor struct {
 	executed []byte
 }
 
-func (e *recordingRegistryExecutor) ExecuteNamed(ctx context.Context, name string, arguments []byte, report func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (e *recordingRegistryExecutor) ExecuteNamed(ctx context.Context, toolCallID, name string, arguments []byte, report func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	e.executed = append([]byte(nil), arguments...)
-	return e.RegistryExecutor.ExecuteNamed(ctx, name, arguments, report)
+	return e.RegistryExecutor.ExecuteNamed(ctx, toolCallID, name, arguments, report)
 }
 
 func TestAgentSessionRegistryPreparesEditArgumentsBeforeSchemaAndHooks(t *testing.T) {

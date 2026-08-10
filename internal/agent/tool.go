@@ -31,6 +31,7 @@ func (e *BashExecutor) Name() string {
 
 func (e *BashExecutor) Execute(
 	ctx context.Context,
+	_ string,
 	arguments []byte,
 	_ func(ToolUpdate),
 ) (ToolOutput, error) {
@@ -83,6 +84,7 @@ func (e *toolPanicError) Stack() []byte {
 func executeToolSafely(
 	executor ToolExecutor,
 	ctx context.Context,
+	toolCallID string,
 	arguments []byte,
 	report func(ToolUpdate),
 ) (output ToolOutput, err error) {
@@ -92,12 +94,13 @@ func executeToolSafely(
 			output = ToolOutput{Text: safeErrorText(err)}
 		}
 	}()
-	return executor.Execute(ctx, arguments, report)
+	return executor.Execute(ctx, toolCallID, arguments, report)
 }
 
 func executeNamedToolSafely(
 	executor ToolExecutor,
 	ctx context.Context,
+	toolCallID string,
 	name string,
 	arguments []byte,
 	report func(ToolUpdate),
@@ -109,9 +112,9 @@ func executeNamedToolSafely(
 				output = ToolOutput{Text: safeErrorText(err)}
 			}
 		}()
-		return named.ExecuteNamed(ctx, name, arguments, report)
+		return named.ExecuteNamed(ctx, toolCallID, name, arguments, report)
 	}
-	return executeToolSafely(executor, ctx, arguments, report)
+	return executeToolSafely(executor, ctx, toolCallID, arguments, report)
 }
 
 // FilesystemExecutor adapts a complete internal/tool registry to the agent's
@@ -154,10 +157,10 @@ func (e *RegistryExecutor) ToolExecutionMode(name string) (ToolExecutionMode, bo
 	}
 	return ToolExecutionParallel, true
 }
-func (e *RegistryExecutor) Execute(_ context.Context, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+func (e *RegistryExecutor) Execute(_ context.Context, _ string, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
 	return ToolOutput{Text: "Tool registry requires a tool name"}, errors.New("tool registry requires a tool name")
 }
-func (e *RegistryExecutor) ExecuteNamed(ctx context.Context, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+func (e *RegistryExecutor) ExecuteNamed(ctx context.Context, _ string, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
 	if e == nil || e.registry == nil {
 		return ToolOutput{Text: "Tool registry is not configured"}, errors.New("tool registry is not configured")
 	}
@@ -200,10 +203,10 @@ func (e *FilesystemExecutor) ToolExecutionMode(name string) (ToolExecutionMode, 
 	}
 	return ToolExecutionParallel, true
 }
-func (e *FilesystemExecutor) Execute(_ context.Context, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+func (e *FilesystemExecutor) Execute(_ context.Context, _ string, _ []byte, _ func(ToolUpdate)) (ToolOutput, error) {
 	return ToolOutput{Text: "Filesystem executor requires a tool name"}, errors.New("filesystem executor requires a tool name")
 }
-func (e *FilesystemExecutor) ExecuteNamed(ctx context.Context, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
+func (e *FilesystemExecutor) ExecuteNamed(ctx context.Context, _ string, name string, arguments []byte, _ func(ToolUpdate)) (ToolOutput, error) {
 	if e == nil || e.registry == nil {
 		return ToolOutput{Text: "Filesystem tools are not configured"}, errors.New("filesystem tools are not configured")
 	}

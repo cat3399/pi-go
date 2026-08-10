@@ -168,13 +168,13 @@ type ToolUpdate struct {
 	Terminate      bool
 }
 
-// ToolExecutor is the compatibility execution port used by the first
-// milestone. NamedToolExecutor below extends it for a registry while retaining
-// existing single-tool implementations and tests.
+// ToolExecutor is the product tool execution port. toolCallID is the exact ID
+// emitted by the provider and must reach the tool unchanged, matching pi's
+// AgentTool.execute contract.
 // report may be called synchronously or concurrently while Execute is active.
 type ToolExecutor interface {
 	Name() string
-	Execute(context.Context, []byte, func(ToolUpdate)) (ToolOutput, error)
+	Execute(context.Context, string, []byte, func(ToolUpdate)) (ToolOutput, error)
 }
 
 // NamedToolExecutor dispatches an admitted tool call by name. The agent checks
@@ -183,7 +183,7 @@ type ToolExecutor interface {
 type NamedToolExecutor interface {
 	ToolExecutor
 	Supports(string) bool
-	ExecuteNamed(context.Context, string, []byte, func(ToolUpdate)) (ToolOutput, error)
+	ExecuteNamed(context.Context, string, string, []byte, func(ToolUpdate)) (ToolOutput, error)
 }
 
 // NamedToolArgumentPreparer is the optional execution-port extension used by

@@ -86,9 +86,10 @@ func newStartEvent(t *testing.T) llm.StartEvent {
 var agentTestEpoch = time.Date(2026, time.August, 1, 10, 11, 12, 0, time.UTC)
 
 type fakeTool struct {
-	name    string
-	execute func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error)
-	calls   atomic.Uint32
+	name          string
+	execute       func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error)
+	executeWithID func(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error)
+	calls         atomic.Uint32
 }
 
 // agentEventSnapshot keeps assertions about both public lifecycle and separate
@@ -240,10 +241,14 @@ func (t *fakeTool) Name() string { return t.name }
 
 func (t *fakeTool) Execute(
 	ctx context.Context,
+	toolCallID string,
 	arguments []byte,
 	report func(agent.ToolUpdate),
 ) (agent.ToolOutput, error) {
 	t.calls.Add(1)
+	if t.executeWithID != nil {
+		return t.executeWithID(ctx, toolCallID, append([]byte(nil), arguments...), report)
+	}
 	if t.execute == nil {
 		return agent.ToolOutput{}, nil
 	}

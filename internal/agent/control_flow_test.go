@@ -27,10 +27,10 @@ type mixedTool struct{}
 
 func (mixedTool) Name() string              { return "mixed" }
 func (mixedTool) Supports(name string) bool { return name != "missing" }
-func (mixedTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (mixedTool) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{}, nil
 }
-func (mixedTool) ExecuteNamed(_ context.Context, name string, _ []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (mixedTool) ExecuteNamed(_ context.Context, _ string, name string, _ []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	switch name {
 	case "failure":
 		return agent.ToolOutput{Text: "failed"}, errors.New("tool failed")
@@ -51,10 +51,10 @@ func (t *namedBatchTool) Supports(name string) bool {
 func (t *namedBatchTool) ToolExecutionMode(string) (agent.ToolExecutionMode, bool) {
 	return t.mode, t.mode != 0
 }
-func (t *namedBatchTool) Execute(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (t *namedBatchTool) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	return agent.ToolOutput{}, nil
 }
-func (t *namedBatchTool) ExecuteNamed(ctx context.Context, name string, _ []byte, report func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (t *namedBatchTool) ExecuteNamed(ctx context.Context, _ string, name string, _ []byte, report func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 	close(t.started[name])
 	select {
 	case <-t.release[name]:

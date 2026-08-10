@@ -531,7 +531,7 @@ func TestCreateAppendCloseAndReopenToolTurn(t *testing.T) {
 	}
 }
 
-func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
+func TestCommittedStateMatchesReopenWithUpstreamToolArgumentSemantics(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -578,8 +578,8 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 	if got, want := immediate.Timestamp(), time.UnixMilli(messageTime.UnixMilli()).UTC(); !got.Equal(want) || got.Location() != time.UTC {
 		t.Fatalf("message timestamp = %v, want canonical %v", got, want)
 	}
-	if got := immediate.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !bytes.Equal(got, arguments) {
-		t.Fatalf("immediate arguments = %q, want exact %q", got, arguments)
+	if got := immediate.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !mustSemanticJSONEqual(t, got, arguments) {
+		t.Fatalf("immediate arguments = %q, want semantic value %q", got, arguments)
 	}
 	if bytes.Contains(entry.RawJSON(), []byte{'\n'}) {
 		t.Fatalf("entry record contains a physical newline: %q", entry.RawJSON())
@@ -597,8 +597,8 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 		t.Fatalf("reopened raw entry = %q, want %q", got, committedRaw)
 	}
 	restored := reopened.Context().Messages()[0].(llm.AssistantToolUseMessage)
-	if got := restored.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !bytes.Equal(got, arguments) {
-		t.Fatalf("reopened arguments = %q, want exact %q", got, arguments)
+	if got := restored.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !mustSemanticJSONEqual(t, got, arguments) {
+		t.Fatalf("reopened arguments = %q, want semantic value %q", got, arguments)
 	}
 	if !restored.Timestamp().Equal(immediate.Timestamp()) || !reopened.Entries()[0].Timestamp().Equal(entry.Timestamp()) {
 		t.Fatalf("reopened timestamps differ: message=%v entry=%v", restored.Timestamp(), reopened.Entries()[0].Timestamp())
@@ -616,7 +616,7 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 
 	// Simulate upstream JSON.parse -> JSON.stringify during fork/rewrite. String
 	// escapes, object order, and number spelling may change without changing the
-	// argument value; the exact Go copy must remain recoverable.
+	// argument value; arguments remains the only public source of truth.
 	lines := bytes.Split(bytes.TrimSuffix(data, []byte("\n")), []byte("\n"))
 	var genericEntry any
 	if err := json.Unmarshal(lines[1], &genericEntry); err != nil {
@@ -640,9 +640,18 @@ func TestCommittedStateMatchesReopenAndPreservesRawToolArguments(t *testing.T) {
 	}
 	defer afterRewrite.Close()
 	rewrittenMessage := afterRewrite.Context().Messages()[0].(llm.AssistantToolUseMessage)
-	if got := rewrittenMessage.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !bytes.Equal(got, arguments) {
-		t.Fatalf("arguments after rewrite = %q, want exact %q", got, arguments)
+	if got := rewrittenMessage.Content()[0].(llm.ToolCallBlock).ArgumentsJSON(); !mustSemanticJSONEqual(t, got, arguments) {
+		t.Fatalf("arguments after rewrite = %q, want semantic value %q", got, arguments)
 	}
+}
+
+func mustSemanticJSONEqual(t *testing.T, left, right []byte) bool {
+	t.Helper()
+	equal, err := semanticJSONEqual(left, right)
+	if err != nil {
+		t.Fatalf("compare JSON semantics: %v", err)
+	}
+	return equal
 }
 
 func TestToolResultDetailsRoundTripThroughDurableSession(t *testing.T) {
