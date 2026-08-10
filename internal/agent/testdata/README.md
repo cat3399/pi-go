@@ -5,13 +5,14 @@
 `createAgentSession()` path. The generator uses a deterministic stream and tool
 only as test inputs; it does not enter pi-go production assembly.
 
-The oracle currently contains eight production workflows: rich/tool/multi-turn/
+The oracle currently contains nine production workflows: rich/tool/multi-turn/
 reopen, mixed-mode queue/clear/abort/settled, retry/Retry-After recovery, manual
 compaction, overflow compaction/continue, and the in-flight model/thinking/
 active-tools snapshot plus resource reload workflow, as well as tree navigation
 and Runtime fork replacement, plus malformed-line/orphan session resume and
-continuation. It records provider inputs, every AgentSession event and its
-semantic payload, action results, final state/stats, normalized JSONL entries/
+continuation, plus skill/template request assembly with dynamic image blocking,
+thinking budgets, and rich tool-result images. It records provider inputs, every
+AgentSession event and its semantic payload, action results, final state/stats, normalized JSONL entries/
 tree structure and physical malformed-line placement, and contexts obtained by
 reopening persisted sessions. Only timestamps, generated entry/session IDs, and
 temporary absolute paths are normalized.

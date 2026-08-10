@@ -13185,5 +13185,2029 @@
         }
       }
     }
+  },
+  "requestAssemblyScenario": {
+    "name": "resource_image_budget_request_assembly",
+    "input": {
+      "name": "resource_image_budget_request_assembly",
+      "sessionId": "session-agent-request-assembly-parity",
+      "systemPrompt": "You are the deterministic request assembly parity oracle.",
+      "thinkingLevel": "high",
+      "thinkingBudgets": {
+        "minimal": 111,
+        "low": 222,
+        "medium": 333,
+        "high": 444
+      },
+      "image": {
+        "mimeType": "image/png",
+        "base64": "AQID"
+      },
+      "skill": {
+        "name": "vision-review",
+        "description": "Inspect image-backed changes",
+        "body": "Follow the explicit vision review procedure.",
+        "argument": "initial target"
+      },
+      "template": {
+        "name": "resource-followup",
+        "content": "Expanded follow-up: $@",
+        "argument": "second target"
+      },
+      "tool": {
+        "name": "image_probe",
+        "callId": "request-assembly-call",
+        "description": "Return deterministic image content",
+        "argument": "probe",
+        "resultText": "probe text"
+      },
+      "responses": [
+        {
+          "text": "probing resources",
+          "toolCall": true,
+          "inputTokens": 6,
+          "outputTokens": 3
+        },
+        {
+          "text": "blocked image turn complete",
+          "toolCall": false,
+          "inputTokens": 9,
+          "outputTokens": 4
+        },
+        {
+          "text": "unblocked image turn complete",
+          "toolCall": false,
+          "inputTokens": 14,
+          "outputTokens": 5
+        }
+      ]
+    },
+    "actions": {
+      "initialBlockImages": true,
+      "finalBlockImages": false,
+      "loadedSkills": [
+        {
+          "name": "vision-review",
+          "description": "Inspect image-backed changes",
+          "filePath": "<root>/explicit-resources/skills/vision-review/SKILL.md",
+          "baseDir": "<root>/explicit-resources/skills/vision-review",
+          "disableModelInvocation": false
+        }
+      ],
+      "loadedTemplates": [
+        {
+          "name": "resource-followup",
+          "description": "Expanded follow-up: $@",
+          "argumentHint": null,
+          "content": "Expanded follow-up: $@",
+          "filePath": "<root>/explicit-resources/prompts/resource-followup.md"
+        }
+      ],
+      "toolRuns": [
+        {
+          "toolCallId": "request-assembly-call",
+          "arguments": {
+            "label": "probe"
+          }
+        }
+      ]
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "systemPrompt": "You are the deterministic request assembly parity oracle.\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>vision-review</name>\n    <description>Inspect image-backed changes</description>\n    <location><root>/explicit-resources/skills/vision-review/SKILL.md</location>\n  </skill>\n</available_skills>\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+              },
+              {
+                "type": "text",
+                "text": "Image reading is disabled."
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "read",
+            "description": "Read deterministic resources",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "image_probe",
+            "description": "Return deterministic image content",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "label"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-request-assembly-parity",
+          "reasoning": "high",
+          "transport": "sse",
+          "thinkingBudgets": {
+            "minimal": 111,
+            "low": 222,
+            "medium": 333,
+            "high": 444
+          }
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "systemPrompt": "You are the deterministic request assembly parity oracle.\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>vision-review</name>\n    <description>Inspect image-backed changes</description>\n    <location><root>/explicit-resources/skills/vision-review/SKILL.md</location>\n  </skill>\n</available_skills>\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+              },
+              {
+                "type": "text",
+                "text": "Image reading is disabled."
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "probing resources"
+              },
+              {
+                "type": "toolCall",
+                "id": "request-assembly-call",
+                "name": "image_probe",
+                "arguments": {
+                  "label": "probe"
+                }
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 9,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          },
+          {
+            "role": "toolResult",
+            "toolCallId": "request-assembly-call",
+            "toolName": "image_probe",
+            "content": [
+              {
+                "type": "text",
+                "text": "probe text"
+              },
+              {
+                "type": "text",
+                "text": "Image reading is disabled."
+              }
+            ],
+            "isError": false,
+            "details": {
+              "label": "probe"
+            }
+          }
+        ],
+        "tools": [
+          {
+            "name": "read",
+            "description": "Read deterministic resources",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "image_probe",
+            "description": "Return deterministic image content",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "label"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-request-assembly-parity",
+          "reasoning": "high",
+          "transport": "sse",
+          "thinkingBudgets": {
+            "minimal": 111,
+            "low": 222,
+            "medium": 333,
+            "high": 444
+          }
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "systemPrompt": "You are the deterministic request assembly parity oracle.\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>vision-review</name>\n    <description>Inspect image-backed changes</description>\n    <location><root>/explicit-resources/skills/vision-review/SKILL.md</location>\n  </skill>\n</available_skills>\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "probing resources"
+              },
+              {
+                "type": "toolCall",
+                "id": "request-assembly-call",
+                "name": "image_probe",
+                "arguments": {
+                  "label": "probe"
+                }
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 9,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          },
+          {
+            "role": "toolResult",
+            "toolCallId": "request-assembly-call",
+            "toolName": "image_probe",
+            "content": [
+              {
+                "type": "text",
+                "text": "probe text"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "label": "probe"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "blocked image turn complete"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 13,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Expanded follow-up: second target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          }
+        ],
+        "tools": [
+          {
+            "name": "read",
+            "description": "Read deterministic resources",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          {
+            "name": "image_probe",
+            "description": "Return deterministic image content",
+            "parameters": {
+              "type": "object",
+              "required": [
+                "label"
+              ],
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        ],
+        "stream": {
+          "sessionId": "session-agent-request-assembly-parity",
+          "reasoning": "high",
+          "transport": "sse",
+          "thinkingBudgets": {
+            "minimal": 111,
+            "low": 222,
+            "medium": 333,
+            "high": 444
+          }
+        }
+      }
+    ],
+    "events": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "pro"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "bin"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "g r"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "eso"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "urc"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "es"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "probing resources"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_start",
+          "contentIndex": 1
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "{\"l"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "abe"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "l\":"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "\"pr"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "obe"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_delta",
+          "contentIndex": 1,
+          "delta": "\"}"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "toolcall_end",
+          "contentIndex": 1,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "request-assembly-call",
+            "name": "image_probe",
+            "arguments": {
+              "label": "probe"
+            }
+          }
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "probing resources"
+            },
+            {
+              "type": "toolCall",
+              "id": "request-assembly-call",
+              "name": "image_probe",
+              "arguments": {
+                "label": "probe"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 6,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 9,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "toolUse"
+        }
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "request-assembly-call",
+        "toolName": "image_probe",
+        "arguments": {
+          "label": "probe"
+        }
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "request-assembly-call",
+        "toolName": "image_probe",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "probe text"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ],
+          "details": {
+            "label": "probe"
+          }
+        },
+        "isError": false
+      },
+      {
+        "type": "message_start",
+        "role": "toolResult"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "request-assembly-call",
+          "toolName": "image_probe",
+          "content": [
+            {
+              "type": "text",
+              "text": "probe text"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ],
+          "isError": false,
+          "details": {
+            "label": "probe"
+          }
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": [
+          "toolResult"
+        ]
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "blo"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "cke"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "d i"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "mag"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "e t"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "urn"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " co"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "mpl"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ete"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "blocked image turn complete"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "blocked image turn complete"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 9,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 13,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant",
+          "toolResult",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Expanded follow-up: second target"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "unb"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "loc"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ked"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " im"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "age"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " tu"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "rn "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "com"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ple"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "te"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "unblocked image turn complete"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "unblocked image turn complete"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 14,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 19,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-reasoning"
+      },
+      "thinkingLevel": "high",
+      "activeTools": [
+        "read",
+        "image_probe"
+      ],
+      "systemPrompt": "You are the deterministic request assembly parity oracle.\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n  <skill>\n    <name>vision-review</name>\n    <description>Inspect image-backed changes</description>\n    <location><root>/explicit-resources/skills/vision-review/SKILL.md</location>\n  </skill>\n</available_skills>\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "probing resources"
+            },
+            {
+              "type": "toolCall",
+              "id": "request-assembly-call",
+              "name": "image_probe",
+              "arguments": {
+                "label": "probe"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 6,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 9,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "toolUse"
+        },
+        {
+          "role": "toolResult",
+          "toolCallId": "request-assembly-call",
+          "toolName": "image_probe",
+          "content": [
+            {
+              "type": "text",
+              "text": "probe text"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ],
+          "isError": false,
+          "details": {
+            "label": "probe"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "blocked image turn complete"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 9,
+            "output": 4,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 13,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Expanded follow-up: second target"
+            },
+            {
+              "type": "image",
+              "mimeType": "image/png",
+              "data": "AQID"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "unblocked image turn complete"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 14,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 19,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-request-assembly-parity",
+        "userMessages": 2,
+        "assistantMessages": 3,
+        "toolCalls": 1,
+        "toolResults": 1,
+        "totalMessages": 6,
+        "tokens": {
+          "input": 29,
+          "output": 12,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 41
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 19,
+          "contextWindow": 128000,
+          "percent": 0.01484375
+        }
+      }
+    },
+    "session": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-request-assembly-parity",
+        "cwd": "<cwd>"
+      },
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "probing resources"
+              },
+              {
+                "type": "toolCall",
+                "id": "request-assembly-call",
+                "name": "image_probe",
+                "arguments": {
+                  "label": "probe"
+                }
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 9,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "toolResult",
+            "toolCallId": "request-assembly-call",
+            "toolName": "image_probe",
+            "content": [
+              {
+                "type": "text",
+                "text": "probe text"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "label": "probe"
+            }
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "blocked image turn complete"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 13,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Expanded follow-up: second target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "unblocked image turn complete"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 14,
+              "output": 5,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 19,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "probing resources"
+              },
+              {
+                "type": "toolCall",
+                "id": "request-assembly-call",
+                "name": "image_probe",
+                "arguments": {
+                  "label": "probe"
+                }
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 6,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 9,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "toolUse"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "toolResult",
+            "toolCallId": "request-assembly-call",
+            "toolName": "image_probe",
+            "content": [
+              {
+                "type": "text",
+                "text": "probe text"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ],
+            "isError": false,
+            "details": {
+              "label": "probe"
+            }
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "blocked image turn complete"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 9,
+              "output": 4,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 13,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Expanded follow-up: second target"
+              },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "AQID"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "unblocked image turn complete"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 14,
+              "output": 5,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 19,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-request-assembly-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-reasoning"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "high"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probing resources"
+                },
+                {
+                  "type": "toolCall",
+                  "id": "request-assembly-call",
+                  "name": "image_probe",
+                  "arguments": {
+                    "label": "probe"
+                  }
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 9,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "toolUse"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "toolResult",
+              "toolCallId": "request-assembly-call",
+              "toolName": "image_probe",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe text"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ],
+              "isError": false,
+              "details": {
+                "label": "probe"
+              }
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "blocked image turn complete"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 9,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 13,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-7",
+            "parentId": "entry-6",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Expanded follow-up: second target"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "unblocked image turn complete"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 14,
+                "output": 5,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 19,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<skill name=\"vision-review\" location=\"<root>/explicit-resources/skills/vision-review/SKILL.md\">\nReferences are relative to <root>/explicit-resources/skills/vision-review.\n\nFollow the explicit vision review procedure.\n</skill>\n\ninitial target"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probing resources"
+                },
+                {
+                  "type": "toolCall",
+                  "id": "request-assembly-call",
+                  "name": "image_probe",
+                  "arguments": {
+                    "label": "probe"
+                  }
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 9,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "toolUse"
+            },
+            {
+              "role": "toolResult",
+              "toolCallId": "request-assembly-call",
+              "toolName": "image_probe",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "probe text"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ],
+              "isError": false,
+              "details": {
+                "label": "probe"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "blocked image turn complete"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 9,
+                "output": 4,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 13,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Expanded follow-up: second target"
+                },
+                {
+                  "type": "image",
+                  "mimeType": "image/png",
+                  "data": "AQID"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "unblocked image turn complete"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 14,
+                "output": 5,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 19,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "high"
+        }
+      }
+    }
   }
 }

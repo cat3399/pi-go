@@ -43,6 +43,7 @@ type upstreamWorkflowCorpus struct {
 	TurnSnapshot       upstreamTurnSnapshotScenario       `json:"turnSnapshotScenario"`
 	TreeFork           upstreamTreeForkScenario           `json:"treeForkScenario"`
 	DamagedSession     upstreamDamagedSessionScenario     `json:"damagedSessionScenario"`
+	RequestAssembly    upstreamRequestAssemblyScenario    `json:"requestAssemblyScenario"`
 }
 
 type upstreamWorkflowScenario struct {
@@ -509,6 +510,28 @@ func normalizeWorkflowAgentMessages(messages []agentmsg.Message) ([]any, error) 
 
 func normalizeWorkflowProviderInputs(requests []provider.Request, root, cwd, sessionID string) ([]any, error) {
 	return normalizeWorkflowProviderInputsWithForeignLabel(requests, root, cwd, sessionID, "<summary-session-id>")
+}
+
+func normalizeWorkflowProviderInputsWithThinkingBudgets(requests []provider.Request, root, cwd, sessionID string) ([]any, error) {
+	result, err := normalizeWorkflowProviderInputs(requests, root, cwd, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for index, request := range requests {
+		input := result[index].(map[string]any)
+		stream := input["stream"].(map[string]any)
+		budgets := request.StreamOptions().ThinkingBudgets
+		if budgets == nil {
+			stream["thinkingBudgets"] = nil
+			continue
+		}
+		normalized := make(map[string]any, len(budgets))
+		for level, value := range budgets {
+			normalized[string(level)] = value
+		}
+		stream["thinkingBudgets"] = normalized
+	}
+	return result, nil
 }
 
 func normalizeWorkflowProviderInputsWithForeignLabel(requests []provider.Request, root, cwd, sessionID, foreignSessionIDLabel string) ([]any, error) {

@@ -120,13 +120,25 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 		thinking = options.Settings.DefaultThinkingLevel
 	}
 	config := options.BaseConfig
+	config.Stream = provider.MergeStreamOptions(
+		provider.StreamOptions{ThinkingBudgets: options.Settings.ThinkingBudgets.ProviderBudgets()},
+		config.Stream,
+	)
+	baseConvertToLLM := config.ConvertToLLM
+	config.ConvertToLLM = convertToLLMWithBlockImages(baseConvertToLLM, func() bool {
+		settings := options.Settings
+		if options.Services.ModelRuntime != nil {
+			settings = options.Services.ModelRuntime.Snapshot().Settings
+		}
+		return settings.Images.BlockImagesOrDefault()
+	})
 	config.Provider = options.Provider
 	config.SessionManager = options.SessionManager
 	if config.AllTools == nil && options.Services.Tools != nil {
 		config.AllTools = append([]provider.ToolDefinition(nil), options.Services.Tools...)
 	}
 	if config.Resources == nil && options.Services.ResourceService != nil {
-		config.Resources = newSessionResources(options.Services.ResourceService)
+		config.Resources = newSessionResources(options.Services.ResourceService, options.Services.ResolveResourcePaths)
 	}
 	if config.ReloadRuntime == nil && options.Services.ModelRuntime != nil {
 		config.ReloadRuntime = options.Services.ModelRuntime.Reload

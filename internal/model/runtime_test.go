@@ -116,7 +116,8 @@ func TestShellAndImageSettingsMergeAndWriteWithoutLosingUnknownFields(t *testing
 		t.Fatal(err)
 	}
 	settings := runtime.Snapshot().Settings
-	if settings.ShellPath != "/project/shell" || settings.ShellCommandPrefix != "global-prefix" || !settings.Images.AutoResizeOrDefault() {
+	if settings.ShellPath != "/project/shell" || settings.ShellCommandPrefix != "global-prefix" ||
+		!settings.Images.AutoResizeOrDefault() || !settings.Images.BlockImagesOrDefault() {
 		t.Fatalf("effective shell/image settings = %#v", settings)
 	}
 	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
@@ -157,14 +158,113 @@ func TestShellAndImageSettingsMergeAndWriteWithoutLosingUnknownFields(t *testing
 
 func TestProjectNullImagesResetsGlobalAutoResizeToDefault(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
-	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"images":{"autoResize":false}}`)
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"images":{"autoResize":false,"blockImages":true}}`)
 	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"images":null}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !runtime.Snapshot().Settings.Images.AutoResizeOrDefault() {
-		t.Fatal("project images:null did not restore upstream autoResize default")
+	images := runtime.Snapshot().Settings.Images
+	if !images.AutoResizeOrDefault() || images.BlockImagesOrDefault() {
+		t.Fatal("project images:null did not restore upstream image defaults")
+	}
+}
+
+func TestRequestAssemblySettingsMergeCloneAndLosslessWrite(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{
+		"skills":["global-skill"],
+		"prompts":["global-prompt"],
+		"thinkingBudgets":{"minimal":111,"high":444,"future":7},
+		"images":{"blockImages":true}
+	}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+		"skills":[],
+		"prompts":["project-prompt"],
+		"thinkingBudgets":{"low":222,"high":0}
+	}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings
+	budgets := settings.ThinkingBudgets.ProviderBudgets()
+	if settings.Skills == nil || len(settings.Skills) != 0 || !reflect.DeepEqual(settings.Prompts, []string{"project-prompt"}) ||
+		budgets[provider.ThinkingMinimal] != 111 || budgets[provider.ThinkingLow] != 222 ||
+		budgets[provider.ThinkingHigh] != 0 || !settings.Images.BlockImagesOrDefault() {
+		t.Fatalf("effective request assembly settings = %#v, budgets %#v", settings, budgets)
+	}
+	settings.Prompts[0] = "mutated-snapshot"
+	budgets[provider.ThinkingMinimal] = 999
+	if got := runtime.Snapshot().Settings; got.Prompts[0] != "project-prompt" || got.ThinkingBudgets.ProviderBudgets()[provider.ThinkingMinimal] != 111 {
+		t.Fatalf("settings snapshot was not isolated: %#v", got)
+	}
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		settings.Skills = []string{"next-skill"}
+		settings.Prompts = []string{}
+		medium := uint64(333)
+		settings.ThinkingBudgets.Medium = &medium
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var skills, prompts []string
+	var thinking map[string]json.RawMessage
+	if err := json.Unmarshal(root["skills"], &skills); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(root["prompts"], &prompts); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(root["thinkingBudgets"], &thinking); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(skills, []string{"next-skill"}) || prompts == nil || len(prompts) != 0 ||
+		string(thinking["minimal"]) != "111" || string(thinking["medium"]) != "333" ||
+		string(thinking["high"]) != "444" || string(thinking["future"]) != "7" {
+		t.Fatalf("lossless request assembly settings = %s", data)
+	}
+}
+
+func TestProjectNullRequestAssemblySettingsResetGlobalValues(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{
+		"skills":["global-skill"],"prompts":["global-prompt"],
+		"thinkingBudgets":{"minimal":111,"high":444}
+	}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"skills":null,"prompts":null,"thinkingBudgets":null}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings
+	if settings.Skills != nil || settings.Prompts != nil || settings.ThinkingBudgets.ProviderBudgets() != nil {
+		t.Fatalf("project null request assembly reset = %#v", settings)
+	}
+}
+
+func TestRequestAssemblySettingsRejectInvalidValues(t *testing.T) {
+	for _, input := range []string{
+		`{"skills":"skill.md"}`,
+		`{"prompts":[1]}`,
+		`{"thinkingBudgets":[]}`,
+		`{"thinkingBudgets":{"minimal":-1}}`,
+		`{"thinkingBudgets":{"high":1.5}}`,
+		`{"images":{"blockImages":"yes"}}`,
+	} {
+		agentDir := t.TempDir()
+		writeFile(t, filepath.Join(agentDir, "settings.json"), input)
+		if _, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()}); err == nil {
+			t.Fatalf("NewRuntime(%s) error = nil", input)
+		}
 	}
 }
 

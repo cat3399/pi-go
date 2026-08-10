@@ -127,6 +127,11 @@ type SessionConfig struct {
 
 	ToolExecution    ToolExecutionMode
 	TransformContext ContextTransform
+	// ConvertToLLM is the final AgentMessage-to-provider boundary. Product
+	// assembly uses it for the original dynamic blockImages defense while
+	// retaining unmodified rich content in memory and session storage.
+	ConvertToLLM     AgentLoopConvertToLLM
+	GetAPIKey        AgentLoopAPIKey
 	SteeringMode     QueueMode
 	FollowUpMode     QueueMode
 	ContextWindow    uint64
@@ -631,6 +636,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		Provider: config.Provider, InitialMessages: initialContext.AgentMessages(), Model: config.Model, ThinkingLevel: config.ThinkingLevel, Stream: config.Stream,
 		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
 		ToolExecution: config.ToolExecution, TransformContext: config.TransformContext, TransformAgentContext: contextHookTransform(config.Hooks.Context),
+		ConvertToLLM: config.ConvertToLLM, GetAPIKey: config.GetAPIKey,
 		MessageEnd:   s.messageEndTransform,
 		SteeringMode: config.SteeringMode, FollowUpMode: config.FollowUpMode,
 		Now:         config.Now,

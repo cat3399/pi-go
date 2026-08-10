@@ -261,17 +261,17 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool metadata: %w", ErrInvalidProductionConfig, err)
 	}
 	activeToolNames := defaultActiveToolNames()
-	resources, err := resource.New(resource.Config{
+	bootstrapResources, err := resource.New(resource.Config{
 		CWD: cwd, AgentDir: p.agentDir,
 		Tools: resourceTools, SelectedTools: activeToolNames,
 	})
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize trusted prompt assets: %w", ErrInvalidProductionConfig, err)
 	}
-	if err := resources.Reload(ctx); err != nil {
+	if err := bootstrapResources.Reload(ctx); err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: load trusted prompt assets: %w", ErrInvalidProductionConfig, err)
 	}
-	resourceSnapshot, err := resources.Snapshot()
+	resourceSnapshot, err := bootstrapResources.Snapshot()
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: trusted prompt assets unavailable", ErrInvalidProductionConfig)
 	}
@@ -283,9 +283,25 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
 	}
 	snapshot := catalog.Snapshot()
-	executor, definitions, _, standaloneBash, err := p.buildToolRuntime(cwd, snapshot.Settings)
+	executor, definitions, resourceTools, standaloneBash, err := p.buildToolRuntime(cwd, snapshot.Settings)
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
+	}
+	resources, err := resource.New(resource.Config{
+		CWD: cwd, AgentDir: p.agentDir,
+		Tools: resourceTools, SelectedTools: activeToolNames,
+		SkillPaths:  append([]string(nil), snapshot.Settings.Skills...),
+		PromptPaths: append([]string(nil), snapshot.Settings.Prompts...),
+	})
+	if err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize configured prompt assets: %w", ErrInvalidProductionConfig, err)
+	}
+	if err := resources.Reload(ctx); err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: load configured prompt assets: %w", ErrInvalidProductionConfig, err)
+	}
+	resourceSnapshot, err = resources.Snapshot()
+	if err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("%w: configured prompt assets unavailable", ErrInvalidProductionConfig)
 	}
 	activeDefinitions := selectProductionToolDefinitions(definitions, activeToolNames)
 	router, err := newProductionProviderRouter(snapshot, p.config)
@@ -363,6 +379,10 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	services := &agentruntime.Services{
 		CWD: cwd, AgentDir: p.agentDir, ModelRuntime: catalog, ResourceService: resources,
+		ResolveResourcePaths: func() ([]string, []string) {
+			settings := catalog.Snapshot().Settings
+			return append([]string(nil), settings.Skills...), append([]string(nil), settings.Prompts...)
+		},
 		AuthRuntime: authResolver.runtime, Provider: router, Tool: executor,
 		Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
 		ReloadTools: func(_ context.Context) (agent.ToolRuntime, error) {

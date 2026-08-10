@@ -245,5 +245,59 @@
       "inputTokens": 7,
       "outputTokens": 4
     }
+  },
+  "requestAssemblyScenario": {
+    "name": "resource_image_budget_request_assembly",
+    "sessionId": "session-agent-request-assembly-parity",
+    "systemPrompt": "You are the deterministic request assembly parity oracle.",
+    "thinkingLevel": "high",
+    "thinkingBudgets": {
+      "minimal": 111,
+      "low": 222,
+      "medium": 333,
+      "high": 444
+    },
+    "image": {
+      "mimeType": "image/png",
+      "base64": "AQID"
+    },
+    "skill": {
+      "name": "vision-review",
+      "description": "Inspect image-backed changes",
+      "body": "Follow the explicit vision review procedure.",
+      "argument": "initial target"
+    },
+    "template": {
+      "name": "resource-followup",
+      "content": "Expanded follow-up: $@",
+      "argument": "second target"
+    },
+    "tool": {
+      "name": "image_probe",
+      "callId": "request-assembly-call",
+      "description": "Return deterministic image content",
+      "argument": "probe",
+      "resultText": "probe text"
+    },
+    "responses": [
+      {
+        "text": "probing resources",
+        "toolCall": true,
+        "inputTokens": 6,
+        "outputTokens": 3
+      },
+      {
+        "text": "blocked image turn complete",
+        "toolCall": false,
+        "inputTokens": 9,
+        "outputTokens": 4
+      },
+      {
+        "text": "unblocked image turn complete",
+        "toolCall": false,
+        "inputTokens": 14,
+        "outputTokens": 5
+      }
+    ]
   }
 }

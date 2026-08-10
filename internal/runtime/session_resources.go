@@ -7,13 +7,16 @@ import (
 	"github.com/cat3399/pi-go/internal/resource"
 )
 
-type sessionResources struct{ service *resource.Service }
+type sessionResources struct {
+	service      *resource.Service
+	resolvePaths func() (skillPaths, promptPaths []string)
+}
 
-func newSessionResources(service *resource.Service) agent.SessionResources {
+func newSessionResources(service *resource.Service, resolvePaths func() (skillPaths, promptPaths []string)) agent.SessionResources {
 	if service == nil {
 		return nil
 	}
-	return sessionResources{service: service}
+	return sessionResources{service: service, resolvePaths: resolvePaths}
 }
 
 func (r sessionResources) BuildSystemPrompt(activeToolNames []string) (string, agent.BuildSystemPromptOptions, error) {
@@ -29,6 +32,10 @@ func (r sessionResources) ExpandPromptInput(text string) (string, error) {
 }
 
 func (r sessionResources) Reload(ctx context.Context) error {
+	if r.resolvePaths != nil {
+		skills, prompts := r.resolvePaths()
+		return r.service.ReloadAdditionalPaths(ctx, skills, prompts)
+	}
 	return r.service.Reload(ctx)
 }
 

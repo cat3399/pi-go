@@ -71,3 +71,50 @@ func TestServiceRebuildsPromptAndExpandsInputFromOneHealthySnapshot(t *testing.T
 		t.Fatalf("template expansion = (%q, %v)", expanded, err)
 	}
 }
+
+func TestServiceReloadAdditionalPathsPublishesConfigAndSnapshotTogether(t *testing.T) {
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	agentDir := filepath.Join(root, "agent")
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	for _, directory := range []string{cwd, agentDir, first, second} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(first, "one.md"), []byte("first $@"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "two.md"), []byte("second $@"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service, err := resource.New(resource.Config{
+		CWD: cwd, AgentDir: agentDir, NoSkills: true, NoPromptTemplates: true,
+		PromptPaths: []string{first},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if expanded, err := service.ExpandInput("/one value"); err != nil || expanded != "first value" {
+		t.Fatalf("initial expansion = (%q, %v)", expanded, err)
+	}
+	if err := service.ReloadAdditionalPaths(context.Background(), nil, []string{second}); err != nil {
+		t.Fatal(err)
+	}
+	if expanded, err := service.ExpandInput("/two value"); err != nil || expanded != "second value" {
+		t.Fatalf("reloaded expansion = (%q, %v)", expanded, err)
+	}
+	if expanded, err := service.ExpandInput("/one value"); err != nil || expanded != "/one value" {
+		t.Fatalf("stale expansion survived = (%q, %v)", expanded, err)
+	}
+	if err := service.ReloadAdditionalPaths(context.Background(), nil, []string{"bad\x00path"}); err == nil {
+		t.Fatal("invalid replacement path succeeded")
+	}
+	if expanded, err := service.ExpandInput("/two value"); err != nil || expanded != "second value" {
+		t.Fatalf("failed reload replaced healthy snapshot = (%q, %v)", expanded, err)
+	}
+}

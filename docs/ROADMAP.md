@@ -21,11 +21,14 @@ overflow continue、最终 settled、完整事件、JSONL 与 reopen。`turn_sna
 以及 reload 后资源 prompt 和 durable state 的语义。`tree_navigation_runtime_fork` 已逐字段固定
 无摘要 tree navigation、废弃分支保留、Runtime session replacement、fork `parentSession`、源与分支
 双 JSONL 及 reopen。`damaged_session_resume_continue` 也已固定坏行保留、orphan 根投影、恢复分支的
-初始化选择、真实 Provider 续写和再次打开。当前进入图片过滤、thinking budget 与资源装配场景。
+初始化选择、真实 Provider 续写和再次打开。`resource_image_budget_request_assembly` 也已逐字段通过，
+固定 skill/template production resources、动态图片屏蔽、thinking budget、rich tool image 与 durable
+session/reopen 的分层语义。当前进入 reload 与复杂控制组合。
 
 ### 下一批共同场景
 
-1. `images.blockImages`、`thinkingBudgets` 与额外 prompt/skill production resource 路径；
+1. settings/resource reload 与运行中 turn snapshot 的组合，包括 resource path replacement 和
+   session 级 thinking budget 生命周期；
 2. retry/compaction、abort、reload 和 tree navigation 的复杂竞争组合。
 
 每个场景必须同时比较：
@@ -43,12 +46,12 @@ Provider/工具。完成一个高内聚场景组后，再用 DeepSeek 做一次�
 ## 由等价场景驱动的修复
 
 共同场景发现不一致后，按原版状态所有权和调用链修复 Go 实现，不在 fixture 中接受 pi-go 现状。
-当前已知、但仍需由场景覆盖的 Agent 可观察差异包括：
+当前已实现但仍需由下一组共同场景组合验证的边界包括：
 
-- `images.blockImages` 的全上下文图片过滤；
-- settings `thinkingBudgets` 到每次 Provider turn 的动态传递；
-- 额外 prompt/skill 路径进入 production resource assembly；
-- reload 后动态 settings 与额外 production resource 路径的完整一致性。
+- reload 后 settings/resource path replacement 与当前 Agent/system prompt 的原子发布；
+- session 创建时固定的 thinking budget 与其他逐 turn 动态设置之间的生命周期差异；
+- provider 返回的实际 model provenance 与请求 alias 不同时，compaction/reopen 的后续语义；
+- retry/compaction、abort、reload 和 tree navigation 相互重叠时的事件与持久化顺序。
 
 Provider/API/Auth 数量扩展、完整 JS extension/plugin runtime、extension custom UI 和 WebUI 功能不作为
 当前 Agent 等价验收的前置条件。相关核心数据若已经存在于 session/message/event 契约中，仍必须

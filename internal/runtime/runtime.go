@@ -45,12 +45,16 @@ type Services struct {
 	AgentDir        string
 	ModelRuntime    *model.Runtime
 	ResourceService *resource.Service
-	AuthRuntime     *auth.Runtime
-	Provider        provider.Provider
-	Tool            agent.ToolExecutor
-	Tools           []provider.ToolDefinition
-	StandaloneBash  agent.StandaloneBashExecutor
-	ReloadTools     func(context.Context) (agent.ToolRuntime, error)
+	// ResolveResourcePaths samples the current effective settings arrays during
+	// AgentSession reload. ResourceService publishes those paths atomically with
+	// its newly discovered snapshot.
+	ResolveResourcePaths func() (skillPaths, promptPaths []string)
+	AuthRuntime          *auth.Runtime
+	Provider             provider.Provider
+	Tool                 agent.ToolExecutor
+	Tools                []provider.ToolDefinition
+	StandaloneBash       agent.StandaloneBashExecutor
+	ReloadTools          func(context.Context) (agent.ToolRuntime, error)
 }
 
 type CreateOptions struct {

@@ -94,6 +94,14 @@ Agent 或 durable session 的第二套状态。
   parent 的既有 JSONL、Runtime 初始化、1 次 Provider 输入、19 个事件、8 条有效 entry 及 reopen。
   坏行不会在打开或续写时被静默重写，orphan 作为独立根成为当前分支，新增 thinking/user/assistant
   记录沿该分支持久化，原始物理前缀和坏行位置保持不变。
+- 已建立 `resource_image_budget_request_assembly` 共同 workflow，逐字段对齐 3 次 Provider 输入、
+  65 个事件和 8 条 JSONL entry。skill 与 prompt template 先展开为 durable user content；
+  `images.blockImages` 在每次 Provider 转换时动态过滤完整上下文并合并连续占位文本，但不改写
+  user/tool rich image、事件或 session；关闭后既有历史图片与新图片重新进入请求；四档
+  `thinkingBudgets` 随每次请求传递，reopen 保留原始 rich content。
+- AgentLoop 现在保留并接受 Provider 实际返回的 assistant provenance，不再要求它与请求 model
+  alias 完全相同；流内 provenance 一致性仍由 collector 校验。这与原版允许 backend 报告实际
+  resolved model 的行为一致。
 - 静态 `CreateAgentSession` 现在和带动态 ModelRuntime 的生产装配一样应用 retry budget/base delay、
   compaction reserve/keepRecent 与 branch-summary reserve，不再静默回退默认值。
 
@@ -101,8 +109,9 @@ Agent 或 durable session 的第二套状态。
 
 - settings、resources、queue/retry/compaction 参数及 active tools/system prompt 的 reload 已接入；
   production 的内置 tool/standalone bash runtime 已按新设置整代重建并保留 active tool 名称。
-- `images.blockImages`、settings `thinkingBudgets` 和额外 prompt/skill 路径尚未完整进入 production
-  Agent 请求与 resource assembly，需要纳入共同场景后按原版行为补齐。
+- `images.blockImages` 已接入最终 AgentMessage→Provider 转换并动态读取有效设置；settings
+  `thinkingBudgets` 在 Session 创建时进入 stream contract；额外 prompt/skill 路径已进入 production
+  resource assembly，并在 reload 时与新资源 snapshot 原子替换，失败仍保留上一健康代。
 - Provider reset、动态 extension runtime、`user_bash` hook dispatch、flag 保留和扩展资源二次发现
   尚未完成，但 Provider/插件宿主当前明确后置，不阻塞第一轮 Agent workflow 等价验收。
 
@@ -140,10 +149,10 @@ Agent 或 durable session 的第二套状态。
 
 ### 整体验收
 
-当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及八个完整
+当前跨实现 golden 已覆盖 SessionManager、resource、tool 的局部场景，以及九个完整
 AgentSession workflow。尚未共同验证：
 
-- `images.blockImages`、thinking budget 与额外 production resource 路径；
+- settings/resource reload、thinking budget 生命周期和运行中 turn snapshot 的组合；
 - retry/compaction 与 abort、reload、tree navigation 的更复杂竞争；
 - 上述场景的完整 event、usage/cost、错误分类和 session JSONL。
 
@@ -161,7 +170,8 @@ AgentSession workflow。尚未共同验证：
 - `git diff --check`
 - 固定上游 `createAgentSession()` 的 rich/tool/reopen、queue/abort/settled、retry/Retry-After、
   manual compaction、overflow compact/continue 与 model/thinking/tools/reload turn snapshot
-  workflow，以及 tree navigation/Runtime fork、damaged session resume/continue oracle；
+  workflow，以及 tree navigation/Runtime fork、damaged session resume/continue、
+  resource/image/thinking-budget request assembly oracle；
 - SessionManager TypeScript/Go golden check；
 - WebUI typecheck、lint、static build，以及真实 Host fixture 的 prompt/SSE/persistence/restore/fork；
 - 67 个复用前端源码文件与当前 pi-web 基线逐文件一致。

@@ -133,6 +133,9 @@ type Settings struct {
 	ShellPath                 string
 	ShellCommandPrefix        string
 	Images                    ImageSettings
+	Skills                    []string
+	Prompts                   []string
+	ThinkingBudgets           ThinkingBudgetSettings
 	EnabledModels             []string
 	Compaction                CompactionSettings
 	BranchSummary             BranchSummarySettings
@@ -141,6 +144,8 @@ type Settings struct {
 	WebsocketConnectTimeoutMS *uint64
 	transportPresent          bool
 	imagesPresence            settingsObjectPresence
+	skillsPresence            settingsObjectPresence
+	promptsPresence           settingsObjectPresence
 	shellPathPresent          bool
 	shellCommandPrefixPresent bool
 }
@@ -148,11 +153,45 @@ type Settings struct {
 // ImageSettings mirrors settings.images. Pointer optionality preserves the
 // upstream default and project-over-global field merge behavior.
 type ImageSettings struct {
-	AutoResize *bool `json:"autoResize,omitempty"`
+	AutoResize  *bool `json:"autoResize,omitempty"`
+	BlockImages *bool `json:"blockImages,omitempty"`
 }
 
 func (s ImageSettings) AutoResizeOrDefault() bool {
 	return s.AutoResize == nil || *s.AutoResize
+}
+
+func (s ImageSettings) BlockImagesOrDefault() bool {
+	return s.BlockImages != nil && *s.BlockImages
+}
+
+// ThinkingBudgetSettings mirrors settings.thinkingBudgets. Pointer fields
+// preserve explicit zero budgets and the original field-level global/project
+// merge behavior.
+type ThinkingBudgetSettings struct {
+	Minimal  *uint64 `json:"minimal,omitempty"`
+	Low      *uint64 `json:"low,omitempty"`
+	Medium   *uint64 `json:"medium,omitempty"`
+	High     *uint64 `json:"high,omitempty"`
+	presence settingsObjectPresence
+}
+
+func (s ThinkingBudgetSettings) ProviderBudgets() map[provider.ThinkingLevel]uint64 {
+	values := make(map[provider.ThinkingLevel]uint64, 4)
+	for level, value := range map[provider.ThinkingLevel]*uint64{
+		provider.ThinkingMinimal: s.Minimal,
+		provider.ThinkingLow:     s.Low,
+		provider.ThinkingMedium:  s.Medium,
+		provider.ThinkingHigh:    s.High,
+	} {
+		if value != nil {
+			values[level] = *value
+		}
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
 }
 
 func (s Settings) TransportOrDefault() provider.Transport {
@@ -518,6 +557,9 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 		"reserveTokens": optionalUint64JSON(current.BranchSummary.ReserveTokens), "skipPrompt": optionalBoolJSON(current.BranchSummary.SkipPrompt),
 	})
 	putImageSettings(root, current.Images, current.imagesPresence)
+	putSettingsStringArray(root, "skills", current.Skills, current.skillsPresence)
+	putSettingsStringArray(root, "prompts", current.Prompts, current.promptsPresence)
+	putThinkingBudgets(root, current.ThinkingBudgets)
 	putRetrySettings(root, current.Retry)
 	if current.HTTPIdleTimeoutMS == nil {
 		delete(root, "httpIdleTimeoutMs")
@@ -644,7 +686,7 @@ func putRetrySettings(root map[string]json.RawMessage, value RetrySettings) {
 }
 
 func putImageSettings(root map[string]json.RawMessage, value ImageSettings, presence settingsObjectPresence) {
-	if value.AutoResize != nil {
+	if value.AutoResize != nil || value.BlockImages != nil {
 		presence = settingsObjectPresent
 	}
 	switch presence {
@@ -654,9 +696,60 @@ func putImageSettings(root map[string]json.RawMessage, value ImageSettings, pres
 		root["images"] = json.RawMessage("null")
 	case settingsObjectPresent:
 		putOptionalSettingsObject(root, "images", map[string]json.RawMessage{
-			"autoResize": optionalBoolJSON(value.AutoResize),
+			"autoResize": optionalBoolJSON(value.AutoResize), "blockImages": optionalBoolJSON(value.BlockImages),
 		})
 	}
+}
+
+func putSettingsStringArray(root map[string]json.RawMessage, key string, values []string, presence settingsObjectPresence) {
+	if values != nil {
+		presence = settingsObjectPresent
+	}
+	switch presence {
+	case settingsObjectAbsent:
+		delete(root, key)
+	case settingsObjectNull:
+		root[key] = json.RawMessage("null")
+	case settingsObjectPresent:
+		encoded, _ := json.Marshal(values)
+		root[key] = encoded
+	}
+}
+
+func putThinkingBudgets(root map[string]json.RawMessage, value ThinkingBudgetSettings) {
+	presence := value.presence
+	if thinkingBudgetSettingsHaveKnownValues(value) {
+		presence = settingsObjectPresent
+	}
+	switch presence {
+	case settingsObjectAbsent:
+		delete(root, "thinkingBudgets")
+		return
+	case settingsObjectNull:
+		root["thinkingBudgets"] = json.RawMessage("null")
+		return
+	}
+	object := map[string]json.RawMessage{}
+	_ = json.Unmarshal(root["thinkingBudgets"], &object)
+	if object == nil {
+		object = map[string]json.RawMessage{}
+	}
+	for key, raw := range map[string]json.RawMessage{
+		"minimal": optionalUint64JSON(value.Minimal), "low": optionalUint64JSON(value.Low),
+		"medium": optionalUint64JSON(value.Medium), "high": optionalUint64JSON(value.High),
+	} {
+		if raw == nil {
+			delete(object, key)
+		} else {
+			object[key] = raw
+		}
+	}
+	encoded, _ := json.Marshal(object)
+	root["thinkingBudgets"] = encoded
+}
+
+func thinkingBudgetSettingsHaveKnownValues(value ThinkingBudgetSettings) bool {
+	return value.Minimal != nil || value.Low != nil || value.Medium != nil || value.High != nil
 }
 
 func retrySettingsHaveKnownValues(value RetrySettings) bool {
@@ -1384,9 +1477,20 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			s.imagesPresence = settingsObjectNull
 		} else if err := json.Unmarshal(raw, &s.Images); err != nil {
-			return s, Diagnostic{label, "images", "must be an object with autoResize"}
+			return s, Diagnostic{label, "images", "must be an object with autoResize and blockImages"}
 		} else {
 			s.imagesPresence = settingsObjectPresent
+		}
+	}
+	if s.Skills, s.skillsPresence, err = decodeSettingsStringArray(root, "skills", label); err != nil {
+		return s, err
+	}
+	if s.Prompts, s.promptsPresence, err = decodeSettingsStringArray(root, "prompts", label); err != nil {
+		return s, err
+	}
+	if raw, ok := root["thinkingBudgets"]; ok {
+		if s.ThinkingBudgets, err = decodeThinkingBudgetSettings(raw, label); err != nil {
+			return s, err
 		}
 	}
 	if raw, ok := root["retry"]; ok {
@@ -1405,6 +1509,52 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	}
 	return s, nil
 }
+
+func decodeSettingsStringArray(root map[string]json.RawMessage, key, label string) ([]string, settingsObjectPresence, error) {
+	raw, ok := root[key]
+	if !ok {
+		return nil, settingsObjectAbsent, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, settingsObjectNull, nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil || values == nil {
+		return nil, settingsObjectAbsent, Diagnostic{label, key, "must be an array of strings"}
+	}
+	for _, value := range values {
+		if !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+			return nil, settingsObjectAbsent, Diagnostic{label, key, "contains an invalid path"}
+		}
+	}
+	return values, settingsObjectPresent, nil
+}
+
+func decodeThinkingBudgetSettings(raw json.RawMessage, label string) (ThinkingBudgetSettings, error) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ThinkingBudgetSettings{presence: settingsObjectNull}, nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return ThinkingBudgetSettings{}, Diagnostic{label, "thinkingBudgets", "must be an object with minimal, low, medium, and high"}
+	}
+	result := ThinkingBudgetSettings{presence: settingsObjectPresent}
+	fields := []struct {
+		key    string
+		target **uint64
+	}{
+		{"minimal", &result.Minimal}, {"low", &result.Low}, {"medium", &result.Medium}, {"high", &result.High},
+	}
+	for _, field := range fields {
+		value, err := decodeOptionalSettingsUint64(object, field.key, label)
+		if err != nil {
+			return ThinkingBudgetSettings{}, Diagnostic{label, "thinkingBudgets." + field.key, "must be a non-negative integer"}
+		}
+		*field.target = value
+	}
+	return result, nil
+}
+
 func validateSettings(s Settings, label string) error {
 	if s.DefaultProvider != "" && !validID(s.DefaultProvider) {
 		return Diagnostic{label, "defaultProvider", "must be a non-empty identifier"}
@@ -1542,7 +1692,7 @@ func mergeSettings(base, override Settings) Settings {
 		out.shellCommandPrefixPresent = true
 	}
 	imagesPresence := override.imagesPresence
-	if imagesPresence == settingsObjectAbsent && override.Images.AutoResize != nil {
+	if imagesPresence == settingsObjectAbsent && (override.Images.AutoResize != nil || override.Images.BlockImages != nil) {
 		imagesPresence = settingsObjectPresent
 	}
 	switch imagesPresence {
@@ -1556,6 +1706,58 @@ func mergeSettings(base, override Settings) Settings {
 		out.imagesPresence = settingsObjectPresent
 		if override.Images.AutoResize != nil {
 			out.Images.AutoResize = cloneBoolPointer(override.Images.AutoResize)
+		}
+		if override.Images.BlockImages != nil {
+			out.Images.BlockImages = cloneBoolPointer(override.Images.BlockImages)
+		}
+	}
+	skillsPresence := override.skillsPresence
+	if skillsPresence == settingsObjectAbsent && override.Skills != nil {
+		skillsPresence = settingsObjectPresent
+	}
+	switch skillsPresence {
+	case settingsObjectNull:
+		out.Skills = nil
+		out.skillsPresence = settingsObjectNull
+	case settingsObjectPresent:
+		out.Skills = append([]string{}, override.Skills...)
+		out.skillsPresence = settingsObjectPresent
+	}
+	promptsPresence := override.promptsPresence
+	if promptsPresence == settingsObjectAbsent && override.Prompts != nil {
+		promptsPresence = settingsObjectPresent
+	}
+	switch promptsPresence {
+	case settingsObjectNull:
+		out.Prompts = nil
+		out.promptsPresence = settingsObjectNull
+	case settingsObjectPresent:
+		out.Prompts = append([]string{}, override.Prompts...)
+		out.promptsPresence = settingsObjectPresent
+	}
+	thinkingBudgetsPresence := override.ThinkingBudgets.presence
+	if thinkingBudgetsPresence == settingsObjectAbsent && thinkingBudgetSettingsHaveKnownValues(override.ThinkingBudgets) {
+		thinkingBudgetsPresence = settingsObjectPresent
+	}
+	switch thinkingBudgetsPresence {
+	case settingsObjectNull:
+		out.ThinkingBudgets = ThinkingBudgetSettings{presence: settingsObjectNull}
+	case settingsObjectPresent:
+		if out.ThinkingBudgets.presence == settingsObjectNull {
+			out.ThinkingBudgets = ThinkingBudgetSettings{}
+		}
+		out.ThinkingBudgets.presence = settingsObjectPresent
+		if override.ThinkingBudgets.Minimal != nil {
+			out.ThinkingBudgets.Minimal = cloneUint64Pointer(override.ThinkingBudgets.Minimal)
+		}
+		if override.ThinkingBudgets.Low != nil {
+			out.ThinkingBudgets.Low = cloneUint64Pointer(override.ThinkingBudgets.Low)
+		}
+		if override.ThinkingBudgets.Medium != nil {
+			out.ThinkingBudgets.Medium = cloneUint64Pointer(override.ThinkingBudgets.Medium)
+		}
+		if override.ThinkingBudgets.High != nil {
+			out.ThinkingBudgets.High = cloneUint64Pointer(override.ThinkingBudgets.High)
 		}
 	}
 	if override.EnabledModels != nil {
@@ -2788,6 +2990,8 @@ func appendUnique(base []string, values ...string) []string {
 	return base
 }
 func cloneSettings(s Settings) Settings {
+	s.Skills = cloneStringSlice(s.Skills)
+	s.Prompts = cloneStringSlice(s.Prompts)
 	s.EnabledModels = append([]string(nil), s.EnabledModels...)
 	s.Compaction.Enabled = cloneBoolPointer(s.Compaction.Enabled)
 	s.Compaction.ReserveTokens = cloneUint64Pointer(s.Compaction.ReserveTokens)
@@ -2795,6 +2999,11 @@ func cloneSettings(s Settings) Settings {
 	s.BranchSummary.ReserveTokens = cloneUint64Pointer(s.BranchSummary.ReserveTokens)
 	s.BranchSummary.SkipPrompt = cloneBoolPointer(s.BranchSummary.SkipPrompt)
 	s.Images.AutoResize = cloneBoolPointer(s.Images.AutoResize)
+	s.Images.BlockImages = cloneBoolPointer(s.Images.BlockImages)
+	s.ThinkingBudgets.Minimal = cloneUint64Pointer(s.ThinkingBudgets.Minimal)
+	s.ThinkingBudgets.Low = cloneUint64Pointer(s.ThinkingBudgets.Low)
+	s.ThinkingBudgets.Medium = cloneUint64Pointer(s.ThinkingBudgets.Medium)
+	s.ThinkingBudgets.High = cloneUint64Pointer(s.ThinkingBudgets.High)
 	s.Retry.Enabled = cloneBoolPointer(s.Retry.Enabled)
 	s.Retry.MaxRetries = cloneUint64Pointer(s.Retry.MaxRetries)
 	s.Retry.BaseDelayMS = cloneUint64Pointer(s.Retry.BaseDelayMS)
@@ -2804,6 +3013,13 @@ func cloneSettings(s Settings) Settings {
 	s.HTTPIdleTimeoutMS = cloneUint64Pointer(s.HTTPIdleTimeoutMS)
 	s.WebsocketConnectTimeoutMS = cloneUint64Pointer(s.WebsocketConnectTimeoutMS)
 	return s
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 func cloneProviderRetrySettings(value ProviderRetrySettings) ProviderRetrySettings {

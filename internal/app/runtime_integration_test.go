@@ -473,6 +473,81 @@ func TestProductionReloadRebuildsModelAndStandaloneBashFromSettings(t *testing.T
 	}
 }
 
+func TestProductionRuntimeLoadsAndReloadsSettingsResourcePaths(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	writeProductionCatalog(t, agentDir, true)
+	firstRoot, secondRoot := filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")
+	firstSkill := filepath.Join(firstRoot, "skills", "settings-first", "SKILL.md")
+	secondSkill := filepath.Join(secondRoot, "skills", "settings-second", "SKILL.md")
+	firstPrompt := filepath.Join(firstRoot, "prompts", "settings-first.md")
+	secondPrompt := filepath.Join(secondRoot, "prompts", "settings-second.md")
+	for path, content := range map[string]string{
+		firstSkill:   "---\nname: settings-first\ndescription: First settings skill\n---\nfirst skill body",
+		secondSkill:  "---\nname: settings-second\ndescription: Second settings skill\n---\nsecond skill body",
+		firstPrompt:  "first expansion $@",
+		secondPrompt: "second expansion $@",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSettings := func(skill, prompt string) {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{"skills": []string{skill}, "prompts": []string{prompt}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSettings(firstSkill, firstPrompt)
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer productRuntime.Dispose(context.Background())
+	assertResources := func(skillName, promptName, expanded, absentSkill string) {
+		t.Helper()
+		snapshot, err := productRuntime.Services().ResourceService.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundSkill, foundPrompt, foundAbsent := false, false, false
+		for _, skill := range snapshot.Skills {
+			foundSkill = foundSkill || skill.Name == skillName
+			foundAbsent = foundAbsent || skill.Name == absentSkill
+		}
+		for _, prompt := range snapshot.Templates {
+			foundPrompt = foundPrompt || prompt.Name == promptName
+		}
+		if !foundSkill || !foundPrompt || foundAbsent || !strings.Contains(productRuntime.Session().SystemPrompt(), "<name>"+skillName+"</name>") {
+			t.Fatalf("resource snapshot after settings load = skills %#v templates %#v prompt %q", snapshot.Skills, snapshot.Templates, productRuntime.Session().SystemPrompt())
+		}
+		value, err := productRuntime.Services().ResourceService.ExpandInput("/" + promptName + " value")
+		if err != nil || value != expanded {
+			t.Fatalf("settings prompt expansion = (%q, %v), want %q", value, err, expanded)
+		}
+	}
+	assertResources("settings-first", "settings-first", "first expansion value", "settings-second")
+	writeSettings(secondSkill, secondPrompt)
+	if err := productRuntime.Session().Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	assertResources("settings-second", "settings-second", "second expansion value", "settings-first")
+}
+
 func TestProductionExplicitModelCanRunAfterRuntimeCredentialAdded(t *testing.T) {
 	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
 	writeProductionCatalog(t, agentDir, false)

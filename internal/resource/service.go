@@ -57,11 +57,14 @@ func (s *Service) BuildSystemPromptForTools(selectedTools []string) (string, Bui
 	if s == nil {
 		return "", BuildSystemPromptOptions{}, ErrUnavailable
 	}
-	snapshot, err := s.Snapshot()
-	if err != nil {
-		return "", BuildSystemPromptOptions{}, err
+	s.mu.RLock()
+	if s.snapshot == nil {
+		s.mu.RUnlock()
+		return "", BuildSystemPromptOptions{}, ErrUnavailable
 	}
+	snapshot := s.snapshot.clone()
 	config := s.config
+	s.mu.RUnlock()
 	if selectedTools == nil {
 		config.SelectedTools = nil
 	} else {
@@ -94,6 +97,36 @@ func (s *Service) ExpandInput(text string) (string, error) {
 // Reload constructs everything off-lock. A failed reload leaves the last
 // healthy snapshot observable, while an initial failure has no snapshot.
 func (s *Service) Reload(ctx context.Context) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	s.mu.RLock()
+	config := s.config
+	s.mu.RUnlock()
+	return s.reloadWithConfig(ctx, config)
+}
+
+// ReloadAdditionalPaths refreshes discovery with the latest effective
+// settings.skills/settings.prompts arrays. The candidate config and snapshot
+// are published together, so a failed reload retains the last healthy prompt,
+// expansion tables, and path set.
+func (s *Service) ReloadAdditionalPaths(ctx context.Context, skillPaths, promptPaths []string) error {
+	if s == nil {
+		return ErrUnavailable
+	}
+	s.mu.RLock()
+	config := s.config
+	s.mu.RUnlock()
+	config.SkillPaths = append([]string(nil), skillPaths...)
+	config.PromptPaths = append([]string(nil), promptPaths...)
+	validated, err := validateConfig(config)
+	if err != nil {
+		return err
+	}
+	return s.reloadWithConfig(ctx, validated)
+}
+
+func (s *Service) reloadWithConfig(ctx context.Context, config Config) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -104,12 +137,11 @@ func (s *Service) Reload(ctx context.Context) error {
 	s.generation++
 	generation := s.generation
 	s.mu.Unlock()
-	decision, err := s.trust.decision(ctx, s.config.CWD)
+	decision, err := s.trust.decision(ctx, config.CWD)
 	if err != nil {
 		return err
 	}
 	admission := decision
-	config := s.config
 	effectiveDecision := decision
 	// The original trust resolver treats a project with no trust-requiring
 	// resources as trusted even when an old explicit decision is present. Keep
@@ -128,12 +160,13 @@ func (s *Service) Reload(ctx context.Context) error {
 	// confirmDecision holds the trust-store serialization token from the final
 	// durable re-read through publication. The service mutex then makes the
 	// generation comparison and assignment one indivisible state transition.
-	return s.trust.confirmDecision(ctx, s.config.CWD, admission, func() error {
+	return s.trust.confirmDecision(ctx, config.CWD, admission, func() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if generation != s.generation {
 			return ErrStaleReload
 		}
+		s.config = config
 		s.snapshot = &next
 		return nil
 	})

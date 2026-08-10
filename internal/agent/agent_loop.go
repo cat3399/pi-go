@@ -542,11 +542,10 @@ func (l *AgentLoop) streamAssistant(ctx context.Context, invocation *agentLoopIn
 		blocks, failureErr := agentLoopCollectorFailure(collector, err)
 		return l.emitProviderFailure(ctx, turn, current, request.Model(), "Provider stream failed", failureErr, blocks, started)
 	}
-	provenance := terminal.AssistantProvenance()
-	if !provenance.Matches(request.Model().Provider(), request.Model().API(), request.Model().ID()) {
-		blocks, failureErr := agentLoopCollectorFailure(collector, fmt.Errorf("%w: terminal provenance does not match request model", ErrProviderStream))
-		return l.emitProviderFailure(ctx, turn, current, request.Model(), "Provider stream failed", failureErr, blocks, started)
-	}
+	// Pi retains the provider-returned assistant provenance. A backend may
+	// report a resolved model identity that differs from the requested alias;
+	// the stream collector already guarantees one internally consistent
+	// provenance across all events, so do not rewrite or reject it here.
 	wrapped, err := agentmsg.NewLLM(terminal)
 	if err != nil {
 		return nil, err

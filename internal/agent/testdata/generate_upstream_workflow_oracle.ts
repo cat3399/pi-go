@@ -107,6 +107,18 @@ type Corpus = {
     continuationPrompt: string;
     response: { text: string; inputTokens: number; outputTokens: number };
   };
+  requestAssemblyScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    thinkingLevel: "high";
+    thinkingBudgets: { minimal: number; low: number; medium: number; high: number };
+    image: { mimeType: string; base64: string };
+    skill: { name: string; description: string; body: string; argument: string };
+    template: { name: string; content: string; argument: string };
+    tool: { name: string; callId: string; description: string; argument: string; resultText: string };
+    responses: Array<{ text: string; toolCall: boolean; inputTokens: number; outputTokens: number }>;
+  };
 };
 
 type EntryIDMap = Map<string, string>;
@@ -121,6 +133,17 @@ function moduleURL(path: string): string {
 
 function normalizePathText(value: string, root: string, cwd: string): string {
   return value.split(cwd).join("<cwd>").split(root).join("<root>");
+}
+
+function normalizePathStrings(value: unknown, root: string, cwd: string): unknown {
+  if (typeof value === "string") return normalizePathText(value, root, cwd);
+  if (Array.isArray(value)) return value.map((item) => normalizePathStrings(item, root, cwd));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, normalizePathStrings(item, root, cwd)]),
+    );
+  }
+  return value;
 }
 
 function normalizeUsage(usage: any): Record<string, unknown> {
@@ -373,18 +396,21 @@ function normalizeProviderInput(
   cwd: string,
   sessionId: string,
   foreignSessionIdLabel = "<summary-session-id>",
+  includeThinkingBudgets = false,
 ): Record<string, unknown> {
   const requestSessionId = options?.sessionId ?? "";
+  const stream: Record<string, unknown> = {
+    sessionId: requestSessionId === sessionId || requestSessionId === "" ? requestSessionId : foreignSessionIdLabel,
+    reasoning: options?.reasoning ?? null,
+    transport: options?.transport ?? "",
+  };
+  if (includeThinkingBudgets) stream.thinkingBudgets = options?.thinkingBudgets ?? null;
   return {
     model: { provider: model.provider, api: model.api, id: model.id },
     systemPrompt: normalizePathText(context.systemPrompt, root, cwd),
     messages: context.messages.map(normalizeMessage),
     tools: (context.tools ?? []).map(normalizeTool),
-    stream: {
-      sessionId: requestSessionId === sessionId || requestSessionId === "" ? requestSessionId : foreignSessionIdLabel,
-      reasoning: options?.reasoning ?? null,
-      transport: options?.transport ?? "",
-    },
+    stream,
   };
 }
 
@@ -2071,6 +2097,242 @@ async function runDamagedSessionScenario(
   };
 }
 
+async function runRequestAssemblyScenario(
+  root: string,
+  runtimeModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+  Type: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.requestAssemblyScenario;
+  if (scenario.responses.length !== 3 || !scenario.responses[0]?.toolCall) {
+    throw new Error("request assembly workflow requires one tool response followed by two text responses");
+  }
+  const scenarioRoot = join(root, "request-assembly");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  const explicitDir = join(scenarioRoot, "explicit-resources");
+  const skillDir = join(explicitDir, "skills", scenario.skill.name);
+  const skillPath = join(skillDir, "SKILL.md");
+  const promptPath = join(explicitDir, "prompts", `${scenario.template.name}.md`);
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  mkdirSync(skillDir, { recursive: true });
+  mkdirSync(dirname(promptPath), { recursive: true });
+  writeFileSync(
+    skillPath,
+    `---\nname: ${scenario.skill.name}\ndescription: ${scenario.skill.description}\n---\n${scenario.skill.body}`,
+    "utf8",
+  );
+  writeFileSync(promptPath, scenario.template.content, "utf8");
+
+  const model = {
+    ...harnessModule.fauxModel,
+    id: "faux-reasoning",
+    name: "Faux Reasoning Model",
+    reasoning: true,
+  };
+  const faux = harnessModule.createFauxStreamFn(scenario.responses.map((response) => ({
+    text: response.text,
+    toolCalls: response.toolCall
+      ? [{ id: scenario.tool.callId, name: scenario.tool.name, args: { label: scenario.tool.argument } }]
+      : undefined,
+    stopReason: response.toolCall ? "toolUse" : "stop",
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  })));
+  const providerModels: any[] = [];
+  const streamOptions: any[] = [];
+  const streamSimple = (requestModel: any, context: any, options: any) => {
+    providerModels.push(requestModel);
+    streamOptions.push(options);
+    return faux.streamFn(requestModel, context, options);
+  };
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+    images: { autoResize: false, blockImages: true },
+    thinkingBudgets: scenario.thinkingBudgets,
+    skills: [skillPath],
+    prompts: [promptPath],
+  });
+  const services = await runtimeModule.createAgentSessionServices({
+    cwd,
+    agentDir,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+    settingsManager,
+    resourceLoaderOptions: {
+      noExtensions: true,
+      noThemes: true,
+      noContextFiles: true,
+      systemPrompt: scenario.systemPrompt,
+    },
+  });
+  const toolRuns: Array<Record<string, unknown>> = [];
+  const readTool = {
+    name: "read",
+    label: "Read",
+    description: "Read deterministic resources",
+    parameters: Type.Object(
+      { path: Type.String() },
+      { additionalProperties: false },
+    ),
+    execute: async () => ({ content: [{ type: "text", text: "unused read" }], details: null }),
+  };
+  const imageTool = {
+    name: scenario.tool.name,
+    label: "Image Probe",
+    description: scenario.tool.description,
+    parameters: Type.Object(
+      { label: Type.String() },
+      { additionalProperties: false },
+    ),
+    execute: async (toolCallId: string, params: { label: string }) => {
+      toolRuns.push({ toolCallId, arguments: { label: params.label } });
+      return {
+        content: [
+          { type: "text", text: scenario.tool.resultText },
+          { type: "image", mimeType: scenario.image.mimeType, data: scenario.image.base64 },
+          { type: "image", mimeType: scenario.image.mimeType, data: scenario.image.base64 },
+        ],
+        details: { label: params.label },
+      };
+    },
+  };
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const created = await runtimeModule.createAgentSessionFromServices({
+    services,
+    sessionManager,
+    model,
+    thinkingLevel: scenario.thinkingLevel,
+    tools: [readTool.name, imageTool.name],
+    customTools: [readTool, imageTool],
+  });
+  const agentSession = created.session;
+  const events: any[] = [];
+  agentSession.subscribe((event: any) => events.push(event));
+  const initialBlockImages = settingsManager.getBlockImages();
+  await agentSession.prompt(`/skill:${scenario.skill.name} ${scenario.skill.argument}`, {
+    images: [
+      { type: "image", mimeType: scenario.image.mimeType, data: scenario.image.base64 },
+      { type: "image", mimeType: scenario.image.mimeType, data: scenario.image.base64 },
+    ],
+  });
+  settingsManager.setBlockImages(false);
+  const finalBlockImages = settingsManager.getBlockImages();
+  await agentSession.prompt(`/${scenario.template.name} ${scenario.template.argument}`, {
+    images: [{ type: "image", mimeType: scenario.image.mimeType, data: scenario.image.base64 }],
+  });
+  if (faux.state.callCount !== 3 || providerModels.length !== 3 || streamOptions.length !== 3) {
+    throw new Error(
+      `request assembly provider calls ${faux.state.callCount}/${providerModels.length}/${streamOptions.length}, want 3/3/3`,
+    );
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = agentSession.sessionFile;
+  if (!sessionFile) throw new Error("request assembly session did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = agentSession.getSessionStats();
+  const loadedSkills = services.resourceLoader.getSkills().skills.map((skill: any) => ({
+    name: skill.name,
+    description: skill.description,
+    filePath: normalizePathText(skill.filePath, scenarioRoot, cwd),
+    baseDir: normalizePathText(skill.baseDir, scenarioRoot, cwd),
+    disableModelInvocation: skill.disableModelInvocation,
+  }));
+  const loadedTemplates = agentSession.promptTemplates.map((template: any) => ({
+    name: template.name,
+    description: template.description,
+    argumentHint: template.argumentHint ?? null,
+    content: template.content,
+    filePath: normalizePathText(template.filePath, scenarioRoot, cwd),
+  }));
+  const finalState = {
+    isStreaming: agentSession.isStreaming,
+    pendingMessageCount: agentSession.pendingMessageCount,
+    model: { provider: agentSession.model.provider, api: agentSession.model.api, id: agentSession.model.id },
+    thinkingLevel: agentSession.thinkingLevel,
+    activeTools: agentSession.getActiveToolNames(),
+    systemPrompt: normalizePathText(agentSession.systemPrompt, scenarioRoot, cwd),
+    messages: agentSession.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  agentSession.dispose();
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return normalizePathStrings({
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      initialBlockImages,
+      finalBlockImages,
+      loadedSkills,
+      loadedTemplates,
+      toolRuns,
+    },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(
+        providerModels[index],
+        context,
+        streamOptions[index],
+        scenarioRoot,
+        cwd,
+        scenario.sessionId,
+        "<summary-session-id>",
+        true,
+      )),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: normalizeDamagedContext(reopenedContext),
+      },
+    },
+  }, scenarioRoot, cwd) as Record<string, unknown>;
+}
+
 async function main(): Promise<void> {
   const commit = execFileSync("git", ["-C", upstreamRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   if (commit !== corpus.upstreamCommit) throw new Error(`upstream commit ${commit}, want ${corpus.upstreamCommit}`);
@@ -2294,6 +2556,16 @@ async function main(): Promise<void> {
       modelTestModule,
       harnessModule,
     );
+    const requestAssemblyScenario = await runRequestAssemblyScenario(
+      root,
+      runtimeModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      modelTestModule,
+      harnessModule,
+      Type,
+    );
     const output = {
       upstreamCommit: corpus.upstreamCommit,
       generatedBy: "pinned packages/coding-agent createAgentSession with deterministic stream/tool inputs",
@@ -2328,6 +2600,7 @@ async function main(): Promise<void> {
       turnSnapshotScenario,
       treeForkScenario,
       damagedSessionScenario,
+      requestAssemblyScenario,
     };
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
