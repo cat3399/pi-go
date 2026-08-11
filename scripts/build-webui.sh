@@ -13,4 +13,4 @@ npm --prefix "$frontend_dir" run build
 mkdir -p "$repo_dir/bin"
 
 cd "$repo_dir"
-go build -tags pi_go_webui -o "$repo_dir/bin/pi-go-web" ./cmd/pi-go-web
+go build -tags pi_go_webui -o "$repo_dir/bin/pi-go" ./cmd/pi-go

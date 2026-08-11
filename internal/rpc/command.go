@@ -1,6 +1,6 @@
-// Package rpc implements pi's headless JSONL protocol above host.Host. It is
-// deliberately a wire adapter: all product state and behavior remain owned by
-// Runtime -> AgentSession -> Agent.
+// Package rpc implements pi's headless JSONL protocol above an
+// application.ApplicationSession. It is deliberately a wire adapter: all
+// product state and behavior remain owned by Runtime -> AgentSession -> Agent.
 package rpc
 
 import (
@@ -8,8 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cat3399/pi-go/internal/host"
-	"github.com/cat3399/pi-go/internal/hostjson"
+	"github.com/cat3399/pi-go/internal/agent"
+	"github.com/cat3399/pi-go/internal/application"
+	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
 )
 
 type commandEnvelope struct {
@@ -20,7 +21,7 @@ type commandEnvelope struct {
 type decodedCommand struct {
 	id      *string
 	typ     string
-	command host.Command
+	command application.Command
 }
 
 func decodeCommand(line []byte) (decodedCommand, error) {
@@ -32,7 +33,7 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 	if strings.TrimSpace(envelope.Type) == "" {
 		return decoded, fmt.Errorf("command type is required")
 	}
-	command, err := hostjson.DecodeCommand(line)
+	command, err := protocolv1.DecodeCommand(line, agent.InputRPC)
 	if err != nil {
 		return decoded, err
 	}

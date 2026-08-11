@@ -277,7 +277,7 @@ export function AppShell() {
     setInitialCwdStatus("validating");
     setInitialCwdError(null);
 
-    void fetch("/api/cwd/validate", {
+    void fetch("/api/v1/system/cwd/validate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cwd: requestedCwd }),
@@ -391,7 +391,7 @@ export function AppShell() {
   // handleCwdChange relies on. Hydrate it from the session list so switching
   // worktrees right after creating a session doesn't close the chat.
   const hydrateSelectedSession = useCallback((sessionId: string) => {
-    void fetch("/api/sessions")
+    void fetch("/api/v1/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
@@ -423,8 +423,10 @@ export function AppShell() {
     setAutoNameStatus({ kind: "naming" });
 
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
+      const response = await fetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
       });
       const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string };
       if (!response.ok || !body.title) {
@@ -542,7 +544,7 @@ export function AppShell() {
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
     window.open(
-      `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
+      `/api/v1/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
       "_blank",
       "noopener,noreferrer",
     );
@@ -562,7 +564,7 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
-    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
+    fetch(`/api/v1/system/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
       .then(async (response) => {
@@ -582,7 +584,7 @@ export function AppShell() {
     setProjectTrustBusy(true);
     setProjectTrustError(null);
     try {
-      const response = await fetch("/api/project-trust", {
+      const response = await fetch("/api/v1/system/project-trust", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),

@@ -91,7 +91,7 @@ export function resolveLocalFileHref(
   const normalizedHref = normalizeFilePathSlashes(decodedHref);
   const lowerHref = normalizedHref.toLowerCase();
 
-  if (lowerHref.startsWith("/api/") || lowerHref.startsWith("/_next/")) return null;
+  if (lowerHref.startsWith("/api/v1/") || lowerHref.startsWith("/_next/")) return null;
   if (!isBackslashUncPath && normalizedHref.startsWith("//")) return null;
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/i.test(normalizedHref) && !lowerHref.startsWith("file:") && !/^[a-zA-Z]:\//.test(normalizedHref)) {
     return null;

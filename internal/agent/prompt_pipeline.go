@@ -21,7 +21,7 @@ type PromptOptions struct {
 	StreamingBehavior     StreamingBehavior
 	Source                InputSource
 	// PreflightResult is the transport-neutral acknowledgement boundary used
-	// by coding-agent's RPC host. It is called exactly once: true after an
+	// by coding-agent's JSONL RPC adapter. It is called exactly once: true after an
 	// immediately handled/queued prompt or after every ordinary prompt
 	// preflight succeeds, and false when the prompt is rejected before that
 	// boundary. A successful callback always precedes the first Agent event.

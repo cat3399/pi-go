@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
-	"github.com/cat3399/pi-go/internal/host"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
@@ -21,16 +21,16 @@ import (
 
 type testBackend struct {
 	mu       sync.Mutex
-	observer host.Observer
-	dispatch func(context.Context, host.Command) (host.CommandResult, error)
+	observer application.SessionObserver
+	dispatch func(context.Context, application.Command) (application.CommandResult, error)
 	disposed bool
 }
 
-func (b *testBackend) Dispatch(ctx context.Context, command host.Command) (host.CommandResult, error) {
+func (b *testBackend) Dispatch(ctx context.Context, command application.Command) (application.CommandResult, error) {
 	return b.dispatch(ctx, command)
 }
 
-func (b *testBackend) Subscribe(observer host.Observer) func() {
+func (b *testBackend) Subscribe(observer application.SessionObserver) func() {
 	b.mu.Lock()
 	b.observer = observer
 	b.mu.Unlock()
@@ -41,7 +41,7 @@ func (b *testBackend) Subscribe(observer host.Observer) func() {
 	}
 }
 
-func (b *testBackend) emit(event host.Event) {
+func (b *testBackend) emit(event application.Event) {
 	b.mu.Lock()
 	observer := b.observer
 	b.mu.Unlock()
@@ -57,14 +57,16 @@ func (b *testBackend) Dispose(context.Context) error {
 	return nil
 }
 
-func TestServerPromptResponsePrecedesFirstAgentEvent(t *testing.T) {
+func TestServerCorrelatesPromptOperationAndAgentEvents(t *testing.T) {
 	backend := &testBackend{}
-	backend.dispatch = func(_ context.Context, command host.Command) (host.CommandResult, error) {
-		prompt := command.(host.PromptCommand)
-		accepted := host.PromptAcceptedResult{OperationID: 7}
-		prompt.PreflightResult(accepted)
-		backend.emit(host.Event{Sequence: 1, SessionID: "session", Value: host.AgentSessionEvent{Event: agent.AgentStartEvent{RunID: 1}}})
-		return accepted, nil
+	backend.dispatch = func(_ context.Context, command application.Command) (application.CommandResult, error) {
+		prompt := command.(application.PromptCommand)
+		if prompt.Source != agent.InputRPC {
+			t.Errorf("prompt source = %q", prompt.Source)
+		}
+		started := application.PromptStartedResult{OperationID: 7}
+		backend.emit(application.Event{Sequence: 1, SessionID: "session", Value: application.AgentSessionEvent{Event: agent.AgentStartEvent{RunID: 1}}})
+		return started, nil
 	}
 	var output bytes.Buffer
 	server, err := NewServer(backend, bytes.NewBufferString("{\"id\":\"p1\",\"type\":\"prompt\",\"message\":\"hello\"}\n"), &output)
@@ -78,11 +80,20 @@ func TestServerPromptResponsePrecedesFirstAgentEvent(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("records = %#v", records)
 	}
-	if records[0]["type"] != "response" || records[0]["command"] != "prompt" || records[0]["success"] != true {
-		t.Fatalf("prompt response = %#v", records[0])
+	var response, event map[string]any
+	for _, record := range records {
+		if record["type"] == "response" {
+			response = record
+		} else if record["type"] == "agent_start" {
+			event = record
+		}
 	}
-	if records[1]["type"] != "agent_start" {
-		t.Fatalf("first Agent event = %#v", records[1])
+	data, _ := response["data"].(map[string]any)
+	if response["command"] != "prompt" || response["success"] != true || data["operationId"] != float64(7) {
+		t.Fatalf("prompt response = %#v", response)
+	}
+	if event == nil {
+		t.Fatalf("Agent event missing from %#v", records)
 	}
 }
 
@@ -140,13 +151,13 @@ func TestServerStreamsRealAgentSessionProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	productHost, err := host.New(context.Background(), runtime)
+	productSession, err := application.NewApplicationSession(context.Background(), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
 	inputReader, inputWriter := io.Pipe()
 	outputReader, outputWriter := io.Pipe()
-	server, err := NewServer(productHost, inputReader, outputWriter)
+	server, err := NewServer(productSession, inputReader, outputWriter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +176,7 @@ func TestServerStreamsRealAgentSessionProtocol(t *testing.T) {
 			t.Fatal(err)
 		}
 		records = append(records, record)
-		if record["type"] == "prompt_done" {
+		if record["type"] == "operation" && record["status"] == "completed" {
 			break
 		}
 	}
@@ -176,7 +187,7 @@ func TestServerStreamsRealAgentSessionProtocol(t *testing.T) {
 	if err := <-serveDone; err != nil {
 		t.Fatal(err)
 	}
-	responseIndex, agentStartIndex, updateIndex := -1, -1, -1
+	responseIndex, agentStartIndex, updateIndex, operationIndex := -1, -1, -1, -1
 	for index, record := range records {
 		switch record["type"] {
 		case "response":
@@ -187,9 +198,13 @@ func TestServerStreamsRealAgentSessionProtocol(t *testing.T) {
 			agentStartIndex = index
 		case "message_update":
 			updateIndex = index
+		case "operation":
+			if record["command"] == "prompt" && record["status"] == "completed" {
+				operationIndex = index
+			}
 		}
 	}
-	if responseIndex < 0 || agentStartIndex <= responseIndex || updateIndex <= agentStartIndex {
+	if responseIndex < 0 || agentStartIndex < 0 || updateIndex <= agentStartIndex || operationIndex <= updateIndex {
 		t.Fatalf("real prompt ordering = %#v", records)
 	}
 	message, ok := records[updateIndex]["message"].(map[string]any)
@@ -207,16 +222,16 @@ func TestServerDispatchesAbortWhileBashCommandIsBlocked(t *testing.T) {
 	aborted := make(chan struct{})
 	bashDone := make(chan struct{})
 	backend := &testBackend{}
-	backend.dispatch = func(_ context.Context, command host.Command) (host.CommandResult, error) {
+	backend.dispatch = func(_ context.Context, command application.Command) (application.CommandResult, error) {
 		switch command.(type) {
-		case host.BashCommand:
+		case application.BashCommand:
 			close(bashStarted)
 			<-aborted
 			close(bashDone)
-			return host.BashResult{Result: agent.BashResult{Output: "partial", Cancelled: true}}, nil
-		case host.AbortBashCommand:
+			return application.BashResult{Result: agent.BashResult{Output: "partial", Cancelled: true}}, nil
+		case application.AbortBashCommand:
 			close(aborted)
-			return host.AbortBashResult{}, nil
+			return application.AbortBashResult{}, nil
 		default:
 			t.Fatalf("unexpected command %T", command)
 			return nil, nil
@@ -260,7 +275,7 @@ func TestServerDispatchesAbortWhileBashCommandIsBlocked(t *testing.T) {
 }
 
 func TestServerReturnsCorrelatedDecodeErrorAndDisposes(t *testing.T) {
-	backend := &testBackend{dispatch: func(context.Context, host.Command) (host.CommandResult, error) {
+	backend := &testBackend{dispatch: func(context.Context, application.Command) (application.CommandResult, error) {
 		t.Fatal("invalid command reached backend")
 		return nil, nil
 	}}
@@ -289,7 +304,7 @@ func TestDecodePromptPreservesRichImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := decoded.command.(host.PromptCommand)
+	prompt := decoded.command.(application.PromptCommand)
 	if prompt.StreamingBehavior != agent.StreamingFollowUp || len(prompt.Images) != 1 || !reflect.DeepEqual(prompt.Images[0].Data(), []byte{1, 2, 3}) {
 		t.Fatalf("decoded prompt = %#v", prompt)
 	}

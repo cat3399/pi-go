@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cat3399/pi-go/internal/host"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -29,9 +28,10 @@ type SessionInfo struct {
 }
 
 // SessionSnapshot is one consistent read of durable session state plus the
-// optional live Host state. Entries and trees retain the canonical session
+// optional live application state. Entries and trees retain the canonical session
 // types so surfaces do not invent a second conversation model.
 type SessionSnapshot struct {
+	Revision  uint64
 	SessionID string
 	FilePath  string
 	Info      SessionInfo
@@ -39,10 +39,10 @@ type SessionSnapshot struct {
 	Tree      []session.TreeNode
 	Entries   []session.Entry
 	Context   session.Context
-	LiveState *host.State
+	LiveState *State
 }
 
-func (s *Supervisor) ListSessions() ([]SessionInfo, error) {
+func (s *Service) ListSessions() ([]SessionInfo, error) {
 	discovered, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
 	if err != nil {
 		return nil, err
@@ -186,7 +186,8 @@ func cleanPathKey(value string) string {
 	return filepath.Clean(absolute)
 }
 
-func (s *Supervisor) SnapshotSession(id, leafID string) (SessionSnapshot, error) {
+func (s *Service) SnapshotSession(id, leafID string) (SessionSnapshot, error) {
+	revision := s.CurrentRevision()
 	manager, managed, info, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return SessionSnapshot{}, err
@@ -214,11 +215,11 @@ func (s *Supervisor) SnapshotSession(id, leafID string) (SessionSnapshot, error)
 	}
 	file, _ := manager.SessionFile()
 	result := SessionSnapshot{
-		SessionID: id, FilePath: file, Info: info, LeafID: leaf,
+		Revision: revision, SessionID: id, FilePath: file, Info: info, LeafID: leaf,
 		Tree: manager.Tree(), Entries: entries, Context: contextValue,
 	}
 	if managed != nil {
-		state, stateErr := managed.host.State()
+		state, stateErr := managed.session.State()
 		if stateErr != nil {
 			return SessionSnapshot{}, stateErr
 		}
@@ -227,7 +228,7 @@ func (s *Supervisor) SnapshotSession(id, leafID string) (SessionSnapshot, error)
 	return result, nil
 }
 
-func (s *Supervisor) SessionExists(id string) (bool, error) {
+func (s *Service) SessionExists(id string) (bool, error) {
 	if _, ok := s.active(id); ok {
 		return true, nil
 	}
@@ -235,10 +236,10 @@ func (s *Supervisor) SessionExists(id string) (bool, error) {
 	return found, err
 }
 
-func (s *Supervisor) RenameSession(ctx context.Context, id, name string) error {
-	ctx = normalizeSupervisorContext(ctx)
+func (s *Service) RenameSession(ctx context.Context, id, name string) error {
+	ctx = normalizeContext(ctx)
 	if _, ok := s.active(id); ok {
-		_, err := s.Dispatch(ctx, id, host.SetSessionNameCommand{Name: name})
+		_, err := s.Dispatch(ctx, id, SetSessionNameCommand{Name: name})
 		return err
 	}
 	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
@@ -249,10 +250,13 @@ func (s *Supervisor) RenameSession(ctx context.Context, id, name string) error {
 		defer manager.Close()
 	}
 	_, err = manager.AppendSessionInfo(ctx, name)
+	if err == nil {
+		s.events.publish(Event{SessionID: id, Value: SessionCatalogEvent{Change: SessionUpdated}})
+	}
 	return err
 }
 
-func (s *Supervisor) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, SessionInfo, bool, error) {
+func (s *Service) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, SessionInfo, bool, error) {
 	if managed, ok := s.active(id); ok {
 		manager := managed.manager()
 		if manager == nil {

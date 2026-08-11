@@ -1,82 +1,88 @@
 # Surface 架构
 
-## 目标
+## 一个核心，三种接入方式
 
-pi-go 只有一套 Agent/Application Core。TUI、WebUI、未来 GUI 和 RPC 自动化都是可选 surface
-或 transport，不复制 Runtime、AgentSession、Agent、SessionManager 的产品状态和策略。
+pi-go 只有一套 Agent/Application Core。GUI、TUI、WebUI、CLI 和自动化协议不复制
+Runtime、AgentSession、Agent 或 SessionManager 的状态与策略。
 
-```text
-surface/tui / surface/web / surface/gui / RPC
-            │
-            ▼
-Application Supervisor: multi-session lifecycle and discovery
-            │
-            ▼
-Application Host: typed commands, queries, events, capabilities
-            │
-            ▼
-Runtime → AgentSession → Agent → AgentLoop
+```mermaid
+flowchart LR
+    CLI["CLI"] --> API["application.API"]
+    TUI["TUI"] --> API
+    GUI["Native GUI"] --> API
+    Browser["Browser WebUI"] --> HTTP["HTTP /api/v1"]
+    Browser --> SSE["One global SSE stream"]
+    HTTP --> Web["surface/web adapter"]
+    SSE --> Web
+    Web --> API
+    RPC["JSONL automation"] --> Protocol["protocol/v1 adapter"]
+    Protocol --> Session["ApplicationSession"]
+    API --> Service["application.Service"]
+    Service --> Sessions["ApplicationSession[]"]
+    Sessions --> Runtime["Runtime → AgentSession → Agent → AgentLoop"]
 ```
 
-## 共享与不共享
+| 调用方 | 默认通信方式 | 原因 |
+|---|---|---|
+| CLI | 同进程 Go 调用 | 无需序列化，也不引入服务生命周期 |
+| TUI | 同进程 Go 调用 | 终端只是呈现层，直接消费 typed API 和事件 |
+| 原生 GUI | 同进程 Go 调用；多进程壳才使用本地 IPC | GUI 不应被迫依赖 HTTP |
+| 浏览器 WebUI | HTTP command/query/snapshot + 一条全局 SSE | 浏览器天然需要网络边界 |
+| 外部自动化/测试 | stdin/stdout JSONL | 适合脚本、跨语言和协议验收 |
 
-共享：
+因此不存在产品内部的 `pi attach http://...` 模式。以后若要支持远程客户端，那是显式的
+remote/server 部署能力，不是 TUI、GUI 与 Agent Core 的默认耦合方式。
 
-- prompt、queue、abort、retry、compaction、model、thinking、tools、session 等产品命令；
-- 权威 state/query；
-- canonical AgentSession event；
-- session discovery、identity 和生命周期规则；
-- approval、notification、clipboard、file picker 等可选 capability contract。
+## 统一 Application API
 
-不共享：
+`internal/application.API` 是所有产品 surface 的进程内边界，提供：
 
-- 终端 raw mode、快捷键和主题渲染；
-- 浏览器路由、面板、滚动、SSE 重连和 DOM 更新；
-- GUI 窗口、菜单、系统通知和 native dialog；
-- 为求统一而抽象出的通用按钮、通用窗口或其他最低公分母 UI 框架。
+- typed command 与 command result；
+- 权威 live state 和 durable session snapshot；
+- session discovery、打开去重、identity replacement 与生命周期；
+- 应用级单调 revision、有限事件回放和 cursor subscription。
 
-## 状态所有权
+`application.Service` 管理多个彼此独立的 `ApplicationSession`。每个会话仍由自己的
+`Runtime → AgentSession → Agent` 权威拥有；Service 不把多个会话合并成一份可变 Agent 状态。
 
-- durable conversation/session state 只在 SessionManager/store；
-- active model/tools/messages/queue/run state 只在 Agent/AgentSession；
-- Runtime/Host 只负责装配、replacement、命令和有序事件；
-- Supervisor 只持有独立 Runtime/Host 句柄及生命周期元数据；
-- surface 只保留选中标签、面板尺寸、输入草稿等呈现状态。
+状态所有权保持如下：
 
-Web/GUI 重连时读取权威 snapshot 和 durable session，而不是回放事件构造第二套 Agent 状态。
+- durable conversation/tree 只在 SessionManager/store；
+- active model/tools/messages/queue/run 只在 Agent/AgentSession；
+- ApplicationSession 只负责单会话命令、snapshot 和有序事件；
+- Service 只负责多会话发现、生命周期和应用级事件总序；
+- surface 只保留选中标签、面板尺寸、滚动位置、输入草稿等呈现状态。
 
-## 构建边界
+## Web 适配器
 
-Surface 专属代码按交互方向高内聚组织：
+`surface/web` 依赖 `application.API`，不依赖具体 Service 实现。公开边界统一放在 `/api/v1`：
 
-- `surface/web`：React 前端、HTTP/SSE、静态资源和 Web 测试；
-- `surface/tui`：终端输入、渲染和终端生命周期；
-- 未来 `surface/gui`：窗口、IPC 和 GUI 前端；
-- `internal/application`：所有 Surface 共用的 Supervisor、会话快照和应用生命周期。
+- `POST /api/v1/sessions`：创建会话；
+- `GET /api/v1/snapshot`：应用会话与运行状态快照；
+- `GET /api/v1/sessions/{id}`：单会话 durable + live 快照；
+- `POST /api/v1/sessions/{id}/commands`：命令；
+- `GET /api/v1/events`：所有会话共用的一条 SSE。
 
-各 surface 使用独立 composition root：
+SSE 使用 `id: <revision>` 和 `Last-Event-ID`。Service 保留有限历史；游标过期时服务器发送
+`reset_required`，客户端重新读取 snapshot，再继续消费 live events。慢客户端只会断开自己的
+订阅，不会向 Agent 执行施加网络背压。
 
-- `cmd/pi-go`：现有默认入口；
-- `cmd/pi-go-rpc`：外部自动化与协议验收；
-- `cmd/pi-go-web`：可选 WebUI；
-- 未来 `cmd/pi-go-gui`：可选 GUI。
+前端的 application client 在整个页面中只维护一条 EventSource，并按 `sessionId` 分发给聊天、
+侧栏等消费者。React hook 不再各自创建服务器连接，也不通过轮询维护第二套运行状态。
 
-普通 Go 构建会编译 Surface 的 Go 边界和测试，但不需要 Node 或静态导出。浏览器静态资源只在
-`pi_go_webui` production build 中进入 `pi-go-web`；build tag 不切分 Host/Runtime 产品逻辑。
+## 构建与入口
 
-## WebUI 特有边界
+所有运行形态由一个二进制提供：
 
-Go Web Host 直接调用 Application Host。HTTP 负责请求验证和命令映射，SSE 负责有序事件投影、
-连接生命周期与背压。当前重连通过权威 state 与 durable session 恢复；显式 sequence/cursor replay
-仍是后续可靠性工作。Web 投影可以省略浏览器不使用的字段或合并视觉更新，
-但 Go 内部 canonical event 和 durable session 必须保持完整。
+```sh
+pi-go run [agent options]
+pi-go web [--listen ...]
+pi-go rpc [rpc options]
+```
 
-浏览器界面可以继续使用 TypeScript/React；生产运行时服务端仍只有 Go。前端构建产物作为
-真实静态资源进入可选 Web 二进制，不允许用静态假消息或演示数据替代 API。
+`cmd/pi-go` 是唯一 composition root。`pi_go_webui` build tag 只决定是否把静态 Web export 嵌入
+同一个二进制，不切分 Application/Agent 逻辑。开发态由 Next 提供 HMR，并将 `/api/v1/*`
+代理到 `pi-go web --api-only`；生产态只需 Go 二进制，不启动 Next 或 JSONL 子进程。
 
-当前 `internal/application.Supervisor` 为每个活动会话持有一个独立 Host/Runtime，完成并发打开
-去重、空闲回收和 shutdown；`surface/web` 只消费 Supervisor/Host 的命令、快照和事件。
-`internal/hostjson` 是 JSONL RPC 与 Web HTTP/SSE 共用的命令、结果和事件投影。
-
-开发态使用 Next HMR，并将 `/api/*` 代理到 API-only Go 进程；生产态由 Go 直接提供静态资源与
-HTTP/SSE，不需要 Next Server，也不会启动 RPC 子进程。
+TUI 与 GUI 实现应直接接收 `application.API`。若原生 GUI 采用多进程壳，
+只在壳与 Go backend 之间增加本地 IPC adapter，command/query/event 语义仍与进程内 API 相同。

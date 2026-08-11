@@ -2,47 +2,64 @@ package web
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
-	"github.com/cat3399/pi-go/internal/host"
-	"github.com/cat3399/pi-go/internal/hostjson"
+	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
 const maxAPIRequestBytes = 64 << 20
 
-func registerAPIRoutes(mux *http.ServeMux, supervisor *application.Supervisor) {
-	mux.HandleFunc("POST /api/agent/new", handleNewAgent(supervisor))
-	mux.HandleFunc("GET /api/agent/running", handleRunningAgents(supervisor))
-	mux.HandleFunc("GET /api/agent/{id}", handleAgentState(supervisor))
-	mux.HandleFunc("POST /api/agent/{id}", handleAgentCommand(supervisor))
-	mux.HandleFunc("GET /api/agent/{id}/events", handleAgentEvents(supervisor))
+var errJSONContentType = errors.New("Content-Type must be application/json")
 
-	mux.HandleFunc("GET /api/sessions", handleSessions(supervisor))
-	mux.HandleFunc("GET /api/sessions/{id}", handleSessionView(supervisor))
-	mux.HandleFunc("PATCH /api/sessions/{id}", handleSessionRename(supervisor))
-	mux.HandleFunc("DELETE /api/sessions/{id}", unsupportedAPI)
-	mux.HandleFunc("GET /api/sessions/{id}/context", handleSessionContext(supervisor))
-	mux.HandleFunc("GET /api/sessions/{id}/state", handleSessionState(supervisor))
+func registerAPIRoutes(mux *http.ServeMux, api application.API) {
+	mux.HandleFunc("GET /api/v1/snapshot", handleApplicationSnapshot(api))
+	mux.HandleFunc("GET /api/v1/events", handleApplicationEvents(api))
 
-	mux.HandleFunc("GET /api/models", handleModels(supervisor))
-	mux.HandleFunc("GET /api/home", handleHome)
-	mux.HandleFunc("POST /api/cwd/validate", handleCWDValidation)
-	mux.HandleFunc("POST /api/default-cwd", handleDefaultCWD)
-	mux.HandleFunc("GET /api/project-trust", handleProjectTrust)
+	mux.HandleFunc("GET /api/v1/sessions", handleSessions(api))
+	mux.HandleFunc("POST /api/v1/sessions", handleCreateSession(api))
+	mux.HandleFunc("GET /api/v1/sessions/running", handleRunningSessions(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}", handleSessionView(api))
+	mux.HandleFunc("PATCH /api/v1/sessions/{id}", handleSessionRename(api))
+	mux.HandleFunc("DELETE /api/v1/sessions/{id}", handleSessionDelete(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/export", handleSessionExport(api))
+	mux.HandleFunc("POST /api/v1/sessions/{id}/auto-name", handleSessionAutoName(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/context", handleSessionContext(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/state", handleSessionState(api))
+	mux.HandleFunc("POST /api/v1/sessions/{id}/commands", handleSessionCommand(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/entries/{entryId}/thinking", handleSessionThinking(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/bash-output", handleSessionBashOutput(api))
+
+	mux.HandleFunc("GET /api/v1/models", handleModels(api))
+	mux.HandleFunc("GET /api/v1/skills", handleSkills(api))
+	mux.HandleFunc("PATCH /api/v1/skills", handleSkillToggle(api))
+	mux.HandleFunc("POST /api/v1/skills/search", handleSkillSearch(api))
+	mux.HandleFunc("POST /api/v1/skills/install", handleSkillInstall(api))
+	mux.HandleFunc("POST /api/v1/skills/check", handleSkillCheck(api))
+	mux.HandleFunc("POST /api/v1/skills/update", handleSkillUpdate(api))
+	mux.HandleFunc("GET /api/v1/system/home", handleHome)
+	mux.HandleFunc("POST /api/v1/system/cwd/validate", handleCWDValidation)
+	mux.HandleFunc("POST /api/v1/system/default-cwd", handleDefaultCWD)
+	mux.HandleFunc("GET /api/v1/system/project-trust", handleProjectTrust(api))
+	mux.HandleFunc("POST /api/v1/system/project-trust", handleTrustProject(api))
 }
 
 func readRequestBody(writer http.ResponseWriter, request *http.Request) ([]byte, error) {
+	if !hasJSONContentType(request) {
+		return nil, errJSONContentType
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxAPIRequestBytes)
 	data, err := io.ReadAll(request.Body)
 	if err != nil {
@@ -54,140 +71,107 @@ func readRequestBody(writer http.ResponseWriter, request *http.Request) ([]byte,
 	return data, nil
 }
 
-func handleNewAgent(supervisor *application.Supervisor) http.HandlerFunc {
+func hasJSONContentType(request *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "application/json" || strings.HasPrefix(mediaType, "application/") && strings.HasSuffix(mediaType, "+json")
+}
+
+func writeRequestBodyError(writer http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, errJSONContentType) {
+		status = http.StatusUnsupportedMediaType
+	} else {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+	}
+	writeAPIError(writer, status, err)
+}
+
+func handleCreateSession(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		body, err := readRequestBody(writer, request)
 		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+			writeRequestBodyError(writer, err)
 			return
 		}
-		var object map[string]json.RawMessage
-		if err := json.Unmarshal(body, &object); err != nil {
+		var input struct {
+			CWD           string                  `json:"cwd"`
+			Provider      string                  `json:"provider"`
+			ModelID       string                  `json:"modelId"`
+			ToolNames     *[]string               `json:"toolNames"`
+			ThinkingLevel *provider.ThinkingLevel `json:"thinkingLevel"`
+		}
+		if err := json.Unmarshal(body, &input); err != nil {
 			writeAPIError(writer, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
 			return
 		}
-		cwd, err := requiredJSONText(object, "cwd")
+		input.CWD = strings.TrimSpace(input.CWD)
+		input.Provider = strings.TrimSpace(input.Provider)
+		input.ModelID = strings.TrimSpace(input.ModelID)
+		if input.CWD == "" {
+			writeAPIError(writer, http.StatusBadRequest, errors.New("cwd is required"))
+			return
+		}
+		input.CWD, err = normalizeUserCWD(input.CWD)
 		if err != nil {
 			writeAPIError(writer, http.StatusBadRequest, err)
 			return
 		}
-		commandType, err := requiredJSONText(object, "type")
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+		if (input.Provider == "") != (input.ModelID == "") {
+			writeAPIError(writer, http.StatusBadRequest, errors.New("provider and modelId must be provided together"))
 			return
 		}
-		providerID, err := optionalJSONText(object, "provider")
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+		if input.ToolNames != nil && *input.ToolNames == nil {
+			writeAPIError(writer, http.StatusBadRequest, errors.New("toolNames must be an array of strings"))
 			return
 		}
-		modelID, err := optionalJSONText(object, "modelId")
-		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+		if input.ThinkingLevel != nil && !input.ThinkingLevel.Valid() {
+			writeAPIError(writer, http.StatusBadRequest, fmt.Errorf("invalid thinking level: %s", *input.ThinkingLevel))
 			return
 		}
-		var toolNames []string
-		_, hasToolNames := object["toolNames"]
-		if hasToolNames {
-			if err := json.Unmarshal(object["toolNames"], &toolNames); err != nil || toolNames == nil {
-				writeAPIError(writer, http.StatusBadRequest, errors.New("toolNames must be an array of strings"))
-				return
-			}
+		toolNames := []string(nil)
+		if input.ToolNames != nil {
+			toolNames = append(toolNames, (*input.ToolNames)...)
 		}
-		var thinking *provider.ThinkingLevel
-		if raw, exists := object["thinkingLevel"]; exists {
-			var value string
-			if json.Unmarshal(raw, &value) != nil {
-				writeAPIError(writer, http.StatusBadRequest, errors.New("thinkingLevel must be a string"))
-				return
-			}
-			level := provider.ThinkingLevel(value)
-			if !level.Valid() {
-				writeAPIError(writer, http.StatusBadRequest, fmt.Errorf("invalid thinking level: %s", value))
-				return
-			}
-			thinking = &level
-		}
-		var initialCommand host.Command
-		if commandType != "ensure_session" {
-			initialCommand, err = hostjson.DecodeCommand(body)
-			if err != nil {
-				writeAPIError(writer, http.StatusBadRequest, err)
-				return
-			}
-		}
-		state, err := supervisor.NewSession(request.Context(), application.NewSessionOptions{
-			CWD: cwd, Provider: providerID, ModelID: modelID,
-			ToolNames: toolNames, HasToolNames: hasToolNames, ThinkingLevel: thinking,
+		state, err := api.NewSession(request.Context(), application.NewSessionOptions{
+			CWD: input.CWD, Provider: input.Provider, ModelID: input.ModelID,
+			ToolNames: toolNames, HasToolNames: input.ToolNames != nil, ThinkingLevel: input.ThinkingLevel,
 		})
 		if err != nil {
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		var data any
-		if initialCommand != nil {
-			result, err := supervisor.Dispatch(request.Context(), state.SessionID, initialCommand)
-			if err != nil {
-				writeAPIError(writer, http.StatusInternalServerError, err)
-				return
-			}
-			encoded, present, err := hostjson.EncodeResult(result)
-			if err != nil {
-				writeAPIError(writer, http.StatusInternalServerError, err)
-				return
-			}
-			if present {
-				data = encoded
-			}
-		}
-		writeJSON(writer, http.StatusOK, map[string]any{
-			"success": true, "sessionId": state.SessionID, "data": data,
+		writeJSON(writer, http.StatusCreated, map[string]any{
+			"sessionId": state.SessionID, "revision": api.CurrentRevision(),
 			"model": stateModel(state), "thinkingLevel": state.ThinkingLevel,
 		})
 	}
 }
 
-func requiredJSONText(object map[string]json.RawMessage, name string) (string, error) {
-	value, err := optionalJSONText(object, name)
-	if err != nil {
-		return "", err
-	}
-	if value == "" {
-		return "", fmt.Errorf("%s is required", name)
-	}
-	return value, nil
-}
-
-func optionalJSONText(object map[string]json.RawMessage, name string) (string, error) {
-	raw, exists := object[name]
-	if !exists {
-		return "", nil
-	}
-	var value string
-	if json.Unmarshal(raw, &value) != nil {
-		return "", fmt.Errorf("%s must be a string", name)
-	}
-	return strings.TrimSpace(value), nil
-}
-
-func handleAgentCommand(supervisor *application.Supervisor) http.HandlerFunc {
+func handleSessionCommand(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		body, err := readRequestBody(writer, request)
 		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+			writeRequestBodyError(writer, err)
 			return
 		}
-		command, err := hostjson.DecodeCommand(body)
+		command, err := protocolv1.DecodeCommand(body, agent.InputInteractive)
 		if err != nil {
 			writeAPIError(writer, http.StatusBadRequest, err)
 			return
 		}
-		result, err := supervisor.Dispatch(request.Context(), request.PathValue("id"), command)
+		result, err := api.Dispatch(request.Context(), request.PathValue("id"), command)
 		if err != nil {
-			writeSupervisorError(writer, err)
+			writeApplicationError(writer, err)
 			return
 		}
-		data, present, err := hostjson.EncodeResult(result)
+		data, present, err := protocolv1.EncodeResult(result)
 		if err != nil {
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
@@ -195,68 +179,57 @@ func handleAgentCommand(supervisor *application.Supervisor) http.HandlerFunc {
 		if !present {
 			data = nil
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"success": true, "data": data})
+		writeJSON(writer, http.StatusOK, map[string]any{"data": data})
 	}
 }
 
-func handleAgentState(supervisor *application.Supervisor) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		state, running, err := supervisor.State(request.Context(), request.PathValue("id"), false)
-		if err != nil {
-			writeSupervisorError(writer, err)
-			return
-		}
-		if !running {
-			writeJSON(writer, http.StatusOK, map[string]any{"running": false})
-			return
-		}
-		writeJSON(writer, http.StatusOK, map[string]any{"running": true, "state": hostjson.EncodeState(state)})
-	}
-}
-
-func handleRunningAgents(supervisor *application.Supervisor) http.HandlerFunc {
+func handleRunningSessions(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, http.StatusOK, map[string]any{"runningSessionIds": supervisor.RunningIDs()})
+		writeJSON(writer, http.StatusOK, map[string]any{"runningSessionIds": api.RunningIDs()})
 	}
 }
 
-type sseItem struct {
-	data any
-	err  error
-}
-
-func handleAgentEvents(supervisor *application.Supervisor) http.HandlerFunc {
+func handleApplicationEvents(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		flusher, ok := writer.(http.Flusher)
 		if !ok {
 			writeAPIError(writer, http.StatusInternalServerError, errors.New("streaming is unavailable"))
 			return
 		}
-		events := make(chan sseItem, 256)
-		unsubscribe, err := supervisor.Subscribe(request.Context(), request.PathValue("id"), func(ctx context.Context, event host.Event) {
-			encoded, encodeErr := hostjson.EncodeEvent(event)
-			if encodeErr == nil {
-				encoded = eventForWebClient(encoded)
-				if encoded == nil {
-					return
-				}
-			}
-			select {
-			case events <- sseItem{data: encoded, err: encodeErr}:
-			case <-ctx.Done():
-			case <-request.Context().Done():
-			}
-		})
+		after, hasCursor, err := eventCursor(request)
 		if err != nil {
-			writeSupervisorError(writer, err)
+			writeAPIError(writer, http.StatusBadRequest, err)
 			return
 		}
-		defer unsubscribe()
+		if !hasCursor {
+			after = api.CurrentRevision()
+		}
+		subscription, err := api.SubscribeEvents(after)
+		reset := errors.Is(err, application.ErrEventCursorUnavailable)
+		if reset {
+			after = api.CurrentRevision()
+			subscription, err = api.SubscribeEvents(after)
+		}
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		defer subscription.Close()
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("Cache-Control", "no-cache")
 		writer.Header().Set("Connection", "keep-alive")
 		writer.Header().Set("X-Accel-Buffering", "no")
-		if err := writeSSE(writer, map[string]any{"type": "connected", "sessionId": request.PathValue("id")}); err != nil {
+		if reset {
+			if err := writeSSE(writer, after, map[string]any{"type": "reset_required", "revision": after}); err != nil {
+				return
+			}
+		}
+		for _, event := range subscription.Replay {
+			if err := writeApplicationSSE(writer, event); err != nil {
+				return
+			}
+		}
+		if err := writeSSE(writer, subscription.Revision, map[string]any{"type": "connected", "revision": subscription.Revision}); err != nil {
 			return
 		}
 		flusher.Flush()
@@ -264,13 +237,11 @@ func handleAgentEvents(supervisor *application.Supervisor) http.HandlerFunc {
 		defer heartbeat.Stop()
 		for {
 			select {
-			case item := <-events:
-				if item.err != nil {
-					_ = writeSSE(writer, map[string]any{"type": "protocol_error", "errorMessage": item.err.Error()})
-					flusher.Flush()
+			case event, ok := <-subscription.Events:
+				if !ok {
 					return
 				}
-				if err := writeSSE(writer, item.data); err != nil {
+				if err := writeApplicationSSE(writer, event); err != nil {
 					return
 				}
 				flusher.Flush()
@@ -286,101 +257,128 @@ func handleAgentEvents(supervisor *application.Supervisor) http.HandlerFunc {
 	}
 }
 
-func eventForWebClient(value any) any {
-	event, ok := value.(map[string]any)
-	if !ok {
-		return value
+func writeApplicationSSE(writer io.Writer, event application.Event) error {
+	encoded, err := protocolv1.EncodeEvent(event)
+	if err != nil {
+		encoded = map[string]any{"type": "protocol_error", "errorMessage": err.Error()}
 	}
-	typeName, _ := event["type"].(string)
-	switch typeName {
-	case "turn_start", "turn_end", "tool_execution_update":
-		return nil
-	case "message_update":
-		delete(event, "assistantMessageEvent")
-	case "agent_end":
-		return map[string]any{"type": "agent_end"}
-	}
-	return event
+	envelope := map[string]any{"sequence": event.Sequence, "sessionId": event.SessionID, "event": encoded}
+	return writeSSE(writer, event.Sequence, envelope)
 }
 
-func writeSSE(writer io.Writer, value any) error {
+func eventCursor(request *http.Request) (uint64, bool, error) {
+	// `after` establishes the first connection from an authoritative snapshot.
+	// Native EventSource reconnects with Last-Event-ID, which must take
+	// precedence over that original query parameter or every reconnect would
+	// replay from the stale snapshot cursor.
+	value := strings.TrimSpace(request.URL.Query().Get("after"))
+	if lastEventID := strings.TrimSpace(request.Header.Get("Last-Event-ID")); lastEventID != "" {
+		value = lastEventID
+	}
+	if value == "" {
+		return 0, false, nil
+	}
+	cursor, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, false, errors.New("event cursor must be an unsigned integer")
+	}
+	return cursor, true, nil
+}
+
+func writeSSE(writer io.Writer, sequence uint64, value any) error {
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(writer, "data: %s\n\n", encoded)
+	_, err = fmt.Fprintf(writer, "id: %d\ndata: %s\n\n", sequence, encoded)
 	return err
 }
 
-func handleSessions(supervisor *application.Supervisor) http.HandlerFunc {
+func handleApplicationSnapshot(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, _ *http.Request) {
-		sessions, err := listSessions(supervisor)
+		// Capture the cursor before reading state. Events published while the
+		// snapshot is assembled will then be replayed instead of being skipped.
+		revision := api.CurrentRevision()
+		sessions, err := listSessions(api)
 		if err != nil {
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"sessions": sessions, "runningSessionIds": supervisor.RunningIDs(),
+			"revision": revision, "sessions": sessions, "runningSessionIds": api.RunningIDs(),
 		})
 	}
 }
 
-func handleSessionView(supervisor *application.Supervisor) http.HandlerFunc {
+func handleSessions(api application.API) http.HandlerFunc {
+	return func(writer http.ResponseWriter, _ *http.Request) {
+		sessions, err := listSessions(api)
+		if err != nil {
+			writeAPIError(writer, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"sessions": sessions, "runningSessionIds": api.RunningIDs(),
+		})
+	}
+}
+
+func handleSessionView(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
-		view, err := sessionView(supervisor,
+		view, err := sessionView(api,
 			request.PathValue("id"), "", query.Has("deferThinking"), query.Has("deferMedia"),
 		)
 		if err != nil {
-			writeSupervisorError(writer, err)
+			writeApplicationError(writer, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, view)
 	}
 }
 
-func handleSessionContext(supervisor *application.Supervisor) http.HandlerFunc {
+func handleSessionContext(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
-		value, err := sessionContext(supervisor,
+		value, err := sessionContext(api,
 			request.PathValue("id"), query.Get("leafId"), query.Has("deferThinking"), query.Has("deferMedia"),
 		)
 		if err != nil {
-			writeSupervisorError(writer, err)
+			writeApplicationError(writer, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"context": value})
 	}
 }
 
-func handleSessionState(supervisor *application.Supervisor) http.HandlerFunc {
+func handleSessionState(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
-		if found, err := supervisor.SessionExists(id); err != nil {
+		if found, err := api.SessionExists(id); err != nil {
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
 		} else if !found {
 			writeAPIError(writer, http.StatusNotFound, errors.New("session not found"))
 			return
 		}
-		state, running, err := supervisor.State(request.Context(), id, false)
+		state, running, err := api.LiveState(id)
 		if err != nil {
-			writeSupervisorError(writer, err)
+			writeApplicationError(writer, err)
 			return
 		}
 		if !running {
 			writeJSON(writer, http.StatusOK, map[string]any{"running": false})
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"running": true, "state": hostjson.EncodeState(state)})
+		writeJSON(writer, http.StatusOK, map[string]any{"running": true, "state": protocolv1.EncodeState(state)})
 	}
 }
 
-func handleSessionRename(supervisor *application.Supervisor) http.HandlerFunc {
+func handleSessionRename(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		body, err := readRequestBody(writer, request)
 		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
+			writeRequestBodyError(writer, err)
 			return
 		}
 		var input struct {
@@ -396,17 +394,17 @@ func handleSessionRename(supervisor *application.Supervisor) http.HandlerFunc {
 			return
 		}
 		id := request.PathValue("id")
-		if err := supervisor.RenameSession(request.Context(), id, name); err != nil {
-			writeSupervisorError(writer, err)
+		if err := api.RenameSession(request.Context(), id, name); err != nil {
+			writeApplicationError(writer, err)
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 	}
 }
 
-func handleModels(supervisor *application.Supervisor) http.HandlerFunc {
+func handleModels(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		models, err := models(supervisor, request.URL.Query().Get("cwd"))
+		models, err := models(api, request.URL.Query().Get("cwd"))
 		if err != nil {
 			writeAPIError(writer, http.StatusBadRequest, err)
 			return
@@ -443,7 +441,7 @@ func normalizeUserCWD(value string) (string, error) {
 func handleCWDValidation(writer http.ResponseWriter, request *http.Request) {
 	body, err := readRequestBody(writer, request)
 	if err != nil {
-		writeAPIError(writer, http.StatusBadRequest, err)
+		writeRequestBodyError(writer, err)
 		return
 	}
 	var input struct {
@@ -458,10 +456,14 @@ func handleCWDValidation(writer http.ResponseWriter, request *http.Request) {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"success": true, "cwd": cwd})
+	writeJSON(writer, http.StatusOK, map[string]any{"cwd": cwd})
 }
 
-func handleDefaultCWD(writer http.ResponseWriter, _ *http.Request) {
+func handleDefaultCWD(writer http.ResponseWriter, request *http.Request) {
+	if !hasJSONContentType(request) {
+		writeAPIError(writer, http.StatusUnsupportedMediaType, errJSONContentType)
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		writeAPIError(writer, http.StatusInternalServerError, err)
@@ -475,15 +477,7 @@ func handleDefaultCWD(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{"cwd": directory})
 }
 
-// Project resources and extensions are currently deferred, so the native Go
-// WebUI does not execute untrusted project code during model/session startup.
-func handleProjectTrust(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"requiresTrust": false, "trusted": false, "projectResourcesLoaded": false,
-	})
-}
-
-func writeSupervisorError(writer http.ResponseWriter, err error) {
+func writeApplicationError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, os.ErrNotExist) {
 		writeAPIError(writer, http.StatusNotFound, errors.New("session not found"))
 		return

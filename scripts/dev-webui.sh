@@ -25,8 +25,8 @@ stop_children() {
 
 trap stop_children EXIT HUP INT TERM
 
-printf '%s\n' "pi-go-web development UI:  http://127.0.0.1:30141"
-printf '%s\n' "pi-go-web development API: $api_origin"
+printf '%s\n' "pi-go web development UI:  http://127.0.0.1:30141"
+printf '%s\n' "pi-go web development API: $api_origin"
 
 (
 	cd "$repo_dir"

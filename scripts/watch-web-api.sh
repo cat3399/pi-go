@@ -2,7 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-dev_binary="/tmp/pi-go-web-dev-$$"
+dev_binary="/tmp/pi-go-dev-$$"
 server_pid=""
 
 source_fingerprint() {
@@ -18,15 +18,15 @@ source_fingerprint() {
 }
 
 build_server() {
-	printf '%s\n' "pi-go-web API: building Go server"
+	printf '%s\n' "pi-go web API: building Go server"
 	(
 		cd "$repo_dir"
-		go build -o "$dev_binary" ./cmd/pi-go-web
+		go build -o "$dev_binary" ./cmd/pi-go
 	)
 }
 
 start_server() {
-	"$dev_binary" --api-only "$@" &
+	"$dev_binary" web --api-only "$@" &
 	server_pid=$!
 }
 
@@ -61,6 +61,6 @@ while :; do
 		stop_server
 		start_server "$@"
 	else
-		printf '%s\n' "pi-go-web API: build failed; keeping the previous server until the next source change" >&2
+		printf '%s\n' "pi-go web API: build failed; keeping the previous server until the next source change" >&2
 	fi
 done

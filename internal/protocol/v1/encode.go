@@ -1,6 +1,6 @@
-// Package hostjson owns the JSON projection shared by transports above
-// host.Host. It contains no transport lifecycle and never owns Agent state.
-package hostjson
+// Package protocolv1 owns the versioned JSON projection used by transport
+// adapters above the application API. It never owns Agent or Session state.
+package protocolv1
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/agentmsg"
-	"github.com/cat3399/pi-go/internal/host"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
@@ -19,9 +19,9 @@ type noData struct{}
 
 var omittedData = noData{}
 
-// EncodeResult converts a Host command result to the canonical public JSON
+// EncodeResult converts a application command result to the canonical public JSON
 // shape. present is false for commands whose successful response has no data.
-func EncodeResult(result host.CommandResult) (data any, present bool, err error) {
+func EncodeResult(result application.CommandResult) (data any, present bool, err error) {
 	data, err = encodeResult(result)
 	if err != nil {
 		return nil, false, err
@@ -32,12 +32,12 @@ func EncodeResult(result host.CommandResult) (data any, present bool, err error)
 	return data, true, nil
 }
 
-// EncodeState converts an authoritative Host snapshot to its public JSON
-// shape. The snapshot is sampled by Host; this function does not replay events.
-func EncodeState(value host.State) map[string]any { return stateWire(value) }
+// EncodeState converts an authoritative application snapshot to its public JSON
+// shape. The snapshot is sampled by application; this function does not replay events.
+func EncodeState(value application.State) map[string]any { return stateWire(value) }
 
-// EncodeEvent converts one ordered Host event to its public JSON shape.
-func EncodeEvent(value host.Event) (any, error) { return encodeHostEvent(value) }
+// EncodeEvent converts one ordered application event to its public JSON shape.
+func EncodeEvent(value application.Event) (any, error) { return encodeApplicationEvent(value) }
 
 func successResponse(id *string, command string, data any) map[string]any {
 	response := map[string]any{"type": "response", "command": command, "success": true}
@@ -58,22 +58,24 @@ func errorResponse(id *string, command string, err error) map[string]any {
 	return response
 }
 
-func encodeResult(result host.CommandResult) (any, error) {
+func encodeResult(result application.CommandResult) (any, error) {
 	switch value := result.(type) {
-	case host.PromptAcceptedResult, host.AbortResult, host.SteerResult, host.FollowUpResult,
-		host.SetThinkingLevelResult, host.AbortCompactionResult, host.SetSessionNameResult,
-		host.SetAutoCompactionResult, host.SetAutoRetryResult, host.SetToolsResult,
-		host.AbortBashResult:
+	case application.PromptStartedResult:
+		return map[string]any{"operationId": value.OperationID}, nil
+	case application.AbortResult, application.SteerResult, application.FollowUpResult,
+		application.SetThinkingLevelResult, application.AbortCompactionResult, application.SetSessionNameResult,
+		application.SetAutoCompactionResult, application.SetAutoRetryResult, application.SetToolsResult,
+		application.AbortBashResult:
 		return omittedData, nil
-	case host.GetStateResult:
+	case application.GetStateResult:
 		return stateWire(value.State), nil
-	case host.ClearQueueResult:
+	case application.ClearQueueResult:
 		return queueWire(value.Queue), nil
-	case host.ReloadResult:
+	case application.ReloadResult:
 		return map[string]any{"success": true}, nil
-	case host.SetModelResult:
+	case application.SetModelResult:
 		return modelWire(value.Model), nil
-	case host.ForkResult:
+	case application.ForkResult:
 		data := map[string]any{"cancelled": value.Cancelled}
 		if value.SelectedText != nil {
 			data["text"] = *value.SelectedText
@@ -82,7 +84,7 @@ func encodeResult(result host.CommandResult) (any, error) {
 			data["newSessionId"] = *value.SessionID
 		}
 		return data, nil
-	case host.NavigateTreeResult:
+	case application.NavigateTreeResult:
 		data := map[string]any{"cancelled": value.Cancelled, "aborted": value.Aborted}
 		if value.EditorText != nil {
 			data["editorText"] = *value.EditorText
@@ -91,21 +93,21 @@ func encodeResult(result host.CommandResult) (any, error) {
 			data["summaryEntry"] = json.RawMessage(value.SummaryEntry.RawJSON())
 		}
 		return data, nil
-	case host.CompactResult:
+	case application.CompactResult:
 		return compactResultWire(value.Result)
-	case host.GetSessionStatsResult:
+	case application.GetSessionStatsResult:
 		return statsWire(value), nil
-	case host.GetLastAssistantTextResult:
+	case application.GetLastAssistantTextResult:
 		return map[string]any{"text": value.Text}, nil
-	case host.GetToolsResult:
+	case application.GetToolsResult:
 		tools := make([]map[string]any, len(value.Tools))
 		for index, tool := range value.Tools {
 			tools[index] = map[string]any{"name": tool.Name, "description": tool.Description, "active": tool.Active}
 		}
 		return tools, nil
-	case host.BashResult:
+	case application.BashResult:
 		return bashResultWire(value.Result), nil
-	case host.GetCommandsResult:
+	case application.GetCommandsResult:
 		commands := make([]map[string]any, len(value.Commands))
 		for index, command := range value.Commands {
 			item := map[string]any{
@@ -123,7 +125,7 @@ func encodeResult(result host.CommandResult) (any, error) {
 	}
 }
 
-func stateWire(value host.State) map[string]any {
+func stateWire(value application.State) map[string]any {
 	state := map[string]any{
 		"sessionId": value.SessionID, "cwd": value.CWD,
 		"thinkingLevel": value.ThinkingLevel, "systemPrompt": value.SystemPrompt,
@@ -237,7 +239,7 @@ func contextUsageWire(value agent.ContextUsage) map[string]any {
 	return map[string]any{"tokens": value.Tokens, "contextWindow": value.ContextWindow, "percent": value.Percent}
 }
 
-func statsWire(value host.GetSessionStatsResult) map[string]any {
+func statsWire(value application.GetSessionStatsResult) map[string]any {
 	stats := value.Stats
 	result := map[string]any{
 		"sessionId": stats.SessionID, "userMessages": stats.UserMessages,
@@ -329,16 +331,23 @@ func sourceWire(value resource.Source) map[string]any {
 	return result
 }
 
-func encodeHostEvent(value host.Event) (any, error) {
+func encodeApplicationEvent(value application.Event) (any, error) {
 	switch event := value.Value.(type) {
-	case host.AgentSessionEvent:
+	case application.AgentSessionEvent:
 		return sessionEventWire(event.Event)
-	case host.PromptErrorEvent:
-		return map[string]any{"type": "prompt_error", "errorMessage": event.Message}, nil
-	case host.PromptDoneEvent:
-		return map[string]any{"type": "prompt_done"}, nil
+	case application.OperationEvent:
+		result := map[string]any{
+			"type": "operation", "operationId": event.OperationID,
+			"command": event.Command, "status": event.Status,
+		}
+		if event.Error != "" {
+			result["errorMessage"] = event.Error
+		}
+		return result, nil
+	case application.SessionCatalogEvent:
+		return map[string]any{"type": "session_catalog", "change": event.Change}, nil
 	default:
-		return nil, fmt.Errorf("unsupported host event %T", value.Value)
+		return nil, fmt.Errorf("unsupported application event %T", value.Value)
 	}
 }
 

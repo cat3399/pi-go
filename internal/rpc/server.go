@@ -8,16 +8,15 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"sync/atomic"
 
-	"github.com/cat3399/pi-go/internal/host"
+	"github.com/cat3399/pi-go/internal/application"
 )
 
 const maxJSONLineBytes = 64 << 20
 
 type dispatcher interface {
-	Dispatch(context.Context, host.Command) (host.CommandResult, error)
-	Subscribe(host.Observer) func()
+	Dispatch(context.Context, application.Command) (application.CommandResult, error)
+	Subscribe(application.SessionObserver) func()
 	Dispose(context.Context) error
 }
 
@@ -44,8 +43,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	unsubscribe := s.backend.Subscribe(func(_ context.Context, event host.Event) {
-		record, err := encodeHostEvent(event)
+	unsubscribe := s.backend.Subscribe(func(_ context.Context, event application.Event) {
+		record, err := encodeApplicationEvent(event)
 		if err == nil {
 			err = s.output.Write(record)
 		}
@@ -84,12 +83,12 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	cancel()
 
-	// Let every command already framed from stdin reach the Host before closing
+	// Let every command already framed from stdin reach ApplicationSession before closing
 	// it. Their request contexts are now cancelled, so long-running bash and
 	// compaction calls return promptly, while state/config commands cannot lose
-	// a race to Host.Dispose merely because the writer closed stdin.
+	// a race to ApplicationSession.Dispose merely because the writer closed stdin.
 	commands.Wait()
-	// Runtime disposal aborts and settles every admitted operation. Host's
+	// Runtime disposal aborts and settles every admitted operation. The application
 	// disposal barrier guarantees its final events reach this subscription.
 	disposeErr := s.backend.Dispose(context.Background())
 	var scanErr error
@@ -100,7 +99,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		return outputErr
 	}
 	if disposeErr != nil {
-		return fmt.Errorf("dispose RPC host: %w", disposeErr)
+		return fmt.Errorf("dispose RPC application session: %w", disposeErr)
 	}
 	if scanErr != nil {
 		return scanErr
@@ -115,26 +114,6 @@ func (s *Server) handleLine(ctx context.Context, line []byte) {
 	decoded, err := decodeCommand(line)
 	if err != nil {
 		_ = s.output.Write(errorResponse(decoded.id, decoded.typ, err))
-		return
-	}
-
-	if prompt, ok := decoded.command.(host.PromptCommand); ok {
-		var acknowledged atomic.Bool
-		prompt.PreflightResult = func(host.PromptAcceptedResult) {
-			if acknowledged.CompareAndSwap(false, true) {
-				if err := s.output.Write(successResponse(decoded.id, decoded.typ, omittedData)); err != nil {
-					s.output.Fail(err)
-				}
-			}
-		}
-		decoded.command = prompt
-		_, dispatchErr := s.backend.Dispatch(ctx, decoded.command)
-		if dispatchErr != nil && !acknowledged.Load() {
-			_ = s.output.Write(errorResponse(decoded.id, decoded.typ, dispatchErr))
-		}
-		if dispatchErr == nil && !acknowledged.Load() {
-			_ = s.output.Write(errorResponse(decoded.id, decoded.typ, errors.New("prompt completed without preflight acknowledgement")))
-		}
 		return
 	}
 

@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
+import { subscribeApplicationEvents } from "@/lib/application-client";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 
@@ -109,7 +110,6 @@ interface WorktreeState {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
-const RUNNING_SESSIONS_POLL_MS = 2500;
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -419,9 +419,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
-  // Once polling has delivered a snapshot it is the source of truth for
-  // running state; late /api/sessions responses must not overwrite it.
-  const runningPollAuthoritativeRef = useRef(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileExplorerRef = useRef<FileExplorerHandle>(null);
@@ -429,15 +426,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const loadSessions = useCallback(async (showLoading = false) => {
     try {
       if (showLoading) setLoading(true);
-      const res = await fetch("/api/sessions");
+      const res = await fetch("/api/v1/snapshot");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
+      const data = await res.json() as {
+        revision: number;
+        sessions: SessionInfo[];
+        runningSessionIds?: string[];
+      };
       setAllSessions(data.sessions);
-      // Treat the fetched running set as an initial fallback only. Once the
-      // lightweight poll is live, a slow session-list fetch cannot overwrite it.
-      if (!runningPollAuthoritativeRef.current) {
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      }
+      setRunningSessionIds(new Set(data.runningSessionIds ?? []));
       // Drop unread markers for sessions that no longer exist (e.g. deleted).
       const existingIds = new Set(data.sessions.map((s) => s.id));
       setUnreadSessionIds((prev) => {
@@ -451,19 +448,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
         sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
       }
+      return data.revision;
     } catch (e) {
       setError(String(e));
+      return null;
     } finally {
       if (showLoading) setLoading(false);
     }
   }, []);
-
-  const initialLoadDone = useRef(false);
-  useEffect(() => {
-    const isFirst = !initialLoadDone.current;
-    initialLoadDone.current = true;
-    loadSessions(isFirst);
-  }, [loadSessions, refreshKey]);
 
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
@@ -471,64 +463,40 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
 
+  const initialLoadDone = useRef(false);
   useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let controller: AbortController | null = null;
-
-    const clearTimer = () => {
-      if (timer) clearTimeout(timer);
-      timer = null;
+    let disposed = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    let subscription: ReturnType<typeof subscribeApplicationEvents> | null = null;
+    const refresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void loadSessions(), 75);
     };
-
-    const schedule = () => {
-      clearTimer();
-      if (stopped || document.visibilityState !== "visible") return;
-      timer = setTimeout(() => void poll(), RUNNING_SESSIONS_POLL_MS);
+    const start = async () => {
+      const isFirst = !initialLoadDone.current;
+      initialLoadDone.current = true;
+      const revision = await loadSessions(isFirst);
+      if (disposed) return;
+      subscription = subscribeApplicationEvents(({ event }) => {
+        if ([
+          "agent_start",
+          "agent_settled",
+          "operation",
+          "compaction_start",
+          "compaction_end",
+          "session_info_changed",
+          "session_catalog",
+        ].includes(event.type)) refresh();
+      }, { after: revision ?? 0, onReset: refresh });
+      void subscription.ready().catch(() => {});
     };
-
-    const poll = async () => {
-      if (stopped || document.visibilityState !== "visible") return;
-      const current = new AbortController();
-      controller?.abort();
-      controller = current;
-      try {
-        const res = await fetch("/api/agent/running", {
-          cache: "no-store",
-          signal: current.signal,
-        });
-        if (!res.ok) return;
-        const data = await res.json() as { runningSessionIds?: string[] };
-        if (stopped || controller !== current) return;
-        runningPollAuthoritativeRef.current = true;
-        setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-      } catch {
-        // Keep the last known state; the next visible-tab poll retries.
-      } finally {
-        if (controller === current) controller = null;
-        schedule();
-      }
-    };
-
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void poll();
-        return;
-      }
-      clearTimer();
-      controller?.abort();
-      controller = null;
-    };
-
-    void poll();
-    document.addEventListener("visibilitychange", onVisibilityChange);
+    void start();
     return () => {
-      stopped = true;
-      clearTimer();
-      controller?.abort();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
+      disposed = true;
+      subscription?.close();
+      if (refreshTimer) clearTimeout(refreshTimer);
     };
-  }, []);
+  }, [loadSessions, refreshKey]);
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
@@ -565,7 +533,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [explorerRefreshKey]);
 
   useEffect(() => {
-    fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
+    fetch("/api/v1/system/home").then((r) => r.json()).then((d: { home?: string }) => {
       if (d.home) setHomeDir(d.home);
     }).catch(() => {});
   }, []);
@@ -614,7 +582,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
     let cancelled = false;
     setWorktreeLoadingCwd(selectedCwd);
-    fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
+    fetch(`/api/v1/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
       .then((r) => r.json())
       .then((d: { projectRoot?: string; isGit?: boolean; isTopLevel?: boolean; worktrees?: WorktreeEntry[]; error?: string }) => {
         if (cancelled) return;
@@ -669,7 +637,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setCustomPathValidating(true);
     setCustomPathError(null);
     try {
-      const res = await fetch("/api/cwd/validate", {
+      const res = await fetch("/api/v1/system/cwd/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: path }),
@@ -697,7 +665,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
   const handleDefaultCwd = useCallback(async () => {
     try {
-      const res = await fetch("/api/default-cwd", { method: "POST" });
+      const res = await fetch("/api/v1/system/default-cwd", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
       const data = await res.json() as { cwd?: string; error?: string };
       if (data.cwd) {
         setSelectedCwd(data.cwd);
@@ -717,7 +689,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
+      const res = await fetch("/api/v1/worktrees", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: worktreeState.projectRoot, branch }),
@@ -752,7 +724,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setWtBusy(true);
     setWtError(null);
     try {
-      const res = await fetch("/api/worktrees", {
+      const res = await fetch("/api/v1/worktrees", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: worktreeState.projectRoot, path, force }),
@@ -1828,6 +1800,7 @@ function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
@@ -1844,7 +1817,7 @@ function SessionItem({
     setRenaming(false);
     if (name === (session.name ?? "")) return;
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      await fetch(`/api/v1/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
@@ -1858,16 +1831,22 @@ function SessionItem({
   const performDelete = useCallback(async () => {
     setConfirmDelete(false);
     setDeleting(true);
+    setDeleteError(null);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const response = await fetch(`/api/v1/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
       onDeleted?.(session.id);
-    } catch {
+    } catch (error) {
       setDeleting(false);
+      setDeleteError(error instanceof Error ? error.message : String(error));
+      setConfirmDelete(true);
     }
   }, [session.id, onDeleted]);
 
   const handleDeleteClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
+    setDeleteError(null);
     if (e.shiftKey) {
       void performDelete();
     } else {
@@ -1883,6 +1862,7 @@ function SessionItem({
   const handleDeleteCancel = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     setConfirmDelete(false);
+    setDeleteError(null);
   }, []);
 
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
@@ -1915,8 +1895,8 @@ function SessionItem({
       {confirmDelete ? (
         /* ── Delete confirmation: same height, two flat buttons ── */
         <>
-          <div style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {t("sidebar.deleteSession", { title: title.slice(0, 22) + (title.length > 22 ? "…" : "") })}
+          <div title={deleteError ?? undefined} style={{ flex: 1, minWidth: 0, fontSize: 12, color: deleteError ? "#ef4444" : "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {deleteError ?? t("sidebar.deleteSession", { title: title.slice(0, 22) + (title.length > 22 ? "…" : "") })}
           </div>
           <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
             <button

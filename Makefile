@@ -21,7 +21,7 @@ web-run:
 	./scripts/webui.sh run $(WEB_ARGS)
 
 test-core:
-	go test ./internal/... ./cmd/pi-go ./cmd/pi-go-rpc
+	go test ./internal/... ./cmd/pi-go
 
 test-surface:
 	./scripts/webui.sh test

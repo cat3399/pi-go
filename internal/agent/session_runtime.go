@@ -1252,7 +1252,7 @@ func (s *AgentSession) State() SessionState {
 }
 
 // Activity returns one lifecycleMu-consistent view of the session operation.
-// AgentSession remains the sole owner of these fields; a Host must sample this
+// AgentSession remains the sole owner of these fields; an application surface must sample this
 // view instead of reconstructing streaming/compaction state from events.
 func (s *AgentSession) Activity() SessionActivity {
 	if s == nil {

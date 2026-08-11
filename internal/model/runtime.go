@@ -366,6 +366,30 @@ func NewRuntime(options Options) (*Runtime, error) {
 	return r, nil
 }
 
+// LoadEffectiveSettings reads only the settings layers used by production.
+// Resource-management surfaces use this narrower boundary so an unrelated
+// models.json/provider error cannot prevent skills and prompts from loading.
+func LoadEffectiveSettings(agentDir, workingDir string, projectTrusted bool) (Settings, error) {
+	if strings.TrimSpace(agentDir) == "" {
+		return Settings{}, fmt.Errorf("%w: agent directory is required", ErrInvalidConfig)
+	}
+	if workingDir == "" {
+		workingDir = "."
+	}
+	global, err := loadSettings(filepath.Join(agentDir, "settings.json"), "global settings.json")
+	if err != nil {
+		return Settings{}, err
+	}
+	if !projectTrusted {
+		return cloneSettings(global), nil
+	}
+	project, err := loadSettings(filepath.Join(workingDir, ".pi", "settings.json"), "project settings.json")
+	if err != nil {
+		return Settings{}, err
+	}
+	return cloneSettings(mergeSettings(global, project)), nil
+}
+
 func (r *Runtime) Snapshot() Snapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

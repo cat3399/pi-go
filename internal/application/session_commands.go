@@ -1,4 +1,4 @@
-package host
+package application
 
 import (
 	"context"
@@ -25,8 +25,8 @@ func promptContent(text string, images []llm.ImageBlock) ([]llm.UserContentBlock
 	return content, nil
 }
 
-func (h *Host) dispatchSteer(command SteerCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSteer(command SteerCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -45,8 +45,8 @@ func (h *Host) dispatchSteer(command SteerCommand) (CommandResult, error) {
 	return SteerResult{}, nil
 }
 
-func (h *Host) dispatchFollowUp(command FollowUpCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchFollowUp(command FollowUpCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -65,8 +65,8 @@ func (h *Host) dispatchFollowUp(command FollowUpCommand) (CommandResult, error) 
 	return FollowUpResult{}, nil
 }
 
-func (h *Host) dispatchSetModel(ctx context.Context, command SetModelCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSetModel(ctx context.Context, command SetModelCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -86,28 +86,28 @@ func (h *Host) dispatchSetModel(ctx context.Context, command SetModelCommand) (C
 	return nil, fmt.Errorf("Model not found: %s/%s", command.Provider, command.ModelID)
 }
 
-func (h *Host) dispatchFork(ctx context.Context, command ForkCommand) (CommandResult, error) {
-	if _, _, err := h.currentSession(); err != nil {
+func (s *ApplicationSession) dispatchFork(ctx context.Context, command ForkCommand) (CommandResult, error) {
+	if _, _, err := s.currentSession(); err != nil {
 		return nil, err
 	}
-	result, err := h.runtime.Fork(ctx, command.EntryID, agentruntime.ForkOptions{Position: command.Position})
+	result, err := s.runtime.Fork(ctx, command.EntryID, agentruntime.ForkOptions{Position: command.Position})
 	if err != nil {
 		return nil, err
 	}
-	hostResult := ForkResult{Cancelled: result.Cancelled, SelectedText: cloneOptionalString(result.SelectedText)}
+	applicationResult := ForkResult{Cancelled: result.Cancelled, SelectedText: cloneOptionalString(result.SelectedText)}
 	if !result.Cancelled {
-		if current, _, currentErr := h.currentSession(); currentErr == nil {
+		if current, _, currentErr := s.currentSession(); currentErr == nil {
 			sessionID := current.SessionManager().SessionID()
-			hostResult.SessionID = &sessionID
+			applicationResult.SessionID = &sessionID
 		} else {
 			return nil, currentErr
 		}
 	}
-	return hostResult, nil
+	return applicationResult, nil
 }
 
-func (h *Host) dispatchNavigateTree(ctx context.Context, command NavigateTreeCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchNavigateTree(ctx context.Context, command NavigateTreeCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +121,8 @@ func (h *Host) dispatchNavigateTree(ctx context.Context, command NavigateTreeCom
 	}, nil
 }
 
-func (h *Host) dispatchSetThinkingLevel(command SetThinkingLevelCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSetThinkingLevel(command SetThinkingLevelCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +132,8 @@ func (h *Host) dispatchSetThinkingLevel(command SetThinkingLevelCommand) (Comman
 	return SetThinkingLevelResult{}, nil
 }
 
-func (h *Host) dispatchCompact(ctx context.Context, command CompactCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchCompact(ctx context.Context, command CompactCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -144,8 +144,8 @@ func (h *Host) dispatchCompact(ctx context.Context, command CompactCommand) (Com
 	return CompactResult{Result: result}, nil
 }
 
-func (h *Host) dispatchAbortCompaction() (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchAbortCompaction() (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -153,12 +153,12 @@ func (h *Host) dispatchAbortCompaction() (CommandResult, error) {
 	return AbortCompactionResult{}, nil
 }
 
-func (h *Host) dispatchSetSessionName(ctx context.Context, command SetSessionNameCommand) (CommandResult, error) {
+func (s *ApplicationSession) dispatchSetSessionName(ctx context.Context, command SetSessionNameCommand) (CommandResult, error) {
 	name := strings.TrimSpace(command.Name)
 	if name == "" {
 		return nil, fmt.Errorf("Session name cannot be empty")
 	}
-	session, _, err := h.currentSession()
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +168,8 @@ func (h *Host) dispatchSetSessionName(ctx context.Context, command SetSessionNam
 	return SetSessionNameResult{}, nil
 }
 
-func (h *Host) dispatchGetSessionStats() (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchGetSessionStats() (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +184,8 @@ func (h *Host) dispatchGetSessionStats() (CommandResult, error) {
 	return result, nil
 }
 
-func (h *Host) dispatchGetLastAssistantText() (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchGetLastAssistantText() (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -196,8 +196,8 @@ func (h *Host) dispatchGetLastAssistantText() (CommandResult, error) {
 	return GetLastAssistantTextResult{Text: stringPointer(text)}, nil
 }
 
-func (h *Host) dispatchSetAutoCompaction(command SetAutoCompactionCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSetAutoCompaction(command SetAutoCompactionCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -207,8 +207,8 @@ func (h *Host) dispatchSetAutoCompaction(command SetAutoCompactionCommand) (Comm
 	return SetAutoCompactionResult{}, nil
 }
 
-func (h *Host) dispatchSetAutoRetry(command SetAutoRetryCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSetAutoRetry(command SetAutoRetryCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -218,8 +218,8 @@ func (h *Host) dispatchSetAutoRetry(command SetAutoRetryCommand) (CommandResult,
 	return SetAutoRetryResult{}, nil
 }
 
-func (h *Host) dispatchGetTools() (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchGetTools() (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -236,8 +236,8 @@ func (h *Host) dispatchGetTools() (CommandResult, error) {
 	return GetToolsResult{Tools: tools}, nil
 }
 
-func (h *Host) dispatchSetTools(command SetToolsCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchSetTools(command SetToolsCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +247,8 @@ func (h *Host) dispatchSetTools(command SetToolsCommand) (CommandResult, error) 
 	return SetToolsResult{}, nil
 }
 
-func (h *Host) dispatchBash(ctx context.Context, command BashCommand) (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchBash(ctx context.Context, command BashCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -262,8 +262,8 @@ func (h *Host) dispatchBash(ctx context.Context, command BashCommand) (CommandRe
 	return BashResult{Result: result}, nil
 }
 
-func (h *Host) dispatchAbortBash() (CommandResult, error) {
-	session, _, err := h.currentSession()
+func (s *ApplicationSession) dispatchAbortBash() (CommandResult, error) {
+	session, _, err := s.currentSession()
 	if err != nil {
 		return nil, err
 	}
@@ -271,28 +271,28 @@ func (h *Host) dispatchAbortBash() (CommandResult, error) {
 	return AbortBashResult{}, nil
 }
 
-func (h *Host) dispatchGetCommands() (CommandResult, error) {
+func (s *ApplicationSession) dispatchGetCommands() (CommandResult, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		session, generation, err := h.currentSession()
+		session, generation, err := s.currentSession()
 		if err != nil {
 			return nil, err
 		}
-		services := h.runtime.Services()
+		services := s.runtime.Services()
 		if services == nil || services.ResourceService == nil {
-			if h.sameBinding(session, generation) && h.runtime.Session() == session {
+			if s.sameBinding(session, generation) && s.runtime.Session() == session {
 				return GetCommandsResult{}, nil
 			}
 			continue
 		}
 		snapshot, err := services.ResourceService.Snapshot()
 		if err != nil {
-			if h.sameBinding(session, generation) && h.runtime.Session() == session {
+			if s.sameBinding(session, generation) && s.runtime.Session() == session {
 				return nil, err
 			}
 			continue
 		}
 		commands := resourceCommands(snapshot)
-		if h.sameBinding(session, generation) && h.runtime.Session() == session {
+		if s.sameBinding(session, generation) && s.runtime.Session() == session {
 			return GetCommandsResult{Commands: commands}, nil
 		}
 	}

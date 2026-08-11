@@ -13,7 +13,7 @@ const nextConfig: NextConfig = {
 	...(development
 		? {
 				async rewrites() {
-					return [{ source: "/api/:path*", destination: `${apiOrigin}/api/:path*` }];
+					return [{ source: "/api/v1/:path*", destination: `${apiOrigin}/api/v1/:path*` }];
 				},
 			}
 		: { output: "export" as const }),

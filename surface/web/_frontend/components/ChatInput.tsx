@@ -160,7 +160,7 @@ function getSlashDescription(command: SlashCommandPaletteItem, t: (key: string) 
 }
 
 // Skill slash commands are named "skill:<skillName>"; look the skill up in the
-// dormancy map fetched from /api/skills. Unknown skills are treated as active.
+// dormancy map fetched from /api/v1/skills. Unknown skills are treated as active.
 function isDormantSkillCommand(command: SlashCommandPaletteItem, dormancy: Record<string, boolean>): boolean {
   if (command.source !== "skill" || !command.name.startsWith("skill:")) return false;
   return dormancy[command.name.slice("skill:".length)] === true;
@@ -625,7 +625,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const fetchCwd = cwd;
     const query = atQueryText;
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}&q=${encodeURIComponent(query)}`)
+      fetch(`/api/v1/file-index?cwd=${encodeURIComponent(fetchCwd)}&q=${encodeURIComponent(query)}`)
         .then((res) => {
           if (!res.ok) throw new Error(`file search failed: ${res.status}`);
           return res.json() as Promise<{ matches?: FileIndexEntry[] }>;
@@ -668,7 +668,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     fileIndexFetchingRef.current = cwd;
     const fetchCwd = cwd;
     setFileIndexLoading(true);
-    fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}`)
+    fetch(`/api/v1/file-index?cwd=${encodeURIComponent(fetchCwd)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`file index failed: ${res.status}`);
         return res.json() as Promise<{ files?: string[]; truncated?: boolean }>;
@@ -1004,7 +1004,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const requestCwd = cwd;
     let cancelled = false;
     setSkillDormancyState({ cwd: requestCwd, values: {} });
-    fetch(`/api/skills?cwd=${encodeURIComponent(requestCwd)}`)
+    fetch(`/api/v1/skills?cwd=${encodeURIComponent(requestCwd)}`)
       .then((res) => {
         if (!res.ok) throw new Error(`skills fetch failed: ${res.status}`);
         return res.json() as Promise<Partial<SkillsResponse>>;

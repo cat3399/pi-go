@@ -272,7 +272,7 @@ func (s *AgentSession) availableModels(ctx context.Context) ([]provider.Model, e
 }
 
 // AvailableModels exposes the same dynamically resolved, availability-filtered
-// catalog used by model cycling. Hosts use this boundary for set_model and
+// catalog used by model cycling. Application surfaces use this boundary for set_model and
 // model listing instead of reaching into a concrete ModelRuntime service.
 func (s *AgentSession) AvailableModels(ctx context.Context) ([]provider.Model, error) {
 	if s == nil {

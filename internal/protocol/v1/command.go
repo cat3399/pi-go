@@ -1,9 +1,6 @@
-// Package rpc implements pi's headless JSONL protocol above host.Host. It is
-// deliberately a wire adapter: all product state and behavior remain owned by
-// Runtime -> AgentSession -> Agent.
-// Package hostjson owns the JSON projection shared by transports above
-// host.Host. It contains no transport lifecycle and never owns Agent state.
-package hostjson
+// Package protocolv1 owns the versioned JSON projection used by transport
+// adapters above the application API. It never owns Agent or Session state.
+package protocolv1
 
 import (
 	"encoding/base64"
@@ -12,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/cat3399/pi-go/internal/agent"
-	"github.com/cat3399/pi-go/internal/host"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 )
@@ -49,21 +46,24 @@ type imageRequest struct {
 type decodedCommand struct {
 	id      *string
 	typ     string
-	command host.Command
+	command application.Command
 }
 
 // DecodeCommand validates one JSON command and returns the corresponding
-// transport-neutral Host command. HTTP and JSONL transports deliberately share
-// this boundary so command semantics cannot drift between surfaces.
-func DecodeCommand(data []byte) (host.Command, error) {
-	decoded, err := decodeCommand(data)
+// transport-neutral application command. HTTP and JSONL transports deliberately
+// share this boundary while identifying their prompt source explicitly.
+func DecodeCommand(data []byte, promptSource agent.InputSource) (application.Command, error) {
+	if !promptSource.Valid() {
+		return nil, fmt.Errorf("invalid prompt source %q", promptSource)
+	}
+	decoded, err := decodeCommand(data, promptSource)
 	if err != nil {
 		return nil, err
 	}
 	return decoded.command, nil
 }
 
-func decodeCommand(line []byte) (decodedCommand, error) {
+func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand, error) {
 	var input request
 	if err := json.Unmarshal(line, &input); err != nil {
 		return decodedCommand{typ: "parse"}, fmt.Errorf("Failed to parse command: %w", err)
@@ -80,7 +80,7 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 	}
 
 	switch input.Type {
-	case string(host.CommandPrompt):
+	case string(application.CommandPrompt):
 		images, err := decodeImages(input.Images)
 		if err != nil {
 			return decoded, err
@@ -93,8 +93,10 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if !behavior.Valid() {
 			return decoded, fmt.Errorf("invalid streamingBehavior %q", input.StreamingBehavior)
 		}
-		decoded.command = host.PromptCommand{Message: message, Images: images, StreamingBehavior: behavior}
-	case string(host.CommandSteer):
+		decoded.command = application.PromptCommand{
+			Message: message, Images: images, StreamingBehavior: behavior, Source: promptSource,
+		}
+	case string(application.CommandSteer):
 		images, err := decodeImages(input.Images)
 		if err != nil {
 			return decoded, err
@@ -103,8 +105,8 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.SteerCommand{Message: message, Images: images}
-	case string(host.CommandFollowUp):
+		decoded.command = application.SteerCommand{Message: message, Images: images}
+	case string(application.CommandFollowUp):
 		images, err := decodeImages(input.Images)
 		if err != nil {
 			return decoded, err
@@ -113,16 +115,16 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.FollowUpCommand{Message: message, Images: images}
-	case string(host.CommandAbort):
-		decoded.command = host.AbortCommand{}
-	case string(host.CommandGetState):
-		decoded.command = host.GetStateCommand{}
-	case string(host.CommandClearQueue):
-		decoded.command = host.ClearQueueCommand{}
-	case string(host.CommandReload):
-		decoded.command = host.ReloadCommand{}
-	case string(host.CommandSetModel):
+		decoded.command = application.FollowUpCommand{Message: message, Images: images}
+	case string(application.CommandAbort):
+		decoded.command = application.AbortCommand{}
+	case string(application.CommandGetState):
+		decoded.command = application.GetStateCommand{}
+	case string(application.CommandClearQueue):
+		decoded.command = application.ClearQueueCommand{}
+	case string(application.CommandReload):
+		decoded.command = application.ReloadCommand{}
+	case string(application.CommandSetModel):
 		providerID, err := requiredString(input.Provider, "provider")
 		if err != nil {
 			return decoded, err
@@ -131,8 +133,8 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.SetModelCommand{Provider: providerID, ModelID: modelID}
-	case string(host.CommandFork):
+		decoded.command = application.SetModelCommand{Provider: providerID, ModelID: modelID}
+	case string(application.CommandFork):
 		entryID, err := requiredString(input.EntryID, "entryId")
 		if err != nil {
 			return decoded, err
@@ -141,17 +143,17 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if position != "" && position != agent.ForkBefore && position != agent.ForkAt {
 			return decoded, fmt.Errorf("invalid fork position %q", position)
 		}
-		decoded.command = host.ForkCommand{EntryID: entryID, Position: position}
-	case string(host.CommandNavigateTree):
+		decoded.command = application.ForkCommand{EntryID: entryID, Position: position}
+	case string(application.CommandNavigateTree):
 		targetID, err := requiredString(input.TargetID, "targetId")
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.NavigateTreeCommand{TargetID: targetID, Options: agent.NavigateTreeOptions{
+		decoded.command = application.NavigateTreeCommand{TargetID: targetID, Options: agent.NavigateTreeOptions{
 			Summarize: input.Summarize, CustomInstructions: input.CustomInstructions,
 			ReplaceInstructions: input.ReplaceInstructions, Label: input.Label,
 		}}
-	case string(host.CommandSetThinkingLevel):
+	case string(application.CommandSetThinkingLevel):
 		level, err := requiredString(input.Level, "level")
 		if err != nil {
 			return decoded, err
@@ -160,52 +162,52 @@ func decodeCommand(line []byte) (decodedCommand, error) {
 		if !thinking.Valid() {
 			return decoded, fmt.Errorf("invalid thinking level %q", level)
 		}
-		decoded.command = host.SetThinkingLevelCommand{Level: thinking}
-	case string(host.CommandCompact):
+		decoded.command = application.SetThinkingLevelCommand{Level: thinking}
+	case string(application.CommandCompact):
 		instructions := ""
 		if input.CustomInstructions != nil {
 			instructions = *input.CustomInstructions
 		}
-		decoded.command = host.CompactCommand{CustomInstructions: instructions}
-	case string(host.CommandAbortCompaction):
-		decoded.command = host.AbortCompactionCommand{}
-	case string(host.CommandSetSessionName):
+		decoded.command = application.CompactCommand{CustomInstructions: instructions}
+	case string(application.CommandAbortCompaction):
+		decoded.command = application.AbortCompactionCommand{}
+	case string(application.CommandSetSessionName):
 		name, err := requiredString(input.Name, "name")
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.SetSessionNameCommand{Name: name}
-	case string(host.CommandGetSessionStats):
-		decoded.command = host.GetSessionStatsCommand{}
-	case string(host.CommandGetLastAssistantText):
-		decoded.command = host.GetLastAssistantTextCommand{}
-	case string(host.CommandSetAutoCompaction):
+		decoded.command = application.SetSessionNameCommand{Name: name}
+	case string(application.CommandGetSessionStats):
+		decoded.command = application.GetSessionStatsCommand{}
+	case string(application.CommandGetLastAssistantText):
+		decoded.command = application.GetLastAssistantTextCommand{}
+	case string(application.CommandSetAutoCompaction):
 		if input.Enabled == nil {
 			return decoded, fmt.Errorf("enabled is required")
 		}
-		decoded.command = host.SetAutoCompactionCommand{Enabled: *input.Enabled}
-	case string(host.CommandSetAutoRetry):
+		decoded.command = application.SetAutoCompactionCommand{Enabled: *input.Enabled}
+	case string(application.CommandSetAutoRetry):
 		if input.Enabled == nil {
 			return decoded, fmt.Errorf("enabled is required")
 		}
-		decoded.command = host.SetAutoRetryCommand{Enabled: *input.Enabled}
-	case string(host.CommandGetTools):
-		decoded.command = host.GetToolsCommand{}
-	case string(host.CommandSetTools):
+		decoded.command = application.SetAutoRetryCommand{Enabled: *input.Enabled}
+	case string(application.CommandGetTools):
+		decoded.command = application.GetToolsCommand{}
+	case string(application.CommandSetTools):
 		if input.ToolNames == nil {
 			return decoded, fmt.Errorf("toolNames is required")
 		}
-		decoded.command = host.SetToolsCommand{ToolNames: append([]string(nil), (*input.ToolNames)...)}
-	case string(host.CommandBash):
+		decoded.command = application.SetToolsCommand{ToolNames: append([]string(nil), (*input.ToolNames)...)}
+	case string(application.CommandBash):
 		command, err := requiredString(input.Command, "command")
 		if err != nil {
 			return decoded, err
 		}
-		decoded.command = host.BashCommand{Command: command, ExcludeFromContext: input.ExcludeFromContext}
-	case string(host.CommandAbortBash):
-		decoded.command = host.AbortBashCommand{}
-	case string(host.CommandGetCommands):
-		decoded.command = host.GetCommandsCommand{}
+		decoded.command = application.BashCommand{Command: command, ExcludeFromContext: input.ExcludeFromContext}
+	case string(application.CommandAbortBash):
+		decoded.command = application.AbortBashCommand{}
+	case string(application.CommandGetCommands):
+		decoded.command = application.GetCommandsCommand{}
 	default:
 		return decoded, fmt.Errorf("Unsupported command: %s", input.Type)
 	}

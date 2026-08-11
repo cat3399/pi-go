@@ -9,7 +9,7 @@ import (
 )
 
 // MarshalAgentMessage emits pi's public AgentMessage JSON shape. Session
-// persistence and RPC events intentionally share this encoder so a web host
+// persistence and RPC events intentionally share this encoder so a surface
 // cannot drift from the durable transcript vocabulary.
 func MarshalAgentMessage(message agentmsg.Message) (json.RawMessage, error) {
 	switch value := message.(type) {

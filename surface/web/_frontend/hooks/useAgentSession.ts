@@ -10,11 +10,18 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { sendAgentCommand } from "@/lib/agent-client";
+import {
+  ApplicationRequestError,
+  sendSessionCommand,
+  subscribeSessionEvents,
+  type ApplicationEvent as AgentEvent,
+  type EventSubscription,
+} from "@/lib/application-client";
 import { getToolNamesForPreset, type ToolEntry } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 
 export interface SessionData {
+  revision: number;
   sessionId: string;
   filePath: string;
   tree: SessionTreeNode[];
@@ -25,6 +32,8 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
   };
+  running: boolean;
+  state?: AgentStateResponse;
 }
 
 interface StreamingState {
@@ -50,11 +59,6 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
     default:
       return state;
   }
-}
-
-interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
 }
 
 interface CompactCommandResult {
@@ -156,39 +160,11 @@ export type ThinkingLevelOption = "auto" | "off" | "minimal" | "low" | "medium" 
 
 const PROGRAMMATIC_SCROLL_IGNORE_MS = 700;
 const USER_SCROLL_INTENT_MS = 1200;
-const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
-const PROMPT_SETTLE_POLL_MS = 600;
-const PROMPT_SETTLE_MAX_MS = 20_000;
-const EVENT_STREAM_IDLE_GRACE_MS = 30_000;
-const AGENT_STATE_RECONCILE_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
-const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
-
-type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
-
-type EventStreamConnectionResult = {
-  status: EventStreamConnectionStatus;
-  source: EventSource;
-};
-
-type EventStreamConnectionAttempt = {
-  source: EventSource;
-  promise: Promise<EventStreamConnectionResult>;
-  pending: boolean;
-};
-
-class EventStreamConnectionError extends Error {
-  constructor(public readonly status: Exclude<EventStreamConnectionStatus, "connected">) {
-    super(status === "timeout"
-      ? "Timed out connecting to the agent event stream. Please try again."
-      : "Failed to connect to the agent event stream. Please try again.");
-    this.name = "EventStreamConnectionError";
-  }
-}
 
 function createNoticeId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -378,20 +354,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
 
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const eventSourceSessionIdRef = useRef<string | null>(null);
-  const eventConnectionAttemptRef = useRef<EventStreamConnectionAttempt | null>(null);
-  const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const eventStreamGraceGenerationRef = useRef(0);
-  const eventStreamGraceActiveRef = useRef(false);
+  const eventSubscriptionRef = useRef<EventSubscription | null>(null);
+  const eventSubscriptionSessionIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  const snapshotRevisionRef = useRef(0);
   const agentRunningRef = useRef(false);
-  const sdkAgentActiveRef = useRef(false);
-  const rpcPromptPendingRef = useRef(false);
+  const agentRunActiveRef = useRef(false);
+  const promptOperationPendingRef = useRef(false);
   const notifiedPromptRunIdRef = useRef(-1);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
+  const handleEventResetRef = useRef<(sessionId: string) => void>(() => {});
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
@@ -457,7 +431,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
+      const res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}?${params}`);
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
@@ -470,6 +444,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
+      snapshotRevisionRef.current = d.revision;
       setData(d);
       setActiveLeafId(d.leafId);
       setMessages(d.context.messages);
@@ -484,28 +459,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading) setLoading(false);
       if (!includeState) return null;
 
-      try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (sessionIdRef.current !== sid) return null;
-
-        const liveState = agentState.state;
-        if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
-          if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
-          if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
-          if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
-          if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
-          if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
-        } else if (!agentState.running) {
-          setQueuedMessages({ steering: [], followUp: [] });
-        }
-        return agentState;
-      } catch (e) {
-        console.error("Failed to load agent state:", e);
-        return null;
+      const liveState = d.state;
+      if (liveState) {
+        if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
+        if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt ?? null);
+        if (liveState.thinkingLevel !== undefined) setThinkingLevel((liveState.thinkingLevel as ThinkingLevelOption) ?? "auto");
+        if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
+        if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
+        if (liveState.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(liveState.queuedMessages));
+      } else if (!d.running) {
+        setQueuedMessages({ steering: [], followUp: [] });
       }
+      return { running: d.running, state: liveState };
     } catch (e) {
       setError(String(e));
       return null;
@@ -518,7 +483,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
       if (leafId) params.set("leafId", leafId);
-      const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
+      const url = `/api/v1/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[] } };
@@ -531,7 +496,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadTools = useCallback(async (sid: string) => {
     try {
-      const tools = await sendAgentCommand<ToolEntry[]>(sid, { type: "get_tools" });
+      const tools = await sendSessionCommand<ToolEntry[]>(sid, { type: "get_tools" });
       if (tools) {
         const { getPresetFromTools } = await import("@/lib/tool-presets");
         setToolPresetState(getPresetFromTools(tools));
@@ -569,12 +534,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const selectedThinkingLevel = thinkingLevelOverrideRef.current;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
-      const res = await fetch("/api/agent/new", {
+      const res = await fetch("/api/v1/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cwd: newSessionCwd,
-          type: "ensure_session",
           toolNames,
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(selectedThinkingLevel
@@ -585,11 +549,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const result = await res.json() as {
         sessionId: string;
+        revision?: number;
         model?: SelectedModel | null;
         thinkingLevel?: ThinkingLevelOption;
       };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      if (typeof result.revision === "number") snapshotRevisionRef.current = result.revision;
       if (result.model && newSessionModelOverrideRef.current === selectedModel) {
         setPendingModel(result.model);
         if (!selectedModel) setNewSessionDefaultModel(result.model);
@@ -619,7 +585,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     setSlashCommandsLoading(true);
     try {
-      const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
+      const data = await sendSessionCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
       const commands = data?.commands ?? [];
       setSlashCommands(commands);
       return commands;
@@ -632,99 +598,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureNewSession]);
 
-  const cancelEventStreamGrace = useCallback(() => {
-    eventStreamGraceGenerationRef.current += 1;
-    eventStreamGraceActiveRef.current = false;
-    if (eventStreamGraceTimerRef.current) {
-      clearTimeout(eventStreamGraceTimerRef.current);
-      eventStreamGraceTimerRef.current = null;
-    }
-  }, []);
-
   const closeEvents = useCallback(() => {
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    eventSourceSessionIdRef.current = null;
-    eventConnectionAttemptRef.current = null;
+    eventSubscriptionRef.current?.close();
+    eventSubscriptionRef.current = null;
+    eventSubscriptionSessionIdRef.current = null;
   }, []);
 
-  const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
+  const connectEvents = useCallback(async (sid: string): Promise<void> => {
     closeEvents();
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
-    eventSourceRef.current = es;
-    eventSourceSessionIdRef.current = sid;
-
-    const promise = new Promise<EventStreamConnectionResult>((resolve) => {
-      let settled = false;
-      const settle = (status: EventStreamConnectionStatus) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        if (eventConnectionAttemptRef.current?.source === es) {
-          eventConnectionAttemptRef.current.pending = false;
-        }
-        resolve({ status, source: es });
-      };
-      const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
-
-      es.onmessage = (e) => {
-        try {
-          const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
-          handleAgentEventRef.current?.(event);
-        } catch {
-          // ignore
-        }
-      };
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/500/content-type mismatch): browser won't
-          // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions or an active idle grace window.
-          settle("closed");
-          if (eventSourceRef.current === es && (agentRunningRef.current || eventStreamGraceActiveRef.current)) {
-            eventSourceRef.current = null;
-            eventSourceSessionIdRef.current = null;
-            eventConnectionAttemptRef.current = null;
-            const reconnectGeneration = eventStreamGraceGenerationRef.current;
-            setTimeout(() => {
-              if (
-                reconnectGeneration === eventStreamGraceGenerationRef.current
-                && !eventSourceRef.current
-                && (agentRunningRef.current || eventStreamGraceActiveRef.current)
-              ) {
-                void connectEvents(sid);
-              }
-            }, 1000);
-          }
-        }
-        // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
-        // The timeout above resolves only to let callers decide whether this
-        // connection must be ready before they continue.
-      };
-    });
-    eventConnectionAttemptRef.current = { source: es, promise, pending: true };
-    return promise;
+    const subscription = subscribeSessionEvents(
+      sid,
+      (event) => handleAgentEventRef.current?.(event),
+      {
+        after: snapshotRevisionRef.current,
+        onReset: () => handleEventResetRef.current(sid),
+      },
+    );
+    eventSubscriptionRef.current = subscription;
+    eventSubscriptionSessionIdRef.current = sid;
+    try {
+      await subscription.ready();
+    } catch (error) {
+      if (eventSubscriptionRef.current === subscription) closeEvents();
+      throw error instanceof Error ? error : new Error(String(error));
+    }
   }, [closeEvents]);
 
   const ensureEventsConnected = useCallback(async (sid: string) => {
-    const current = eventSourceRef.current;
-    if (current && eventSourceSessionIdRef.current === sid) {
-      if (current.readyState === EventSource.OPEN) return;
-      const attempt = eventConnectionAttemptRef.current;
-      if (attempt?.source === current && attempt.pending) {
-        await attempt.promise;
-        if (eventSourceRef.current === current && current.readyState === EventSource.OPEN) return;
+    const current = eventSubscriptionRef.current;
+    if (current && eventSubscriptionSessionIdRef.current === sid) {
+      try {
+        await current.ready();
+        return;
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(String(error));
       }
     }
-
-    const result = await connectEvents(sid);
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
-    if (eventSourceRef.current === result.source) eventSourceRef.current = null;
-    if (eventSourceSessionIdRef.current === sid) eventSourceSessionIdRef.current = null;
-    if (eventConnectionAttemptRef.current?.source === result.source) eventConnectionAttemptRef.current = null;
-    result.source.close();
-    throw new EventStreamConnectionError(result.status);
+    await connectEvents(sid);
   }, [connectEvents]);
 
   const respondToExtensionUi = useCallback(async (
@@ -735,7 +645,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setExtensionDialog((current) => current?.id === request.id ? null : current);
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "extension_ui_response",
         id: request.id,
         ...response,
@@ -749,7 +659,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "extension_ui_input",
         id: request.id,
         data,
@@ -840,64 +750,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return true;
   }, [onAgentEnd]);
 
-  const scheduleEventStreamClose = useCallback((sid: string) => {
-    cancelEventStreamGrace();
-    eventStreamGraceActiveRef.current = true;
-    const generation = eventStreamGraceGenerationRef.current;
-
-    const checkServerIdle = async () => {
-      if (
-        generation !== eventStreamGraceGenerationRef.current
-        || sessionIdRef.current !== sid
-        || !eventStreamGraceActiveRef.current
-      ) return;
-
-      try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-        if (
-          generation !== eventStreamGraceGenerationRef.current
-          || sessionIdRef.current !== sid
-          || !eventStreamGraceActiveRef.current
-        ) return;
-
-        const state = data.state;
-        const promptActive = Boolean(data.running && state && (state.isStreaming || state.isPromptRunning));
-        if (promptActive) {
-          eventStreamGraceActiveRef.current = false;
-          eventStreamGraceTimerRef.current = null;
-          sdkAgentActiveRef.current = Boolean(state?.isStreaming);
-          rpcPromptPendingRef.current = Boolean(state?.isPromptRunning);
-          agentRunningRef.current = true;
-          setAgentRunning(true);
-          setAgentPhase(state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-          return;
-        }
-
-        if (data.running && state?.isCompacting) {
-          setIsCompacting(true);
-          eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-          return;
-        }
-
-        eventStreamGraceActiveRef.current = false;
-        eventStreamGraceTimerRef.current = null;
-        closeEvents();
-      } catch {
-        // Keep the stream alive while state cannot be verified.
-        if (
-          generation !== eventStreamGraceGenerationRef.current
-          || sessionIdRef.current !== sid
-          || !eventStreamGraceActiveRef.current
-        ) return;
-        eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), PROMPT_SETTLE_POLL_MS);
-      }
-    };
-
-    eventStreamGraceTimerRef.current = setTimeout(() => void checkServerIdle(), EVENT_STREAM_IDLE_GRACE_MS);
-  }, [cancelEventStreamGrace, closeEvents]);
-
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
@@ -906,10 +758,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sid) await loadSession(sid);
     } finally {
       if (promptRunIdRef.current !== runId) return;
-      const promptWasPending = rpcPromptPendingRef.current;
-      const agentWasActive = sdkAgentActiveRef.current;
-      rpcPromptPendingRef.current = false;
-      sdkAgentActiveRef.current = false;
+      const promptWasPending = promptOperationPendingRef.current;
+      const agentWasActive = agentRunActiveRef.current;
+      promptOperationPendingRef.current = false;
+      agentRunActiveRef.current = false;
       optimisticUserMessageKeyRef.current = null;
       const wasRunning = settleUiStage();
       if (promptWasPending) {
@@ -917,32 +769,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (agentWasActive && wasRunning) {
         onAgentEnd?.();
       }
-      if (sid) scheduleEventStreamClose(sid);
     }
-  }, [loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, settleUiStage]);
-
-  const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
-    await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
-    const startedAt = Date.now();
-
-    while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
-      if (runId !== undefined && promptRunIdRef.current !== runId) return;
-      try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (res.ok) {
-          const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
-          const state = data.state;
-          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
-            await finishPromptWithoutStream(sid, runId);
-            return;
-          }
-        }
-      } catch {
-        // SSE remains the primary completion path.
-      }
-      await delay(PROMPT_SETTLE_POLL_MS);
-    }
-  }, [finishPromptWithoutStream]);
+  }, [loadSession, notifyPromptStage, onAgentEnd, settleUiStage]);
 
   const waitForBashSettlement = useCallback(async (sid: string) => {
     const recoveryId = bashRecoveryIdRef.current + 1;
@@ -955,7 +783,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     ) {
       await delay(BASH_STATE_RECONCILE_MS);
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        const res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}/state`);
         if (!res.ok) continue;
         const data = await res.json() as { state?: AgentStateResponse };
         if (data.state?.isBashRunning) continue;
@@ -981,7 +809,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!agentRunningRef.current) return;
     const runId = promptRunIdRef.current;
     try {
-      const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+      const res = await fetch(`/api/v1/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) return;
       const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
       // A slow response can straddle a run boundary (previous run finished
@@ -991,7 +819,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const state = data.state;
       // Mirror compaction state unconditionally: a missed compaction_end
       // would otherwise leave the "Stop compaction" UI stuck. No state
-      // (wrapper destroyed) means nothing is compacting.
+      // (no live state) means nothing is compacting.
       setIsCompacting(state?.isCompacting ?? false);
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
       const busy = data.running && state
@@ -1005,29 +833,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       await finishPromptWithoutStream(sid, runId);
     } catch {
-      // Network still down — the next poll / visibility / online tick retries.
+      // Network still down — SSE reconnect or the next visibility/online
+      // transition will reconcile again.
     }
   }, [finishPromptWithoutStream]);
 
-  // Recovery net for missed SSE events: while the agent is running, verify
-  // against the server periodically and whenever the tab returns to the
-  // foreground or the network comes back.
+  handleEventResetRef.current = (sid: string) => {
+    void loadSession(sid, false, true).then((snapshot) => {
+      if (!snapshot || sessionIdRef.current !== sid) return;
+      const state = snapshot.state;
+      const busy = Boolean(snapshot.running && state
+        && (state.isStreaming || state.isPromptRunning || state.isCompacting));
+      if (busy) {
+        agentRunActiveRef.current = Boolean(state?.isStreaming);
+        promptOperationPendingRef.current = Boolean(state?.isPromptRunning);
+        agentRunningRef.current = true;
+        setAgentRunning(true);
+        setAgentPhase(state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+        return;
+      }
+      if (agentRunningRef.current) void finishPromptWithoutStream(sid);
+    });
+  };
+
+  // Cursor replay is the normal recovery path. A visibility or network
+  // transition also samples authoritative state so a suspended browser can
+  // settle immediately without maintaining a polling loop.
   useEffect(() => {
     if (!agentRunning) return;
     const reconcile = () => {
       // Read the ref on every tick: for brand-new sessions the id is
-      // assigned only after ensure_session returns.
+      // assigned only after the session creation response returns.
       const sid = sessionIdRef.current;
       if (sid) void reconcileAgentState(sid);
     };
     const onVisible = () => {
       if (document.visibilityState === "visible") reconcile();
     };
-    const interval = setInterval(reconcile, AGENT_STATE_RECONCILE_MS);
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", reconcile);
     return () => {
-      clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", reconcile);
     };
@@ -1040,8 +885,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "agent_start":
-        cancelEventStreamGrace();
-        sdkAgentActiveRef.current = true;
+        agentRunActiveRef.current = true;
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -1050,64 +894,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_end":
         // One logical prompt can emit multiple agent_end events before retrying,
         // compacting, or continuing messages queued by extension handlers.
-        // Keep the stream open until prompt_done/agent_settled and the idle grace.
+        // Keep the session subscription; operation/agent_settled owns the
+        // higher-level completion transition.
         if (!agentRunningRef.current) break;
         setAgentPhase(null);
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: AgentStateResponse }) => {
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-              if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
-              if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
-              // Aborted turns can leave messages queued in pi (delivered with the
-              // next turn); dead wrapper (no state) means the queue is gone.
-              setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
-            })
-            .catch(() => {});
+          void loadSession(sessionIdRef.current, false, true);
         }
         break;
       case "agent_settled": {
-        const agentWasActive = sdkAgentActiveRef.current;
-        sdkAgentActiveRef.current = false;
-        if (!agentWasActive || rpcPromptPendingRef.current) break;
+        const agentWasActive = agentRunActiveRef.current;
+        agentRunActiveRef.current = false;
+        if (!agentWasActive || promptOperationPendingRef.current) break;
 
         const sid = sessionIdRef.current;
         const wasRunning = settleUiStage();
         setIsCompacting(false);
         if (sid) {
-          void loadSession(sid);
-          scheduleEventStreamClose(sid);
+          void loadSession(sid, false, true);
         }
         if (wasRunning) onAgentEnd?.();
         break;
       }
-      case "prompt_done":
-        {
+      case "operation":
+        if (event.command === "prompt") {
+          if (event.status === "failed") {
+            addNotice({
+              type: "error",
+              message: (event.errorMessage as string | undefined) ?? "Prompt failed",
+            });
+          }
           const runId = promptRunIdRef.current;
-          const promptWasPending = rpcPromptPendingRef.current;
-          rpcPromptPendingRef.current = false;
+          const promptWasPending = promptOperationPendingRef.current;
+          promptOperationPendingRef.current = false;
           optimisticUserMessageKeyRef.current = null;
           const firstNotification = notifyPromptStage(runId);
           if (!promptWasPending && !firstNotification) break;
 
           const sid = sessionIdRef.current;
-          if (sid) void loadSession(sid);
+          if (sid) void loadSession(sid, false, true);
           // An extension-injected agent may already have started before the
-          // command's prompt_done. Keep that active stage visible and let its
+          // command's operation completion. Keep that active stage visible and let its
           // agent_settled event perform the next completion transition.
-          if (!sdkAgentActiveRef.current) {
+          if (!agentRunActiveRef.current) {
             settleUiStage();
-            if (sid) scheduleEventStreamClose(sid);
           }
         }
-        break;
-      case "prompt_error":
-        addNotice({ type: "error", message: (event.errorMessage as string | undefined) ?? "Command failed" });
         break;
       case "extension_error":
         addNotice({
@@ -1215,7 +1049,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, settleUiStage]);
+  }, [addNotice, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1234,8 +1068,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
 
     const promptRunId = promptRunIdRef.current + 1;
-    cancelEventStreamGrace();
-    rpcPromptPendingRef.current = true;
+    promptOperationPendingRef.current = true;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     const userMsg: AgentMessage = {
@@ -1270,12 +1103,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (selectedModel) {
             setPendingModel(selectedModel);
             if (existingSid) {
-              await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
+              await sendSessionCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
             }
           }
           await ensureEventsConnected(sid);
           promptRequestStarted = true;
-          await sendAgentCommand(sid, {
+          await sendSessionCommand(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
@@ -1286,49 +1119,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         sentSessionId = session.id;
         await ensureEventsConnected(session.id);
         promptRequestStarted = true;
-        await sendAgentCommand(session.id, {
+        await sendSessionCommand(session.id, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
-      }
-      if (isSlashCommandPrompt && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
       }
     } catch (e) {
       console.error("Failed to send message:", e);
       // A failed prompt POST is ambiguous: the server may have accepted it
       // before the response connection was lost. Keep SSE alive until the
       // server confirms idle so a real run cannot continue unseen.
-      if (promptRequestStarted && sentSessionId) {
-        void waitForPromptSettlement(sentSessionId, promptRunId);
+      if (promptRequestStarted && sentSessionId && !(e instanceof ApplicationRequestError)) {
+        const ambiguousSessionId = sentSessionId;
+        setTimeout(() => void reconcileAgentState(ambiguousSessionId), 1_000);
         return;
       }
-      rpcPromptPendingRef.current = false;
+      promptOperationPendingRef.current = false;
       agentRunningRef.current = false;
-      closeEvents();
-      if (e instanceof EventStreamConnectionError) {
-        const optimisticKey = optimisticUserMessageKeyRef.current;
-        if (optimisticKey) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last?.role === "user" && userMessageKey(last) === optimisticKey
-              ? prev.slice(0, -1)
-              : prev;
-          });
-        }
-        addNotice({ type: "error", message: e.message });
-        // The prompt never reached the agent, so restore the user's text into
-        // the input instead of losing it. Mirrors the shell-command recovery in
-        // executeBash; insertIfEmpty avoids clobbering anything typed since.
-        if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
+      const optimisticKey = optimisticUserMessageKeyRef.current;
+      if (optimisticKey) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          return last?.role === "user" && userMessageKey(last) === optimisticKey
+            ? prev.slice(0, -1)
+            : prev;
+        });
       }
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      // The prompt was rejected before admission, so restore the user's text
+      // without overwriting anything typed after submission.
+      if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
       optimisticUserMessageKeyRef.current = null;
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, addNotice, opts.chatInputRef, reconcileAgentState]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1339,7 +1166,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error("Unable to create a session for the shell command");
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "bash",
         command,
         excludeFromContext,
@@ -1363,14 +1190,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     if (bashRunningRef.current) {
       try {
-        await sendAgentCommand(sid, { type: "abort_bash" });
+        await sendSessionCommand(sid, { type: "abort_bash" });
       } catch (e) {
         console.error("Failed to abort bash:", e);
       }
       return;
     }
     try {
-      await sendAgentCommand(sid, { type: "abort" });
+      await sendSessionCommand(sid, { type: "abort" });
     } catch (e) {
       console.error("Failed to abort:", e);
     }
@@ -1382,7 +1209,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     setForkingEntryId(entryId);
     try {
-      const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string }>(sid, {
+      const result = await sendSessionCommand<{ cancelled?: boolean; newSessionId?: string }>(sid, {
         type: "fork",
         entryId,
       });
@@ -1401,7 +1228,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (bashRunningRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
-    sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
+    sendSessionCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
     setActiveLeafId(entryId);
     await loadContext(sid, entryId);
   }, [loadContext]);
@@ -1413,7 +1240,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     await loadContext(sid, leafId);
     if (leafId) {
-      sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
+      sendSessionCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
     }
   }, [loadContext]);
 
@@ -1426,7 +1253,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
       if (!sid) return;
       try {
-        await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+        await sendSessionCommand(sid, { type: "set_model", provider, modelId });
       } catch (e) {
         console.error("Failed to set model:", e);
       }
@@ -1435,7 +1262,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_model", provider, modelId });
+      await sendSessionCommand(sid, { type: "set_model", provider, modelId });
       setCurrentModelOverride({ provider, modelId });
     } catch (e) {
       console.error("Failed to set model:", e);
@@ -1449,7 +1276,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setCompactError(null);
     setCompactResult(null);
     try {
-      const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
+      const result = await sendSessionCommand<CompactCommandResult>(sid, { type: "compact" });
       setCompactResult(readCompactResult(result, "manual"));
       await loadSession(sid, true);
     } catch (e) {
@@ -1462,7 +1289,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     const modelCwd = newSessionCwd ?? session?.cwd ?? "";
-    const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
+    const modelsUrl = modelCwd ? `/api/v1/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/v1/models";
     const res = await fetch(modelsUrl, signal ? { signal } : undefined);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const d = await res.json() as ModelsResponse;
@@ -1513,7 +1340,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setIsCompacting(true);
           setCompactError(null);
           setCompactResult(null);
-          const result = await sendAgentCommand<CompactCommandResult>(sid, {
+          const result = await sendSessionCommand<CompactCommandResult>(sid, {
             type: "compact",
             ...(args ? { customInstructions: args } : {}),
           });
@@ -1524,7 +1351,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         case "reload": {
           if (!sid) return complete({ handled: true, error: "No active session to reload" });
-          await sendAgentCommand(sid, { type: "reload" });
+          await sendSessionCommand(sid, { type: "reload" });
           await Promise.all([
             loadSession(sid, false, true),
             loadTools(sid),
@@ -1537,14 +1364,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         case "name": {
           if (!sid) return complete({ handled: true, error: "No active session to name" });
           if (!args) return complete({ handled: true, error: "Usage: /name <name>" });
-          await sendAgentCommand(sid, { type: "set_session_name", name: args });
+          await sendSessionCommand(sid, { type: "set_session_name", name: args });
           if (await loadSession(sid)) promoteNewSession();
           return complete({ handled: true, message: `Session renamed to ${args}` });
         }
 
         case "session": {
           if (!sid) return complete({ handled: true, error: "No active session" });
-          const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
+          const stats = await sendSessionCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
           if (stats) {
             setSessionStatsOverride(stats);
           }
@@ -1554,7 +1381,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         case "copy": {
           if (!sid) return complete({ handled: true, error: "No active session" });
-          const data = await sendAgentCommand<LastAssistantTextResponse>(sid, { type: "get_last_assistant_text" });
+          const data = await sendSessionCommand<LastAssistantTextResponse>(sid, { type: "get_last_assistant_text" });
           const textToCopy = data?.text ?? "";
           if (!textToCopy) return complete({ handled: true, error: "No assistant message to copy" });
           await navigator.clipboard.writeText(textToCopy);
@@ -1580,7 +1407,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "steer",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
@@ -1599,7 +1426,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "prompt",
         message,
         streamingBehavior: behavior,
@@ -1615,7 +1442,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
-      await sendAgentCommand(sid, {
+      await sendSessionCommand(sid, {
         type: "follow_up",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
@@ -1629,7 +1456,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "abort_compaction" });
+      await sendSessionCommand(sid, { type: "abort_compaction" });
     } catch (e) {
       console.error("Failed to abort compaction:", e);
     }
@@ -1639,7 +1466,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
-      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
+      const result = await sendSessionCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
       // clearQueue also emits an empty queue_update, but that only reaches us
       // while SSE is connected — clear locally so idle recalls update the UI.
       setQueuedMessages({ steering: [], followUp: [] });
@@ -1662,7 +1489,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_thinking_level", level });
+      await sendSessionCommand(sid, { type: "set_thinking_level", level });
     } catch (e) {
       console.error("Failed to set thinking level:", e);
     }
@@ -1674,7 +1501,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
     if (!sid) return;
     try {
-      await sendAgentCommand(sid, { type: "set_tools", toolNames });
+      await sendSessionCommand(sid, { type: "set_tools", toolNames });
     } catch (e) {
       console.error("Failed to set tools:", e);
     }
@@ -1714,19 +1541,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (session) {
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
+        void connectEvents(session.id);
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
-            rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
+            agentRunActiveRef.current = Boolean(agentState.state.isStreaming);
+            promptOperationPendingRef.current = Boolean(agentState.state.isPromptRunning);
             agentRunningRef.current = true;
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
-            void connectEvents(session.id);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
           }
           if (agentState.state?.isBashRunning) {
             bashRunningRef.current = true;
@@ -1747,7 +1571,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     return () => {
       bashRecoveryIdRef.current += 1;
-      cancelEventStreamGrace();
       closeEvents();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1847,7 +1670,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentPhase,
     isNew,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,

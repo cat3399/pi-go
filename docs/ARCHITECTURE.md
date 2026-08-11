@@ -12,15 +12,14 @@ pi-go 重写的是 pi 的完整 Agent Runtime。兼容范围包含：
 代码形式不要求逐行翻译。Go 特有的锁、goroutine、context、接口和错误包装可以自由设计，
 前提是不会改变上述语义。
 
-## 原版基线
+## 对齐基线
 
-当前 coding-agent、CLI、RPC 和 pi-web 实际使用：
+对齐工作以固定上游版本中产品实际使用的生产调用链为准：
 
 `AgentSessionRuntime → AgentSession → Agent → runAgentLoop → SessionManager`
 
-`packages/agent` 中的新 `AgentHarness + SessionRepository/Store` 尚未接管 coding-agent。
-它是需要持续跟踪的上游方向，但不能用来跳过现有 AgentSession 的 retry、overflow recovery、
-resource/tool 管理和 `agent_settled` 等产品语义。
+上游实验性抽象只有进入实际产品调用方后才成为迁移基线，不能用未落地的新接口跳过
+AgentSession 的 retry、overflow recovery、resource/tool 管理或 `agent_settled` 等现有语义。
 
 主要参考入口：
 
@@ -36,12 +35,15 @@ resource/tool 管理和 `agent_settled` 等产品语义。
 
 ```mermaid
 flowchart TB
-    TUI["TUI surface"] --> Host["Application Host"]
-    Web["WebUI surface"] --> Host
-    GUI["Future GUI surface"] --> Host
-    RPC["RPC / automation adapter"] -.-> Host
-    Host --> Supervisor["Session supervisor"]
-    Supervisor --> Runtime["Application Runtime"]
+    TUI["TUI surface"] --> API["application.API"]
+    CLI["CLI surface"] --> API
+    GUI["GUI surface"] --> API
+    Browser["Browser WebUI"] --> Web["HTTP/SSE adapter"]
+    Web --> API
+    RPC["RPC / automation adapter"] -.-> AppSession["ApplicationSession"]
+    API --> Service["Application Service"]
+    Service --> AppSession
+    AppSession --> Runtime["Application Runtime"]
     Runtime --> Services["Model / Settings / Auth / Resource"]
     Runtime --> Session["AgentSession"]
     Session --> Agent["Agent"]
@@ -52,9 +54,9 @@ flowchart TB
     Loop --> Tools["Tool runtime"]
 ```
 
-Surface 和外部 transport 只驱动 Host/Runtime，不拥有第二套 Agent 状态。HTTP、SSE、进程内
+Surface 和外部 transport 只驱动 Application API/Runtime，不拥有第二套 Agent 状态。HTTP、SSE、进程内
 调用或 JSONL 只是接入方式，不能在接入层重新实现 queue、retry、compaction 或 session 行为。
-Session supervisor 是多会话生命周期的目标层，不把多个 Runtime 合成一个可变全局状态；每个
+Application Service 是多会话生命周期层，不把多个 Runtime 合成一个可变全局状态；每个
 活动会话仍由自己的 Runtime/AgentSession 权威拥有。
 
 ## 分层职责
@@ -107,24 +109,26 @@ AgentSession 是 coding-agent 产品核心，负责：
 AgentSession 拥有产品策略，但运行中的 model、thinking、system prompt、tools 和 messages
 必须以 Agent state 为唯一事实源。
 
-### Application Runtime 与 Host
+### Application Runtime、ApplicationSession 与 Service
 
 Runtime 负责创建 cwd-bound 服务和 AgentSession，以及 new/switch/fork/import/dispose 等
 replacement 生命周期。
 
-Host 在 Runtime 之上提供 transport-neutral 边界：
+ApplicationSession 在 Runtime 之上提供单会话的 transport-neutral 边界：
 
 - command dispatch 和结果；
 - 权威 state snapshot；
-- 单一有序 event stream；
-- session/runtime identity 与生命周期；
+- 单会话有序 event stream；
+- session/runtime replacement identity 与生命周期；
 - active operation、flush 和 shutdown 顺序。
 
-Transport adapter 只进行 framing、字段兼容和连接管理。
+Application Service 在 ApplicationSession 之上提供多会话发现、打开去重、空闲回收、权威
+snapshot，以及跨会话的全局 revision/cursor event stream。Transport adapter 只进行 framing、
+字段投影和连接管理。
 
-### Surface 与 Session Supervisor
+### Surface 与 Application Service
 
-TUI、WebUI 和未来 GUI 是 Application Host 的独立 surface adapter：
+CLI、TUI、WebUI 和 GUI 是 Application API 的独立 surface adapter：
 
 - 共用强类型 command、query、event 和 capability contract；
 - 只保留滚动、面板、窗口、选中标签等瞬时呈现状态；
@@ -132,12 +136,12 @@ TUI、WebUI 和未来 GUI 是 Application Host 的独立 surface adapter：
 - 可以按各自媒介投影、合并或编码事件，但不能改变 durable 或 canonical 事件语义；
 - 不要求共用按钮、对话框、主题或其他最低公分母 UI 抽象。
 
-多会话 surface 通过 Session supervisor 持有 Host/Runtime 句柄并统一收束生命周期。TUI 可以只
+多会话 surface 通过 Service 持有 ApplicationSession/Runtime 句柄并统一收束生命周期。TUI 可以只
 暴露单会话体验，WebUI/GUI 可以多标签，但底层 Agent 行为和状态所有权不分叉。
 
-各 surface 采用独立 composition root 和构建目标。默认核心构建不导入 Web/GUI 包；可选资源
-只进入对应二进制。JSONL RPC 保留为外部自动化和兼容验收 transport，不作为进程内产品 surface
-之间的桥。
+`cmd/pi-go` 是唯一 composition root，通过 `run`、`web`、`rpc` 子命令装配不同 adapter。
+GUI/TUI/CLI 默认与 Application Service 同进程；浏览器使用版本化 HTTP/SSE；JSONL RPC 只保留为
+外部自动化和兼容验收 transport，不作为进程内产品 surface 之间的桥。
 
 ## 核心不变量
 
@@ -152,16 +156,16 @@ TUI、WebUI 和未来 GUI 是 Application Host 的独立 surface adapter：
 - 通用层不依赖 vendor wire type，durable schema 不静默丢弃未知数据。
 - fake 只用于测试，不能进入普通 production assembly。
 
-## 可后置边界
+## 范围边界
 
-可以后置：
+下列能力属于独立 Surface 或产品集成，可以在不分叉 Agent Core 的前提下独立演进：
 
 - TUI、主题和终端交互；
 - JS extension/plugin loader 与 extension custom UI；
 - HTML export 和其他 surface-specific 功能；
 - Provider 数量扩展。
 
-不能后置：
+下列契约属于 Agent Core，任何 Surface 的开发顺序都不能成为缩减它们的理由：
 
 - vendor-neutral Model/Provider/Message/ToolResult 契约；
 - AgentSession 产品行为和事件语义；

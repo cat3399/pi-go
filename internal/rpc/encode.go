@@ -1,8 +1,8 @@
 package rpc
 
 import (
-	"github.com/cat3399/pi-go/internal/host"
-	"github.com/cat3399/pi-go/internal/hostjson"
+	"github.com/cat3399/pi-go/internal/application"
+	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
 )
 
 type noData struct{}
@@ -28,8 +28,8 @@ func errorResponse(id *string, command string, err error) map[string]any {
 	return response
 }
 
-func encodeResult(result host.CommandResult) (any, error) {
-	data, present, err := hostjson.EncodeResult(result)
+func encodeResult(result application.CommandResult) (any, error) {
+	data, present, err := protocolv1.EncodeResult(result)
 	if err != nil {
 		return nil, err
 	}
@@ -39,6 +39,6 @@ func encodeResult(result host.CommandResult) (any, error) {
 	return data, nil
 }
 
-func encodeHostEvent(event host.Event) (any, error) {
-	return hostjson.EncodeEvent(event)
+func encodeApplicationEvent(event application.Event) (any, error) {
+	return protocolv1.EncodeEvent(event)
 }

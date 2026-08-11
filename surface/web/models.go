@@ -26,16 +26,16 @@ type modelsWire struct {
 	ModelScopeWarnings []string                                      `json:"modelScopeWarnings,omitempty"`
 }
 
-func models(supervisor *application.Supervisor, cwd string) (modelsWire, error) {
+func models(api application.API, cwd string) (modelsWire, error) {
 	if strings.TrimSpace(cwd) == "" {
-		cwd = supervisor.DefaultCWD()
+		cwd = api.DefaultCWD()
 	}
 	resolved, err := application.ValidateCWD(cwd)
 	if err != nil {
 		return modelsWire{}, err
 	}
 	runtime, err := modelcatalog.NewRuntime(modelcatalog.Options{
-		AgentDir: supervisor.AgentDir(), WorkingDir: resolved, ProjectTrusted: false,
+		AgentDir: api.AgentDir(), WorkingDir: resolved, ProjectTrusted: false,
 	})
 	if err != nil {
 		return modelsWire{}, fmt.Errorf("load model catalog: %w", err)

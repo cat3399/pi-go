@@ -22,7 +22,7 @@ type ProductionRuntimeOptions struct {
 
 // OpenProductionRuntime performs the same cwd-bound production assembly and
 // session restore path as RunProduction, but returns the long-lived Runtime to
-// a transport host instead of executing one print prompt.
+// an application surface instead of executing one print prompt.
 func OpenProductionRuntime(ctx context.Context, config ProductionConfig, selection ProductionRuntimeOptions) (*agentruntime.Runtime, error) {
 	if ctx == nil {
 		ctx = context.Background()

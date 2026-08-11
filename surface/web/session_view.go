@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/application"
-	"github.com/cat3399/pi-go/internal/host"
+	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -47,16 +47,19 @@ type treeNodeWire struct {
 }
 
 type sessionViewWire struct {
+	Revision  uint64             `json:"revision"`
 	SessionID string             `json:"sessionId"`
 	FilePath  string             `json:"filePath"`
 	Info      sessionInfoWire    `json:"info"`
 	LeafID    *string            `json:"leafId"`
 	Tree      []*treeNodeWire    `json:"tree"`
 	Context   sessionContextWire `json:"context"`
+	Running   bool               `json:"running"`
+	State     map[string]any     `json:"state,omitempty"`
 }
 
-func listSessions(supervisor *application.Supervisor) ([]sessionInfoWire, error) {
-	values, err := supervisor.ListSessions()
+func listSessions(api application.API) ([]sessionInfoWire, error) {
+	values, err := api.ListSessions()
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +86,8 @@ func formatWebTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func sessionView(supervisor *application.Supervisor, id, leafID string, deferThinking, deferMedia bool) (sessionViewWire, error) {
-	snapshot, err := supervisor.SnapshotSession(id, leafID)
+func sessionView(api application.API, id, leafID string, deferThinking, deferMedia bool) (sessionViewWire, error) {
+	snapshot, err := api.SnapshotSession(id, leafID)
 	if err != nil {
 		return sessionViewWire{}, err
 	}
@@ -96,14 +99,19 @@ func sessionView(supervisor *application.Supervisor, id, leafID string, deferThi
 	if err != nil {
 		return sessionViewWire{}, err
 	}
-	return sessionViewWire{
-		SessionID: id, FilePath: snapshot.FilePath, Info: sessionInfoToWire(snapshot.Info), LeafID: snapshot.LeafID,
-		Tree: tree, Context: contextValue,
-	}, nil
+	result := sessionViewWire{
+		Revision: snapshot.Revision, SessionID: id, FilePath: snapshot.FilePath,
+		Info: sessionInfoToWire(snapshot.Info), LeafID: snapshot.LeafID,
+		Tree: tree, Context: contextValue, Running: snapshot.LiveState != nil,
+	}
+	if snapshot.LiveState != nil {
+		result.State = protocolv1.EncodeState(*snapshot.LiveState)
+	}
+	return result, nil
 }
 
-func sessionContext(supervisor *application.Supervisor, id, leafID string, deferThinking, deferMedia bool) (sessionContextWire, error) {
-	snapshot, err := supervisor.SnapshotSession(id, leafID)
+func sessionContext(api application.API, id, leafID string, deferThinking, deferMedia bool) (sessionContextWire, error) {
+	snapshot, err := api.SnapshotSession(id, leafID)
 	if err != nil {
 		return sessionContextWire{}, err
 	}
@@ -390,7 +398,7 @@ func flattenKeptDescendants(root *session.TreeNode) ([]*treeNodeWire, error) {
 	return result, nil
 }
 
-func stateModel(state host.State) *selectedModelWire {
+func stateModel(state application.State) *selectedModelWire {
 	if !state.HasModel {
 		return nil
 	}

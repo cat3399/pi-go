@@ -9,10 +9,10 @@ import (
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 )
 
-func TestSupervisorOwnsSurfaceNeutralPathsAndLifecycle(t *testing.T) {
+func TestServiceOwnsSurfaceNeutralPathsAndLifecycle(t *testing.T) {
 	cwd := t.TempDir()
 	agentDir := filepath.Join(t.TempDir(), "agent")
-	supervisor, err := NewSupervisor(SupervisorOptions{
+	service, err := NewService(ServiceOptions{
 		Context: context.Background(),
 		Production: app.ProductionConfig{
 			WorkingDir: cwd,
@@ -23,31 +23,31 @@ func TestSupervisorOwnsSurfaceNeutralPathsAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if supervisor.DefaultCWD() != cwd || supervisor.AgentDir() != agentDir {
-		t.Fatalf("paths = %q, %q", supervisor.DefaultCWD(), supervisor.AgentDir())
+	if service.DefaultCWD() != cwd || service.AgentDir() != agentDir {
+		t.Fatalf("paths = %q, %q", service.DefaultCWD(), service.AgentDir())
 	}
-	values, err := supervisor.ListSessions()
+	values, err := service.ListSessions()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(values) != 0 {
 		t.Fatalf("sessions = %#v", values)
 	}
-	found, err := supervisor.SessionExists("not-present")
+	found, err := service.SessionExists("not-present")
 	if err != nil || found {
 		t.Fatalf("SessionExists = %v, %v", found, err)
 	}
-	if err := supervisor.Close(context.Background()); err != nil {
+	if err := service.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.Close(context.Background()); err != nil {
+	if err := service.Close(context.Background()); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
 }
 
-func TestSupervisorRejectsIncompleteModelSelectionBeforeOpeningRuntime(t *testing.T) {
+func TestServiceRejectsIncompleteModelSelectionBeforeOpeningRuntime(t *testing.T) {
 	cwd := t.TempDir()
-	supervisor, err := NewSupervisor(SupervisorOptions{
+	service, err := NewService(ServiceOptions{
 		Production: app.ProductionConfig{WorkingDir: cwd, AgentDir: filepath.Join(t.TempDir(), "agent")},
 		OpenRuntime: func(context.Context, app.ProductionConfig, app.ProductionRuntimeOptions) (*agentruntime.Runtime, error) {
 			t.Fatal("runtime opener must not be called")
@@ -58,8 +58,8 @@ func TestSupervisorRejectsIncompleteModelSelectionBeforeOpeningRuntime(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = supervisor.Close(context.Background()) })
-	if _, err := supervisor.NewSession(context.Background(), NewSessionOptions{CWD: cwd, Provider: "only-provider"}); err == nil {
+	t.Cleanup(func() { _ = service.Close(context.Background()) })
+	if _, err := service.NewSession(context.Background(), NewSessionOptions{CWD: cwd, Provider: "only-provider"}); err == nil {
 		t.Fatal("incomplete model selection was accepted")
 	}
 }

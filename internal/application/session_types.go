@@ -1,7 +1,7 @@
-// Package host exposes the long-lived, transport-neutral command, state, and
-// event boundary above agentruntime.Runtime. Protocol adapters may encode these
-// values, but must not own a second copy of AgentSession product state.
-package host
+// Package application exposes the process-local command, query, snapshot, and
+// event API above agentruntime.Runtime. Transport adapters encode this API but
+// never own Agent or durable Session state.
+package application
 
 import (
 	"context"
@@ -15,10 +15,10 @@ import (
 )
 
 var (
-	ErrClosed             = errors.New("agent host is closed")
-	ErrSessionUnavailable = errors.New("agent host session is unavailable")
-	ErrSessionChanged     = errors.New("agent host session changed while taking a snapshot")
-	ErrInvalidCommand     = errors.New("invalid agent host command")
+	ErrClosed             = errors.New("application session is closed")
+	ErrSessionUnavailable = errors.New("application session is unavailable")
+	ErrSessionChanged     = errors.New("application session changed while taking a snapshot")
+	ErrInvalidCommand     = errors.New("invalid application command")
 )
 
 type CommandType string
@@ -51,18 +51,14 @@ const (
 
 type Command interface {
 	Type() CommandType
-	hostCommand()
+	applicationCommand()
 }
 
 type PromptCommand struct {
 	Message           string
 	Images            []llm.ImageBlock
 	StreamingBehavior agent.StreamingBehavior
-	// PreflightResult runs synchronously at pi's authoritative prompt
-	// admission boundary. A transport that needs to acknowledge a prompt
-	// before the first Agent event can write that acknowledgement here instead
-	// of racing the asynchronous Host event dispatcher.
-	PreflightResult func(PromptAcceptedResult)
+	Source            agent.InputSource
 }
 type AbortCommand struct{}
 type GetStateCommand struct{}
@@ -127,39 +123,39 @@ func (BashCommand) Type() CommandType                 { return CommandBash }
 func (AbortBashCommand) Type() CommandType            { return CommandAbortBash }
 func (GetCommandsCommand) Type() CommandType          { return CommandGetCommands }
 
-func (PromptCommand) hostCommand()               {}
-func (AbortCommand) hostCommand()                {}
-func (GetStateCommand) hostCommand()             {}
-func (ClearQueueCommand) hostCommand()           {}
-func (ReloadCommand) hostCommand()               {}
-func (SteerCommand) hostCommand()                {}
-func (FollowUpCommand) hostCommand()             {}
-func (SetModelCommand) hostCommand()             {}
-func (ForkCommand) hostCommand()                 {}
-func (NavigateTreeCommand) hostCommand()         {}
-func (SetThinkingLevelCommand) hostCommand()     {}
-func (CompactCommand) hostCommand()              {}
-func (AbortCompactionCommand) hostCommand()      {}
-func (SetSessionNameCommand) hostCommand()       {}
-func (GetSessionStatsCommand) hostCommand()      {}
-func (GetLastAssistantTextCommand) hostCommand() {}
-func (SetAutoCompactionCommand) hostCommand()    {}
-func (SetAutoRetryCommand) hostCommand()         {}
-func (GetToolsCommand) hostCommand()             {}
-func (SetToolsCommand) hostCommand()             {}
-func (BashCommand) hostCommand()                 {}
-func (AbortBashCommand) hostCommand()            {}
-func (GetCommandsCommand) hostCommand()          {}
+func (PromptCommand) applicationCommand()               {}
+func (AbortCommand) applicationCommand()                {}
+func (GetStateCommand) applicationCommand()             {}
+func (ClearQueueCommand) applicationCommand()           {}
+func (ReloadCommand) applicationCommand()               {}
+func (SteerCommand) applicationCommand()                {}
+func (FollowUpCommand) applicationCommand()             {}
+func (SetModelCommand) applicationCommand()             {}
+func (ForkCommand) applicationCommand()                 {}
+func (NavigateTreeCommand) applicationCommand()         {}
+func (SetThinkingLevelCommand) applicationCommand()     {}
+func (CompactCommand) applicationCommand()              {}
+func (AbortCompactionCommand) applicationCommand()      {}
+func (SetSessionNameCommand) applicationCommand()       {}
+func (GetSessionStatsCommand) applicationCommand()      {}
+func (GetLastAssistantTextCommand) applicationCommand() {}
+func (SetAutoCompactionCommand) applicationCommand()    {}
+func (SetAutoRetryCommand) applicationCommand()         {}
+func (GetToolsCommand) applicationCommand()             {}
+func (SetToolsCommand) applicationCommand()             {}
+func (BashCommand) applicationCommand()                 {}
+func (AbortBashCommand) applicationCommand()            {}
+func (GetCommandsCommand) applicationCommand()          {}
 
 type CommandResult interface {
 	CommandType() CommandType
-	hostCommandResult()
+	applicationCommandResult()
 }
 
-// PromptAcceptedResult is returned at pi's preflightResult(true) boundary. The
+// PromptStartedResult is returned at pi's preflightResult(true) boundary. The
 // Agent operation continues asynchronously and remains observable through the
-// ordered Host event stream and State.IsPromptRunning/IsStreaming.
-type PromptAcceptedResult struct{ OperationID uint64 }
+// ordered ApplicationSession event stream and State.IsPromptRunning/IsStreaming.
+type PromptStartedResult struct{ OperationID uint64 }
 type AbortResult struct{}
 type GetStateResult struct{ State State }
 type ClearQueueResult struct{ Queue agent.QueueState }
@@ -214,7 +210,7 @@ type SlashCommandInfo struct {
 }
 type GetCommandsResult struct{ Commands []SlashCommandInfo }
 
-func (PromptAcceptedResult) CommandType() CommandType       { return CommandPrompt }
+func (PromptStartedResult) CommandType() CommandType        { return CommandPrompt }
 func (AbortResult) CommandType() CommandType                { return CommandAbort }
 func (GetStateResult) CommandType() CommandType             { return CommandGetState }
 func (ClearQueueResult) CommandType() CommandType           { return CommandClearQueue }
@@ -238,29 +234,29 @@ func (BashResult) CommandType() CommandType                 { return CommandBash
 func (AbortBashResult) CommandType() CommandType            { return CommandAbortBash }
 func (GetCommandsResult) CommandType() CommandType          { return CommandGetCommands }
 
-func (PromptAcceptedResult) hostCommandResult()       {}
-func (AbortResult) hostCommandResult()                {}
-func (GetStateResult) hostCommandResult()             {}
-func (ClearQueueResult) hostCommandResult()           {}
-func (ReloadResult) hostCommandResult()               {}
-func (SteerResult) hostCommandResult()                {}
-func (FollowUpResult) hostCommandResult()             {}
-func (SetModelResult) hostCommandResult()             {}
-func (ForkResult) hostCommandResult()                 {}
-func (NavigateTreeResult) hostCommandResult()         {}
-func (SetThinkingLevelResult) hostCommandResult()     {}
-func (CompactResult) hostCommandResult()              {}
-func (AbortCompactionResult) hostCommandResult()      {}
-func (SetSessionNameResult) hostCommandResult()       {}
-func (GetSessionStatsResult) hostCommandResult()      {}
-func (GetLastAssistantTextResult) hostCommandResult() {}
-func (SetAutoCompactionResult) hostCommandResult()    {}
-func (SetAutoRetryResult) hostCommandResult()         {}
-func (GetToolsResult) hostCommandResult()             {}
-func (SetToolsResult) hostCommandResult()             {}
-func (BashResult) hostCommandResult()                 {}
-func (AbortBashResult) hostCommandResult()            {}
-func (GetCommandsResult) hostCommandResult()          {}
+func (PromptStartedResult) applicationCommandResult()        {}
+func (AbortResult) applicationCommandResult()                {}
+func (GetStateResult) applicationCommandResult()             {}
+func (ClearQueueResult) applicationCommandResult()           {}
+func (ReloadResult) applicationCommandResult()               {}
+func (SteerResult) applicationCommandResult()                {}
+func (FollowUpResult) applicationCommandResult()             {}
+func (SetModelResult) applicationCommandResult()             {}
+func (ForkResult) applicationCommandResult()                 {}
+func (NavigateTreeResult) applicationCommandResult()         {}
+func (SetThinkingLevelResult) applicationCommandResult()     {}
+func (CompactResult) applicationCommandResult()              {}
+func (AbortCompactionResult) applicationCommandResult()      {}
+func (SetSessionNameResult) applicationCommandResult()       {}
+func (GetSessionStatsResult) applicationCommandResult()      {}
+func (GetLastAssistantTextResult) applicationCommandResult() {}
+func (SetAutoCompactionResult) applicationCommandResult()    {}
+func (SetAutoRetryResult) applicationCommandResult()         {}
+func (GetToolsResult) applicationCommandResult()             {}
+func (SetToolsResult) applicationCommandResult()             {}
+func (BashResult) applicationCommandResult()                 {}
+func (AbortBashResult) applicationCommandResult()            {}
+func (GetCommandsResult) applicationCommandResult()          {}
 
 // State is assembled from the current AgentSession owners on demand. It never
 // advances by replaying events, so reconnecting transports observe the same
@@ -298,40 +294,57 @@ type State struct {
 type EventType string
 
 const (
-	EventAgentSession EventType = "agent_session"
-	EventPromptError  EventType = "prompt_error"
-	EventPromptDone   EventType = "prompt_done"
+	EventAgentSession   EventType = "agent_session"
+	EventOperation      EventType = "operation"
+	EventSessionCatalog EventType = "session_catalog"
+)
+
+type OperationStatus string
+
+const (
+	OperationCompleted OperationStatus = "completed"
+	OperationFailed    OperationStatus = "failed"
 )
 
 type EventValue interface {
 	Type() EventType
-	hostEvent()
+	applicationEvent()
 }
 
 // AgentSessionEvent retains the complete concrete AgentSessionEvent union.
 // Wire adapters are responsible only for encoding the contained event.
 type AgentSessionEvent struct{ Event agent.SessionEvent }
-type PromptErrorEvent struct {
+type SessionCatalogChange string
+
+const (
+	SessionCreated SessionCatalogChange = "created"
+	SessionUpdated SessionCatalogChange = "updated"
+	SessionDeleted SessionCatalogChange = "deleted"
+)
+
+type SessionCatalogEvent struct{ Change SessionCatalogChange }
+type OperationEvent struct {
 	OperationID uint64
-	Message     string
+	Command     CommandType
+	Status      OperationStatus
+	Error       string
 }
-type PromptDoneEvent struct{ OperationID uint64 }
 
-func (AgentSessionEvent) Type() EventType { return EventAgentSession }
-func (PromptErrorEvent) Type() EventType  { return EventPromptError }
-func (PromptDoneEvent) Type() EventType   { return EventPromptDone }
+func (AgentSessionEvent) Type() EventType   { return EventAgentSession }
+func (SessionCatalogEvent) Type() EventType { return EventSessionCatalog }
+func (OperationEvent) Type() EventType      { return EventOperation }
 
-func (AgentSessionEvent) hostEvent() {}
-func (PromptErrorEvent) hostEvent()  {}
-func (PromptDoneEvent) hostEvent()   {}
+func (AgentSessionEvent) applicationEvent()   {}
+func (SessionCatalogEvent) applicationEvent() {}
+func (OperationEvent) applicationEvent()      {}
 
-// Event is one item in the single Host-owned total order. Sequence is
-// monotonically increasing for the lifetime of a Host, including across
-// AgentSession replacement and reload rebinds.
+// Event is an immutable application event envelope. ApplicationSession assigns
+// a session-local Sequence across replacement and reload; Service republishes
+// the same payload with a process-wide Sequence for surface subscriptions.
 type Event struct {
 	Sequence  uint64
 	SessionID string
 	Value     EventValue
 }
 
-type Observer func(context.Context, Event)
+type SessionObserver func(context.Context, Event)

@@ -397,7 +397,7 @@ function AddSkillPanel({
     setSearchError(null);
     setResults([]);
     try {
-      const res = await fetch("/api/skills/search", {
+      const res = await fetch("/api/v1/skills/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: q.trim() }),
@@ -424,7 +424,7 @@ function AddSkillPanel({
       setInstalling(pkg);
       setInstallError(null);
       try {
-        const res = await fetch("/api/skills/install", {
+        const res = await fetch("/api/v1/skills/install", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ package: pkg, scope, cwd }),
@@ -449,7 +449,7 @@ function AddSkillPanel({
 
   const installPath =
     scope === "global"
-      ? "~/.pi/agent/skills/"
+      ? "~/.agents/skills/"
       : `${shortenPath(cwd)}/.pi/skills/`;
 
   return (
@@ -734,7 +734,7 @@ export function SkillsConfig({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
+      const res = await fetch(`/api/v1/skills?cwd=${encodeURIComponent(cwd)}`);
       const d = (await res.json()) as Partial<SkillsResponse> & { error?: string };
       if (!res.ok || d.error) throw new Error(d.error ?? `HTTP ${res.status}`);
       const list = d.skills ?? [];
@@ -778,7 +778,7 @@ export function SkillsConfig({
     setCheckingUpdates((current) => new Set([...current, ...keys]));
     if (!skill) setCheckingAll(true);
     try {
-      const res = await fetch("/api/skills/check", {
+      const res = await fetch("/api/v1/skills/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -817,7 +817,7 @@ export function SkillsConfig({
     setUpdatingSkill(key);
     setUpdateError(null);
     try {
-      const res = await fetch("/api/skills/update", {
+      const res = await fetch("/api/v1/skills/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -858,10 +858,11 @@ export function SkillsConfig({
     setToggling((s) => new Set(s).add(skill.filePath));
     setSaveError(null);
     try {
-      const res = await fetch("/api/skills", {
+      const res = await fetch("/api/v1/skills", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          cwd,
           filePath: skill.filePath,
           disableModelInvocation: next,
         }),
@@ -893,7 +894,7 @@ export function SkillsConfig({
         return n;
       });
     }
-  }, []);
+  }, [cwd]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
 

@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cat3399/pi-go/internal/app"
-	"github.com/cat3399/pi-go/internal/host"
+	"github.com/cat3399/pi-go/internal/application"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 )
 
@@ -59,15 +59,15 @@ func RunProduction(ctx context.Context, config app.ProductionConfig, args []stri
 			return app.ExitFailure
 		}
 	}
-	agentHost, err := host.New(ctx, runtime)
+	applicationSession, err := application.NewApplicationSession(ctx, runtime)
 	if err != nil {
 		_ = runtime.Dispose(context.Background())
 		writeError(stderr, err)
 		return app.ExitFailure
 	}
-	server, err := NewServer(agentHost, stdin, stdout)
+	server, err := NewServer(applicationSession, stdin, stdout)
 	if err != nil {
-		_ = agentHost.Dispose(context.Background())
+		_ = applicationSession.Dispose(context.Background())
 		writeError(stderr, err)
 		return app.ExitFailure
 	}
@@ -116,5 +116,5 @@ func parseLaunchOptions(args []string) (launchOptions, error) {
 }
 
 func writeError(writer io.Writer, err error) {
-	_, _ = fmt.Fprintln(writer, "pi-go-rpc: "+err.Error())
+	_, _ = fmt.Fprintln(writer, "pi-go rpc: "+err.Error())
 }

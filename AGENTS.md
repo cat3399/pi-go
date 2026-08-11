@@ -52,8 +52,8 @@ Go 核心必须对外提供与原版一致的完整 Agent 能力和可观察语�
 的 `surface/gui`、`surface/cli`。每个 Surface 可以拥有自身的渲染状态、输入、HTTP/SSE/IPC、
 静态资源和专属测试，但不得拥有 Agent、Runtime 或 durable Session 的权威产品状态。
 
-多会话发现、打开去重、Host/Runtime 生命周期和中立会话快照属于 `internal/application`；
-`cmd/*` 只作为 composition root。Surface 共用 typed Host/application command、query、snapshot
+多会话发现、打开去重、ApplicationSession/Runtime 生命周期和中立会话快照属于 `internal/application`；
+`cmd/*` 只作为 composition root。Surface 共用 typed Application API 的 command、query、snapshot
 和 event；HTTP JSON、SSE、终端事件或 GUI IPC 等传输编码留在对应 Surface。只有出现两个真实
 消费者后才提取共享 wire protocol，禁止为了预想复用提前建立最低公分母交互抽象。
 

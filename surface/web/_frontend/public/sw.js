@@ -42,7 +42,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // Session data and live agent traffic must always come from the local server.
-  if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js") return;
+  if (url.pathname.startsWith("/api/v1/") || url.pathname === "/sw.js") return;
 
   if (request.mode === "navigate") {
     event.respondWith(
