@@ -39,9 +39,9 @@ type CachedModel struct {
 	Compat json.RawMessage `json:"compat,omitempty"`
 }
 
-// CachedCatalog is the durable, provider-scoped result of a future remote
-// catalog refresh. v0.1 reads and writes it safely but never refreshes a
-// catalog over the network or treats the cache as an authoritative builtin.
+// CachedCatalog is the durable, provider-scoped result of a dynamic provider
+// refresh. The cache augments an already registered provider; it never creates
+// a provider or acts as an authoritative builtin by itself.
 type CachedCatalog struct {
 	Models        []CachedModel `json:"models"`
 	ETag          string        `json:"etag,omitempty"`
@@ -75,7 +75,6 @@ func (s *Store) Read(ctx context.Context, providerID string) (CachedCatalog, boo
 	if runtime.GOOS == "windows" {
 		return CachedCatalog{}, false, fmt.Errorf("%w: models-store.json", ErrPersistence)
 	}
-	providerID = canonicalKey(providerID)
 	releaseLocal, err := acquireLocal(ctx, s.local)
 	if err != nil {
 		return CachedCatalog{}, false, err
@@ -113,7 +112,6 @@ func (s *Store) Write(ctx context.Context, providerID string, entry CachedCatalo
 	if !validID(providerID) {
 		return fmt.Errorf("%w: invalid provider identifier", ErrInvalidConfig)
 	}
-	providerID = canonicalKey(providerID)
 	entry, err := canonicalizeCatalog(entry, providerID)
 	if err != nil {
 		return err
@@ -177,7 +175,6 @@ func (s *Store) Delete(ctx context.Context, providerID string) error {
 	if runtime.GOOS == "windows" {
 		return fmt.Errorf("%w: models-store.json", ErrPersistence)
 	}
-	providerID = canonicalKey(providerID)
 	releaseLocal, err := acquireLocal(ctx, s.local)
 	if err != nil {
 		return err
@@ -291,7 +288,7 @@ func parseCatalogModel(providerID string, index int, raw json.RawMessage) (Cache
 	}
 	rawProvider, ok := object["provider"]
 	var declaredProvider string
-	if !ok || json.Unmarshal(rawProvider, &declaredProvider) != nil || canonicalKey(declaredProvider) != providerID {
+	if !ok || json.Unmarshal(rawProvider, &declaredProvider) != nil || declaredProvider != providerID {
 		return CachedModel{}, Model{}, Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 	}
 	var reasoning bool
@@ -336,11 +333,7 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 				var modelObject map[string]json.RawMessage
 				var id string
 				if json.Unmarshal(value, &modelObject) == nil && json.Unmarshal(modelObject["id"], &id) == nil {
-					canonical := canonicalKey(id)
-					if _, duplicate := oldModels[canonical]; duplicate {
-						return nil, Diagnostic{"models-store.json", "models", "contains case-fold duplicate model id"}
-					}
-					oldModels[canonical] = value
+					oldModels[id] = value
 				}
 			}
 		}
@@ -348,7 +341,7 @@ func encodeCatalog(entry CachedCatalog, previous json.RawMessage) (json.RawMessa
 	models := make([]json.RawMessage, 0, len(entry.Models))
 	for _, model := range entry.Models {
 		modelObject := map[string]json.RawMessage{}
-		if previousModel, ok := oldModels[canonicalKey(model.ID)]; ok {
+		if previousModel, ok := oldModels[model.ID]; ok {
 			_ = json.Unmarshal(previousModel, &modelObject)
 		}
 		if err := writeCachedModelFields(modelObject, model); err != nil {
@@ -395,9 +388,8 @@ func validateCatalog(entry CachedCatalog, providerID string) error {
 	if entry.LastModified != nil && *entry.LastModified < 0 {
 		return Diagnostic{"models-store.json", providerID, "lastModified cannot be negative"}
 	}
-	seen := map[string]bool{}
 	for _, m := range entry.Models {
-		if !validValue(m.ID) || !validID(m.Provider) || canonicalKey(m.Provider) != providerID || !validValue(m.API) || m.Name != "" && !validValue(m.Name) || m.BaseURL != "" && !validValue(m.BaseURL) {
+		if !validValue(m.ID) || !validID(m.Provider) || m.Provider != providerID || !validValue(m.API) || m.Name != "" && !validValue(m.Name) || m.BaseURL != "" && !validValue(m.BaseURL) {
 			return Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 		}
 		for name, value := range m.Headers {
@@ -405,11 +397,6 @@ func validateCatalog(entry CachedCatalog, providerID string) error {
 				return Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 			}
 		}
-		key := canonicalKey(m.ID)
-		if seen[key] {
-			return Diagnostic{"models-store.json", providerID, "contains duplicate model id"}
-		}
-		seen[key] = true
 	}
 	return nil
 }
@@ -419,7 +406,7 @@ func canonicalizeCatalog(entry CachedCatalog, providerID string) (CachedCatalog,
 	entry.runtimeModels = nil
 	for index := range entry.Models {
 		model := cloneCachedModel(entry.Models[index])
-		if !validID(model.Provider) || canonicalKey(model.Provider) != providerID {
+		if !validID(model.Provider) || model.Provider != providerID {
 			return CachedCatalog{}, Diagnostic{"models-store.json", providerID, "contains a model for another provider"}
 		}
 		model.Provider = providerID
@@ -430,7 +417,7 @@ func canonicalizeCatalog(entry CachedCatalog, providerID string) (CachedCatalog,
 
 func cloneCachedModel(model CachedModel) CachedModel {
 	model.Headers = cloneHeaders(model.Headers)
-	model.Input = append([]provider.InputKind(nil), model.Input...)
+	model.Input = cloneInputKinds(model.Input)
 	model.ThinkingLevelMap = cloneThinkingMap(model.ThinkingLevelMap)
 	model.Cost.Tiers = append([]provider.CostTier(nil), model.Cost.Tiers...)
 	model.Compat = append(json.RawMessage(nil), model.Compat...)
@@ -442,11 +429,11 @@ func cachedRuntimeModel(entry CachedCatalog, index int) Model {
 		return cloneModel(entry.runtimeModels[index])
 	}
 	model := entry.Models[index]
-	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: append([]provider.InputKind(nil), model.Input...), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens}
+	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens}
 }
 
 func cachedFromRuntimeModel(model Model, compat json.RawMessage) CachedModel {
-	return CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: append([]provider.InputKind(nil), model.Input...), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Compat: append(json.RawMessage(nil), compat...)}
+	return CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Compat: append(json.RawMessage(nil), compat...)}
 }
 
 // writeCachedModelFields replaces every member of the public Model contract;
@@ -466,7 +453,7 @@ func writeCachedModelFields(object map[string]json.RawMessage, model CachedModel
 		values["thinkingLevelMap"] = cloneThinkingMap(model.ThinkingLevelMap)
 	}
 	if model.Input != nil {
-		values["input"] = append([]provider.InputKind(nil), model.Input...)
+		values["input"] = cloneInputKinds(model.Input)
 	}
 	if model.ContextWindow != 0 {
 		values["contextWindow"] = model.ContextWindow
@@ -501,11 +488,7 @@ func indexStoreRoot(root map[string]json.RawMessage) (map[string]string, error) 
 	sort.Strings(keys)
 	index := make(map[string]string, len(keys))
 	for _, key := range keys {
-		canonical := canonicalKey(key)
-		if _, duplicate := index[canonical]; duplicate {
-			return nil, Diagnostic{"models-store.json", "root", "contains case-fold duplicate provider id"}
-		}
-		index[canonical] = key
+		index[key] = key
 	}
 	return index, nil
 }

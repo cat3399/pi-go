@@ -26,7 +26,7 @@ func TestCreateAgentSessionWiresModelCycleAndLosslessGlobalDefaults(t *testing.T
 	if err := os.WriteFile(settingsPath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"b","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","baseUrl":"https://scripted.example/v1","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"b","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: t.TempDir()})
@@ -60,7 +60,7 @@ func TestCreateAgentSessionWiresModelCycleAndLosslessGlobalDefaults(t *testing.T
 	if err := created.Session.SetThinkingLevel(provider.ThinkingLow); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"c","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","baseUrl":"https://scripted.example/v1","models":[{"id":"a","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"c","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := catalog.Reload(context.Background()); err != nil {
@@ -330,7 +330,7 @@ func TestCreateAgentSessionReadsEffectiveProjectThinkingOnEveryModelSwitch(t *te
 	if err := os.WriteFile(filepath.Join(projectDir, "settings.json"), []byte(`{"defaultThinkingLevel":"high"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","models":[{"id":"plain","reasoning":false,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"reasoning","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"scripted":{"api":"scripted","baseUrl":"https://scripted.example/v1","models":[{"id":"plain","reasoning":false,"input":["text"],"contextWindow":16000,"maxTokens":1000},{"id":"reasoning","reasoning":true,"input":["text"],"contextWindow":16000,"maxTokens":1000}]}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})

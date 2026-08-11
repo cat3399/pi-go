@@ -1,7 +1,7 @@
-// Package model owns the credential-blind, process-local model catalog and
-// settings projection used by product assembly.  It deliberately does not
-// contact a catalog service or resolve credentials: those are separate trust
-// boundaries owned by future catalog work and internal/auth respectively.
+// Package model owns the process-local provider registry, model catalog,
+// credential resolution, availability checks, dynamic catalog refresh, and
+// API-dialect stream dispatch used by product assembly. Callers that only need
+// catalog projection may omit the optional auth, adapter, and refresh services.
 package model
 
 import (
@@ -77,6 +77,7 @@ type Model struct {
 	// part of CachedCatalog's durable model contract.
 	UnsupportedFields []string `json:"-"`
 	UnknownFields     []string `json:"-"`
+	compatRaw         json.RawMessage
 }
 
 func (m Model) Ref() (provider.Model, error) {
@@ -94,11 +95,19 @@ type ProviderConfig struct {
 	AuthHeader             *bool
 	// ConfiguredAPIKey is returned only to the in-process assembly that passes it
 	// to auth. It is never put in diagnostics or persisted by this package.
-	ConfiguredAPIKey  *string
+	ConfiguredAPIKey *string
+	// APIKeyEnvironment and Keyless are builtin Provider auth metadata. They
+	// are not models.json fields; provider factories supply them alongside the
+	// builtin catalog and request adapter.
+	APIKeyEnvironment []string
+	Keyless           bool
 	Models            []Model
 	UnknownFields     []string
 	UnsupportedFields []string
 	overrides         map[string]modelOverride
+	compatRaw         json.RawMessage
+	compatPresent     bool
+	oauthRadius       bool
 }
 
 // modelOverride keeps presence separate from a zero value so config overlays do
@@ -116,6 +125,7 @@ type modelOverride struct {
 	CompatPresent     bool
 	UnsupportedFields []string
 	UnknownFields     []string
+	compatRaw         json.RawMessage
 }
 
 type modelCostOverride struct {
@@ -331,12 +341,24 @@ type Options struct {
 	// rename never masquerades as durable creation of missing ancestors.
 	AgentDir   string
 	WorkingDir string
-	// ModelsStorePath is the optional, local catalog cache. It is read into the
-	// snapshot, but never refreshed by this package.
+	// ModelsStorePath is the optional, provider-scoped catalog cache. Registered
+	// dynamic providers may refresh it through Runtime.Refresh.
 	ModelsStorePath string
 	// ProjectTrusted is deliberately opt-in. A project .pi/settings.json is not
 	// read merely because it exists; a formal trust decision is deferred.
 	ProjectTrusted bool
+	// Adapters are API-dialect stream implementations. Runtime composes them
+	// with provider metadata and auth instead of exposing a separate app-owned
+	// router. A missing API remains a valid catalog entry but is unavailable for
+	// selection and fails explicitly if streamed.
+	Adapters map[string]provider.Streamer
+	// AuthResolver owns provider credential checks and request-time resolution.
+	// It is optional for credential-blind catalog consumers.
+	AuthResolver ProviderAuthResolver
+	// Refreshers and Filters are provider-scoped extension points used by
+	// dynamic providers. Static providers need neither.
+	Refreshers map[string]RefreshModelsFunc
+	Filters    map[string]ProviderModelFilter
 }
 
 type Runtime struct {
@@ -345,8 +367,18 @@ type Runtime struct {
 	local       chan struct{}
 	snapshot    Snapshot
 	providers   map[string]ProviderConfig
+	registered  map[string]*runtimeProvider
+	adapters    map[string]provider.Streamer
+	auth        ProviderAuthResolver
+	refreshers  map[string]RefreshModelsFunc
+	filters     map[string]ProviderModelFilter
 	storeErrors map[string]error
+	configError error
+	storeError  error
+	composeErrs map[string]error
 	faults      atomicWriteFaults
+	refreshMu   sync.Mutex
+	refreshing  map[string]*providerRefreshCall
 }
 
 func NewRuntime(options Options) (*Runtime, error) {
@@ -359,7 +391,32 @@ func NewRuntime(options Options) (*Runtime, error) {
 	if options.ModelsStorePath == "" {
 		options.ModelsStorePath = filepath.Join(options.AgentDir, "models-store.json")
 	}
-	r := &Runtime{options: options, local: newLocalGate(), storeErrors: make(map[string]error)}
+	adapters := make(map[string]provider.Streamer, len(options.Adapters))
+	for api, adapter := range options.Adapters {
+		if strings.TrimSpace(api) == "" || adapter == nil {
+			return nil, fmt.Errorf("%w: invalid provider adapter registration", ErrInvalidConfig)
+		}
+		adapters[api] = adapter
+	}
+	refreshers := make(map[string]RefreshModelsFunc, len(options.Refreshers))
+	for providerID, refresh := range options.Refreshers {
+		if !validID(providerID) || refresh == nil {
+			return nil, fmt.Errorf("%w: invalid provider model refresher", ErrInvalidConfig)
+		}
+		refreshers[providerID] = refresh
+	}
+	filters := make(map[string]ProviderModelFilter, len(options.Filters))
+	for providerID, filter := range options.Filters {
+		if !validID(providerID) || filter == nil {
+			return nil, fmt.Errorf("%w: invalid provider model filter", ErrInvalidConfig)
+		}
+		filters[providerID] = filter
+	}
+	r := &Runtime{
+		options: options, local: newLocalGate(), storeErrors: make(map[string]error),
+		adapters: adapters, auth: options.AuthResolver, refreshers: refreshers,
+		filters: filters, refreshing: make(map[string]*providerRefreshCall),
+	}
 	if err := r.Reload(context.Background()); err != nil {
 		return nil, err
 	}
@@ -395,10 +452,32 @@ func (r *Runtime) Snapshot() Snapshot {
 	defer r.mu.RUnlock()
 	return cloneSnapshot(r.snapshot)
 }
+
+// Error returns non-fatal model-source diagnostics from the latest reload.
+// Invalid models.json or models-store.json never removes built-in providers or
+// prevents Runtime construction; callers may surface this alongside the
+// healthy fallback catalog, matching ModelRuntime.getError().
+func (r *Runtime) Error() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	values := []error{r.configError, r.storeError}
+	ids := make([]string, 0, len(r.composeErrs))
+	for id := range r.composeErrs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		values = append(values, r.composeErrs[id])
+	}
+	return errors.Join(values...)
+}
 func (r *Runtime) Provider(id string) (ProviderConfig, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p, ok := r.providers[canonicalKey(id)]
+	p, ok := r.providers[id]
 	return cloneProvider(p), ok
 }
 
@@ -409,7 +488,7 @@ func (r *Runtime) Provider(id string) (ProviderConfig, bool) {
 func (r *Runtime) ValidateRoute(selected Model) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	providerID := canonicalKey(selected.Provider)
+	providerID := selected.Provider
 	if err := r.storeErrors[providerID]; err != nil {
 		return fmt.Errorf("%w: selected provider has an invalid cached catalog", ErrUnsupported)
 	}
@@ -421,6 +500,20 @@ func (r *Runtime) ValidateRoute(selected Model) error {
 	if len(selected.UnsupportedFields) != 0 {
 		return fmt.Errorf("%w: selected model contains unsupported configuration fields", ErrUnsupported)
 	}
+	if len(r.adapters) != 0 {
+		adapter := r.adapters[selected.API]
+		if adapter == nil {
+			return fmt.Errorf("%w: selected model uses an unimplemented API", ErrUnsupported)
+		}
+		ref, err := selected.Ref()
+		if err != nil {
+			return fmt.Errorf("%w: selected model is invalid", ErrUnsupported)
+		}
+		if validator, ok := adapter.(provider.RouteValidator); ok && !validator.SupportsModel(ref) {
+			return fmt.Errorf("%w: selected model is rejected by its API adapter", ErrUnsupported)
+		}
+		return nil
+	}
 	switch selected.API {
 	case OpenAIResponsesAPI, OpenAICompletionsAPI, OpenAICodexResponsesAPI, AnthropicMessagesAPI:
 	default:
@@ -429,8 +522,10 @@ func (r *Runtime) ValidateRoute(selected Model) error {
 	return nil
 }
 
-// Reload is transactional: malformed replacement files leave the last healthy
-// snapshot published. A missing optional file is a healthy empty source.
+// Reload publishes settings transactionally. A malformed models.json or
+// models-store.json is instead recorded as a non-fatal source diagnostic and
+// publishes the healthy built-in fallback, matching ModelRuntime.getError().
+// A missing optional file is a healthy empty source.
 func (r *Runtime) Reload(ctx context.Context) error {
 	releaseLocal, err := acquireLocal(ctx, r.local)
 	if err != nil {
@@ -448,14 +543,18 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		}
 		settings = mergeSettings(settings, project)
 	}
-	providers, err := loadModels(filepath.Join(r.options.AgentDir, "models.json"))
-	if err != nil {
-		return err
+	providers, configError := loadModels(filepath.Join(r.options.AgentDir, "models.json"))
+	compositionErrors := map[string]error{}
+	if configError != nil {
+		providers = map[string]ProviderConfig{}
+	} else {
+		providers, compositionErrors = validateConfiguredProviders(providers)
 	}
 	providers = composeProviderConfigs(providers)
-	cached, storeErrors, err := loadStoreCatalogs(r.options.ModelsStorePath)
-	if err != nil {
-		return err
+	cached, storeErrors, storeError := loadStoreCatalogs(r.options.ModelsStorePath)
+	if storeError != nil {
+		cached = map[string]CachedCatalog{}
+		storeErrors = map[string]error{}
 	}
 	snapshot := buildSnapshot(providers, cached, settings)
 	r.mu.Lock()
@@ -463,19 +562,19 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	snapshot.Generation = r.snapshot.Generation + 1
 	r.providers = providers
 	r.storeErrors = storeErrors
+	r.configError = configError
+	r.storeError = storeError
+	r.composeErrs = compositionErrors
 	r.snapshot = snapshot
+	r.registered = rebuildRuntimeProviders(snapshot, r)
 	return nil
 }
 
 func composeProviderConfigs(configured map[string]ProviderConfig) map[string]ProviderConfig {
-	result := make(map[string]ProviderConfig, len(configured)+3)
+	defaults := builtinProviderConfigs()
+	result := make(map[string]ProviderConfig, len(configured)+len(defaults))
 	for id, value := range configured {
 		result[id] = cloneProvider(value)
-	}
-	defaults := []ProviderConfig{
-		{ID: OpenAIProviderID, Name: "OpenAI", API: OpenAIResponsesAPI, BaseURL: defaultOpenAIBaseURL},
-		{ID: OpenAICodexProviderID, Name: "OpenAI Codex", API: OpenAICodexResponsesAPI, BaseURL: defaultOpenAICodexBaseURL},
-		{ID: AnthropicProviderID, Name: "Anthropic", API: AnthropicMessagesAPI, BaseURL: defaultAnthropicBaseURL},
 	}
 	for _, fallback := range defaults {
 		current, exists := result[fallback.ID]
@@ -492,9 +591,75 @@ func composeProviderConfigs(configured map[string]ProviderConfig) map[string]Pro
 		if current.BaseURL == "" {
 			current.BaseURL = fallback.BaseURL
 		}
+		current.APIKeyEnvironment = append([]string(nil), fallback.APIKeyEnvironment...)
+		current.Keyless = fallback.Keyless
 		result[fallback.ID] = current
 	}
 	return result
+}
+
+func validateConfiguredProviders(configured map[string]ProviderConfig) (map[string]ProviderConfig, map[string]error) {
+	baselines := make(map[string][]Model)
+	for _, candidate := range builtinModels() {
+		baselines[candidate.Provider] = append(baselines[candidate.Provider], candidate)
+	}
+	valid := make(map[string]ProviderConfig, len(configured))
+	invalid := make(map[string]error)
+	ids := make([]string, 0, len(configured))
+	for id := range configured {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		entry := configured[id]
+		if err := validateConfiguredProvider(entry, baselines[id]); err != nil {
+			invalid[id] = err
+			continue
+		}
+		valid[id] = entry
+	}
+	return valid, invalid
+}
+
+func validateConfiguredProvider(config ProviderConfig, baseline []Model) error {
+	path := "providers." + config.ID
+	if config.oauthRadius && config.BaseURL == "" {
+		return Diagnostic{"models.json", path + ".baseUrl", "is required when oauth is set"}
+	}
+	if config.BaseURL == "" && config.Headers == nil && !config.compatPresent && len(config.overrides) == 0 &&
+		len(config.Models) == 0 && config.ConfiguredAPIKey == nil && !config.oauthRadius && config.AuthHeader == nil {
+		return Diagnostic{"models.json", path, "must configure baseUrl, headers, compat, modelOverrides, models, apiKey, oauth, or authHeader"}
+	}
+	byID := make(map[string]Model, len(baseline))
+	for _, candidate := range baseline {
+		byID[candidate.ID] = candidate
+	}
+	var first Model
+	if len(baseline) != 0 {
+		first = baseline[0]
+	}
+	for index, definition := range config.Models {
+		defaults, exists := byID[definition.ID]
+		if !exists {
+			defaults = first
+		}
+		api := firstNonEmpty(definition.API, config.API, defaults.API)
+		if api == "" {
+			return Diagnostic{"models.json", fmt.Sprintf("%s.models.%d.api", path, index), "is required at model or provider level"}
+		}
+		baseURL := firstNonEmpty(definition.BaseURL, config.BaseURL, defaults.BaseURL)
+		if baseURL == "" {
+			return Diagnostic{"models.json", fmt.Sprintf("%s.models.%d.baseUrl", path, index), "is required when defining custom models"}
+		}
+		resolved := definition
+		resolved.API = api
+		resolved.BaseURL = baseURL
+		byID[definition.ID] = resolved
+		if first.Provider == "" {
+			first = resolved
+		}
+	}
+	return nil
 }
 
 // SetGlobalSettings safely merges only known settings into the current raw root.
@@ -552,9 +717,10 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 		}
 		settings = mergeSettings(settings, project)
 	}
-	cached, storeErrors, err := loadStoreCatalogs(r.options.ModelsStorePath)
-	if err != nil {
-		return err
+	cached, storeErrors, storeError := loadStoreCatalogs(r.options.ModelsStorePath)
+	if storeError != nil {
+		cached = map[string]CachedCatalog{}
+		storeErrors = map[string]error{}
 	}
 	putString(root, "defaultProvider", current.DefaultProvider)
 	putString(root, "defaultModel", current.DefaultModel)
@@ -612,6 +778,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	r.snapshot = buildSnapshot(r.providers, cached, settings)
 	r.snapshot.Generation = generation
 	r.storeErrors = storeErrors
+	r.storeError = storeError
 	r.mu.Unlock()
 	return writeErr
 }
@@ -811,10 +978,10 @@ type Resolution struct {
 	Diagnostics []Diagnostic
 }
 
-// Resolve is a credential-blind compatibility entry point. Explicit selections
-// use the same CLI resolver as pi; implicit selections use the same new-session
-// scope/settings/provider-default order. Production code that knows credentials
-// and registered routes must call ResolveInitialModel with real predicates.
+// Resolve is a catalog-only compatibility entry point. Explicit selections use
+// the same CLI resolver as pi; implicit selections use the same new-session
+// scope/settings/provider-default order. Production selection should use
+// availability-aware predicates or GetAvailable before accepting a model.
 func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 	s := r.Snapshot()
 	providerID, modelID := strings.TrimSpace(selection.Provider), strings.TrimSpace(selection.Model)
@@ -867,13 +1034,16 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 func (r *Runtime) applyConfiguredOverride(selected Model) Model {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	configured, ok := r.providers[canonicalKey(selected.Provider)]
+	configured, ok := r.providers[selected.Provider]
 	if !ok {
 		return selected
 	}
-	override, ok := configured.overrides[canonicalKey(selected.ID)]
+	override, ok := configured.overrides[selected.ID]
 	if !ok {
 		return selected
+	}
+	if len(override.compatRaw) != 0 {
+		override.Compat, _ = decodeCompat(override.compatRaw, configured.ID+"/"+selected.ID, selected.API)
 	}
 	result := applyModelOverride(selected, override)
 	result.Headers = mergeHeaders(override.Headers, result.Headers)
@@ -885,13 +1055,18 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 	providerSet := make(map[string]struct{})
 	for _, builtin := range builtinModels() {
 		byKey[modelKey(builtin.Provider, builtin.ID)] = builtin
-		providerSet[canonicalKey(builtin.Provider)] = struct{}{}
+		providerSet[builtin.Provider] = struct{}{}
 	}
 	for id := range providers {
-		providerSet[canonicalKey(id)] = struct{}{}
+		providerSet[id] = struct{}{}
 	}
 	for id, entry := range cached {
-		providerSet[canonicalKey(id)] = struct{}{}
+		if _, registered := providers[id]; !registered {
+			// models-store.json is provider-scoped cache, not a registration
+			// source. Unknown entries remain on disk but cannot invent providers.
+			continue
+		}
+		providerSet[id] = struct{}{}
 		for index, cached := range entry.Models {
 			m := cachedRuntimeModel(entry, index)
 			byKey[modelKey(cached.Provider, cached.ID)] = m
@@ -907,32 +1082,46 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 		if !configured {
 			continue
 		}
+		var firstProviderModel Model
+		for _, candidate := range byKey {
+			if candidate.Provider == id && (firstProviderModel.Provider == "" || candidate.ID < firstProviderModel.ID) {
+				firstProviderModel = candidate
+			}
+		}
 		// Provider baseUrl/compat change model metadata. Provider headers remain
 		// in auth composition and are resolved at request time; only static and
 		// per-model headers belong to Model.headers in pi.
 		for key, base := range byKey {
-			if canonicalKey(base.Provider) != id {
+			if base.Provider != id {
 				continue
 			}
 			if p.BaseURL != "" {
 				base.BaseURL = p.BaseURL
 			}
-			base.Compat = mergeCompat(base.Compat, p.Compat)
+			providerCompat := p.Compat
+			if len(p.compatRaw) != 0 {
+				providerCompat, _ = decodeCompat(p.compatRaw, p.ID, base.API)
+			}
+			base.Compat = mergeCompat(base.Compat, providerCompat)
 			byKey[key] = base
 		}
 		for _, m := range p.Models {
 			key := modelKey(p.ID, m.ID)
 			base := byKey[key]
+			defaults := base
+			if defaults.Provider == "" {
+				defaults = firstProviderModel
+			}
 			if m.API == "" {
-				m.API = firstNonEmpty(p.API, base.API, defaultProviderAPI(p.ID))
+				m.API = firstNonEmpty(p.API, defaults.API, defaultProviderAPI(p.ID))
 			}
 			if m.BaseURL == "" {
-				m.BaseURL = firstNonEmpty(p.BaseURL, base.BaseURL, defaultProviderBaseURL(p.ID))
+				m.BaseURL = firstNonEmpty(p.BaseURL, defaults.BaseURL, defaultProviderBaseURL(p.ID))
 			}
 			if m.Name == "" {
 				m.Name = m.ID
 			}
-			if len(m.Input) == 0 {
+			if m.Input == nil {
 				m.Input = []provider.InputKind{provider.InputText}
 			}
 			if m.ContextWindow == 0 {
@@ -941,18 +1130,30 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 			if m.MaxTokens == 0 {
 				m.MaxTokens = 16_384
 			}
-			if m.MaxTokens > m.ContextWindow {
-				m.MaxTokens = m.ContextWindow
+			if len(m.compatRaw) != 0 {
+				m.Compat, _ = decodeCompat(m.compatRaw, p.ID+"/"+m.ID, m.API)
 			}
-			m.Compat = mergeCompat(p.Compat, m.Compat)
+			providerCompat := p.Compat
+			if len(p.compatRaw) != 0 {
+				// Provider compat may be declared while each model supplies its
+				// own API. Project the validated object after that API is known.
+				providerCompat, _ = decodeCompat(p.compatRaw, p.ID, m.API)
+			}
+			m.Compat = mergeCompat(providerCompat, m.Compat)
 			m.Provider = p.ID
 			byKey[key] = m
+			if firstProviderModel.Provider == "" {
+				firstProviderModel = m
+			}
 		}
 		for modelID, override := range p.overrides {
 			key := modelKey(p.ID, modelID)
 			m, ok := byKey[key]
 			if !ok {
 				continue
+			}
+			if len(override.compatRaw) != 0 {
+				override.Compat, _ = decodeCompat(override.compatRaw, p.ID+"/"+modelID, m.API)
 			}
 			m = applyModelOverride(m, override)
 			// This mirrors rawModelHeaders(): an explicit custom model's header
@@ -990,7 +1191,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func defaultProviderAPI(providerID string) string {
-	switch canonicalKey(providerID) {
+	switch providerID {
 	case OpenAIProviderID:
 		return OpenAIResponsesAPI
 	case OpenAICodexProviderID:
@@ -1003,7 +1204,7 @@ func defaultProviderAPI(providerID string) string {
 }
 
 func defaultProviderBaseURL(providerID string) string {
-	switch canonicalKey(providerID) {
+	switch providerID {
 	case OpenAIProviderID:
 		return defaultOpenAIBaseURL
 	case OpenAICodexProviderID:
@@ -1036,7 +1237,7 @@ func applyModelOverride(model Model, override modelOverride) Model {
 		}
 	}
 	if override.Input != nil {
-		model.Input = append([]provider.InputKind(nil), (*override.Input)...)
+		model.Input = cloneInputKinds(*override.Input)
 	}
 	if override.Cost != nil {
 		if override.Cost.Input != nil {
@@ -1093,15 +1294,11 @@ func loadModels(path string) (map[string]ProviderConfig, error) {
 		if !validID(id) {
 			return nil, Diagnostic{"models.json", "providers", "provider identifier is invalid"}
 		}
-		canonical := canonicalKey(id)
-		if _, duplicate := result[canonical]; duplicate {
-			return nil, Diagnostic{"models.json", "providers", "contains case-fold duplicate provider id"}
-		}
-		p, err := parseProvider(canonical, data)
+		p, err := parseProvider(id, data)
 		if err != nil {
 			return nil, err
 		}
-		result[canonical] = p
+		result[id] = p
 	}
 	return result, nil
 }
@@ -1125,9 +1322,16 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 		return p, err
 	}
 	if raw, ok := o["compat"]; ok {
+		p.compatPresent = true
 		compatAPI := firstNonEmpty(p.API, defaultProviderAPI(id))
-		if p.Compat, err = decodeCompat(raw, id, compatAPI); err != nil {
-			return p, err
+		decoded, decodeErr := decodeCompat(raw, id, compatAPI)
+		if decodeErr != nil {
+			return p, decodeErr
+		}
+		if compatAPI == "" {
+			p.compatRaw = bytes.Clone(raw)
+		} else {
+			p.Compat = decoded
 		}
 	}
 	if key, ok, err := optionalSecret(o, "apiKey", id); err != nil {
@@ -1140,24 +1344,24 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 	} else if present {
 		p.AuthHeader = &value
 	}
-	if _, present := o["oauth"]; present {
+	if rawOAuth, present := o["oauth"]; present {
+		var oauth string
+		if err := json.Unmarshal(rawOAuth, &oauth); err != nil || oauth != "radius" {
+			return p, Diagnostic{"models.json", "providers." + id + ".oauth", "must be \"radius\""}
+		}
 		p.UnsupportedFields = append(p.UnsupportedFields, "oauth")
+		p.oauthRadius = true
 	}
 	if data, ok := o["models"]; ok {
 		var models []json.RawMessage
 		if err := json.Unmarshal(data, &models); err != nil || models == nil {
 			return p, Diagnostic{"models.json", "providers." + id + ".models", "must be an array"}
 		}
-		seen := map[string]bool{}
 		for i, entry := range models {
 			m, e := parseModel(id, p.API, i, entry)
 			if e != nil {
 				return p, e
 			}
-			if seen[canonicalKey(m.ID)] {
-				return p, Diagnostic{"models.json", "providers." + id + ".models", "contains duplicate model id"}
-			}
-			seen[canonicalKey(m.ID)] = true
 			p.Models = append(p.Models, m)
 		}
 	}
@@ -1177,13 +1381,9 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 			if !validValue(modelID) {
 				return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "contains invalid model id"}
 			}
-			canonical := canonicalKey(modelID)
-			if _, duplicate := p.overrides[canonical]; duplicate {
-				return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "contains case-fold duplicate model id"}
-			}
 			overrideAPI := firstNonEmpty(p.API, defaultProviderAPI(id))
 			for _, model := range p.Models {
-				if canonicalKey(model.ID) == canonical && model.API != "" {
+				if model.ID == modelID && model.API != "" {
 					overrideAPI = model.API
 					break
 				}
@@ -1192,7 +1392,7 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 			if err != nil {
 				return p, err
 			}
-			p.overrides[canonical] = override
+			p.overrides[modelID] = override
 		}
 	}
 	for key := range o {
@@ -1268,6 +1468,7 @@ func parseOverride(providerID, modelID, api string, raw json.RawMessage) (modelO
 			return result, err
 		}
 		result.Compat, result.CompatPresent = value, true
+		result.compatRaw = bytes.Clone(rawValue)
 	}
 	for key := range o {
 		switch key {
@@ -1338,6 +1539,7 @@ func parseModel(providerID, providerAPI string, index int, raw json.RawMessage) 
 		if m.Compat, err = decodeCompat(raw, providerID, compatAPI); err != nil {
 			return m, err
 		}
+		m.compatRaw = bytes.Clone(raw)
 	}
 	for key := range o {
 		switch key {
@@ -1870,7 +2072,7 @@ func requiredString(o map[string]json.RawMessage, key, owner string) (string, bo
 		return "", false, nil
 	}
 	var v string
-	if err := json.Unmarshal(raw, &v); err != nil || !validValue(v) {
+	if err := json.Unmarshal(raw, &v); err != nil || v == "" || !utf8.ValidString(v) {
 		return "", true, Diagnostic{"models.json", key, "must be a non-empty valid string"}
 	}
 	return v, true, nil
@@ -1901,11 +2103,6 @@ func optionalHeaders(o map[string]json.RawMessage, key, owner string) (map[strin
 	var h map[string]string
 	if err := json.Unmarshal(raw, &h); err != nil || h == nil {
 		return nil, Diagnostic{"models.json", key, "must be an object of strings"}
-	}
-	for k, v := range h {
-		if !validValue(k) || !utf8.ValidString(v) || strings.ContainsFunc(v, unicode.IsControl) {
-			return nil, Diagnostic{"models.json", key, "contains an invalid header"}
-		}
 	}
 	return h, nil
 }
@@ -1943,7 +2140,7 @@ func decodeThinkingLevelMap(raw json.RawMessage, owner string) (map[provider.Thi
 			// participate in the current runtime projection.
 			continue
 		}
-		if value != nil && !validValue(*value) {
+		if value != nil && !utf8.ValidString(*value) {
 			return nil, Diagnostic{"models.json", owner, "thinkingLevelMap contains an invalid value"}
 		}
 		if value != nil {
@@ -1961,17 +2158,15 @@ func decodeInputKinds(raw json.RawMessage, owner string) ([]provider.InputKind, 
 		return []provider.InputKind{provider.InputText}, nil
 	}
 	var values []string
-	if err := json.Unmarshal(raw, &values); err != nil || len(values) == 0 {
-		return nil, Diagnostic{"models.json", owner, "input must be a non-empty array"}
+	if err := json.Unmarshal(raw, &values); err != nil || values == nil {
+		return nil, Diagnostic{"models.json", owner, "input must be an array"}
 	}
 	result := make([]provider.InputKind, len(values))
-	seen := map[provider.InputKind]bool{}
 	for index, value := range values {
 		kind := provider.InputKind(value)
-		if (kind != provider.InputText && kind != provider.InputImage) || seen[kind] {
+		if kind != provider.InputText && kind != provider.InputImage {
 			return nil, Diagnostic{"models.json", owner, "input contains an invalid value"}
 		}
-		seen[kind] = true
 		result[index] = kind
 	}
 	return result, nil
@@ -1987,32 +2182,30 @@ func decodeCost(raw json.RawMessage, owner string) (provider.CostRates, error) {
 			return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain all rates"}
 		}
 	}
-	var value struct {
-		Input      float64 `json:"input"`
-		Output     float64 `json:"output"`
-		CacheRead  float64 `json:"cacheRead"`
-		CacheWrite float64 `json:"cacheWrite"`
-		Tiers      []struct {
-			InputTokensAbove uint64  `json:"inputTokensAbove"`
-			Input            float64 `json:"input"`
-			Output           float64 `json:"output"`
-			CacheRead        float64 `json:"cacheRead"`
-			CacheWrite       float64 `json:"cacheWrite"`
-		} `json:"tiers"`
+	input, err := decodeRate(fields["input"], owner)
+	if err != nil {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain numeric rates"}
 	}
-	if err := json.Unmarshal(raw, &value); err != nil || value.Input < 0 || value.Output < 0 || value.CacheRead < 0 || value.CacheWrite < 0 {
-		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain non-negative rates"}
+	output, err := decodeRate(fields["output"], owner)
+	if err != nil {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain numeric rates"}
 	}
-	tiers := make([]provider.CostTier, len(value.Tiers))
-	var previous uint64
-	for index, tier := range value.Tiers {
-		if (index != 0 && tier.InputTokensAbove <= previous) || tier.Input < 0 || tier.Output < 0 || tier.CacheRead < 0 || tier.CacheWrite < 0 {
-			return provider.CostRates{}, Diagnostic{"models.json", owner, "cost tiers must be strictly increasing non-negative rates"}
+	cacheRead, err := decodeRate(fields["cacheRead"], owner)
+	if err != nil {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain numeric rates"}
+	}
+	cacheWrite, err := decodeRate(fields["cacheWrite"], owner)
+	if err != nil {
+		return provider.CostRates{}, Diagnostic{"models.json", owner, "cost must contain numeric rates"}
+	}
+	var tiers []provider.CostTier
+	if rawTiers, present := fields["tiers"]; present {
+		tiers, err = decodeCostTiers(rawTiers, owner)
+		if err != nil {
+			return provider.CostRates{}, err
 		}
-		previous = tier.InputTokensAbove
-		tiers[index] = provider.CostTier{InputTokensAbove: tier.InputTokensAbove, Input: tier.Input, Output: tier.Output, CacheRead: tier.CacheRead, CacheWrite: tier.CacheWrite}
 	}
-	return provider.CostRates{Input: value.Input, Output: value.Output, CacheRead: value.CacheRead, CacheWrite: value.CacheWrite, Tiers: tiers}, nil
+	return provider.CostRates{Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite, Tiers: tiers}, nil
 }
 
 func decodeCostOverride(raw json.RawMessage, owner string) (modelCostOverride, error) {
@@ -2024,48 +2217,33 @@ func decodeCostOverride(raw json.RawMessage, owner string) (modelCostOverride, e
 	for key, value := range fields {
 		switch key {
 		case "input":
-			parsed, err := decodeNonNegativeRate(value, owner)
+			parsed, err := decodeRate(value, owner)
 			if err != nil {
 				return result, err
 			}
 			result.Input = &parsed
 		case "output":
-			parsed, err := decodeNonNegativeRate(value, owner)
+			parsed, err := decodeRate(value, owner)
 			if err != nil {
 				return result, err
 			}
 			result.Output = &parsed
 		case "cacheRead":
-			parsed, err := decodeNonNegativeRate(value, owner)
+			parsed, err := decodeRate(value, owner)
 			if err != nil {
 				return result, err
 			}
 			result.CacheRead = &parsed
 		case "cacheWrite":
-			parsed, err := decodeNonNegativeRate(value, owner)
+			parsed, err := decodeRate(value, owner)
 			if err != nil {
 				return result, err
 			}
 			result.CacheWrite = &parsed
 		case "tiers":
-			var wire []struct {
-				InputTokensAbove uint64  `json:"inputTokensAbove"`
-				Input            float64 `json:"input"`
-				Output           float64 `json:"output"`
-				CacheRead        float64 `json:"cacheRead"`
-				CacheWrite       float64 `json:"cacheWrite"`
-			}
-			if err := json.Unmarshal(value, &wire); err != nil || wire == nil {
-				return result, Diagnostic{"models.json", owner, "cost tiers must be an array"}
-			}
-			tiers := make([]provider.CostTier, len(wire))
-			var previous uint64
-			for index, tier := range wire {
-				if (index != 0 && tier.InputTokensAbove <= previous) || !validRate(tier.Input) || !validRate(tier.Output) || !validRate(tier.CacheRead) || !validRate(tier.CacheWrite) {
-					return result, Diagnostic{"models.json", owner, "cost tiers must be strictly increasing non-negative rates"}
-				}
-				previous = tier.InputTokensAbove
-				tiers[index] = provider.CostTier{InputTokensAbove: tier.InputTokensAbove, Input: tier.Input, Output: tier.Output, CacheRead: tier.CacheRead, CacheWrite: tier.CacheWrite}
+			tiers, err := decodeCostTiers(value, owner)
+			if err != nil {
+				return result, err
 			}
 			result.Tiers = &tiers
 		default:
@@ -2076,16 +2254,53 @@ func decodeCostOverride(raw json.RawMessage, owner string) (modelCostOverride, e
 	return result, nil
 }
 
-func decodeNonNegativeRate(raw json.RawMessage, owner string) (float64, error) {
+func decodeCostTiers(raw json.RawMessage, owner string) ([]provider.CostTier, error) {
+	var wire []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil || wire == nil {
+		return nil, Diagnostic{"models.json", owner, "cost tiers must be an array"}
+	}
+	result := make([]provider.CostTier, len(wire))
+	for index, fields := range wire {
+		for _, name := range []string{"inputTokensAbove", "input", "output", "cacheRead", "cacheWrite"} {
+			if _, present := fields[name]; !present {
+				return nil, Diagnostic{"models.json", owner, "cost tiers must contain all rates"}
+			}
+		}
+		threshold, err := decodeRate(fields["inputTokensAbove"], owner)
+		if err != nil {
+			return nil, Diagnostic{"models.json", owner, "cost tier threshold must be a number"}
+		}
+		input, err := decodeRate(fields["input"], owner)
+		if err != nil {
+			return nil, Diagnostic{"models.json", owner, "cost tiers must contain numeric rates"}
+		}
+		output, err := decodeRate(fields["output"], owner)
+		if err != nil {
+			return nil, Diagnostic{"models.json", owner, "cost tiers must contain numeric rates"}
+		}
+		cacheRead, err := decodeRate(fields["cacheRead"], owner)
+		if err != nil {
+			return nil, Diagnostic{"models.json", owner, "cost tiers must contain numeric rates"}
+		}
+		cacheWrite, err := decodeRate(fields["cacheWrite"], owner)
+		if err != nil {
+			return nil, Diagnostic{"models.json", owner, "cost tiers must contain numeric rates"}
+		}
+		result[index] = provider.CostTier{InputTokensAbove: threshold, Input: input, Output: output, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	}
+	return result, nil
+}
+
+func decodeRate(raw json.RawMessage, owner string) (float64, error) {
 	var value float64
 	if err := json.Unmarshal(raw, &value); err != nil || !validRate(value) {
-		return 0, Diagnostic{"models.json", owner, "cost override rates must be non-negative numbers"}
+		return 0, Diagnostic{"models.json", owner, "cost override rates must be numbers"}
 	}
 	return value, nil
 }
 
 func validRate(value float64) bool {
-	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat, error) {
@@ -2093,177 +2308,127 @@ func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat,
 	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
 		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
 	}
-	// Provider-level compat is valid even when the provider leaves `api`
-	// unspecified and supplies it per model. Validate every currently known
-	// compat member before selecting the dialect projection so null or an invalid
-	// literal cannot evade the models.json schema through an omitted API. Unknown
-	// members remain open, matching TypeBox's default object behavior.
-	if err := validateKnownCompatObject(object, owner); err != nil {
+	// ProviderCompatSchema is a union of three open TypeBox objects. Only fields
+	// common to every branch are unconditionally constrained; currently that is
+	// supportsLongCacheRetention. Other forward/branch-specific values remain in
+	// Additional and are projected into typed fields only when valid.
+	if err := validateCompatBoolFields(object, owner, "supportsLongCacheRetention"); err != nil {
 		return provider.ModelCompat{}, err
 	}
 	if api == "anthropic-messages" {
-		if err := validateCompatBoolFields(object, owner,
-			"supportsEagerToolInputStreaming", "supportsLongCacheRetention", "sendSessionAffinityHeaders",
-			"supportsCacheControlOnTools", "supportsTemperature", "forceAdaptiveThinking", "allowEmptySignature",
-			"supportsStrictTools", "supportsToolReferences"); err != nil {
-			return provider.ModelCompat{}, err
-		}
-		var wire struct {
-			SupportsEagerToolInputStreaming *bool `json:"supportsEagerToolInputStreaming"`
-			SupportsLongCacheRetention      *bool `json:"supportsLongCacheRetention"`
-			SendSessionAffinityHeaders      *bool `json:"sendSessionAffinityHeaders"`
-			SupportsCacheControlOnTools     *bool `json:"supportsCacheControlOnTools"`
-			SupportsTemperature             *bool `json:"supportsTemperature"`
-			ForceAdaptiveThinking           *bool `json:"forceAdaptiveThinking"`
-			AllowEmptySignature             *bool `json:"allowEmptySignature"`
-			SupportsStrictTools             *bool `json:"supportsStrictTools"`
-			SupportsToolReferences          *bool `json:"supportsToolReferences"`
-		}
-		if json.Unmarshal(raw, &wire) != nil {
-			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
-		}
-		return provider.ModelCompat{AnthropicMessages: &provider.AnthropicMessagesCompat{SupportsEagerToolInputStreaming: wire.SupportsEagerToolInputStreaming, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SupportsCacheControlOnTools: wire.SupportsCacheControlOnTools, SupportsTemperature: wire.SupportsTemperature, ForceAdaptiveThinking: wire.ForceAdaptiveThinking, AllowEmptySignature: wire.AllowEmptySignature, SupportsStrictTools: wire.SupportsStrictTools, SupportsToolReferences: wire.SupportsToolReferences}}, nil
+		return provider.ModelCompat{
+			AnthropicMessages: &provider.AnthropicMessagesCompat{
+				SupportsEagerToolInputStreaming: compatBool(object, "supportsEagerToolInputStreaming"),
+				SupportsLongCacheRetention:      compatBool(object, "supportsLongCacheRetention"),
+				SendSessionAffinityHeaders:      compatBool(object, "sendSessionAffinityHeaders"),
+				SupportsCacheControlOnTools:     compatBool(object, "supportsCacheControlOnTools"),
+				SupportsTemperature:             compatBool(object, "supportsTemperature"),
+				ForceAdaptiveThinking:           compatBool(object, "forceAdaptiveThinking"),
+				AllowEmptySignature:             compatBool(object, "allowEmptySignature"),
+				SupportsStrictTools:             compatBool(object, "supportsStrictTools"),
+				SupportsToolReferences:          compatBool(object, "supportsToolReferences"),
+			},
+			Additional: compatAdditional(api, raw),
+		}, nil
 	}
 	if api == "bedrock-converse-stream" {
-		if err := validateCompatBoolFields(object, owner, "supportsStrictMode"); err != nil {
-			return provider.ModelCompat{}, err
-		}
-		var wire struct {
-			SupportsStrictMode *bool `json:"supportsStrictMode"`
-		}
-		if json.Unmarshal(raw, &wire) != nil {
-			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
-		}
-		return provider.ModelCompat{Bedrock: &provider.BedrockCompat{SupportsStrictMode: wire.SupportsStrictMode}}, nil
+		return provider.ModelCompat{
+			Bedrock:    &provider.BedrockCompat{SupportsStrictMode: compatBool(object, "supportsStrictMode")},
+			Additional: compatAdditional(api, raw),
+		}, nil
 	}
 	if api != "openai-completions" && api != "openai-responses" && api != "azure-openai-responses" && api != "openai-codex-responses" {
 		return provider.ModelCompat{Additional: map[string]json.RawMessage{api: bytes.Clone(raw)}}, nil
 	}
-	if err := validateCompatBoolFields(object, owner,
-		"supportsStore", "supportsDeveloperRole", "supportsReasoningEffort", "supportsUsageInStreaming", "supportsFinishReason",
-		"requiresToolResultName", "requiresAssistantAfterToolResult", "requiresThinkingAsText",
-		"requiresReasoningContentOnAssistantMessages", "sendSessionAffinityHeaders", "supportsLongCacheRetention",
-		"supportsStrictMode", "supportsOpenAIGrammarTools", "supportsToolSearch", "supportsExplicitPromptCacheMode", "zaiToolStream"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if err := validateCompatStringLiteral(object, owner, "sessionAffinityFormat", "openai", "openai-nosession", "openrouter"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if err := validateCompatStringLiteral(object, owner, "maxTokensField", "max_completion_tokens", "max_tokens"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if err := validateCompatStringLiteral(object, owner, "thinkingFormat", "openai", "openrouter", "together", "deepseek", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if err := validateCompatStringLiteral(object, owner, "cacheControlFormat", "anthropic"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if err := validateCompatStringLiteral(object, owner, "deferredToolsMode", "kimi"); err != nil {
-		return provider.ModelCompat{}, err
-	}
-	if raw, ok := object["chatTemplateKwargs"]; ok {
-		if err := validateChatTemplateKwargs(raw, owner+".compat.chatTemplateKwargs"); err != nil {
-			return provider.ModelCompat{}, err
-		}
-	}
-	if raw, ok := object["openRouterRouting"]; ok {
-		if err := validateOpenRouterRouting(raw, owner+".compat.openRouterRouting"); err != nil {
-			return provider.ModelCompat{}, err
-		}
-	}
-	if raw, ok := object["vercelGatewayRouting"]; ok {
-		if err := validateVercelGatewayRouting(raw, owner+".compat.vercelGatewayRouting"); err != nil {
-			return provider.ModelCompat{}, err
-		}
-	}
-	var wire struct {
-		SupportsStore                               *bool          `json:"supportsStore"`
-		SupportsDeveloperRole                       *bool          `json:"supportsDeveloperRole"`
-		SupportsReasoningEffort                     *bool          `json:"supportsReasoningEffort"`
-		SupportsUsageInStreaming                    *bool          `json:"supportsUsageInStreaming"`
-		SupportsFinishReason                        *bool          `json:"supportsFinishReason"`
-		MaxTokensField                              *string        `json:"maxTokensField"`
-		RequiresToolResultName                      *bool          `json:"requiresToolResultName"`
-		RequiresAssistantAfterToolResult            *bool          `json:"requiresAssistantAfterToolResult"`
-		RequiresThinkingAsText                      *bool          `json:"requiresThinkingAsText"`
-		RequiresReasoningContentOnAssistantMessages *bool          `json:"requiresReasoningContentOnAssistantMessages"`
-		ThinkingFormat                              *string        `json:"thinkingFormat"`
-		SendSessionAffinityHeaders                  *bool          `json:"sendSessionAffinityHeaders"`
-		SessionAffinityFormat                       *string        `json:"sessionAffinityFormat"`
-		SupportsLongCacheRetention                  *bool          `json:"supportsLongCacheRetention"`
-		SupportsStrictMode                          *bool          `json:"supportsStrictMode"`
-		SupportsOpenAIGrammarTools                  *bool          `json:"supportsOpenAIGrammarTools"`
-		SupportsToolSearch                          *bool          `json:"supportsToolSearch"`
-		SupportsExplicitPromptCacheMode             *bool          `json:"supportsExplicitPromptCacheMode"`
-		CacheControlFormat                          *string        `json:"cacheControlFormat"`
-		DeferredToolsMode                           *string        `json:"deferredToolsMode"`
-		ZaiToolStream                               *bool          `json:"zaiToolStream"`
-		ChatTemplateKwargs                          map[string]any `json:"chatTemplateKwargs"`
-		OpenRouterRouting                           map[string]any `json:"openRouterRouting"`
-		VercelGatewayRouting                        map[string]any `json:"vercelGatewayRouting"`
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "compat must be an object"}
-	}
-	if wire.SessionAffinityFormat != nil && *wire.SessionAffinityFormat != "openai" && *wire.SessionAffinityFormat != "openai-nosession" && *wire.SessionAffinityFormat != "openrouter" {
-		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid sessionAffinityFormat"}
-	}
-	if wire.MaxTokensField != nil && *wire.MaxTokensField != "max_completion_tokens" && *wire.MaxTokensField != "max_tokens" {
-		return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid maxTokensField"}
-	}
-	if wire.ThinkingFormat != nil {
-		switch *wire.ThinkingFormat {
-		case "openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling":
-		default:
-			return provider.ModelCompat{}, Diagnostic{"models.json", owner, "invalid thinkingFormat"}
-		}
-	}
+	supportsDeveloperRole := compatBool(object, "supportsDeveloperRole")
+	sessionAffinityFormat := compatString(object, "sessionAffinityFormat", "openai", "openai-nosession", "openrouter")
+	supportsLongCacheRetention := compatBool(object, "supportsLongCacheRetention")
+	supportsStrictMode := compatBool(object, "supportsStrictMode")
+	supportsOpenAIGrammarTools := compatBool(object, "supportsOpenAIGrammarTools")
 	return provider.ModelCompat{
-		OpenAIResponses:   &provider.OpenAIResponsesCompat{SupportsDeveloperRole: wire.SupportsDeveloperRole, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, SupportsStrictMode: wire.SupportsStrictMode, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsToolSearch: wire.SupportsToolSearch, SupportsExplicitPromptCacheMode: wire.SupportsExplicitPromptCacheMode},
-		OpenAICompletions: &provider.OpenAICompletionsCompat{SupportsStore: wire.SupportsStore, SupportsDeveloperRole: wire.SupportsDeveloperRole, SupportsReasoningEffort: wire.SupportsReasoningEffort, SupportsUsageInStreaming: wire.SupportsUsageInStreaming, SupportsFinishReason: wire.SupportsFinishReason, MaxTokensField: wire.MaxTokensField, RequiresToolResultName: wire.RequiresToolResultName, RequiresAssistantAfterToolResult: wire.RequiresAssistantAfterToolResult, RequiresThinkingAsText: wire.RequiresThinkingAsText, RequiresReasoningContentOnAssistantMessages: wire.RequiresReasoningContentOnAssistantMessages, ThinkingFormat: wire.ThinkingFormat, SupportsOpenAIGrammarTools: wire.SupportsOpenAIGrammarTools, SupportsStrictMode: wire.SupportsStrictMode, SendSessionAffinityHeaders: wire.SendSessionAffinityHeaders, SessionAffinityFormat: wire.SessionAffinityFormat, SupportsLongCacheRetention: wire.SupportsLongCacheRetention, CacheControlFormat: wire.CacheControlFormat, DeferredToolsMode: wire.DeferredToolsMode, ZaiToolStream: wire.ZaiToolStream, ChatTemplateKwargs: wire.ChatTemplateKwargs, OpenRouterRouting: wire.OpenRouterRouting, VercelGatewayRouting: wire.VercelGatewayRouting},
+		OpenAIResponses: &provider.OpenAIResponsesCompat{
+			SupportsDeveloperRole:           supportsDeveloperRole,
+			SessionAffinityFormat:           sessionAffinityFormat,
+			SupportsLongCacheRetention:      supportsLongCacheRetention,
+			SupportsStrictMode:              supportsStrictMode,
+			SupportsOpenAIGrammarTools:      supportsOpenAIGrammarTools,
+			SupportsToolSearch:              compatBool(object, "supportsToolSearch"),
+			SupportsExplicitPromptCacheMode: compatBool(object, "supportsExplicitPromptCacheMode"),
+		},
+		OpenAICompletions: &provider.OpenAICompletionsCompat{
+			SupportsStore:                               compatBool(object, "supportsStore"),
+			SupportsDeveloperRole:                       supportsDeveloperRole,
+			SupportsReasoningEffort:                     compatBool(object, "supportsReasoningEffort"),
+			SupportsUsageInStreaming:                    compatBool(object, "supportsUsageInStreaming"),
+			SupportsFinishReason:                        compatBool(object, "supportsFinishReason"),
+			MaxTokensField:                              compatString(object, "maxTokensField", "max_completion_tokens", "max_tokens"),
+			RequiresToolResultName:                      compatBool(object, "requiresToolResultName"),
+			RequiresAssistantAfterToolResult:            compatBool(object, "requiresAssistantAfterToolResult"),
+			RequiresThinkingAsText:                      compatBool(object, "requiresThinkingAsText"),
+			RequiresReasoningContentOnAssistantMessages: compatBool(object, "requiresReasoningContentOnAssistantMessages"),
+			ThinkingFormat:                              compatString(object, "thinkingFormat", "openai", "openrouter", "together", "deepseek", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"),
+			SupportsOpenAIGrammarTools:                  supportsOpenAIGrammarTools,
+			SupportsStrictMode:                          supportsStrictMode,
+			SendSessionAffinityHeaders:                  compatBool(object, "sendSessionAffinityHeaders"),
+			SessionAffinityFormat:                       sessionAffinityFormat,
+			SupportsLongCacheRetention:                  supportsLongCacheRetention,
+			CacheControlFormat:                          compatString(object, "cacheControlFormat", "anthropic"),
+			DeferredToolsMode:                           compatString(object, "deferredToolsMode", "kimi"),
+			ZaiToolStream:                               compatBool(object, "zaiToolStream"),
+			ChatTemplateKwargs:                          compatObject(object, "chatTemplateKwargs"),
+			OpenRouterRouting:                           compatObject(object, "openRouterRouting"),
+			VercelGatewayRouting:                        compatObject(object, "vercelGatewayRouting"),
+		},
+		Additional: compatAdditional(api, raw),
 	}, nil
 }
 
-func validateKnownCompatObject(object map[string]json.RawMessage, owner string) error {
-	if err := validateCompatBoolFields(object, owner,
-		"supportsStore", "supportsDeveloperRole", "supportsReasoningEffort", "supportsUsageInStreaming", "supportsFinishReason",
-		"requiresToolResultName", "requiresAssistantAfterToolResult", "requiresThinkingAsText",
-		"requiresReasoningContentOnAssistantMessages", "sendSessionAffinityHeaders", "supportsLongCacheRetention",
-		"supportsStrictMode", "supportsOpenAIGrammarTools", "supportsToolSearch", "supportsExplicitPromptCacheMode", "zaiToolStream",
-		"supportsEagerToolInputStreaming", "supportsCacheControlOnTools", "supportsTemperature", "forceAdaptiveThinking",
-		"allowEmptySignature", "supportsStrictTools", "supportsToolReferences"); err != nil {
-		return err
+func compatBool(object map[string]json.RawMessage, field string) *bool {
+	raw, ok := object[field]
+	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
 	}
-	for _, literal := range []struct {
-		field   string
-		allowed []string
-	}{
-		{field: "sessionAffinityFormat", allowed: []string{"openai", "openai-nosession", "openrouter"}},
-		{field: "maxTokensField", allowed: []string{"max_completion_tokens", "max_tokens"}},
-		{field: "thinkingFormat", allowed: []string{"openai", "openrouter", "together", "deepseek", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"}},
-		{field: "cacheControlFormat", allowed: []string{"anthropic"}},
-		{field: "deferredToolsMode", allowed: []string{"kimi"}},
-	} {
-		if err := validateCompatStringLiteral(object, owner, literal.field, literal.allowed...); err != nil {
-			return err
-		}
+	var value bool
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
 	}
-	if raw, ok := object["chatTemplateKwargs"]; ok {
-		if err := validateChatTemplateKwargs(raw, owner+".compat.chatTemplateKwargs"); err != nil {
-			return err
-		}
+	return &value
+}
+
+func compatString(object map[string]json.RawMessage, field string, allowed ...string) *string {
+	raw, ok := object[field]
+	if !ok {
+		return nil
 	}
-	if raw, ok := object["openRouterRouting"]; ok {
-		if err := validateOpenRouterRouting(raw, owner+".compat.openRouterRouting"); err != nil {
-			return err
-		}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return nil
 	}
-	if raw, ok := object["vercelGatewayRouting"]; ok {
-		if err := validateVercelGatewayRouting(raw, owner+".compat.vercelGatewayRouting"); err != nil {
-			return err
+	for _, candidate := range allowed {
+		if value == candidate {
+			return &value
 		}
 	}
 	return nil
+}
+
+func compatObject(object map[string]json.RawMessage, field string) map[string]any {
+	raw, ok := object[field]
+	if !ok {
+		return nil
+	}
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil || value == nil {
+		return nil
+	}
+	return value
+}
+
+func compatAdditional(api string, raw json.RawMessage) map[string]json.RawMessage {
+	if api == "" || len(raw) == 0 {
+		return nil
+	}
+	return map[string]json.RawMessage{api: bytes.Clone(raw)}
 }
 
 func validateCompatBoolFields(object map[string]json.RawMessage, owner string, fields ...string) error {
@@ -2278,170 +2443,6 @@ func validateCompatBoolFields(object map[string]json.RawMessage, owner string, f
 		}
 	}
 	return nil
-}
-
-func validateCompatStringLiteral(object map[string]json.RawMessage, owner, field string, allowed ...string) error {
-	raw, ok := object[field]
-	if !ok {
-		return nil
-	}
-	var value string
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &value) != nil {
-		return Diagnostic{"models.json", owner + ".compat." + field, "must be a supported string literal"}
-	}
-	for _, candidate := range allowed {
-		if value == candidate {
-			return nil
-		}
-	}
-	return Diagnostic{"models.json", owner + ".compat." + field, "must be a supported string literal"}
-}
-
-func validateChatTemplateKwargs(raw json.RawMessage, path string) error {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || object == nil {
-		return Diagnostic{"models.json", path, "must be an object of scalar values or variable descriptors"}
-	}
-	for key, value := range object {
-		trimmed := bytes.TrimSpace(value)
-		if bytes.Equal(trimmed, []byte("null")) || len(trimmed) != 0 && (trimmed[0] == '"' || trimmed[0] == 't' || trimmed[0] == 'f' || trimmed[0] == '-' || trimmed[0] >= '0' && trimmed[0] <= '9') {
-			var scalar any
-			if json.Unmarshal(value, &scalar) == nil {
-				switch scalar.(type) {
-				case nil, string, bool, float64:
-					continue
-				}
-			}
-		}
-		var descriptor map[string]json.RawMessage
-		if json.Unmarshal(value, &descriptor) != nil || descriptor == nil {
-			return Diagnostic{"models.json", path + "." + key, "must be a scalar or variable descriptor"}
-		}
-		variable, ok := descriptor["$var"]
-		if !ok {
-			return Diagnostic{"models.json", path + "." + key + ".$var", "is required"}
-		}
-		var name string
-		if json.Unmarshal(variable, &name) != nil || name != "thinking.enabled" && name != "thinking.effort" {
-			return Diagnostic{"models.json", path + "." + key + ".$var", "must be thinking.enabled or thinking.effort"}
-		}
-		if rawOmit, ok := descriptor["omitWhenOff"]; ok {
-			var omit bool
-			if bytes.Equal(bytes.TrimSpace(rawOmit), []byte("null")) || json.Unmarshal(rawOmit, &omit) != nil {
-				return Diagnostic{"models.json", path + "." + key + ".omitWhenOff", "must be a boolean"}
-			}
-		}
-	}
-	return nil
-}
-
-func validateVercelGatewayRouting(raw json.RawMessage, path string) error {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || object == nil {
-		return Diagnostic{"models.json", path, "must be an object"}
-	}
-	for _, field := range []string{"only", "order"} {
-		if value, ok := object[field]; ok {
-			if err := validateStringArray(value); err != nil {
-				return Diagnostic{"models.json", path + "." + field, "must be an array of strings"}
-			}
-		}
-	}
-	return nil
-}
-
-func validateOpenRouterRouting(raw json.RawMessage, path string) error {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || object == nil {
-		return Diagnostic{"models.json", path, "must be an object"}
-	}
-	for _, field := range []string{"allow_fallbacks", "require_parameters", "zdr", "enforce_distillable_text"} {
-		if value, ok := object[field]; ok {
-			var boolean bool
-			if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || json.Unmarshal(value, &boolean) != nil {
-				return Diagnostic{"models.json", path + "." + field, "must be a boolean"}
-			}
-		}
-	}
-	if value, ok := object["data_collection"]; ok {
-		var literal string
-		if json.Unmarshal(value, &literal) != nil || literal != "deny" && literal != "allow" {
-			return Diagnostic{"models.json", path + ".data_collection", "must be deny or allow"}
-		}
-	}
-	for _, field := range []string{"order", "only", "ignore", "quantizations"} {
-		if value, ok := object[field]; ok && validateStringArray(value) != nil {
-			return Diagnostic{"models.json", path + "." + field, "must be an array of strings"}
-		}
-	}
-	if value, ok := object["sort"]; ok {
-		var literal string
-		if json.Unmarshal(value, &literal) != nil {
-			var sortObject map[string]json.RawMessage
-			if json.Unmarshal(value, &sortObject) != nil || sortObject == nil {
-				return Diagnostic{"models.json", path + ".sort", "must be a string or object"}
-			}
-			if by, ok := sortObject["by"]; ok && json.Unmarshal(by, &literal) != nil {
-				return Diagnostic{"models.json", path + ".sort.by", "must be a string"}
-			}
-			if partition, ok := sortObject["partition"]; ok && !bytes.Equal(bytes.TrimSpace(partition), []byte("null")) && json.Unmarshal(partition, &literal) != nil {
-				return Diagnostic{"models.json", path + ".sort.partition", "must be a string or null"}
-			}
-		}
-	}
-	if value, ok := object["max_price"]; ok {
-		var prices map[string]json.RawMessage
-		if json.Unmarshal(value, &prices) != nil || prices == nil {
-			return Diagnostic{"models.json", path + ".max_price", "must be an object"}
-		}
-		for _, field := range []string{"prompt", "completion", "image", "audio", "request"} {
-			if price, ok := prices[field]; ok && !jsonNumberOrString(price) {
-				return Diagnostic{"models.json", path + ".max_price." + field, "must be a number or string"}
-			}
-		}
-	}
-	for _, field := range []string{"preferred_min_throughput", "preferred_max_latency"} {
-		if value, ok := object[field]; ok && !validOpenRouterPercentile(value) {
-			return Diagnostic{"models.json", path + "." + field, "must be a number or percentile object"}
-		}
-	}
-	return nil
-}
-
-func validateStringArray(raw json.RawMessage) error {
-	var values []string
-	if json.Unmarshal(raw, &values) != nil || values == nil {
-		return errors.New("not a string array")
-	}
-	return nil
-}
-
-func jsonNumberOrString(raw json.RawMessage) bool {
-	var number float64
-	if json.Unmarshal(raw, &number) == nil {
-		return true
-	}
-	var text string
-	return json.Unmarshal(raw, &text) == nil
-}
-
-func validOpenRouterPercentile(raw json.RawMessage) bool {
-	var number float64
-	if json.Unmarshal(raw, &number) == nil {
-		return true
-	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil || object == nil {
-		return false
-	}
-	for _, field := range []string{"p50", "p75", "p90", "p99"} {
-		if value, ok := object[field]; ok {
-			if json.Unmarshal(value, &number) != nil {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMessage, bool, error) {
@@ -2471,97 +2472,16 @@ func readRawObject(path string, jsonc bool, label string) (map[string]json.RawMe
 	}
 	root, err := decodeObject(data)
 	if err != nil {
-		var duplicate duplicateFieldError
-		if errors.As(err, &duplicate) {
-			return nil, false, Diagnostic{label, duplicate.Path, "contains a duplicate object field"}
-		}
 		return nil, false, Diagnostic{label, "root", "is not strict JSON"}
 	}
 	return root, true, nil
 }
 func decodeObject(data []byte) (map[string]json.RawMessage, error) {
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.UseNumber()
-	if err := validateJSONValue(d, "root", 0); err != nil {
-		return nil, err
-	}
-	if _, err := d.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return nil, errors.New("trailing JSON value")
-		}
-		return nil, err
-	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil || root == nil {
 		return nil, errors.New("not object")
 	}
 	return root, nil
-}
-
-type duplicateFieldError struct{ Path string }
-
-func (e duplicateFieldError) Error() string { return "duplicate JSON object field" }
-
-func validateJSONValue(decoder *json.Decoder, path string, depth int) error {
-	if depth > 64 {
-		return errors.New("JSON nesting exceeds limit")
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		seen := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("object key is not a string")
-			}
-			child := path + "." + key
-			if _, duplicate := seen[key]; duplicate {
-				return duplicateFieldError{Path: child}
-			}
-			seen[key] = struct{}{}
-			if err := validateJSONValue(decoder, child, depth+1); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim('}') {
-			return errors.New("unterminated object")
-		}
-		return nil
-	case '[':
-		index := 0
-		for decoder.More() {
-			if err := validateJSONValue(decoder, fmt.Sprintf("%s.%d", path, index), depth+1); err != nil {
-				return err
-			}
-			index++
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim(']') {
-			return errors.New("unterminated array")
-		}
-		return nil
-	default:
-		return errors.New("unexpected JSON delimiter")
-	}
 }
 func normalizeJSONC(data []byte) []byte {
 	out := append([]byte(nil), data...)
@@ -2761,30 +2681,7 @@ func contextCause(ctx context.Context) error {
 }
 func validID(v string) bool { return validValue(v) && !strings.ContainsAny(v, "/\\") }
 
-// canonicalKey returns one stable representative for the same equivalence
-// class used by strings.EqualFold. Provider and model lookup maps must never
-// be keyed by user casing directly.
-func canonicalKey(value string) string {
-	var result strings.Builder
-	result.Grow(len(value))
-	for _, character := range value {
-		representative := character
-		hasLower := unicode.IsLower(character)
-		for folded := unicode.SimpleFold(character); folded != character; folded = unicode.SimpleFold(folded) {
-			isLower := unicode.IsLower(folded)
-			if isLower && (!hasLower || folded < representative) || !isLower && !hasLower && folded < representative {
-				representative = folded
-				hasLower = isLower
-			}
-		}
-		result.WriteRune(representative)
-	}
-	return result.String()
-}
-
-func modelKey(providerID, modelID string) string {
-	return canonicalKey(providerID) + "/" + canonicalKey(modelID)
-}
+func modelKey(providerID, modelID string) string { return providerID + "/" + modelID }
 func validValue(v string) bool {
 	return utf8.ValidString(v) && strings.TrimSpace(v) != "" && !strings.ContainsFunc(v, unicode.IsControl)
 }
@@ -2890,13 +2787,13 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 		copyString(&target.DeferredToolsMode, value.DeferredToolsMode)
 		copyBool(&target.ZaiToolStream, value.ZaiToolStream)
 		if value.ChatTemplateKwargs != nil {
-			target.ChatTemplateKwargs = provider.CloneJSONMap(value.ChatTemplateKwargs)
+			target.ChatTemplateKwargs = mergeCompatObject(target.ChatTemplateKwargs, value.ChatTemplateKwargs)
 		}
 		if value.OpenRouterRouting != nil {
-			target.OpenRouterRouting = provider.CloneJSONMap(value.OpenRouterRouting)
+			target.OpenRouterRouting = mergeCompatObject(target.OpenRouterRouting, value.OpenRouterRouting)
 		}
 		if value.VercelGatewayRouting != nil {
-			target.VercelGatewayRouting = provider.CloneJSONMap(value.VercelGatewayRouting)
+			target.VercelGatewayRouting = mergeCompatObject(target.VercelGatewayRouting, value.VercelGatewayRouting)
 		}
 	}
 	if value := override.AnthropicMessages; value != nil {
@@ -2925,19 +2822,89 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 			result.Additional = map[string]json.RawMessage{}
 		}
 		for key, value := range override.Additional {
-			result.Additional[key] = bytes.Clone(value)
+			_, baseHasRawProjection := base.Additional[key]
+			result.Additional[key] = mergeCompatRaw(result.Additional[key], value)
+			if baseHasRawProjection {
+				reprojectCompat(&result, key, result.Additional[key])
+			}
 		}
 	}
 	return result
 }
+
+func reprojectCompat(target *provider.ModelCompat, api string, raw json.RawMessage) {
+	projected, err := decodeCompat(raw, "compat", api)
+	if err != nil {
+		return
+	}
+	switch api {
+	case OpenAICompletionsAPI:
+		target.OpenAICompletions = projected.OpenAICompletions
+	case OpenAIResponsesAPI, "azure-openai-responses", OpenAICodexResponsesAPI:
+		target.OpenAIResponses = projected.OpenAIResponses
+	case AnthropicMessagesAPI:
+		target.AnthropicMessages = projected.AnthropicMessages
+	case "bedrock-converse-stream":
+		target.Bedrock = projected.Bedrock
+	}
+}
+
+func mergeCompatObject(base, override map[string]any) map[string]any {
+	result := provider.CloneJSONMap(base)
+	if result == nil {
+		result = make(map[string]any, len(override))
+	}
+	for key, value := range provider.CloneJSONMap(override) {
+		result[key] = value
+	}
+	return result
+}
+
+func mergeCompatRaw(base, override json.RawMessage) json.RawMessage {
+	if len(base) == 0 {
+		return bytes.Clone(override)
+	}
+	var baseObject, overrideObject map[string]json.RawMessage
+	if json.Unmarshal(base, &baseObject) != nil || json.Unmarshal(override, &overrideObject) != nil || baseObject == nil || overrideObject == nil {
+		return bytes.Clone(override)
+	}
+	for key, value := range overrideObject {
+		switch key {
+		case "openRouterRouting", "vercelGatewayRouting", "chatTemplateKwargs":
+			var baseNested, overrideNested map[string]json.RawMessage
+			baseIsObject := json.Unmarshal(baseObject[key], &baseNested) == nil && baseNested != nil
+			overrideIsObject := json.Unmarshal(value, &overrideNested) == nil && overrideNested != nil
+			if baseIsObject || overrideIsObject {
+				mergedNested := make(map[string]json.RawMessage, len(baseNested)+len(overrideNested))
+				for nestedKey, nestedValue := range baseNested {
+					mergedNested[nestedKey] = bytes.Clone(nestedValue)
+				}
+				for nestedKey, nestedValue := range overrideNested {
+					mergedNested[nestedKey] = bytes.Clone(nestedValue)
+				}
+				if encoded, err := json.Marshal(mergedNested); err == nil {
+					baseObject[key] = encoded
+					continue
+				}
+			}
+		}
+		baseObject[key] = bytes.Clone(value)
+	}
+	merged, err := json.Marshal(baseObject)
+	if err != nil {
+		return bytes.Clone(override)
+	}
+	return merged
+}
 func cloneModel(m Model) Model {
 	m.Headers = cloneHeaders(m.Headers)
-	m.Input = append([]provider.InputKind(nil), m.Input...)
+	m.Input = cloneInputKinds(m.Input)
 	m.ThinkingLevelMap = cloneThinkingMap(m.ThinkingLevelMap)
 	m.Compat = cloneCompat(m.Compat)
 	m.Cost.Tiers = append([]provider.CostTier(nil), m.Cost.Tiers...)
 	m.UnsupportedFields = append([]string(nil), m.UnsupportedFields...)
 	m.UnknownFields = append([]string(nil), m.UnknownFields...)
+	m.compatRaw = bytes.Clone(m.compatRaw)
 	return m
 }
 func cloneProvider(p ProviderConfig) ProviderConfig {
@@ -2945,8 +2912,10 @@ func cloneProvider(p ProviderConfig) ProviderConfig {
 	p.Compat = cloneCompat(p.Compat)
 	p.AuthHeader = cloneBoolPointer(p.AuthHeader)
 	p.Models = append([]Model(nil), p.Models...)
+	p.APIKeyEnvironment = append([]string(nil), p.APIKeyEnvironment...)
 	p.UnknownFields = append([]string(nil), p.UnknownFields...)
 	p.UnsupportedFields = append([]string(nil), p.UnsupportedFields...)
+	p.compatRaw = bytes.Clone(p.compatRaw)
 	if p.overrides != nil {
 		sourceOverrides := p.overrides
 		p.overrides = make(map[string]modelOverride, len(sourceOverrides))
@@ -2958,7 +2927,7 @@ func cloneProvider(p ProviderConfig) ProviderConfig {
 			v.Reasoning = cloneBoolPointer(v.Reasoning)
 			v.ThinkingLevelMap = cloneThinkingMap(v.ThinkingLevelMap)
 			if v.Input != nil {
-				input := append([]provider.InputKind(nil), (*v.Input)...)
+				input := cloneInputKinds(*v.Input)
 				v.Input = &input
 			}
 			if v.Cost != nil {
@@ -2979,6 +2948,7 @@ func cloneProvider(p ProviderConfig) ProviderConfig {
 			v.Compat = cloneCompat(v.Compat)
 			v.UnsupportedFields = append([]string(nil), v.UnsupportedFields...)
 			v.UnknownFields = append([]string(nil), v.UnknownFields...)
+			v.compatRaw = bytes.Clone(v.compatRaw)
 			p.overrides[k] = v
 		}
 	}
@@ -3044,6 +3014,13 @@ func cloneStringSlice(values []string) []string {
 		return nil
 	}
 	return append([]string{}, values...)
+}
+
+func cloneInputKinds(values []provider.InputKind) []provider.InputKind {
+	if values == nil {
+		return nil
+	}
+	return append([]provider.InputKind{}, values...)
 }
 
 func cloneProviderRetrySettings(value ProviderRetrySettings) ProviderRetrySettings {

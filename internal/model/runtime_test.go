@@ -24,10 +24,11 @@ func TestRuntimeCompatMergeRecursivelyClonesNamedMapsAndSlices(t *testing.T) {
 	baseNested := namedSlice{{"value": "base"}}
 	overrideNested := map[string][]namedMap{"items": {{"value": "override"}}}
 	base := provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
-		ChatTemplateKwargs: map[string]any{"nested": baseNested},
+		ChatTemplateKwargs: map[string]any{"nested": baseNested, "baseOnly": true, "shared": "base"},
 	}}
 	override := provider.ModelCompat{OpenAICompletions: &provider.OpenAICompletionsCompat{
-		OpenRouterRouting: map[string]any{"nested": overrideNested},
+		ChatTemplateKwargs: map[string]any{"overrideOnly": true, "shared": "override"},
+		OpenRouterRouting:  map[string]any{"nested": overrideNested},
 	}}
 	merged := mergeCompat(base, override)
 	baseNested[0]["value"] = "mutated-base"
@@ -38,6 +39,9 @@ func TestRuntimeCompatMergeRecursivelyClonesNamedMapsAndSlices(t *testing.T) {
 	}
 	if got := compat.OpenRouterRouting["nested"].(map[string][]namedMap)["items"][0]["value"]; got != "override" {
 		t.Fatalf("override nested clone = %q", got)
+	}
+	if compat.ChatTemplateKwargs["baseOnly"] != true || compat.ChatTemplateKwargs["overrideOnly"] != true || compat.ChatTemplateKwargs["shared"] != "override" {
+		t.Fatalf("nested compat object was not shallow-merged: %#v", compat.ChatTemplateKwargs)
 	}
 	snapshot := cloneCompat(merged)
 	compat.ChatTemplateKwargs["nested"].(namedSlice)[0]["value"] = "mutated-result"
@@ -694,32 +698,30 @@ func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
 	}
 }
 
-func TestGeneratedBuiltinCatalogMatchesScopedUpstreamOracle(t *testing.T) {
+func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
 	if generatedCatalogSource != "@earendil-works/pi-ai@0.83.0" {
 		t.Fatalf("catalog source = %q", generatedCatalogSource)
 	}
 	models := builtinModels()
-	if len(models) != 60 {
-		t.Fatalf("builtin model count = %d, want 60", len(models))
+	if len(models) != 92 {
+		t.Fatalf("builtin model count = %d, want 92", len(models))
+	}
+	allowedAPIs := map[string]map[string]bool{
+		OpenAIProviderID:      {OpenAIResponsesAPI: true},
+		OpenAICodexProviderID: {OpenAICodexResponsesAPI: true},
+		AnthropicProviderID:   {AnthropicMessagesAPI: true},
+		"deepseek":            {OpenAICompletionsAPI: true},
+		"xai":                 {OpenAICompletionsAPI: true, OpenAIResponsesAPI: true},
+		"groq":                {OpenAICompletionsAPI: true},
+		"cerebras":            {OpenAICompletionsAPI: true},
+		"together":            {OpenAICompletionsAPI: true},
 	}
 	ids := make([]string, 0, len(models))
 	byID := make(map[string]Model, len(models))
 	for _, model := range models {
-		switch model.Provider {
-		case OpenAIProviderID:
-			if model.API != OpenAIResponsesAPI {
-				t.Fatalf("openai model %q API = %q", model.ID, model.API)
-			}
-		case OpenAICodexProviderID:
-			if model.API != OpenAICodexResponsesAPI {
-				t.Fatalf("openai-codex model %q API = %q", model.ID, model.API)
-			}
-		case AnthropicProviderID:
-			if model.API != AnthropicMessagesAPI {
-				t.Fatalf("anthropic model %q API = %q", model.ID, model.API)
-			}
-		default:
-			t.Fatalf("out-of-scope generated provider %q", model.Provider)
+		allowed, registered := allowedAPIs[model.Provider]
+		if !registered || !allowed[model.API] {
+			t.Fatalf("generated model %s/%s API = %q", model.Provider, model.ID, model.API)
 		}
 		key := model.Provider + "/" + model.ID
 		if _, duplicate := byID[key]; duplicate {
@@ -847,17 +849,33 @@ func TestRuntimeModelOverrideDoesNotEraseBuiltinMetadata(t *testing.T) {
 	}
 }
 
-func TestRuntimeDuplicateJSONCFieldsAreRejectedAtEveryDepth(t *testing.T) {
-	for _, content := range []string{
-		`{"providers":{"openai":{"api":"openai-responses","api":"future-secret"}}}`,
-		`{"providers":{"openai":{"models":[{"id":"one","api":"openai-responses","nested":{"x":1,"x":2}}]}}}`,
-		`{"providers":{"openai":{"models":[{"id":"one","api":"openai-responses","nested":[{"x":1,"x":2}]}]}}}`,
-	} {
-		path := filepath.Join(t.TempDir(), "models.json")
-		writeFile(t, path, content)
-		if _, err := loadModels(path); err == nil || !strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "future-secret") {
-			t.Fatalf("loadModels duplicate = %v", err)
+func TestRuntimeDuplicateJSONCFieldsUseJSONParseLastValueSemantics(t *testing.T) {
+	content := `{"providers":{"fixture":{"api":"future-api","api":"openai-completions","baseUrl":"https://example.test/v1","apiKey":"key","models":[{"id":"one","nested":{"x":1,"x":2},"future":[{"x":1,"x":2}]}]}}}`
+	r, _, _ := newTestRuntime(t, content, "", false)
+	selected, ok := r.GetModel("fixture", "one")
+	if !ok || selected.API != OpenAICompletionsAPI {
+		t.Fatalf("last duplicate value was not retained: %#v, %t", selected, ok)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", selected), "future-api") {
+		t.Fatalf("overwritten or unknown duplicate metadata leaked: %#v", selected)
+	}
+}
+
+func TestRuntimeDuplicateModelDefinitionsUseSequentialUpsertSemantics(t *testing.T) {
+	content := `{"providers":{"fixture":{"api":"openai-completions","baseUrl":"https://example.test/v1","apiKey":"key","models":[{"id":"one","name":"first","reasoning":false},{"id":"one","name":"second","reasoning":true}]}}}`
+	r, _, _ := newTestRuntime(t, content, "", false)
+	selected, ok := r.GetModel("fixture", "one")
+	if !ok || selected.Name != "second" || !selected.Reasoning {
+		t.Fatalf("last model upsert was not retained: %#v, %t", selected, ok)
+	}
+	count := 0
+	for _, candidate := range r.GetModels("fixture") {
+		if candidate.ID == "one" {
+			count++
 		}
+	}
+	if count != 1 {
+		t.Fatalf("duplicate model definitions published %d entries", count)
 	}
 }
 
@@ -876,11 +894,14 @@ func TestRuntimeRejectsMissingModelIDAndNullModelsArray(t *testing.T) {
 
 func TestRuntimeRejectsNullKnownModelFieldsWithoutLeakingUnknownMetadata(t *testing.T) {
 	for _, models := range []string{
+		`{"providers":{"custom":{"oauth":"not-radius","baseUrl":"https://example.test"}}}`,
+		`{"providers":{"custom":{"oauth":null,"baseUrl":"https://example.test"}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","authHeader":null,"future":"secret-value"}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","headers":null,"future":"secret-value"}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","reasoning":null,"future":"secret-value"}]}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","headers":null,"future":"secret-value"}]}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","thinkingLevelMap":null,"future":"secret-value"}]}}}`,
+		`{"providers":{"custom":{"api":"openai-completions","models":[{"id":"fixture","cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"tiers":[{"inputTokensAbove":1,"input":0,"output":0,"cacheRead":0}]}}]}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"reasoning":null,"future":"secret-value"}}}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"headers":null,"future":"secret-value"}}}}}`,
 		`{"providers":{"custom":{"api":"openai-completions","modelOverrides":{"fixture":{"thinkingLevelMap":null,"future":"secret-value"}}}}}`,
@@ -893,8 +914,33 @@ func TestRuntimeRejectsNullKnownModelFieldsWithoutLeakingUnknownMetadata(t *test
 	}
 }
 
-func TestRuntimeUnknownModelsJSONFieldsAreIgnoredLikeOpenTypeBoxObjects(t *testing.T) {
-	r, _, _ := newTestRuntime(t, `{"providers":{"future":{"compat":{"token":"do-not-leak"},"models":[{"id":"ignored","api":"openai-responses"}]},"openai":{"models":[{"id":"supported","api":"openai-responses"}]}}}`, "", false)
+func TestRuntimeCompositionErrorsAreProviderScopedAndKeepBuiltinFallback(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{},"broken":{"models":[{"id":"missing-base","api":"openai-responses"}]},"valid":{"baseUrl":"https://valid.example/v1","models":[{"id":"one","api":"openai-responses"}]}}}`, "", false)
+	err := r.Error()
+	if err == nil || !strings.Contains(err.Error(), "providers.openai") || !strings.Contains(err.Error(), "providers.broken") {
+		t.Fatalf("provider-scoped composition errors = %v", err)
+	}
+	if _, ok := r.GetModel(OpenAIProviderID, DefaultOpenAIModel); !ok {
+		t.Fatal("invalid OpenAI overlay removed the builtin fallback")
+	}
+	if _, ok := r.GetProvider("broken"); ok {
+		t.Fatal("invalid custom provider was registered")
+	}
+	if selected, ok := r.GetModel("valid", "one"); !ok || selected.BaseURL != "https://valid.example/v1" {
+		t.Fatalf("valid neighboring provider = %#v, %t", selected, ok)
+	}
+}
+
+func TestRuntimeCustomModelsInheritAPIAndBaseURLFromFirstDefinition(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"custom":{"models":[{"id":"first","api":"openai-completions","baseUrl":"https://custom.example/v1"},{"id":"second","compat":{"supportsStore":true}}]}}}`, "", false)
+	second, ok := r.GetModel("custom", "second")
+	if !ok || second.API != OpenAICompletionsAPI || second.BaseURL != "https://custom.example/v1" || second.Compat.OpenAICompletions == nil || second.Compat.OpenAICompletions.SupportsStore == nil || !*second.Compat.OpenAICompletions.SupportsStore {
+		t.Fatalf("second custom model defaults = %#v, %t", second, ok)
+	}
+}
+
+func TestRuntimeUnknownModelsJSONFieldsStayOpenWithoutChangingKnownProjection(t *testing.T) {
+	r, _, _ := newTestRuntime(t, `{"providers":{"future":{"baseUrl":"https://future.example/v1","compat":{"token":"do-not-leak"},"models":[{"id":"ignored","api":"openai-responses"}]},"openai":{"models":[{"id":"supported","api":"openai-responses"}]}}}`, "", false)
 	openAI, err := r.Resolve(Selection{Provider: "openai", Model: "supported"})
 	if err != nil || r.ValidateRoute(openAI.Model) != nil {
 		t.Fatalf("unselected future provider must not block openai: %#v, %v", openAI, err)
@@ -903,60 +949,109 @@ func TestRuntimeUnknownModelsJSONFieldsAreIgnoredLikeOpenTypeBoxObjects(t *testi
 	if err != nil || r.ValidateRoute(future.Model) != nil {
 		t.Fatalf("unknown compat members must be ignored on a supported route: %#v, %v", future, err)
 	}
+	if raw := future.Model.Compat.Additional[future.Model.API]; !strings.Contains(string(raw), `"token":"do-not-leak"`) {
+		t.Fatalf("open provider compat was not preserved: %s", raw)
+	}
 	overridden, _, err := newTestRuntimeNoFatal(t, `{"providers":{"openai":{"modelOverrides":{"custom":{"compat":{"token":"do-not-leak"}}}}}}`, "", false)
 	if err != nil {
 		t.Fatalf("unknown override compatibility must be ignored without leaking values: %v", err)
 	}
 	resolved, err := overridden.Resolve(Selection{Provider: "openai", Model: "custom"})
-	if err != nil || overridden.ValidateRoute(resolved.Model) != nil || strings.Contains(fmt.Sprintf("%#v", resolved.Model.Compat), "do-not-leak") {
+	if err != nil || overridden.ValidateRoute(resolved.Model) != nil {
 		t.Fatalf("unknown override changed the supported projection: %#v, %v", resolved, err)
+	}
+	if raw := resolved.Model.Compat.Additional[resolved.Model.API]; !strings.Contains(string(raw), `"token":"do-not-leak"`) {
+		t.Fatalf("open override compat was not preserved: %s", raw)
 	}
 }
 
-func TestRuntimeRejectsNullAndInvalidKnownCompatFieldsAtProviderAndModelLevel(t *testing.T) {
-	testCases := []struct {
-		name, api, compat string
-	}{
-		{name: "responses bool null", api: OpenAIResponsesAPI, compat: `{"supportsDeveloperRole":null}`},
-		{name: "chat bool null", api: OpenAICompletionsAPI, compat: `{"supportsStore":null}`},
-		{name: "chat literal null", api: OpenAICompletionsAPI, compat: `{"maxTokensField":null}`},
-		{name: "chat literal invalid", api: OpenAICompletionsAPI, compat: `{"thinkingFormat":"future"}`},
-		{name: "cache literal invalid", api: OpenAICompletionsAPI, compat: `{"cacheControlFormat":"openai"}`},
-		{name: "deferred literal invalid", api: OpenAICompletionsAPI, compat: `{"deferredToolsMode":"all"}`},
-		{name: "chat template descriptor null", api: OpenAICompletionsAPI, compat: `{"chatTemplateKwargs":{"effort":{"$var":null}}}`},
-		{name: "openrouter nested null", api: OpenAICompletionsAPI, compat: `{"openRouterRouting":{"allow_fallbacks":null}}`},
-		{name: "vercel nested type", api: OpenAICompletionsAPI, compat: `{"vercelGatewayRouting":{"only":[1]}}`},
-		{name: "anthropic bool null", api: AnthropicMessagesAPI, compat: `{"forceAdaptiveThinking":null}`},
-	}
+func TestRuntimeMatchesOpenProviderCompatUnionValidation(t *testing.T) {
+	// The original ProviderCompatSchema is a union of three open TypeBox
+	// objects. supportsLongCacheRetention is the only property present in every
+	// branch, so it is the only property that every branch constrains.
 	for _, level := range []string{"provider", "model"} {
-		for _, testCase := range testCases {
-			t.Run(level+"/"+testCase.name, func(t *testing.T) {
+		for _, invalid := range []string{"null", `"not-a-boolean"`} {
+			t.Run(level+"/common-field-"+invalid, func(t *testing.T) {
 				providerCompat, modelCompat := "", ""
+				compat := `{"supportsLongCacheRetention":` + invalid + `}`
 				if level == "provider" {
-					providerCompat = `,"compat":` + testCase.compat
+					providerCompat = `,"compat":` + compat
 				} else {
-					modelCompat = `,"compat":` + testCase.compat
+					modelCompat = `,"compat":` + compat
 				}
-				models := fmt.Sprintf(`{"providers":{"fixture":{"api":%q%s,"models":[{"id":"m"%s}]}}}`, testCase.api, providerCompat, modelCompat)
-				if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "compat") {
-					t.Fatalf("NewRuntime() error = %v, want compat validation failure", err)
+				models := fmt.Sprintf(`{"providers":{"fixture":{"api":"openai-completions","baseUrl":"https://fixture.example/v1"%s,"models":[{"id":"m"%s}]}}}`, providerCompat, modelCompat)
+				if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "supportsLongCacheRetention") {
+					t.Fatalf("NewRuntime() error = %v, want common compat field validation failure", err)
 				}
 			})
 		}
 	}
-	// Provider compat is schema-checked before a per-model API is selected. An
-	// omitted provider API must not turn a known null field into opaque metadata.
-	models := `{"providers":{"fixture":{"compat":{"supportsStore":null},"models":[{"id":"m","api":"openai-completions"}]}}}`
-	if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "compat") {
+
+	// A branch-specific invalid value still matches another open union branch
+	// upstream. Preserve it in the forward-compatible raw object, but do not put
+	// an invalid value into a typed Go adapter contract.
+	openCompat := `{"supportsStore":null,"thinkingFormat":"future","openRouterRouting":"future-routing"}`
+	for _, level := range []string{"provider", "model"} {
+		t.Run(level+"/branch-specific-fields-stay-open", func(t *testing.T) {
+			providerCompat, modelCompat := "", ""
+			if level == "provider" {
+				providerCompat = `,"compat":` + openCompat
+			} else {
+				modelCompat = `,"compat":` + openCompat
+			}
+			models := fmt.Sprintf(`{"providers":{"fixture":{"api":"openai-completions","baseUrl":"https://fixture.example/v1"%s,"models":[{"id":"m"%s}]}}}`, providerCompat, modelCompat)
+			runtime, _, err := newTestRuntimeNoFatal(t, models, "", false)
+			if err != nil {
+				t.Fatalf("open union field was rejected: %v", err)
+			}
+			selected, ok := runtime.GetModel("fixture", "m")
+			if !ok || selected.Compat.OpenAICompletions == nil {
+				t.Fatalf("selected model = %#v, %t", selected, ok)
+			}
+			typed := selected.Compat.OpenAICompletions
+			if typed.SupportsStore != nil || typed.ThinkingFormat != nil || typed.OpenRouterRouting != nil {
+				t.Fatalf("invalid open values entered typed adapter projection: %#v", typed)
+			}
+			raw := string(selected.Compat.Additional[OpenAICompletionsAPI])
+			for _, fragment := range []string{`"supportsStore":null`, `"thinkingFormat":"future"`, `"openRouterRouting":"future-routing"`} {
+				if !strings.Contains(raw, fragment) {
+					t.Fatalf("raw compat lost %s: %s", fragment, raw)
+				}
+			}
+		})
+	}
+
+	// Validation is schema-level and does not depend on selecting a provider API.
+	models := `{"providers":{"fixture":{"baseUrl":"https://fixture.example/v1","compat":{"supportsLongCacheRetention":null},"models":[{"id":"m","api":"openai-completions"}]}}}`
+	if _, _, err := newTestRuntimeNoFatal(t, models, "", false); err == nil || !strings.Contains(err.Error(), "supportsLongCacheRetention") {
 		t.Fatalf("provider compat without provider API error = %v, want schema failure", err)
 	}
 }
 
 func TestRuntimeKeepsCompatObjectsOpenForUnknownKeys(t *testing.T) {
-	runtime, _, _ := newTestRuntime(t, `{"providers":{"fixture":{"api":"openai-completions","compat":{"futureSetting":null},"models":[{"id":"m","compat":{"futureNested":{"secret":true}}}]}}}`, "", false)
+	runtime, _, _ := newTestRuntime(t, `{"providers":{"fixture":{"api":"openai-completions","baseUrl":"https://fixture.example/v1","compat":{"futureSetting":null},"models":[{"id":"m","compat":{"futureNested":{"secret":true}}}]}}}`, "", false)
 	resolved, err := runtime.Resolve(Selection{Provider: "fixture", Model: "m"})
 	if err != nil || resolved.Model.Compat.OpenAICompletions == nil {
 		t.Fatalf("open compat object = %#v, %v", resolved, err)
+	}
+}
+
+func TestRuntimeProjectsProviderCompatAfterPerModelAPISelection(t *testing.T) {
+	runtime, _, _ := newTestRuntime(t, `{"providers":{"fixture":{"baseUrl":"https://example.test/v1","apiKey":"key","compat":{"supportsStore":true,"maxTokensField":"max_tokens","thinkingFormat":"openai","openRouterRouting":{"order":["first"],"shared":"provider"}},"models":[{"id":"chat","api":"openai-completions","compat":{"supportsStore":null,"supportsDeveloperRole":false,"thinkingFormat":"future","openRouterRouting":{"only":["second"],"shared":"model"}}}]}}}`, "", false)
+	selected, ok := runtime.GetModel("fixture", "chat")
+	if !ok || selected.Compat.OpenAICompletions == nil || selected.Compat.OpenAICompletions.MaxTokensField == nil || *selected.Compat.OpenAICompletions.MaxTokensField != "max_tokens" || selected.Compat.OpenAICompletions.SupportsDeveloperRole == nil || *selected.Compat.OpenAICompletions.SupportsDeveloperRole {
+		t.Fatalf("deferred provider compat = %#v, %t", selected.Compat, ok)
+	}
+	if selected.Compat.OpenAICompletions.SupportsStore != nil || selected.Compat.OpenAICompletions.ThinkingFormat != nil {
+		t.Fatalf("open union override did not clear the inherited typed projection: %#v", selected.Compat.OpenAICompletions)
+	}
+	routing := selected.Compat.OpenAICompletions.OpenRouterRouting
+	if !reflect.DeepEqual(routing["order"], []any{"first"}) || !reflect.DeepEqual(routing["only"], []any{"second"}) || routing["shared"] != "model" {
+		t.Fatalf("nested provider/model compat merge = %#v", routing)
+	}
+	raw := string(selected.Compat.Additional[OpenAICompletionsAPI])
+	if !strings.Contains(raw, `"supportsStore":null`) || !strings.Contains(raw, `"thinkingFormat":"future"`) || !strings.Contains(raw, `"supportsDeveloperRole":false`) || !strings.Contains(raw, `"order":["first"]`) || !strings.Contains(raw, `"only":["second"]`) {
+		t.Fatalf("raw compat overlay = %s", raw)
 	}
 }
 
@@ -972,46 +1067,60 @@ func TestRuntimeUnknownNestedOverrideFieldsDoNotEnterProjection(t *testing.T) {
 	if resolved.Model.Cost.Input != 7 || resolved.Model.ThinkingLevelMap[provider.ThinkingHigh] == nil || *resolved.Model.ThinkingLevelMap[provider.ThinkingHigh] != "high" {
 		t.Fatalf("known overrides were not applied: %#v", resolved.Model)
 	}
-	if _, present := resolved.Model.ThinkingLevelMap[provider.ThinkingLevel("future-level")]; present || strings.Contains(fmt.Sprintf("%#v", resolved.Model), "secret") {
+	if _, present := resolved.Model.ThinkingLevelMap[provider.ThinkingLevel("future-level")]; present {
 		t.Fatalf("unknown nested fields entered runtime projection: %#v", resolved.Model)
+	}
+	if raw := resolved.Model.Compat.Additional[resolved.Model.API]; !strings.Contains(string(raw), `"futureCompat":"secret"`) {
+		t.Fatalf("open nested compat was not preserved: %s", raw)
 	}
 }
 
-func TestRuntimeCanonicalIdentifiersRejectDuplicatesAndApplyOverrides(t *testing.T) {
-	for _, pair := range [][2]string{{"OpenAI", "openai"}, {"K", "K"}, {"Σ", "ς"}} {
-		if !strings.EqualFold(pair[0], pair[1]) || canonicalKey(pair[0]) != canonicalKey(pair[1]) {
-			t.Fatalf("canonical mismatch for %q and %q", pair[0], pair[1])
-		}
+func TestRuntimeProviderAndModelIdentityIsCaseSensitiveLikePiMaps(t *testing.T) {
+	models := `{"providers":{"OpenAI":{"api":"openai-responses","baseUrl":"https://case.example/v1","apiKey":"key","models":[{"id":"MODEL"},{"id":"model"}]},"openai":{"modelOverrides":{"GPT-5.5":{"compat":{"supportsDeveloperRole":false}},"gpt-5.5":{"compat":{"supportsDeveloperRole":true}}}}}}`
+	path := filepath.Join(t.TempDir(), "models.json")
+	writeFile(t, path, models)
+	loaded, err := loadModels(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.EqualFold("İ", "i") || canonicalKey("İ") == canonicalKey("i") {
-		t.Fatal("canonical key collapsed identifiers outside strings.EqualFold")
+	if len(loaded) != 2 || loaded["OpenAI"].ID != "OpenAI" || loaded["openai"].ID != "openai" || len(loaded["OpenAI"].Models) != 2 {
+		t.Fatalf("case-sensitive config = %#v", loaded)
 	}
-	for _, content := range []string{
-		`{"providers":{"OpenAI":{},"openai":{}}}`,
-		`{"providers":{"openai":{"modelOverrides":{"GPT-5.5":{},"gpt-5.5":{}}}}}`,
-	} {
-		path := filepath.Join(t.TempDir(), "models.json")
-		writeFile(t, path, content)
-		if _, err := loadModels(path); err == nil || !strings.Contains(err.Error(), "case-fold duplicate") {
-			t.Fatalf("case-fold duplicate = %v", err)
-		}
+	r, _, _ := newTestRuntime(t, models, "", false)
+	if _, ok := r.Provider("OpenAI"); !ok {
+		t.Fatal("mixed-case provider was not retained")
 	}
-	r, _, _ := newTestRuntime(t, `{"providers":{"OpEnAi":{"modelOverrides":{"GPT-5.5":{"compat":{"supportsStore":false}},"CUSTOM":{"futureOption":"case-secret"}}}}}`, "", false)
-	for _, selection := range []Selection{{Provider: "OPENAI", Model: "gPt-5.5"}, {Provider: "openai", Model: "custom"}} {
-		resolved, err := r.Resolve(selection)
-		if err != nil {
-			t.Fatalf("resolve %#v: %v", selection, err)
-		}
-		err = r.ValidateRoute(resolved.Model)
-		if err != nil {
-			t.Fatalf("canonical supported builtin override = %v", err)
-		}
-		if strings.Contains(fmt.Sprintf("%#v", resolved.Model), "case-secret") {
-			t.Fatalf("unknown custom override entered runtime behavior: %#v", resolved.Model)
-		}
-		if resolved.Model.Provider != OpenAIProviderID {
-			t.Fatalf("provider was not canonical: %#v", resolved.Model)
-		}
+	if _, ok := r.Provider("OPENAI"); ok {
+		t.Fatal("provider lookup unexpectedly folded case")
+	}
+	upper, upperOK := r.GetModel("OpenAI", "MODEL")
+	lower, lowerOK := r.GetModel("OpenAI", "model")
+	if !upperOK || !lowerOK || upper.ID == lower.ID {
+		t.Fatalf("case-distinct models = %#v/%t %#v/%t", upper, upperOK, lower, lowerOK)
+	}
+	builtin, ok := r.GetModel("openai", "gpt-5.5")
+	if !ok || builtin.Compat.OpenAIResponses == nil {
+		t.Fatalf("exact builtin override = %#v, %t", builtin, ok)
+	}
+	// The differently-cased override key is a distinct, unmatched model id and
+	// cannot overwrite the builtin entry.
+	if builtin.Compat.OpenAIResponses.SupportsDeveloperRole == nil || !*builtin.Compat.OpenAIResponses.SupportsDeveloperRole {
+		t.Fatalf("case-distinct override leaked into builtin: %#v", builtin.Compat)
+	}
+}
+
+func TestRuntimePreservesModelsJSONValuesWithoutGoOnlyPolicyClamps(t *testing.T) {
+	models := `{"providers":{"fixture":{"api":"openai-responses","baseUrl":"https://example.test/v1","apiKey":"key","models":[{"id":"open-values","input":[],"cost":{"input":-1,"output":-2,"cacheRead":-3,"cacheWrite":-4,"tiers":[{"inputTokensAbove":100.5,"input":-5,"output":0,"cacheRead":0,"cacheWrite":0},{"inputTokensAbove":-0.5,"input":-6,"output":0,"cacheRead":0,"cacheWrite":0}]},"contextWindow":100,"maxTokens":200}]}}}`
+	r, _, _ := newTestRuntime(t, models, "", false)
+	selected, ok := r.GetModel("fixture", "open-values")
+	if !ok {
+		t.Fatal("custom model missing")
+	}
+	if len(selected.Input) != 0 || selected.Cost.Input != -1 || len(selected.Cost.Tiers) != 2 || selected.Cost.Tiers[0].InputTokensAbove != 100.5 || selected.Cost.Tiers[1].InputTokensAbove != -0.5 || selected.ContextWindow != 100 || selected.MaxTokens != 200 {
+		t.Fatalf("models.json values were normalized: %#v", selected)
+	}
+	if _, err := selected.Ref(); err != nil {
+		t.Fatalf("provider model rejected upstream-valid values: %v", err)
 	}
 }
 
@@ -1035,18 +1144,27 @@ func TestRuntimeCustomFallbackUsesOriginalProviderDefaultBaseline(t *testing.T) 
 	}
 }
 
-func TestRuntimeStrictDiagnosticsAndKeepsLastHealthySnapshot(t *testing.T) {
+func TestRuntimeInvalidModelsJSONPublishesBuiltinFallbackAndDiagnostic(t *testing.T) {
 	r, agent, _ := newTestRuntime(t, `{"providers":{"openai":{"models":[{"id":"first","api":"openai-responses"}]}}}`, "", false)
 	before := r.Snapshot()
-	writeFile(t, filepath.Join(agent, "models.json"), `{"providers":{"openai":{"models":[{"id":"dup"},{"id":"dup"}]}}}`)
-	err := r.Reload(context.Background())
+	writeFile(t, filepath.Join(agent, "models.json"), `{"providers":{"openai":{"models":null}}}`)
+	if err := r.Reload(context.Background()); err != nil {
+		t.Fatalf("non-fatal models reload = %v", err)
+	}
+	err := r.Error()
 	var diagnostic Diagnostic
-	if !errors.As(err, &diagnostic) || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("reload error = %v", err)
+	if !errors.As(err, &diagnostic) || !strings.Contains(err.Error(), "models") {
+		t.Fatalf("runtime diagnostic = %v", err)
 	}
 	after := r.Snapshot()
-	if after.Generation != before.Generation || len(after.Models) != len(before.Models) {
-		t.Fatalf("unhealthy reload published %#v -> %#v", before, after)
+	if after.Generation != before.Generation+1 {
+		t.Fatalf("fallback generation = %d, want %d", after.Generation, before.Generation+1)
+	}
+	if _, ok := r.GetModel("openai", "first"); ok {
+		t.Fatal("invalid custom config remained published")
+	}
+	if _, ok := r.GetModel(OpenAIProviderID, DefaultOpenAIModel); !ok {
+		t.Fatal("builtin fallback catalog was not retained")
 	}
 }
 
@@ -1116,6 +1234,9 @@ func newTestRuntimeNoFatal(t *testing.T, models, settings string, trusted bool) 
 		writeFile(t, filepath.Join(agent, "settings.json"), settings)
 	}
 	r, err := NewRuntime(Options{AgentDir: agent, WorkingDir: cwd, ProjectTrusted: trusted})
+	if err == nil && r != nil && r.Error() != nil {
+		err = r.Error()
+	}
 	return r, cwd, err
 }
 

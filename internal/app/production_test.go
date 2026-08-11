@@ -180,6 +180,38 @@ func TestRunProductionRoutesOpenAIChatCompletionsModel(t *testing.T) {
 	}
 }
 
+func TestRunProductionRoutesBuiltinDeepSeekWithProviderEnvironment(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	capture := &capturedProductionRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := capture.record(r); err != nil {
+			t.Errorf("record: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"deepseek answer"},"finish_reason":null}]}`+"\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	models, err := json.Marshal(map[string]any{"providers": map[string]any{"deepseek": map[string]any{"baseUrl": server.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), models, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := productionTestConfig(workingDir, agentDir, []string{"DEEPSEEK_API_KEY=deepseek-key"})
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), config, []string{
+		"--model", "deepseek/deepseek-v4-pro", "--session", filepath.Join(workingDir, "deepseek.jsonl"), "-p", "hello",
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stdout.String() != "deepseek answer\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	request := capture.snapshot()
+	if request.path != "/chat/completions" || request.authorization != "Bearer deepseek-key" || request.payload["model"] != "deepseek-v4-pro" {
+		t.Fatalf("DeepSeek request = %#v", request)
+	}
+}
+
 func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -1045,7 +1077,7 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 					t.Fatal(err)
 				}
 			},
-			want:    "parse models.json",
+			want:    "Model configuration: models.json",
 			secrets: []string{"ambient-secret", "models-secret", "trailing-secret"},
 		},
 		{
@@ -1176,10 +1208,10 @@ func TestRunProductionIgnoresUnknownModelsJSONFields(t *testing.T) {
 			},
 		},
 		{
-			name:  "mixed-case model override compat",
-			model: "OPENAI/gpt-5.5",
+			name:  "case-distinct model override compat",
+			model: "openai/gpt-5.5",
 			prepare: func(t *testing.T, agentDir, baseURL string) {
-				content, err := json.Marshal(map[string]any{"providers": map[string]any{"OpEnAi": map[string]any{
+				content, err := json.Marshal(map[string]any{"providers": map[string]any{"openai": map[string]any{
 					"baseUrl": baseURL, "apiKey": "fixture-key",
 					"modelOverrides": map[string]any{"GPT-5.5": map[string]any{"compat": map[string]any{"token": "must-not-enter-request"}}},
 				}}})

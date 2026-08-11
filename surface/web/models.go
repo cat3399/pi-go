@@ -1,12 +1,10 @@
 package web
 
 import (
-	"fmt"
-	"sort"
+	"context"
 	"strings"
 
 	"github.com/cat3399/pi-go/internal/application"
-	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -23,10 +21,11 @@ type modelsWire struct {
 	ThinkingLevels     map[string][]provider.ThinkingLevel           `json:"thinkingLevels"`
 	ThinkingLevelMaps  map[string]map[provider.ThinkingLevel]*string `json:"thinkingLevelMaps"`
 	ThinkingLevelPins  map[string]provider.ThinkingLevel             `json:"thinkingLevelPins"`
+	ModelError         string                                        `json:"modelError,omitempty"`
 	ModelScopeWarnings []string                                      `json:"modelScopeWarnings,omitempty"`
 }
 
-func models(api application.API, cwd string) (modelsWire, error) {
+func models(ctx context.Context, api application.API, cwd string) (modelsWire, error) {
 	if strings.TrimSpace(cwd) == "" {
 		cwd = api.DefaultCWD()
 	}
@@ -34,63 +33,28 @@ func models(api application.API, cwd string) (modelsWire, error) {
 	if err != nil {
 		return modelsWire{}, err
 	}
-	runtime, err := modelcatalog.NewRuntime(modelcatalog.Options{
-		AgentDir: api.AgentDir(), WorkingDir: resolved, ProjectTrusted: false,
-	})
+	snapshot, err := api.ListModels(ctx, resolved)
 	if err != nil {
-		return modelsWire{}, fmt.Errorf("load model catalog: %w", err)
+		return modelsWire{}, err
 	}
-	snapshot := runtime.Snapshot()
-	visible := append([]modelcatalog.Model(nil), snapshot.Models...)
-	pins := make(map[string]provider.ThinkingLevel)
-	warnings := []string{}
-	if len(snapshot.Settings.EnabledModels) != 0 {
-		scope := modelcatalog.ResolveModelScope(snapshot.Settings.EnabledModels, snapshot.Models)
-		visible = make([]modelcatalog.Model, 0, len(scope.ScopedModels))
-		for _, scoped := range scope.ScopedModels {
-			visible = append(visible, scoped.Model)
-			if scoped.ThinkingLevel != nil {
-				pins[scoped.Model.Provider+"/"+scoped.Model.ID] = *scoped.ThinkingLevel
-			}
-		}
-		for _, diagnostic := range scope.Diagnostics {
-			warnings = append(warnings, diagnostic.Message)
-		}
-	}
-	sort.SliceStable(visible, func(left, right int) bool {
-		leftName := strings.ToLower(visible[left].Name)
-		rightName := strings.ToLower(visible[right].Name)
-		if leftName != rightName {
-			return leftName < rightName
-		}
-		if visible[left].Provider != visible[right].Provider {
-			return visible[left].Provider < visible[right].Provider
-		}
-		return visible[left].ID < visible[right].ID
-	})
 	result := modelsWire{
-		Models: make(map[string]string, len(visible)), ModelList: make([]modelListItemWire, 0, len(visible)),
-		ThinkingLevels:    make(map[string][]provider.ThinkingLevel, len(visible)),
+		Models: make(map[string]string, len(snapshot.Models)), ModelList: make([]modelListItemWire, 0, len(snapshot.Models)),
+		ThinkingLevels:    make(map[string][]provider.ThinkingLevel, len(snapshot.Models)),
 		ThinkingLevelMaps: make(map[string]map[provider.ThinkingLevel]*string),
-		ThinkingLevelPins: pins, ModelScopeWarnings: warnings,
+		ThinkingLevelPins: snapshot.ThinkingLevelPins, ModelError: snapshot.Diagnostic,
+		ModelScopeWarnings: snapshot.ModelScopeWarnings,
 	}
-	for _, candidate := range visible {
+	for _, candidate := range snapshot.Models {
 		key := candidate.Provider + ":" + candidate.ID
 		result.Models[key] = candidate.Name
 		result.ModelList = append(result.ModelList, modelListItemWire{ID: candidate.ID, Name: candidate.Name, Provider: candidate.Provider})
-		ref, refErr := candidate.Ref()
-		if refErr == nil {
-			result.ThinkingLevels[key] = ref.SupportedThinkingLevels()
-		}
+		result.ThinkingLevels[key] = append([]provider.ThinkingLevel(nil), candidate.ThinkingLevels...)
 		if len(candidate.ThinkingLevelMap) != 0 {
 			result.ThinkingLevelMaps[key] = cloneThinkingLevelMap(candidate.ThinkingLevelMap)
 		}
-		if result.DefaultModel == nil && candidate.Provider == snapshot.Settings.DefaultProvider && candidate.ID == snapshot.Settings.DefaultModel {
-			result.DefaultModel = &selectedModelWire{Provider: candidate.Provider, ModelID: candidate.ID}
-		}
 	}
-	if result.DefaultModel == nil && len(visible) != 0 {
-		result.DefaultModel = &selectedModelWire{Provider: visible[0].Provider, ModelID: visible[0].ID}
+	if snapshot.DefaultModel != nil {
+		result.DefaultModel = &selectedModelWire{Provider: snapshot.DefaultModel.Provider, ModelID: snapshot.DefaultModel.ModelID}
 	}
 	return result, nil
 }

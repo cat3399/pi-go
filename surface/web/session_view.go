@@ -158,10 +158,14 @@ func entryToUIMessage(entry session.Entry, deferThinking, deferMedia bool) (json
 		if len(message) == 0 || !json.Valid(message) {
 			return nil, false, nil
 		}
-		if !deferThinking && !deferMedia {
-			return append(json.RawMessage(nil), message...), true, nil
+		normalized, err := normalizeHistoryToolCalls(message)
+		if err != nil {
+			return nil, false, err
 		}
-		deferred, err := deferHistoryMedia(message, deferThinking, deferMedia)
+		if !deferThinking && !deferMedia {
+			return normalized, true, nil
+		}
+		deferred, err := deferHistoryMedia(normalized, deferThinking, deferMedia)
 		return deferred, true, err
 	case "compaction":
 		var payload struct {
@@ -209,6 +213,53 @@ func entryToUIMessage(entry session.Entry, deferThinking, deferMedia bool) (json
 	default:
 		return nil, false, nil
 	}
+}
+
+// normalizeHistoryToolCalls ports pi-web's session-reader normalization. Pi's
+// durable message format stores tool calls as id/name/arguments, while the Web
+// view consumes toolCallId/toolName/input. Live events perform the same
+// projection in the browser before rendering.
+func normalizeHistoryToolCalls(message json.RawMessage) (json.RawMessage, error) {
+	var value map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(message))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	if value["role"] != "assistant" {
+		return append(json.RawMessage(nil), message...), nil
+	}
+	content, ok := value["content"].([]any)
+	if !ok {
+		return append(json.RawMessage(nil), message...), nil
+	}
+	for index, rawBlock := range content {
+		block, ok := rawBlock.(map[string]any)
+		if !ok || block["type"] != "toolCall" {
+			continue
+		}
+		toolCallID, ok := block["toolCallId"].(string)
+		if !ok {
+			toolCallID, _ = block["id"].(string)
+		}
+		toolName, ok := block["toolName"].(string)
+		if !ok {
+			toolName, _ = block["name"].(string)
+		}
+		input, ok := block["input"].(map[string]any)
+		if !ok {
+			input, _ = block["arguments"].(map[string]any)
+		}
+		if input == nil {
+			input = map[string]any{}
+		}
+		content[index] = map[string]any{
+			"type": "toolCall", "toolCallId": toolCallID,
+			"toolName": toolName, "input": input,
+		}
+	}
+	encoded, err := json.Marshal(value)
+	return json.RawMessage(encoded), err
 }
 
 func marshalRaw(value any) (json.RawMessage, bool, error) {

@@ -14,17 +14,16 @@ import (
 //go:generate go run ./cataloggen
 
 // generatedCatalogData is the scoped JSON emitted by pi-ai's catalog
-// generator. Only the four API dialects registered by this assembly are
-// present (OpenAI Responses, OpenAI Codex Responses, Anthropic Messages; Chat
-// Completions remains user/provider configured because there is no extra
-// built-in provider in scope).
+// generator. It contains only providers whose API dialects are registered by
+// this assembly.
 //
 //go:embed catalogdata/*.json
 var generatedCatalogData embed.FS
 
 type catalogOracle struct {
-	Provider, API, SHA256 string
-	Count                 int
+	Provider, SHA256 string
+	APIs             []string
+	Count            int
 }
 
 type generatedCatalogModel struct {
@@ -54,29 +53,36 @@ func generatedBuiltinModels() []Model {
 			panic("generated catalog oracle mismatch for " + file)
 		}
 		var groups map[string]map[string]generatedCatalogModel
-		if err := json.Unmarshal(raw, &groups); err != nil || len(groups) != 1 {
+		if err := json.Unmarshal(raw, &groups); err != nil || len(groups) != len(oracle.APIs) {
 			panic(fmt.Sprintf("decode generated catalog %s: %v", file, err))
 		}
-		entries := groups[oracle.API]
-		if len(entries) != oracle.Count {
-			panic(fmt.Sprintf("generated catalog %s has %d models, want %d", file, len(entries), oracle.Count))
-		}
-		for id, wire := range entries {
-			if id != wire.ID || wire.Provider != oracle.Provider || wire.API != oracle.API {
-				panic("generated catalog identity mismatch for " + oracle.Provider + "/" + id)
+		count := 0
+		for _, api := range oracle.APIs {
+			entries, ok := groups[api]
+			if !ok {
+				panic("generated catalog is missing API " + api + " for " + oracle.Provider)
 			}
-			compat := provider.ModelCompat{}
-			if len(wire.Compat) != 0 {
-				compat, err = decodeCompat(wire.Compat, oracle.Provider+"/"+id, oracle.API)
-				if err != nil {
-					panic(fmt.Sprintf("decode generated compat for %s/%s: %v", oracle.Provider, id, err))
+			count += len(entries)
+			for id, wire := range entries {
+				if id != wire.ID || wire.Provider != oracle.Provider || wire.API != api {
+					panic("generated catalog identity mismatch for " + oracle.Provider + "/" + id)
 				}
+				compat := provider.ModelCompat{}
+				if len(wire.Compat) != 0 {
+					compat, err = decodeCompat(wire.Compat, oracle.Provider+"/"+id, api)
+					if err != nil {
+						panic(fmt.Sprintf("decode generated compat for %s/%s: %v", oracle.Provider, id, err))
+					}
+				}
+				models = append(models, Model{
+					Provider: wire.Provider, ID: wire.ID, Name: wire.Name, API: wire.API, BaseURL: wire.BaseURL,
+					Reasoning: wire.Reasoning, ThinkingLevelMap: wire.ThinkingLevelMap, Input: wire.Input, Cost: wire.Cost,
+					ContextWindow: wire.ContextWindow, MaxTokens: wire.MaxTokens, Compat: compat,
+				})
 			}
-			models = append(models, Model{
-				Provider: wire.Provider, ID: wire.ID, Name: wire.Name, API: wire.API, BaseURL: wire.BaseURL,
-				Reasoning: wire.Reasoning, ThinkingLevelMap: wire.ThinkingLevelMap, Input: wire.Input, Cost: wire.Cost,
-				ContextWindow: wire.ContextWindow, MaxTokens: wire.MaxTokens, Compat: compat,
-			})
+		}
+		if count != oracle.Count {
+			panic(fmt.Sprintf("generated catalog %s has %d models, want %d", file, count, oracle.Count))
 		}
 	}
 	sort.Slice(models, func(left, right int) bool {

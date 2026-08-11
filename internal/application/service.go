@@ -27,14 +27,16 @@ const defaultSessionIdleTimeout = 10 * time.Minute
 type RuntimeOpener func(context.Context, app.ProductionConfig, app.ProductionRuntimeOptions) (*agentruntime.Runtime, error)
 
 type ServiceOptions struct {
-	Context       context.Context
-	Production    app.ProductionConfig
-	IdleTimeout   time.Duration
-	OpenRuntime   RuntimeOpener
-	DisableReaper bool
-	SkillHTTP     HTTPDoer
-	SkillsAPIURL  string
-	GitHubAPIURL  string
+	Context         context.Context
+	Production      app.ProductionConfig
+	IdleTimeout     time.Duration
+	OpenRuntime     RuntimeOpener
+	DisableReaper   bool
+	SkillHTTP       HTTPDoer
+	ModelHTTP       HTTPDoer
+	ModelCatalogURL string
+	SkillsAPIURL    string
+	GitHubAPIURL    string
 }
 
 type HTTPDoer interface {
@@ -126,17 +128,27 @@ type openCall struct {
 // It coordinates lifecycle only: every conversation remains authoritative in
 // Runtime -> AgentSession -> Agent and its SessionManager.
 type Service struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	production  app.ProductionConfig
-	paths       app.ProductionPaths
-	idle        time.Duration
-	openRuntime RuntimeOpener
-	mutationMu  sync.Mutex
-	resourceMu  sync.Mutex
-	skillHTTP   HTTPDoer
-	skillsAPI   string
-	githubAPI   string
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	production          app.ProductionConfig
+	paths               app.ProductionPaths
+	idle                time.Duration
+	openRuntime         RuntimeOpener
+	mutationMu          sync.Mutex
+	resourceMu          sync.Mutex
+	modelMu             sync.Mutex
+	modelHTTP           HTTPDoer
+	modelCatalogURL     string
+	modelCatalogMu      sync.Mutex
+	modelCatalogEntries []ModelCatalogEntry
+	modelCatalogExpires time.Time
+	allowedRootMu       sync.RWMutex
+	allowedRoots        map[string]struct{}
+	fileIndexMu         sync.Mutex
+	fileIndexCache      map[string]fileIndexCacheEntry
+	skillHTTP           HTTPDoer
+	skillsAPI           string
+	githubAPI           string
 
 	mu         sync.Mutex
 	sessions   map[string]*managedSession
@@ -167,6 +179,14 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if skillHTTP == nil {
 		skillHTTP = &http.Client{Timeout: 60 * time.Second}
 	}
+	modelHTTP := options.ModelHTTP
+	if modelHTTP == nil {
+		modelHTTP = &http.Client{Timeout: 30 * time.Second}
+	}
+	modelCatalogURL := strings.TrimRight(strings.TrimSpace(options.ModelCatalogURL), "/")
+	if modelCatalogURL == "" {
+		modelCatalogURL = "https://models.dev/api.json"
+	}
 	skillsAPI := strings.TrimRight(strings.TrimSpace(options.SkillsAPIURL), "/")
 	if skillsAPI == "" {
 		skillsAPI = strings.TrimRight(environmentValue(options.Production.Environment, "SKILLS_API_URL"), "/")
@@ -182,8 +202,11 @@ func NewService(options ServiceOptions) (*Service, error) {
 	s := &Service{
 		ctx: serviceCtx, cancel: cancel, production: cloneProductionConfig(options.Production),
 		paths: paths, idle: idle, openRuntime: opener,
+		modelHTTP: modelHTTP, modelCatalogURL: modelCatalogURL,
 		skillHTTP: skillHTTP, skillsAPI: skillsAPI, githubAPI: githubAPI,
-		sessions: make(map[string]*managedSession), opening: make(map[string]*openCall),
+		allowedRoots:   make(map[string]struct{}),
+		fileIndexCache: make(map[string]fileIndexCacheEntry),
+		sessions:       make(map[string]*managedSession), opening: make(map[string]*openCall),
 		events: newEventStream(defaultEventHistoryCapacity), reaperDone: make(chan struct{}),
 	}
 	if options.DisableReaper {
@@ -195,7 +218,9 @@ func NewService(options ServiceOptions) (*Service, error) {
 }
 
 func cloneProductionConfig(config app.ProductionConfig) app.ProductionConfig {
-	config.Environment = append([]string(nil), config.Environment...)
+	if config.Environment != nil {
+		config.Environment = append([]string{}, config.Environment...)
+	}
 	return config
 }
 

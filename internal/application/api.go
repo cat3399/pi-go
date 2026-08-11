@@ -1,6 +1,9 @@
 package application
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // API is the process-local boundary consumed by GUI, TUI, WebUI, and CLI
 // surfaces. A transport adapter may project it, but product code should depend
@@ -8,6 +11,17 @@ import "context"
 type API interface {
 	AgentDir() string
 	DefaultCWD() string
+	BrowseDirectories(context.Context, string) (DirectoryBrowseResult, error)
+	ResolveFile(context.Context, string, string) (FileResource, error)
+	ListFiles(context.Context, string) (FileList, error)
+	InspectUploadTargets(context.Context, string, []string) (UploadTargetInspection, error)
+	SaveUploads(context.Context, string, []UploadFile, UploadConflictStrategy) (UploadResult, error)
+	QueryFileIndex(context.Context, string, string) (FileIndexResult, error)
+	GetGitStatus(context.Context, string) (GitStatus, error)
+	GetGitFileDiff(context.Context, string, string) (GitFileDiff, error)
+	ListWorktrees(context.Context, string) (WorktreeList, error)
+	AddWorktree(context.Context, string, string) (WorktreeCreated, error)
+	RemoveWorktree(context.Context, string, string, bool) error
 
 	NewSession(context.Context, NewSessionOptions) (State, error)
 	Dispatch(context.Context, string, Command) (CommandResult, error)
@@ -23,6 +37,16 @@ type API interface {
 	SessionThinking(context.Context, string, string, int) (string, error)
 	OpenBashOutput(context.Context, string, string) (BashOutput, error)
 	RunningIDs() []string
+	ListModels(context.Context, string) (ModelsSnapshot, error)
+	ListModelProviders(context.Context, string) ([]ProviderAuthInfo, error)
+	SetProviderAPIKey(context.Context, string, string) error
+	DeleteProviderCredential(context.Context, string, string) error
+	StartProviderOAuth(context.Context, string) (*ProviderOAuthLogin, error)
+	ReadModelsConfig(context.Context) (ModelsConfigDocument, error)
+	WriteModelsConfig(context.Context, ModelsConfigDocument) error
+	DiscoverModels(context.Context, string, ModelProviderDraft) (ModelDiscoveryResult, error)
+	QueryModelCatalog(context.Context, string, string, string, int) (ModelCatalogResult, error)
+	TestModel(context.Context, string, json.RawMessage, json.RawMessage) (ModelProbeResult, error)
 
 	ProjectTrust(context.Context, string) (ProjectTrustStatus, error)
 	TrustProject(context.Context, string) (ProjectTrustStatus, error)

@@ -9,6 +9,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -65,7 +66,7 @@ type CostRates struct {
 	Tiers []CostTier `json:"tiers,omitempty"`
 }
 type CostTier struct {
-	InputTokensAbove uint64  `json:"inputTokensAbove"`
+	InputTokensAbove float64 `json:"inputTokensAbove"`
 	Input            float64 `json:"input"`
 	Output           float64 `json:"output"`
 	CacheRead        float64 `json:"cacheRead"`
@@ -203,7 +204,7 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 		{name: "id", value: spec.ID},
 		{name: "name", value: spec.Name},
 	} {
-		if !utf8.ValidString(field.value) || strings.TrimSpace(field.value) == "" {
+		if !utf8.ValidString(field.value) || field.value == "" {
 			return fmt.Errorf("%w: %s must be non-empty valid UTF-8", ErrInvalidModel, field.name)
 		}
 	}
@@ -216,50 +217,29 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 	if spec.MaxTokens == 0 {
 		return fmt.Errorf("%w: max tokens must be greater than zero", ErrInvalidModel)
 	}
-	if spec.MaxTokens > spec.ContextWindow {
-		return fmt.Errorf("%w: max tokens cannot exceed context window", ErrInvalidModel)
-	}
-	if len(input) == 0 {
-		return fmt.Errorf("%w: input capabilities must be non-empty", ErrInvalidModel)
-	}
 	for _, rate := range []float64{spec.Cost.Input, spec.Cost.Output, spec.Cost.CacheRead, spec.Cost.CacheWrite} {
-		if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
-			return fmt.Errorf("%w: cost rates must be finite and non-negative", ErrInvalidModel)
+		if math.IsNaN(rate) || math.IsInf(rate, 0) {
+			return fmt.Errorf("%w: cost rates must be finite", ErrInvalidModel)
 		}
 	}
-	lastTier := uint64(0)
-	for index, tier := range spec.Cost.Tiers {
-		if index != 0 && tier.InputTokensAbove <= lastTier {
-			return fmt.Errorf("%w: cost tiers must be strictly increasing", ErrInvalidModel)
-		}
-		lastTier = tier.InputTokensAbove
+	for _, tier := range spec.Cost.Tiers {
 		for _, rate := range []float64{tier.Input, tier.Output, tier.CacheRead, tier.CacheWrite} {
-			if math.IsNaN(rate) || math.IsInf(rate, 0) || rate < 0 {
-				return fmt.Errorf("%w: tier cost rates must be finite and non-negative", ErrInvalidModel)
+			if math.IsNaN(rate) || math.IsInf(rate, 0) {
+				return fmt.Errorf("%w: tier cost rates must be finite", ErrInvalidModel)
 			}
 		}
 	}
-	seenInput := map[InputKind]struct{}{}
 	for _, kind := range input {
 		if kind != InputText && kind != InputImage {
 			return fmt.Errorf("%w: unsupported input kind %q", ErrInvalidModel, kind)
 		}
-		if _, duplicate := seenInput[kind]; duplicate {
-			return fmt.Errorf("%w: duplicate input kind %q", ErrInvalidModel, kind)
-		}
-		seenInput[kind] = struct{}{}
 	}
 	for level, mapped := range spec.ThinkingLevelMap {
 		if !level.Valid() {
 			return fmt.Errorf("%w: invalid thinking level map key %q", ErrInvalidModel, level)
 		}
-		if mapped != nil && (!utf8.ValidString(*mapped) || strings.TrimSpace(*mapped) == "") {
+		if mapped != nil && !utf8.ValidString(*mapped) {
 			return fmt.Errorf("%w: invalid thinking level mapping %q", ErrInvalidModel, level)
-		}
-	}
-	for name, value := range spec.Headers {
-		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
-			return fmt.Errorf("%w: invalid model header", ErrInvalidModel)
 		}
 	}
 	if compat := spec.Compat.OpenAICompletions; compat != nil {
@@ -353,20 +333,31 @@ func (m Model) ContextWindow() uint64  { return m.metadata.contextWindow }
 func (m Model) MaxTokens() uint64      { return m.metadata.maxTokens }
 func (m Model) Cost() CostRates        { return cloneCostRates(m.metadata.cost) }
 
+// WithBaseURL returns the same immutable model with an auth-resolved endpoint.
+// Provider/model/API identity and all remaining metadata are preserved.
+func (m Model) WithBaseURL(baseURL string) (Model, error) {
+	copy := m
+	copy.metadata.baseURL = baseURL
+	if err := copy.validate(); err != nil {
+		return Model{}, err
+	}
+	return copy, nil
+}
+
 // CalculateCost implements pi's request-wide tier selection. The highest
 // threshold strictly below total input/cache tokens applies to the whole
 // request; one-hour Anthropic cache writes cost 2x input rate.
 func (m Model) CalculateCost(usage llm.Usage) llm.Cost {
 	rates := m.Cost()
-	inputTokens := usage.Input() + usage.CacheRead() + usage.CacheWrite()
-	matched := int64(-1)
+	inputTokens := float64(usage.Input() + usage.CacheRead() + usage.CacheWrite())
+	matched := -1.0
 	for _, tier := range rates.Tiers {
-		if inputTokens > tier.InputTokensAbove && int64(tier.InputTokensAbove) > matched {
+		if inputTokens > tier.InputTokensAbove && tier.InputTokensAbove > matched {
 			rates.Input = tier.Input
 			rates.Output = tier.Output
 			rates.CacheRead = tier.CacheRead
 			rates.CacheWrite = tier.CacheWrite
-			matched = int64(tier.InputTokensAbove)
+			matched = tier.InputTokensAbove
 		}
 	}
 	longWrite := uint64(0)
@@ -1247,6 +1238,21 @@ func (r Request) StreamOptions() StreamOptions {
 	return CloneStreamOptions(r.stream)
 }
 
+// WithModelAndStream returns a validated request snapshot for the model and
+// request options prepared by the owning Models runtime. It preserves prompt,
+// messages, tools, tool policy, thinking level, and metadata exactly; callers
+// cannot accidentally reconstruct only a subset of the AgentLoop request.
+func (r Request) WithModelAndStream(model Model, stream StreamOptions) (Request, error) {
+	r = r.clone()
+	r.model = model
+	r.stream = CloneStreamOptions(stream)
+	r.replayTarget = llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()}
+	if err := r.validate(); err != nil {
+		return Request{}, err
+	}
+	return r, nil
+}
+
 func (r Request) ReplayTarget() llm.AssistantProvenance { return r.replayTarget }
 
 // ThinkingBudget returns the optional cap selected for a thinking level.
@@ -1350,10 +1356,18 @@ type EventStream interface {
 	Close() error
 }
 
-// Provider is the narrow stream port consumed by the agent runtime.
-type Provider interface {
+// Streamer is the narrow stream port consumed by Agent and AgentLoop. The
+// provider/model runtime deliberately owns catalog, authentication, refresh,
+// and API dispatch; the agent core only needs this one operation, matching
+// pi-agent's StreamFn boundary.
+type Streamer interface {
 	Stream(context.Context, Request) EventStream
 }
+
+// Provider is kept as a source-compatible alias for callers that used the old
+// name for the narrow port. Full provider ownership lives in model.Provider;
+// adapters in this package implement Streamer.
+type Provider = Streamer
 
 // RouteValidator is implemented by model-driven provider runtimes. Sessions
 // use it at SetModel time so a route that has no registered adapter fails at
@@ -1469,6 +1483,95 @@ func isNilProvider(value Provider) bool {
 }
 
 type routeFailureStream struct{ err error }
+
+// FailureStream creates a stream that reports one setup/dispatch error and
+// then reaches EOF. Streamer cannot return a separate construction error, so
+// Models runtimes use this for unknown providers, missing auth, and routes
+// whose API adapter is not present in the current binary.
+func FailureStream(err error) EventStream {
+	if err == nil {
+		err = fmt.Errorf("%w: provider stream failed without an error", ErrInvalidRequest)
+	}
+	return &routeFailureStream{err: err}
+}
+
+// LazyStream defers request preparation until the first pull. This mirrors
+// pi-ai's lazyStream boundary: credential refresh and provider setup errors are
+// delivered through the stream instead of blocking Stream itself. Closing an
+// unstarted stream does not run its preparation callback.
+func LazyStream(prepare func() EventStream) EventStream {
+	if prepare == nil {
+		return FailureStream(fmt.Errorf("%w: nil lazy stream preparation", ErrInvalidRequest))
+	}
+	return &lazyEventStream{prepare: prepare}
+}
+
+type lazyEventStream struct {
+	once    sync.Once
+	mu      sync.Mutex
+	prepare func() EventStream
+	stream  EventStream
+	closed  bool
+}
+
+func (s *lazyEventStream) initialize() EventStream {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return nil
+	}
+	s.once.Do(func() {
+		prepared := s.prepare()
+		if prepared == nil {
+			prepared = FailureStream(fmt.Errorf("%w: lazy stream preparation returned nil", ErrInvalidRequest))
+		}
+		s.mu.Lock()
+		s.prepare = nil
+		if s.closed {
+			s.mu.Unlock()
+			_ = prepared.Close()
+			return
+		}
+		s.stream = prepared
+		s.mu.Unlock()
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	return s.stream
+}
+
+func (s *lazyEventStream) Next() (llm.StreamEvent, error) {
+	stream := s.initialize()
+	if stream == nil {
+		return nil, io.EOF
+	}
+	return stream.Next()
+}
+
+func (s *lazyEventStream) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	stream := s.stream
+	s.mu.Unlock()
+	if stream == nil {
+		return nil
+	}
+	return stream.Close()
+}
 
 func (s *routeFailureStream) Next() (llm.StreamEvent, error) {
 	if s == nil || s.err == nil {

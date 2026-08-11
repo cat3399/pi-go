@@ -10,6 +10,9 @@ const development = process.env.NODE_ENV === "development";
 const apiOrigin = (process.env.PI_GO_WEB_API_ORIGIN ?? "http://127.0.0.1:30142").replace(/\/+$/, "");
 
 const nextConfig: NextConfig = {
+	// Next's development rewrite otherwise gzip-buffers the long-lived SSE
+	// response, so browsers see an open connection but no application events.
+	compress: false,
 	...(development
 		? {
 				async rewrites() {

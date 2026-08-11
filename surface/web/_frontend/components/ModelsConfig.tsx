@@ -1660,18 +1660,28 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
 
-  const loadOAuthProviders = useCallback(() => {
-    fetch("/api/v1/auth/providers")
-      .then((r) => r.json())
-      .then((d: { providers: OAuthProvider[] }) => setOauthProviders(d.providers))
-      .catch(() => {});
+  const loadOAuthProviders = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/auth/providers");
+      const body = await response.json() as { providers?: unknown; error?: string };
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      if (!Array.isArray(body.providers)) throw new Error("Invalid OAuth provider response");
+      setOauthProviders(body.providers as OAuthProvider[]);
+    } catch {
+      setOauthProviders([]);
+    }
   }, []);
 
-  const loadApiKeyProviders = useCallback(() => {
-    fetch("/api/v1/auth/all-providers")
-      .then((r) => r.json())
-      .then((d: { providers: ApiKeyProvider[] }) => setApiKeyProviders(d.providers))
-      .catch(() => {});
+  const loadApiKeyProviders = useCallback(async () => {
+    try {
+      const response = await fetch("/api/v1/auth/all-providers");
+      const body = await response.json() as { providers?: unknown; error?: string };
+      if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+      if (!Array.isArray(body.providers)) throw new Error("Invalid API-key provider response");
+      setApiKeyProviders(body.providers as ApiKeyProvider[]);
+    } catch {
+      setApiKeyProviders([]);
+    }
   }, []);
 
   // A dual-auth provider moves between the two lists when its credential type
@@ -1685,8 +1695,13 @@ export function ModelsConfig({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     fetch("/api/v1/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsJson) => {
+      .then(async (response) => {
+        const body = await response.json() as ModelsJson & { error?: string };
+        if (!response.ok) throw new Error(body.error ?? `HTTP ${response.status}`);
+        if (typeof body !== "object" || body === null || Array.isArray(body)) throw new Error("Invalid models configuration response");
+        return body;
+      })
+      .then((d) => {
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});

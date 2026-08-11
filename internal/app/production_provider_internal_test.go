@@ -45,19 +45,19 @@ func TestProductionProviderStreamOptionsMatchUpstreamDefaultsAndExplicitZeros(t 
 	}
 }
 
-func TestProductionProviderEnvWhitelistsAndPrioritizesScopedRetention(t *testing.T) {
+func TestProductionProviderEnvPreservesCredentialScopeAndPrioritizesScopedRetention(t *testing.T) {
 	got := productionProviderEnv(
 		map[string]string{"PI_CACHE_RETENTION": "long", "AUTH_SECRET": "must-not-leak"},
 		map[string]string{"PI_CACHE_RETENTION": "short", "AMBIENT_SECRET": "must-not-leak"},
 	)
-	if len(got) != 1 || got["PI_CACHE_RETENTION"] != "long" {
+	if len(got) != 2 || got["PI_CACHE_RETENTION"] != "long" || got["AUTH_SECRET"] != "must-not-leak" {
 		t.Fatalf("provider env = %#v", got)
 	}
 	got = productionProviderEnv(nil, map[string]string{"PI_CACHE_RETENTION": "short", "AMBIENT_SECRET": "must-not-leak"})
 	if len(got) != 1 || got["PI_CACHE_RETENTION"] != "short" {
 		t.Fatalf("ambient provider env = %#v", got)
 	}
-	if got := productionProviderEnv(map[string]string{"AUTH_SECRET": "must-not-leak"}, map[string]string{"AMBIENT_SECRET": "must-not-leak"}); got != nil {
-		t.Fatalf("unrelated env leaked = %#v", got)
+	if got := productionProviderEnv(map[string]string{"AUTH_SECRET": "credential-scoped"}, map[string]string{"AMBIENT_SECRET": "must-not-leak"}); len(got) != 1 || got["AUTH_SECRET"] != "credential-scoped" {
+		t.Fatalf("credential-scoped env was not preserved: %#v", got)
 	}
 }

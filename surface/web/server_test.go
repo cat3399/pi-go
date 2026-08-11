@@ -75,6 +75,9 @@ func TestCapabilitiesReportUnavailableModulesExplicitly(t *testing.T) {
 		if capability.ID == "agent_chat" && capability.Status != CapabilityConnected {
 			t.Fatalf("agent_chat status = %q", capability.Status)
 		}
+		if (capability.ID == "models" || capability.ID == "files" || capability.ID == "git_worktrees") && capability.Status != CapabilityComplete {
+			t.Fatalf("%s status = %q", capability.ID, capability.Status)
+		}
 	}
 }
 
@@ -172,6 +175,24 @@ func TestApplicationEventStreamRequestsSnapshotForExpiredCursor(t *testing.T) {
 	body := response.Body.String()
 	if !strings.Contains(body, "id: 42\n") || !strings.Contains(body, `"type":"reset_required"`) || !strings.Contains(body, `"type":"connected"`) {
 		t.Fatalf("SSE body = %q", body)
+	}
+}
+
+func TestApplicationEventStreamResetsCursorAfterServerRestart(t *testing.T) {
+	server, err := New(Options{Version: "test", Application: cursorTestAPI{revision: 0}, AllowedHosts: []string{"example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/events?after=42", nil)
+	request.Header.Set("Last-Event-ID", "42")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, "id: 0\n") || !strings.Contains(body, `"type":"reset_required"`) || !strings.Contains(body, `"type":"connected"`) {
+		t.Fatalf("restart SSE body = %q", body)
 	}
 }
 

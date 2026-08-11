@@ -45,6 +45,86 @@ func TestDeferHistoryMediaMatchesPiWebPlaceholder(t *testing.T) {
 	}
 }
 
+func TestNormalizeHistoryToolCallsMatchesPiWeb(t *testing.T) {
+	message := json.RawMessage(`{
+		"role":"assistant",
+		"content":[
+			{"type":"text","text":"before"},
+			{"type":"toolCall","id":"call-1","name":"read","arguments":{"path":"go.mod","limit":1},"thoughtSignature":"private"},
+			{"type":"toolCall","toolCallId":"call-2","toolName":"edit","input":{"path":"README.md"}}
+		]
+	}`)
+	normalized, err := normalizeHistoryToolCalls(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(normalized, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Content) != 3 {
+		t.Fatalf("content = %#v", value.Content)
+	}
+	first := value.Content[1]
+	input, _ := first["input"].(map[string]any)
+	if first["toolCallId"] != "call-1" || first["toolName"] != "read" || input["path"] != "go.mod" {
+		t.Fatalf("normalized legacy tool call = %#v", first)
+	}
+	if _, exists := first["name"]; exists {
+		t.Fatalf("raw tool call fields leaked into Web view: %#v", first)
+	}
+	second := value.Content[2]
+	if second["toolCallId"] != "call-2" || second["toolName"] != "edit" {
+		t.Fatalf("normalized Web tool call = %#v", second)
+	}
+}
+
+func TestEntryToUIMessageProjectsDurableToolCallToWebContract(t *testing.T) {
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	call, err := llm.NewToolCallBlock("call-read", "read", []byte(`{"path":"go.mod","limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantToolUseMessage(
+		[]llm.AssistantBlock{call}, llm.Usage{}, time.UnixMilli(1),
+		llm.AssistantProvenance{Provider: "deepseek", API: "openai-completions", Model: "deepseek-v4-flash"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := manager.AppendLLMMessage(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, ok, err := entryToUIMessage(entry, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("durable assistant message was omitted")
+	}
+	var value struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(projected, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Content) != 1 {
+		t.Fatalf("content = %#v", value.Content)
+	}
+	block := value.Content[0]
+	input, _ := block["input"].(map[string]any)
+	if block["toolCallId"] != "call-read" || block["toolName"] != "read" || input["path"] != "go.mod" {
+		t.Fatalf("projected tool call = %#v", block)
+	}
+}
+
 func TestProjectedSessionTreeFlattensBeyondClientDepthLimit(t *testing.T) {
 	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
 	if err != nil {

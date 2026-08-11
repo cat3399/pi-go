@@ -1,5 +1,6 @@
 const API_ROOT = "/api/v1";
 const CONNECT_TIMEOUT_MS = 5_000;
+const RECONNECT_DELAY_MS = 250;
 
 export interface ApplicationEvent {
   type: string;
@@ -27,6 +28,13 @@ export class ApplicationRequestError extends Error {
   }
 }
 
+export class ApplicationTransportError extends Error {
+  constructor(message: string, public readonly status?: number) {
+    super(message);
+    this.name = "ApplicationTransportError";
+  }
+}
+
 type RegisteredListener = {
   sessionId?: string;
   onEvent: EventListener;
@@ -42,6 +50,8 @@ class ApplicationEventClient {
   private readonly connectionWaiters = new Set<() => void>();
   private readonly history: ApplicationEventEnvelope[] = [];
   private lastSequence = 0;
+  private hasCursor = false;
+  private reconnectTimer: number | null = null;
 
   subscribe(listener: RegisteredListener): EventSubscription {
     const id = ++this.nextListenerId;
@@ -55,21 +65,66 @@ class ApplicationEventClient {
         if (closed) return;
         closed = true;
         this.listeners.delete(id);
+        if (this.listeners.size === 0) this.stop();
       },
     };
   }
 
   private open(after?: number): void {
-    if (this.source || typeof window === "undefined") return;
-    const query = after === undefined ? "" : `?after=${encodeURIComponent(String(after))}`;
+    if (this.source || typeof window === "undefined" || this.listeners.size === 0) return;
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const cursor = this.hasCursor ? this.lastSequence : after;
+    const query = cursor === undefined ? "" : `?after=${encodeURIComponent(String(cursor))}`;
     const source = new EventSource(`${API_ROOT}/events${query}`);
     this.source = source;
+    source.onopen = () => {
+      if (this.source !== source) return;
+      this.markConnected();
+    };
     source.onmessage = (message) => this.receive(message);
     source.onerror = () => {
+      if (this.source !== source) return;
       this.connected = false;
-      // Native EventSource reconnects with Last-Event-ID. The server replays
-      // retained events and requests a snapshot only when that cursor expired.
+      // Own the reconnect loop instead of leaving CONNECTING streams to the
+      // browser indefinitely. The application cursor makes replacing the
+      // transport lossless across API restarts and transient proxy failures.
+      source.close();
+      this.source = null;
+      this.scheduleReconnect();
     };
+  }
+
+  private scheduleReconnect(): void {
+    if (typeof window === "undefined" || this.listeners.size === 0 || this.reconnectTimer !== null) return;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.open(this.minimumListenerCursor());
+    }, RECONNECT_DELAY_MS);
+  }
+
+  private minimumListenerCursor(): number | undefined {
+    let cursor: number | undefined;
+    for (const listener of this.listeners.values()) {
+      if (listener.after === undefined) continue;
+      cursor = cursor === undefined ? listener.after : Math.min(cursor, listener.after);
+    }
+    return cursor;
+  }
+
+  private stop(): void {
+    if (typeof window !== "undefined" && this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = null;
+    this.source?.close();
+    this.source = null;
+    this.connected = false;
+    this.hasCursor = false;
+    this.lastSequence = 0;
+    this.history.length = 0;
   }
 
   private receive(message: MessageEvent<string>): void {
@@ -82,16 +137,16 @@ class ApplicationEventClient {
     if (!value || typeof value !== "object") return;
     const object = value as Record<string, unknown>;
     if (object.type === "connected") {
-      this.connected = true;
+      this.markConnected();
+      this.hasCursor = true;
       if (typeof object.revision === "number") {
         this.lastSequence = Math.max(this.lastSequence, object.revision);
       }
-      for (const resolve of this.connectionWaiters) resolve();
-      this.connectionWaiters.clear();
       return;
     }
     if (object.type === "reset_required") {
       const revision = typeof object.revision === "number" ? object.revision : 0;
+      this.hasCursor = true;
       this.lastSequence = revision;
       this.history.length = 0;
       for (const listener of this.listeners.values()) {
@@ -118,6 +173,7 @@ class ApplicationEventClient {
       event: event as ApplicationEvent,
     };
     if (sequence <= this.lastSequence) return;
+    this.hasCursor = true;
     this.lastSequence = Math.max(this.lastSequence, sequence);
     this.history.push(envelope);
     if (this.history.length > 1_024) this.history.splice(0, this.history.length - 1_024);
@@ -147,8 +203,11 @@ class ApplicationEventClient {
   }
 
   private waitUntilConnected(): Promise<void> {
-    this.open();
-    if (this.connected) return Promise.resolve();
+    this.open(this.minimumListenerCursor());
+    if (this.connected || this.source?.readyState === EventSource.OPEN) {
+      this.markConnected();
+      return Promise.resolve();
+    }
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const complete = () => {
@@ -160,12 +219,22 @@ class ApplicationEventClient {
       };
       const timeout = window.setTimeout(() => {
         if (settled) return;
+        if (this.connected || this.source?.readyState === EventSource.OPEN) {
+          complete();
+          return;
+        }
         settled = true;
         this.connectionWaiters.delete(complete);
         reject(new Error("Timed out connecting to the application event stream"));
       }, CONNECT_TIMEOUT_MS);
       this.connectionWaiters.add(complete);
     });
+  }
+
+  private markConnected(): void {
+    this.connected = true;
+    for (const resolve of this.connectionWaiters) resolve();
+    this.connectionWaiters.clear();
   }
 }
 
@@ -200,12 +269,20 @@ export async function sendSessionCommand<T = unknown>(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(command),
   });
-  const body = (await response.json().catch(() => ({}))) as {
+  let parsed = false;
+  const body = (await response.json().then((value: unknown) => {
+    parsed = Boolean(value && typeof value === "object" && !Array.isArray(value));
+    return parsed ? value : {};
+  }).catch(() => ({}))) as {
     data?: T;
     error?: string;
   };
   if (!response.ok || body.error) {
-    throw new ApplicationRequestError(body.error ?? `HTTP ${response.status}`, response.status);
+    if (typeof body.error === "string" && body.error) {
+      throw new ApplicationRequestError(body.error, response.status);
+    }
+    throw new ApplicationTransportError(`HTTP ${response.status}`, response.status);
   }
+  if (!parsed || !("data" in body)) throw new ApplicationTransportError("Invalid application response", response.status);
   return body.data as T;
 }

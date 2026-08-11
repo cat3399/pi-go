@@ -25,6 +25,7 @@ const maxAPIRequestBytes = 64 << 20
 var errJSONContentType = errors.New("Content-Type must be application/json")
 
 func registerAPIRoutes(mux *http.ServeMux, api application.API) {
+	oauth := newOAuthBroker()
 	mux.HandleFunc("GET /api/v1/snapshot", handleApplicationSnapshot(api))
 	mux.HandleFunc("GET /api/v1/events", handleApplicationEvents(api))
 
@@ -43,6 +44,19 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/bash-output", handleSessionBashOutput(api))
 
 	mux.HandleFunc("GET /api/v1/models", handleModels(api))
+	mux.HandleFunc("GET /api/v1/models-config", handleModelsConfigRead(api))
+	mux.HandleFunc("PUT /api/v1/models-config", handleModelsConfigWrite(api))
+	mux.HandleFunc("POST /api/v1/models-config/discover", handleModelDiscovery(api))
+	mux.HandleFunc("GET /api/v1/models-config/catalog", handleModelCatalog(api))
+	mux.HandleFunc("POST /api/v1/models-config/test", handleModelProbe(api))
+	mux.HandleFunc("GET /api/v1/auth/providers", handleOAuthProviders(api))
+	mux.HandleFunc("GET /api/v1/auth/all-providers", handleAPIKeyProviders(api))
+	mux.HandleFunc("GET /api/v1/auth/api-key/{provider}", handleAPIKeyStatus(api))
+	mux.HandleFunc("POST /api/v1/auth/api-key/{provider}", handleSetAPIKey(api))
+	mux.HandleFunc("DELETE /api/v1/auth/api-key/{provider}", handleDeleteAPIKey(api))
+	mux.HandleFunc("GET /api/v1/auth/login/{provider}", handleOAuthLoginStream(api, oauth))
+	mux.HandleFunc("POST /api/v1/auth/login/{provider}", handleOAuthLoginInput(oauth))
+	mux.HandleFunc("POST /api/v1/auth/logout/{provider}", handleOAuthLogout(api))
 	mux.HandleFunc("GET /api/v1/skills", handleSkills(api))
 	mux.HandleFunc("PATCH /api/v1/skills", handleSkillToggle(api))
 	mux.HandleFunc("POST /api/v1/skills/search", handleSkillSearch(api))
@@ -50,10 +64,19 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("POST /api/v1/skills/check", handleSkillCheck(api))
 	mux.HandleFunc("POST /api/v1/skills/update", handleSkillUpdate(api))
 	mux.HandleFunc("GET /api/v1/system/home", handleHome)
+	mux.HandleFunc("GET /api/v1/system/cwd/browse", handleDirectoryBrowse(api))
 	mux.HandleFunc("POST /api/v1/system/cwd/validate", handleCWDValidation)
 	mux.HandleFunc("POST /api/v1/system/default-cwd", handleDefaultCWD)
 	mux.HandleFunc("GET /api/v1/system/project-trust", handleProjectTrust(api))
 	mux.HandleFunc("POST /api/v1/system/project-trust", handleTrustProject(api))
+	mux.HandleFunc("GET /api/v1/worktrees", handleWorktreeList(api))
+	mux.HandleFunc("POST /api/v1/worktrees", handleWorktreeAdd(api))
+	mux.HandleFunc("DELETE /api/v1/worktrees", handleWorktreeRemove(api))
+	mux.HandleFunc("GET /api/v1/files/{path...}", handleFileGet(api))
+	mux.HandleFunc("POST /api/v1/files/{path...}", handleFileUpload(api))
+	mux.HandleFunc("GET /api/v1/file-index", handleFileIndex(api))
+	mux.HandleFunc("GET /api/v1/git/status", handleGitStatus(api))
+	mux.HandleFunc("GET /api/v1/git/diff", handleGitDiff(api))
 }
 
 func readRequestBody(writer http.ResponseWriter, request *http.Request) ([]byte, error) {
@@ -404,7 +427,7 @@ func handleSessionRename(api application.API) http.HandlerFunc {
 
 func handleModels(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		models, err := models(api, request.URL.Query().Get("cwd"))
+		models, err := models(request.Context(), api, request.URL.Query().Get("cwd"))
 		if err != nil {
 			writeAPIError(writer, http.StatusBadRequest, err)
 			return
@@ -420,6 +443,30 @@ func handleHome(writer http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"home": home})
+}
+
+func handleDirectoryBrowse(api application.API) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		result, err := api.BrowseDirectories(request.Context(), request.URL.Query().Get("path"))
+		if err != nil {
+			switch {
+			case errors.Is(err, application.ErrDirectoryNotFound):
+				writeAPIError(writer, http.StatusNotFound, err)
+			case errors.Is(err, application.ErrPathNotDirectory):
+				writeAPIError(writer, http.StatusBadRequest, err)
+			default:
+				writeApplicationError(writer, err)
+			}
+			return
+		}
+		response := map[string]any{
+			"path": result.Path, "parentPath": result.ParentPath, "directories": result.Directories,
+		}
+		if result.Drives != nil {
+			response["drives"] = result.Drives
+		}
+		writeJSON(writer, http.StatusOK, response)
+	}
 }
 
 func normalizeUserCWD(value string) (string, error) {

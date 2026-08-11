@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -223,11 +224,10 @@ func TestModelRequiresCompleteCanonicalFields(t *testing.T) {
 		mutate func(*provider.ModelSpec)
 	}{
 		{name: "provider", mutate: func(spec *provider.ModelSpec) { spec.Provider = "" }},
-		{name: "api", mutate: func(spec *provider.ModelSpec) { spec.API = " " }},
+		{name: "api", mutate: func(spec *provider.ModelSpec) { spec.API = "" }},
 		{name: "id", mutate: func(spec *provider.ModelSpec) { spec.ID = string([]byte{0xff}) }},
 		{name: "name", mutate: func(spec *provider.ModelSpec) { spec.Name = "" }},
 		{name: "base URL encoding", mutate: func(spec *provider.ModelSpec) { spec.BaseURL = string([]byte{0xff}) }},
-		{name: "input", mutate: func(spec *provider.ModelSpec) { spec.Input = nil }},
 		{name: "context window", mutate: func(spec *provider.ModelSpec) { spec.ContextWindow = 0 }},
 		{name: "max tokens", mutate: func(spec *provider.ModelSpec) { spec.MaxTokens = 0 }},
 	}
@@ -243,6 +243,60 @@ func TestModelRequiresCompleteCanonicalFields(t *testing.T) {
 				t.Fatalf("NewModel() error = %v, want ErrInvalidModel", err)
 			}
 		})
+	}
+}
+
+func TestModelPreservesOpenModelsJSONNumericAndInputValues(t *testing.T) {
+	t.Parallel()
+	model, err := provider.NewModel(provider.ModelSpec{
+		Provider: "fixture", API: "fixture", ID: "model", Name: "Model",
+		Input: []provider.InputKind{}, Cost: provider.CostRates{
+			Input: -1, Tiers: []provider.CostTier{
+				{InputTokensAbove: 100.5, Output: -2},
+				{InputTokensAbove: -0.5, Output: -3},
+			},
+		},
+		ContextWindow: 100, MaxTokens: 200,
+	})
+	if err != nil {
+		t.Fatalf("open pi model values were rejected: %v", err)
+	}
+	if len(model.Input()) != 0 || model.Cost().Input != -1 || model.Cost().Tiers[0].InputTokensAbove != 100.5 || model.Cost().Tiers[1].InputTokensAbove != -0.5 || model.MaxTokens() != 200 {
+		t.Fatalf("model values = input %#v cost %#v max %d", model.Input(), model.Cost(), model.MaxTokens())
+	}
+}
+
+func TestLazyStreamDefersPreparationAndCloseBeforePullSkipsIt(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	want := errors.New("prepare failure")
+	stream := provider.LazyStream(func() provider.EventStream {
+		calls++
+		return provider.FailureStream(want)
+	})
+	if calls != 0 {
+		t.Fatal("lazy stream prepared before the first pull")
+	}
+	if _, err := stream.Next(); !errors.Is(err, want) || calls != 1 {
+		t.Fatalf("first pull = %v, calls = %d", err, calls)
+	}
+	if _, err := stream.Next(); !errors.Is(err, io.EOF) || calls != 1 {
+		t.Fatalf("second pull = %v, calls = %d", err, calls)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	closedCalls := 0
+	closed := provider.LazyStream(func() provider.EventStream {
+		closedCalls++
+		return provider.FailureStream(want)
+	})
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := closed.Next(); !errors.Is(err, io.EOF) || closedCalls != 0 {
+		t.Fatalf("closed lazy stream = %v, calls = %d", err, closedCalls)
 	}
 }
 

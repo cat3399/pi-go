@@ -126,6 +126,7 @@ func TestModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.
 		t.Fatalf("explicit false compat presence = %#v", compatObject)
 	}
 
+	writeFile(t, filepath.Join(directory, "models.json"), `{"providers":{"fixture":{"api":"openai-completions","baseUrl":"https://fixture.test/v1","apiKey":"key"}}}`)
 	runtimeModel, err := NewRuntime(Options{AgentDir: directory, ModelsStorePath: path})
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +144,33 @@ func TestModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.
 		t.Fatalf("typed compat = %#v", typed)
 	}
 }
+
+func TestModelsStoreDuplicateModelsUseLastDynamicOverlay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows v0.1 fails closed for private durable configuration")
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "models-store.json")
+	writeFile(t, path, `{"fixture":{"models":[{"provider":"fixture","id":"same","name":"first","api":"openai-responses","reasoning":false},{"provider":"fixture","id":"same","name":"second","api":"openai-responses","reasoning":true}]}}`)
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, ok, err := store.Read(context.Background(), "fixture")
+	if err != nil || !ok || len(restored.Models) != 2 {
+		t.Fatalf("Read = (%#v, %t, %v)", restored, ok, err)
+	}
+	writeFile(t, filepath.Join(directory, "models.json"), `{"providers":{"fixture":{"api":"openai-responses","baseUrl":"https://fixture.example/v1","apiKey":"key"}}}`)
+	models, err := NewRuntime(Options{AgentDir: directory, ModelsStorePath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, ok := models.GetModel("fixture", "same")
+	if !ok || selected.Name != "second" || !selected.Reasoning {
+		t.Fatalf("last cached overlay = %#v, %t", selected, ok)
+	}
+}
+
 func TestStoreConcurrentWriters(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows v0.1 fails closed for private durable configuration")
@@ -191,23 +219,23 @@ func TestStorePreservesOpaqueEntryAndModelFields(t *testing.T) {
 	}
 }
 
-func TestStoreCanonicalProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
+func TestStoreExactProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows v0.1 fails closed for private durable configuration")
 	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
-	writeFile(t, path, `{"OpenAI":{"models":[{"provider":"OPENAI","id":"MODEL","name":"old","api":"openai-responses","baseUrl":"https://old.invalid/v1","reasoning":false,"headers":{"X-Old":"old"},"futureModel":{"keep":true}}],"checkedAt":1,"futureEntry":{"keep":true}}}`)
+	writeFile(t, path, `{"OpenAI":{"models":[{"provider":"OpenAI","id":"model","name":"old","api":"openai-responses","baseUrl":"https://old.invalid/v1","reasoning":false,"headers":{"X-Old":"old"},"futureModel":{"keep":true}}],"checkedAt":1,"futureEntry":{"keep":true}}}`)
 	headers := map[string]string{"X-Secret": "header-secret"}
 	entry := CachedCatalog{Models: []CachedModel{{Provider: "OpenAI", ID: "model", Name: "New model", API: OpenAIResponsesAPI, BaseURL: "https://new.invalid/v1", Reasoning: true, Headers: headers}}, CheckedAt: int64Pointer(2), ETag: "new-etag", LastModified: int64Pointer(3)}
 	s, err := NewStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Write(context.Background(), "OPENAI", entry); err != nil {
+	if err := s.Write(context.Background(), "OpenAI", entry); err != nil {
 		t.Fatal(err)
 	}
 	headers["X-Secret"] = "mutated-after-write"
-	first, ok, err := s.Read(context.Background(), "openai")
+	first, ok, err := s.Read(context.Background(), "OpenAI")
 	if err != nil || !ok || len(first.Models) != 1 {
 		t.Fatalf("read = %#v, %t, %v", first, ok, err)
 	}
@@ -215,11 +243,11 @@ func TestStoreCanonicalProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 		t.Fatalf("catalog metadata round trip = %#v", first)
 	}
 	model := first.Models[0]
-	if model.Provider != "openai" || model.ID != "model" || model.Name != "New model" || model.API != OpenAIResponsesAPI || model.BaseURL != "https://new.invalid/v1" || !model.Reasoning || model.Headers["X-Secret"] != "header-secret" {
+	if model.Provider != "OpenAI" || model.ID != "model" || model.Name != "New model" || model.API != OpenAIResponsesAPI || model.BaseURL != "https://new.invalid/v1" || !model.Reasoning || model.Headers["X-Secret"] != "header-secret" {
 		t.Fatalf("model round trip = %#v", model)
 	}
 	first.Models[0].Headers["X-Secret"] = "mutated-read"
-	second, _, err := s.Read(context.Background(), "OpEnAi")
+	second, _, err := s.Read(context.Background(), "OpenAI")
 	if err != nil || second.Models[0].Headers["X-Secret"] != "header-secret" {
 		t.Fatalf("headers were not deep copied: %#v, %v", second, err)
 	}
@@ -231,25 +259,25 @@ func TestStoreCanonicalProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(content, &root); err != nil {
 		t.Fatal(err)
 	}
-	if len(root) != 1 || root["openai"] == nil || !strings.Contains(string(content), `"futureModel"`) || !strings.Contains(string(content), `"futureEntry"`) {
-		t.Fatalf("canonical write or opaque preservation failed: %s", content)
+	if len(root) != 1 || root["OpenAI"] == nil || !strings.Contains(string(content), `"futureModel"`) || !strings.Contains(string(content), `"futureEntry"`) {
+		t.Fatalf("exact-key write or opaque preservation failed: %s", content)
 	}
 	bad := entry
 	bad.Models = append([]CachedModel(nil), entry.Models...)
 	bad.Models[0] = cloneCachedModel(bad.Models[0])
 	bad.Models[0].Headers["X-Bad"] = "do-not-leak\nsecret"
-	if err := s.Write(context.Background(), "openai", bad); err == nil || strings.Contains(err.Error(), "do-not-leak") {
+	if err := s.Write(context.Background(), "OpenAI", bad); err == nil || strings.Contains(err.Error(), "do-not-leak") {
 		t.Fatalf("invalid header diagnostic = %v", err)
 	}
-	if err := s.Delete(context.Background(), "OPENAI"); err != nil {
-		t.Fatalf("canonical delete = %v", err)
+	if err := s.Delete(context.Background(), "OpenAI"); err != nil {
+		t.Fatalf("exact-key delete = %v", err)
 	}
-	if _, ok, err := s.Read(context.Background(), "openai"); err != nil || ok {
-		t.Fatalf("canonical delete left entry: %t, %v", ok, err)
+	if _, ok, err := s.Read(context.Background(), "OpenAI"); err != nil || ok {
+		t.Fatalf("exact-key delete left entry: %t, %v", ok, err)
 	}
 }
 
-func TestStoreRejectsCaseFoldDuplicateProviderKeys(t *testing.T) {
+func TestStoreKeepsCaseDistinctProviderKeys(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows v0.1 fails closed for private durable configuration")
 	}
@@ -260,15 +288,23 @@ func TestStoreRejectsCaseFoldDuplicateProviderKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Read(context.Background(), "OPENAI"); err == nil || !strings.Contains(err.Error(), "case-fold duplicate") {
-		t.Fatalf("duplicate read = %v", err)
+	upper, upperOK, err := s.Read(context.Background(), "OpenAI")
+	if err != nil || !upperOK || upper.CheckedAt == nil || *upper.CheckedAt != 1 {
+		t.Fatalf("upper read = %#v, %t, %v", upper, upperOK, err)
 	}
-	if err := s.Write(context.Background(), "openai", cached("openai", "new")); err == nil || !strings.Contains(err.Error(), "case-fold duplicate") {
-		t.Fatalf("duplicate write = %v", err)
+	lower, lowerOK, err := s.Read(context.Background(), "openai")
+	if err != nil || !lowerOK || lower.CheckedAt == nil || *lower.CheckedAt != 2 {
+		t.Fatalf("lower read = %#v, %t, %v", lower, lowerOK, err)
+	}
+	if _, ok, err := s.Read(context.Background(), "OPENAI"); err != nil || ok {
+		t.Fatalf("folded lookup = %t, %v", ok, err)
+	}
+	if err := s.Write(context.Background(), "openai", cached("openai", "new")); err != nil {
+		t.Fatalf("lower write = %v", err)
 	}
 	after, err := os.ReadFile(path)
-	if err != nil || string(after) != content {
-		t.Fatalf("duplicate store was changed: %q, %v", after, err)
+	if err != nil || !strings.Contains(string(after), `"OpenAI"`) || !strings.Contains(string(after), `"openai"`) {
+		t.Fatalf("case-distinct store = %q, %v", after, err)
 	}
 }
 
@@ -295,8 +331,10 @@ func TestStoreRejectsNullAndRuntimeProjectsValidCatalog(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows v0.1 fails closed for private durable configuration")
 	}
-	path := filepath.Join(t.TempDir(), "models-store.json")
-	writeFile(t, path, `{"broken":null,"cached":{"models":[{"provider":"cached","id":"m1","api":"openai-responses"}],"checkedAt":1}}`)
+	directory := t.TempDir()
+	path := filepath.Join(directory, "models-store.json")
+	writeFile(t, path, `{"broken":null,"cached":{"models":[{"provider":"cached","id":"m1","api":"openai-responses"}],"checkedAt":1},"orphan":{"models":[{"provider":"orphan","id":"m2","api":"openai-responses"}],"checkedAt":1}}`)
+	writeFile(t, filepath.Join(directory, "models.json"), `{"providers":{"cached":{"api":"openai-responses","baseUrl":"https://cached.test/v1","apiKey":"key"}}}`)
 	s, err := NewStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -311,6 +349,9 @@ func TestStoreRejectsNullAndRuntimeProjectsValidCatalog(t *testing.T) {
 	resolved, err := r.Resolve(Selection{Provider: "cached", Model: "m1"})
 	if err != nil || r.ValidateRoute(resolved.Model) != nil {
 		t.Fatalf("valid cache was not projected: %#v, %v", resolved, err)
+	}
+	if _, ok := r.GetProvider("orphan"); ok {
+		t.Fatal("unregistered cache entry created a provider")
 	}
 	if !errors.Is(r.ValidateRoute(Model{Provider: "broken"}), ErrUnsupported) {
 		t.Fatal("selected invalid cached provider must fail route")
