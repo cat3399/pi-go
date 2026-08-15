@@ -58,51 +58,82 @@ func validResponsesTextSignature(value responsesTextSignature) bool {
 	return value.Phase == "" || value.Phase == "commentary" || value.Phase == "final_answer"
 }
 
-func encodeResponsesReasoningSignature(id, encryptedContent, plaintextContent, summaryText string) (string, error) {
-	if !validResponsesReasoningIdentity(id) || !utf8.ValidString(encryptedContent) || !utf8.ValidString(plaintextContent) || !utf8.ValidString(summaryText) || len(encryptedContent) > 1<<20 || len(plaintextContent) > 1<<20 || len(summaryText) > 1<<20 || (encryptedContent != "" && plaintextContent != "") {
-		return "", fmt.Errorf("invalid Responses reasoning signature")
+// decodeResponsesReasoningSignature validates the generic opaque signature
+// just enough for safe replay, then returns the original JSON unchanged. Old
+// pi-go sessions may contain encrypted reasoning reconstructed without the
+// schema-required summary field; repair only that historical shape while
+// preserving every other field.
+func decodeResponsesReasoningSignature(signature string) (json.RawMessage, bool) {
+	raw, fields, encrypted, ok := inspectResponsesReasoningItem([]byte(signature))
+	if !ok {
+		return nil, false
 	}
-	wire := responsesReasoningInput{
-		Type:             "reasoning",
-		ID:               id,
-		EncryptedContent: encryptedContent,
-		Content:          plaintextContent,
+	if _, hasSummary := fields["summary"]; encrypted != "" && !hasSummary {
+		fields["summary"] = json.RawMessage("[]")
+		repaired, err := json.Marshal(fields)
+		if err != nil || len(repaired) > maxResponsesSignatureBytes {
+			return nil, false
+		}
+		return repaired, true
 	}
-	if encryptedContent != "" && summaryText != "" {
-		wire.Summary = []responsesReasoningSummary{{Type: "summary_text", Text: summaryText}}
-	}
-	raw, err := json.Marshal(wire)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
+	return raw, true
 }
 
-// decodeResponsesReasoningSignature validates the generic opaque signature
-// just enough for safe replay, then returns the original JSON unchanged. This
-// preserves future Responses item fields instead of teaching llm about them.
-func decodeResponsesReasoningSignature(signature string) (json.RawMessage, bool) {
-	if !utf8.ValidString(signature) || len(signature) == 0 || len(signature) > maxResponsesSignatureBytes || !json.Valid([]byte(signature)) {
-		return nil, false
+// preserveResponsesReasoningItem validates a newly completed reasoning item
+// without rewriting it. This is the Go equivalent of the upstream
+// JSON.stringify(item) persistence contract.
+func preserveResponsesReasoningItem(item json.RawMessage) (json.RawMessage, error) {
+	raw, _, _, ok := inspectResponsesReasoningItem(item)
+	if !ok {
+		return nil, fmt.Errorf("invalid Responses reasoning output item")
+	}
+	return raw, nil
+}
+
+// patchResponsesReasoningEncryption mirrors upstream's terminal Azure
+// backfill: retain the completed item's full JSON and replace only
+// encrypted_content.
+func patchResponsesReasoningEncryption(item json.RawMessage, encryptedContent string) (json.RawMessage, error) {
+	_, fields, _, ok := inspectResponsesReasoningItem(item)
+	if !ok || !utf8.ValidString(encryptedContent) || encryptedContent == "" || len(encryptedContent) > 1<<20 {
+		return nil, fmt.Errorf("invalid Responses reasoning encryption backfill")
+	}
+	rawEncrypted, err := json.Marshal(encryptedContent)
+	if err != nil {
+		return nil, err
+	}
+	fields["encrypted_content"] = rawEncrypted
+	patched, err := json.Marshal(fields)
+	if err != nil || len(patched) > maxResponsesSignatureBytes {
+		return nil, fmt.Errorf("invalid Responses reasoning encryption backfill")
+	}
+	return patched, nil
+}
+
+func inspectResponsesReasoningItem(item []byte) (json.RawMessage, map[string]json.RawMessage, string, bool) {
+	if !utf8.Valid(item) || len(item) == 0 || len(item) > maxResponsesSignatureBytes || !json.Valid(item) {
+		return nil, nil, "", false
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal([]byte(signature), &fields) != nil || fields == nil {
-		return nil, false
+	if json.Unmarshal(item, &fields) != nil || fields == nil {
+		return nil, nil, "", false
 	}
 	var typeName, id string
 	if json.Unmarshal(fields["type"], &typeName) != nil || typeName != "reasoning" || json.Unmarshal(fields["id"], &id) != nil || !validResponsesReasoningIdentity(id) {
-		return nil, false
+		return nil, nil, "", false
 	}
+	var encryptedContent string
 	if raw, ok := fields["encrypted_content"]; ok {
-		var value string
-		if json.Unmarshal(raw, &value) != nil || !utf8.ValidString(value) || len(value) > 1<<20 {
-			return nil, false
+		if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			if json.Unmarshal(raw, &encryptedContent) != nil || !utf8.ValidString(encryptedContent) || len(encryptedContent) > 1<<20 {
+				return nil, nil, "", false
+			}
 		}
 	}
 	if raw, ok := fields["content"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && len(raw) > 1<<20 {
-		return nil, false
+		return nil, nil, "", false
 	}
-	return append(json.RawMessage(nil), signature...), true
+	return append(json.RawMessage(nil), item...), fields, encryptedContent, true
 }
 
 func validResponsesReasoningIdentity(id string) bool {

@@ -580,7 +580,7 @@ capabilities:
 
   - id: provider.openai_responses
     category: provider
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/ai/src/api/openai-responses.ts
       symbol: streamOpenAIResponses
@@ -591,9 +591,12 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/provider/openai_responses_test.go, symbol: TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay}
+      - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesPersistsEmptyReasoningSummaryAcrossRestartAndReplay}
+      - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesRepairsLegacyEncryptedReasoningWithoutSummary}
+      - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesAssemblesMultipartReasoningAndIgnoresProgressMetadata}
       - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
-    intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines.
-    remainingDifference: Completed reasoning items are still reconstructed instead of preserved as original JSON; empty/multipart summary replay is tracked in the next parity batch.
+    intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines; the request boundary repairs only historical pi-go encrypted signatures that omitted schema-required summary.
+    remainingDifference: none
 
   - id: provider.openai_completions
     category: provider
@@ -613,7 +616,7 @@ capabilities:
 
   - id: provider.openai_codex_responses
     category: provider
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/ai/src/api/openai-codex-responses.ts
       symbol: streamOpenAICodexResponses
@@ -623,9 +626,10 @@ capabilities:
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexWebSocketStreamsAndReusesCachedContinuation}
+      - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexCachedContinuationPreservesReasoningAndNormalizesToolItems}
       - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: WebSocket affinity state is synchronized explicitly and SSE fallback is an owned adapter policy.
-    remainingDifference: Codex reasoning replay and WebSocket continuation still reconstruct completed items instead of preserving the original JSON.
+    remainingDifference: none
 
   - id: provider.anthropic_messages
     category: provider

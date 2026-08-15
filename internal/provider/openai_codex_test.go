@@ -126,7 +126,7 @@ func TestOpenAICodexWebSocketStreamsAndReusesCachedContinuation(t *testing.T) {
 	}
 }
 
-func TestOpenAICodexCachedContinuationUsesNormalizedOutputItems(t *testing.T) {
+func TestOpenAICodexCachedContinuationPreservesReasoningAndNormalizesToolItems(t *testing.T) {
 	provider.ResetOpenAICodexWebSocketDebugStats("")
 	defer provider.CloseOpenAICodexWebSocketSessions("")
 
@@ -156,10 +156,14 @@ func TestOpenAICodexCachedContinuationUsesNormalizedOutputItems(t *testing.T) {
 			}
 			if turn == 1 {
 				for _, event := range []map[string]any{
-					{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "sample_tool", "input": ""}},
-					{"type": "response.custom_tool_call_input.delta", "output_index": 0, "item_id": "ctc_1", "delta": "abc"},
-					{"type": "response.custom_tool_call_input.done", "output_index": 0, "item_id": "ctc_1", "input": "abc"},
-					{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "sample_tool", "input": "abc", "status": "completed", "future": "ignored"}},
+					{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{
+						"type": "reasoning", "id": "rs_cached", "encrypted_content": "cached-cipher", "status": "completed", "future": map[string]any{"retained": true},
+						"summary": []any{map[string]any{"type": "summary_text", "text": "first"}, map[string]any{"type": "summary_text", "text": "second"}},
+					}},
+					{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "sample_tool", "input": ""}},
+					{"type": "response.custom_tool_call_input.delta", "output_index": 1, "item_id": "ctc_1", "delta": "abc"},
+					{"type": "response.custom_tool_call_input.done", "output_index": 1, "item_id": "ctc_1", "input": "abc"},
+					{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1", "name": "sample_tool", "input": "abc", "status": "completed", "future": "ignored"}},
 				} {
 					if err := wsjson.Write(request.Context(), connection, event); err != nil {
 						t.Errorf("write custom tool event: %v", err)
@@ -209,10 +213,14 @@ func TestOpenAICodexCachedContinuationUsesNormalizedOutputItems(t *testing.T) {
 	firstUser := mustUser(t, "Use the tool")
 	_, first := collectStream(t, implementation.Stream(context.Background(), newRequest([]llm.ConversationMessage{firstUser})))
 	toolUse, ok := first.(llm.AssistantToolUseMessage)
-	if !ok || len(toolUse.Blocks()) != 1 {
+	if !ok || len(toolUse.Blocks()) != 2 {
 		t.Fatalf("first terminal = %#v", first)
 	}
-	call := toolUse.Blocks()[0].(llm.ToolCallBlock)
+	reasoning := responsesReasoningSignatureForTest(t, toolUse.Blocks()[0].(llm.ThinkingBlock))
+	if summary := reasoning["summary"].([]any); len(summary) != 2 || reasoning["status"] != "completed" || reasoning["future"].(map[string]any)["retained"] != true {
+		t.Fatalf("cached reasoning = %#v", reasoning)
+	}
+	call := toolUse.Blocks()[1].(llm.ToolCallBlock)
 	if call.ID() != "call_1|ctc_1" || string(call.ArgumentsJSON()) != `{"payload":"abc"}` {
 		t.Fatalf("custom tool call = %#v", call)
 	}

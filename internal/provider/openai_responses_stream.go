@@ -57,11 +57,10 @@ type responsesReasoningSlot struct {
 }
 
 type responsesCompletedReasoning struct {
-	contentIndex     int
-	itemID           string
-	text             string
-	encryptedContent string
-	plaintextContent string
+	contentIndex int
+	itemID       string
+	text         string
+	rawItem      json.RawMessage
 }
 
 type responsesDeferredEvent struct {
@@ -720,11 +719,7 @@ func (s *openAIResponsesStream) flushResponsesDeferredEvents() error {
 		if reasoning == nil {
 			return errors.New("missing deferred reasoning item")
 		}
-		signature, err := encodeResponsesReasoningSignature(reasoning.itemID, reasoning.encryptedContent, reasoning.plaintextContent, reasoning.text)
-		if err != nil {
-			return err
-		}
-		block, err := llm.NewThinkingBlockWithSignature(reasoning.text, signature, false)
+		block, err := llm.NewThinkingBlockWithSignature(reasoning.text, string(reasoning.rawItem), false)
 		if err != nil {
 			return err
 		}

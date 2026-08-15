@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -503,7 +504,7 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, err := llm.NewThinkingBlockWithSignature("parallel plan", `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher"}`, false)
+	reasoning, err := llm.NewThinkingBlockWithSignature("parallel plan", `{"type":"reasoning","id":"rs_integrated","summary":[{"type":"summary_text","text":"parallel plan"}],"encrypted_content":"integrated-cipher"}`, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,8 +726,8 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 		mu.Unlock()
 		writer.Header().Set("Content-Type", "text/event-stream")
 		if turn == 1 {
-			reasoningDone := map[string]any{"type": "reasoning", "id": "rs_persist"}
-			reasoningTerminal := map[string]any{"type": "reasoning", "id": "rs_persist", "encrypted_content": "cipher"}
+			reasoningDone := map[string]any{"type": "reasoning", "id": "rs_persist", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}}
+			reasoningTerminal := map[string]any{"type": "reasoning", "id": "rs_persist", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}, "encrypted_content": "cipher"}
 			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
 			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoningDone}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoningTerminal, text}}})
 			return
@@ -755,7 +756,7 @@ func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
 	for _, item := range input {
 		wire := item.(map[string]any)
 		if wire["type"] == "reasoning" {
-			foundReasoning = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher"
+			foundReasoning = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher" && reflect.DeepEqual(wire["summary"], []any{map[string]any{"type": "summary_text", "text": "plan"}})
 		}
 		if wire["type"] == "message" && wire["id"] == "msg_persist" {
 			foundText = wire["phase"] == "final_answer"

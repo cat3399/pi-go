@@ -490,7 +490,7 @@ func assertCoreIntegrationReplay(t *testing.T, raw any) {
 	}
 	reasoning := input[2].(map[string]any)
 	commentary := input[3].(map[string]any)
-	if reasoning["type"] != "reasoning" || reasoning["id"] != "rs_integrated" || reasoning["encrypted_content"] != "integrated-cipher" {
+	if reasoning["type"] != "reasoning" || reasoning["id"] != "rs_integrated" || reasoning["encrypted_content"] != "integrated-cipher" || !reflect.DeepEqual(reasoning["summary"], []any{map[string]any{"type": "summary_text", "text": "parallel plan"}}) {
 		t.Fatalf("reasoning replay = %#v", reasoning)
 	}
 	if commentary["type"] != "message" || commentary["id"] != "msg_integrated" || commentary["phase"] != "commentary" {
@@ -540,7 +540,8 @@ func assertCoreIntegrationSession(t *testing.T, transcript *session.SessionManag
 	reasoning, ok := blocks[0].(llm.ThinkingBlock).ThinkingSignature()
 	// Responses replay must retain the complete reasoning item.  OpenAI's
 	// summary is part of the replay provenance, not disposable display text.
-	if !ok || reasoning != `{"type":"reasoning","id":"rs_integrated","encrypted_content":"integrated-cipher","summary":[{"type":"summary_text","text":"parallel plan"}]}` {
+	var reasoningItem map[string]any
+	if !ok || json.Unmarshal([]byte(reasoning), &reasoningItem) != nil || reasoningItem["type"] != "reasoning" || reasoningItem["id"] != "rs_integrated" || reasoningItem["encrypted_content"] != "integrated-cipher" || !reflect.DeepEqual(reasoningItem["summary"], []any{map[string]any{"type": "summary_text", "text": "parallel plan"}}) {
 		t.Fatalf("durable reasoning signature = (%q, %t)", reasoning, ok)
 	}
 	textSignature, ok := blocks[1].(llm.TextBlock).TextSignature()
@@ -581,7 +582,7 @@ func assertCoreIntegrationLifecycle(t *testing.T, events []agentEventSnapshot) {
 func writeCoreIntegrationToolSSE(t *testing.T, w http.ResponseWriter) {
 	t.Helper()
 	w.Header().Set("Content-Type", "text/event-stream")
-	reasoning := map[string]any{"type": "reasoning", "id": "rs_integrated", "encrypted_content": "integrated-cipher"}
+	reasoning := map[string]any{"type": "reasoning", "id": "rs_integrated", "summary": []any{map[string]any{"type": "summary_text", "text": "parallel plan"}}, "encrypted_content": "integrated-cipher"}
 	commentary := map[string]any{"type": "message", "id": "msg_integrated", "role": "assistant", "phase": "commentary", "content": []any{map[string]any{"type": "output_text", "text": "running both tools"}}}
 	slow := map[string]any{"type": "function_call", "id": "fc_slow", "call_id": "call_slow", "name": "slow", "arguments": `{"value":"slow"}`}
 	fast := map[string]any{"type": "function_call", "id": "fc_fast", "call_id": "call_fast", "name": "fast", "arguments": `{"value":"fast"}`}

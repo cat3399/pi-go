@@ -30,9 +30,10 @@ func responsesReasoningBlock(t *testing.T, text, id, encryptedContent, plaintext
 	raw, err := json.Marshal(struct {
 		Type             string `json:"type"`
 		ID               string `json:"id"`
+		Summary          []any  `json:"summary"`
 		EncryptedContent string `json:"encrypted_content,omitempty"`
 		Content          string `json:"content,omitempty"`
-	}{Type: "reasoning", ID: id, EncryptedContent: encryptedContent, Content: plaintextContent})
+	}{Type: "reasoning", ID: id, Summary: []any{}, EncryptedContent: encryptedContent, Content: plaintextContent})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,10 +383,10 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 	body := responsesSSE(
 		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_azure"}},
 		map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_azure", "delta": "plan"},
-		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_azure"}},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_azure", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}, "status": "completed", "future": map[string]any{"retained": true}}},
 		map[string]any{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_azure", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}}},
 		map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{
-			map[string]any{"type": "reasoning", "id": "rs_azure", "encrypted_content": "terminal-cipher"},
+			map[string]any{"type": "reasoning", "id": "rs_azure", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}, "encrypted_content": "terminal-cipher"},
 			map[string]any{"type": "message", "id": "msg_azure", "role": "assistant"},
 		}}},
 	)
@@ -402,8 +403,11 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 		t.Fatalf("terminal = %T", terminal)
 	}
 	replay := responsesReasoningSignatureForTest(t, message.Blocks()[0].(llm.ThinkingBlock))
-	if replay["id"] != "rs_azure" || replay["encrypted_content"] != "terminal-cipher" {
+	if replay["id"] != "rs_azure" || replay["encrypted_content"] != "terminal-cipher" || replay["status"] != "completed" || replay["future"].(map[string]any)["retained"] != true {
 		t.Fatalf("reasoning signature = %#v", replay)
+	}
+	if summary := replay["summary"].([]any); len(summary) != 1 || summary[0].(map[string]any)["text"] != "plan" {
+		t.Fatalf("reasoning summary = %#v", summary)
 	}
 
 	directory := t.TempDir()
@@ -428,8 +432,151 @@ func TestOpenAIResponsesBackfillsAzureReasoningEncryptionFromTerminalOutput(t *t
 	t.Cleanup(func() { _ = restarted.Close() })
 	restartedMessage := restarted.Context().Messages()[0].(llm.AssistantRichMessage)
 	restartedReplay := responsesReasoningSignatureForTest(t, restartedMessage.Blocks()[0].(llm.ThinkingBlock))
-	if restartedReplay["id"] != "rs_azure" || restartedReplay["encrypted_content"] != "terminal-cipher" {
+	if restartedReplay["id"] != "rs_azure" || restartedReplay["encrypted_content"] != "terminal-cipher" || !reflect.DeepEqual(restartedReplay["summary"], replay["summary"]) || !reflect.DeepEqual(restartedReplay["future"], replay["future"]) {
 		t.Fatalf("restarted reasoning signature = %#v", restartedReplay)
+	}
+}
+
+func TestOpenAIResponsesPersistsEmptyReasoningSummaryAcrossRestartAndReplay(t *testing.T) {
+	body := responsesSSE(
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{
+			"type": "reasoning", "id": "rs_empty", "summary": []any{}, "encrypted_content": "empty-cipher",
+			"status": "completed", "future": map[string]any{"version": float64(2)},
+		}},
+		map[string]any{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_empty", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}}},
+		map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed"}},
+	)
+	implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "secret",
+		Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", body)),
+	})
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
+	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_end", "text_start", "text_delta", "text_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	message, ok := terminal.(llm.AssistantRichMessage)
+	if !ok || len(message.Blocks()) != 2 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	thinking := message.Blocks()[0].(llm.ThinkingBlock)
+	if thinking.Thinking() != "" {
+		t.Fatalf("empty reasoning became visible text %q", thinking.Thinking())
+	}
+	wantSignature := responsesReasoningSignatureForTest(t, thinking)
+	if summary := wantSignature["summary"].([]any); len(summary) != 0 {
+		t.Fatalf("empty summary = %#v", summary)
+	}
+
+	directory := t.TempDir()
+	entryIDs := []string{"entry-user", "entry-assistant"}
+	transcript, err := session.Create(filepath.Join(directory, "empty-reasoning.jsonl"), session.CreateOptions{
+		ID: "empty-reasoning", WorkingDir: directory,
+		NewEntryID: func() (string, error) {
+			id := entryIDs[0]
+			entryIDs = entryIDs[1:]
+			return id, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), mustUser(t, "go"), session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := session.Open(transcript.Path(), session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	messages := append(restarted.Context().Messages(), mustUser(t, "continue"))
+	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", messages))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := replayItemsOfType(t, payload, "reasoning")
+	if len(reasoning) != 1 || !reflect.DeepEqual(reasoning[0], wantSignature) {
+		t.Fatalf("restarted reasoning replay = %#v, want %#v", reasoning, wantSignature)
+	}
+}
+
+func TestOpenAIResponsesRepairsLegacyEncryptedReasoningWithoutSummary(t *testing.T) {
+	legacy := `{"type":"reasoning","id":"rs_legacy","encrypted_content":"legacy-cipher","status":"completed","future":{"retained":true}}`
+	thinking, err := llm.NewThinkingBlockWithSignature("", legacy, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantRichMessageWithMetadata(
+		[]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, responsesTestTime,
+		llm.AssistantProvenance{Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, Model: "test-model"}, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	transcript, err := session.Create(filepath.Join(directory, "legacy-reasoning.jsonl"), session.CreateOptions{
+		ID: "legacy-reasoning", WorkingDir: directory,
+		NewEntryID: func() (string, error) { return "entry-assistant", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transcript.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transcript.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := session.Open(transcript.Path(), session.OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	messages := append(restarted.Context().Messages(), mustUser(t, "continue"))
+	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", messages))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := replayItemsOfType(t, payload, "reasoning")
+	if len(reasoning) != 1 {
+		t.Fatalf("legacy reasoning replay = %#v", reasoning)
+	}
+	if summary, ok := reasoning[0]["summary"].([]any); !ok || len(summary) != 0 {
+		t.Fatalf("repaired summary = %#v", reasoning[0]["summary"])
+	}
+	if reasoning[0]["encrypted_content"] != "legacy-cipher" || reasoning[0]["status"] != "completed" || reasoning[0]["future"].(map[string]any)["retained"] != true {
+		t.Fatalf("legacy fields were not preserved: %#v", reasoning[0])
+	}
+}
+
+func TestOpenAIResponsesReplaysNullableEncryptedReasoningUnchanged(t *testing.T) {
+	signature := `{"type":"reasoning","id":"rs_null","summary":[],"encrypted_content":null,"status":"completed"}`
+	thinking, err := llm.NewThinkingBlockWithSignature("", signature, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := llm.NewAssistantRichMessageWithMetadata(
+		[]llm.AssistantBlock{thinking}, llm.FinishStop, llm.Usage{}, responsesTestTime,
+		llm.AssistantProvenance{Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, Model: "test-model"}, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", []llm.ConversationMessage{message}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := replayItemsOfType(t, payload, "reasoning")
+	if len(reasoning) != 1 {
+		t.Fatalf("nullable reasoning replay = %#v", reasoning)
+	}
+	if value, exists := reasoning[0]["encrypted_content"]; !exists || value != nil {
+		t.Fatalf("nullable encrypted_content = %#v, exists=%t", value, exists)
 	}
 }
 
@@ -680,7 +827,7 @@ func TestOpenAIResponsesStreamsReasoningThenText(t *testing.T) {
 	body := responsesSSE(
 		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_1"}},
 		map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_1", "delta": "plan"},
-		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_1", "encrypted_content": "cipher"}},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_1", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}, "encrypted_content": "cipher"}},
 		map[string]any{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}}},
 		map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "reasoning"}, map[string]any{"type": "message"}}}},
 	)
@@ -714,6 +861,7 @@ func TestOpenAIResponsesAssemblesMultipartReasoningAndIgnoresProgressMetadata(t 
 		map[string]any{"type": "response.reasoning_summary_part.done", "output_index": 0, "item_id": "rs_multi", "summary_index": 1, "part": map[string]any{"type": "summary_text", "text": "second"}},
 		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{
 			"type": "reasoning", "id": "rs_multi", "encrypted_content": "cipher",
+			"status": "completed", "future": map[string]any{"retained": true},
 			"summary": []any{
 				map[string]any{"type": "summary_text", "text": "first"},
 				map[string]any{"type": "summary_text", "text": "second"},
@@ -735,6 +883,22 @@ func TestOpenAIResponsesAssemblesMultipartReasoningAndIgnoresProgressMetadata(t 
 	}
 	if got := message.Blocks()[0].(llm.ThinkingBlock).Thinking(); got != "first\n\nsecond" {
 		t.Fatalf("thinking = %q", got)
+	}
+	wantSummary := []any{
+		map[string]any{"type": "summary_text", "text": "first"},
+		map[string]any{"type": "summary_text", "text": "second"},
+	}
+	signature := responsesReasoningSignatureForTest(t, message.Blocks()[0].(llm.ThinkingBlock))
+	if !reflect.DeepEqual(signature["summary"], wantSummary) || signature["status"] != "completed" || signature["future"].(map[string]any)["retained"] != true {
+		t.Fatalf("multipart reasoning signature = %#v", signature)
+	}
+	payload, err := encodeReplayForTest(mustResponsesRequest(t, "", []llm.ConversationMessage{message}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoning := replayItemsOfType(t, payload, "reasoning")
+	if len(reasoning) != 1 || !reflect.DeepEqual(reasoning[0], signature) {
+		t.Fatalf("multipart reasoning replay = %#v, want %#v", reasoning, signature)
 	}
 }
 

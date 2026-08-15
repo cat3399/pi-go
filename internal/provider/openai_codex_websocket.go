@@ -817,7 +817,9 @@ func (b *codexWebSocketBody) commitResponsesTerminal(responseID string) {
 // authoritative wire source available to the WebSocket body, and its raw item
 // may contain status/future fields or multipart summaries that the next
 // request's converter intentionally rewrites. Canonicalizing here makes the
-// cached baseline byte-for-value equivalent to that next request.
+// cached baseline byte-for-value equivalent to that next request. Reasoning is
+// the exception: its opaque signature is the complete output item, so preserve
+// all raw fields and apply only the same legacy-session repair as replay.
 func canonicalCodexContinuationItem(value any) (any, bool) {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -838,15 +840,13 @@ func canonicalCodexContinuationItem(value any) (any, bool) {
 			Content: []responsesOutputText{{Type: "output_text", Text: text, Annotations: []any{}}},
 		}, true
 	case "reasoning":
-		if item.ID == "" {
+		reasoning, ok := decodeResponsesReasoningSignature(string(raw))
+		if !ok {
 			return nil, false
 		}
-		text := responsesReasoningText(item)
-		result := responsesReasoningInput{Type: "reasoning", ID: item.ID, EncryptedContent: item.EncryptedContent}
-		if item.EncryptedContent == "" {
-			result.Content = text
-		} else if text != "" {
-			result.Summary = []responsesReasoningSummary{{Type: "summary_text", Text: text}}
+		var result any
+		if json.Unmarshal(reasoning, &result) != nil {
+			return nil, false
 		}
 		return result, true
 	case "function_call":

@@ -71,18 +71,6 @@ type responsesInputImage struct {
 	Detail   string `json:"detail"`
 	ImageURL string `json:"image_url"`
 }
-type responsesReasoningInput struct {
-	Type             string                      `json:"type"`
-	ID               string                      `json:"id"`
-	EncryptedContent string                      `json:"encrypted_content,omitempty"`
-	Content          string                      `json:"content,omitempty"`
-	Summary          []responsesReasoningSummary `json:"summary,omitempty"`
-}
-type responsesReasoningSummary struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
-
 type responsesOutputText struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`

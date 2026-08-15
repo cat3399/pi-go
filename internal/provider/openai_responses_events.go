@@ -34,6 +34,7 @@ type responsesOutputEvent struct {
 }
 
 type responsesOutputItem struct {
+	Raw              json.RawMessage          `json:"-"`
 	Type             string                   `json:"type"`
 	ID               string                   `json:"id"`
 	Role             string                   `json:"role"`
@@ -49,11 +50,12 @@ type responsesOutputItem struct {
 	EncryptedContent string                   `json:"encrypted_content"`
 }
 
-// Some Responses-compatible endpoints represent reasoning content as a
-// string, while OpenAI uses an array for message/reasoning content. Preserve
-// this narrow wire variance without making arbitrary item JSON opaque.
+// Keep the authoritative output_item.done JSON alongside the fields needed by
+// the stream parser. Reasoning signatures must replay this item verbatim so
+// multipart summaries, status, and fields added by future API revisions are
+// not collapsed by the display-oriented representation below. Some compatible
+// endpoints also represent reasoning content as a string instead of an array.
 func (item *responsesOutputItem) UnmarshalJSON(data []byte) error {
-	type itemAlias responsesOutputItem
 	var wire struct {
 		Type             string                   `json:"type"`
 		ID               string                   `json:"id"`
@@ -71,7 +73,7 @@ func (item *responsesOutputItem) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	*item = responsesOutputItem{Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, Phase: wire.Phase, CallID: wire.CallID, Name: wire.Name, Arguments: wire.Arguments, Input: wire.Input, Summary: wire.Summary, EncryptedContent: wire.EncryptedContent}
+	*item = responsesOutputItem{Raw: append(json.RawMessage(nil), data...), Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, Phase: wire.Phase, CallID: wire.CallID, Name: wire.Name, Arguments: wire.Arguments, Input: wire.Input, Summary: wire.Summary, EncryptedContent: wire.EncryptedContent}
 	if len(wire.Content) == 0 || bytes.Equal(bytes.TrimSpace(wire.Content), []byte("null")) {
 		return nil
 	}
@@ -925,21 +927,20 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 				s.enqueueResponsesEvent(d)
 			}
 		}
+		rawItem, err := preserveResponsesReasoningItem(event.Item.Raw)
+		if err != nil {
+			return invalidResponsesEventFailure(err)
+		}
 		completedReasoning := &responsesCompletedReasoning{
-			contentIndex:     slot.contentIndex,
-			itemID:           slot.itemID,
-			text:             text,
-			encryptedContent: event.Item.EncryptedContent,
+			contentIndex: slot.contentIndex,
+			itemID:       slot.itemID,
+			text:         text,
+			rawItem:      rawItem,
 		}
 		if event.Item.EncryptedContent == "" {
-			completedReasoning.plaintextContent = text
 			s.deferResponsesReasoningEnd(index, completedReasoning)
 		} else {
-			signature, err := encodeResponsesReasoningSignature(slot.itemID, event.Item.EncryptedContent, "", text)
-			if err != nil {
-				return invalidResponsesEventFailure(err)
-			}
-			block, err := llm.NewThinkingBlockWithSignature(text, signature, false)
+			block, err := llm.NewThinkingBlockWithSignature(text, string(rawItem), false)
 			if err != nil {
 				return invalidResponsesEventFailure(err)
 			}
@@ -1111,9 +1112,12 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	}
 	for _, pending := range s.pendingReasoning {
 		if terminal, ok := terminalReasoningByID[pending.itemID]; ok {
-			pending.encryptedContent = terminal.encryptedContent
 			if terminal.encryptedContent != "" {
-				pending.plaintextContent = ""
+				patched, err := patchResponsesReasoningEncryption(pending.rawItem, terminal.encryptedContent)
+				if err != nil {
+					return invalidResponsesEventFailure(fmt.Errorf("backfill reasoning encryption: %w", err))
+				}
+				pending.rawItem = patched
 			}
 		}
 	}
