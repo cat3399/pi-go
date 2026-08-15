@@ -112,7 +112,7 @@ func (r *contentRenderer) renderToolExecution(call contentBlock, result []conten
 		lines = append(lines, r.theme.subtleStyle().Render("│ …"))
 	}
 	for _, image := range images {
-		detail := image.MediaType
+		detail := sanitizeDisplayText(image.MediaType)
 		if detail == "" {
 			detail = "image"
 		}

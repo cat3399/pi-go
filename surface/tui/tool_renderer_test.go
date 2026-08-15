@@ -68,6 +68,24 @@ func TestToolRendererSanitizesUntrustedTerminalControls(t *testing.T) {
 	}
 }
 
+func TestToolRendererSanitizesImageMetadataControls(t *testing.T) {
+	renderer := newContentRenderer(DefaultTheme())
+	item := contentItem{
+		ID: "image-tool", Revision: 1, Role: contentRoleTool, Title: "image",
+		Blocks: []contentBlock{
+			{Kind: contentBlockToolCall, ToolCallID: "image-call", ToolName: "image", Text: `{}`},
+			{
+				Kind: contentBlockImage, ToolCallID: "image-call", ToolName: "image",
+				MediaType: "image/png\x1b]52;c;SU1BR0VfRVZJTA==\a\x1bPpayload\x1b\\\x1b[2J",
+			},
+		},
+	}
+	view := StripTerminalSequences(strings.Join(renderer.Render(item, 100), "\n"))
+	if strings.Contains(view, "SU1BR0VfRVZJTA==") || strings.Contains(view, "payload") || !strings.Contains(view, "image/png") {
+		t.Fatalf("sanitized image metadata:\n%s", view)
+	}
+}
+
 func TestMergeToolResultBlocksKeepsOneExecutionTransaction(t *testing.T) {
 	item := contentItem{
 		ID: "assistant", Revision: 1, Role: contentRoleAssistant,
