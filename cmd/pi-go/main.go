@@ -34,6 +34,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	case "run":
 		return app.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdout, stderr)
+	case "tui":
+		return runTUI(ctx, args[1:], stdin, stdout, stderr)
 	case "rpc":
 		return rpc.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdin, stdout, stderr)
 	case "web":
@@ -50,6 +52,7 @@ func writeUsage(writer io.Writer) {
 
 Commands:
   run      Run the command-line agent
+  tui      Run the interactive terminal surface
   web      Serve the WebUI and application API
   rpc      Run the JSONL automation adapter
   version  Print the version
