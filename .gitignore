@@ -13,3 +13,4 @@
 /surface/web/_frontend/.next/
 /surface/web/_frontend/out/
 /surface/web/_frontend/*.tsbuildinfo
+.claude
