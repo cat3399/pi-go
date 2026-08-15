@@ -64,6 +64,66 @@ func TestStreamCollectorSuccessAndImmutableSnapshots(t *testing.T) {
 	assertTextContent(t, textResult.Content(), "你好", "done")
 }
 
+func TestStreamCollectorSnapshotIncludesConcurrentThinkingAndText(t *testing.T) {
+	t.Parallel()
+
+	collector := &llm.StreamCollector{}
+	accept(t, collector, newStartEvent(t))
+	thinkingStart, err := llm.NewThinkingStartEvent(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingDelta, err := llm.NewThinkingDeltaEvent(0, "still reasoning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept(t, collector, thinkingStart)
+	accept(t, collector, thinkingDelta)
+	accept(t, collector, textStart(t, 1))
+	accept(t, collector, textDelta(t, 1, "visible answer"))
+
+	snapshot, err := collector.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := snapshot.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("partial blocks = %#v, want thinking and text", blocks)
+	}
+	thinking, ok := blocks[0].(llm.PartialThinkingBlock)
+	if !ok || thinking.Thinking() != "still reasoning" {
+		t.Fatalf("thinking block = %#v", blocks[0])
+	}
+	text, ok := blocks[1].(llm.TextBlock)
+	if !ok || text.Text() != "visible answer" {
+		t.Fatalf("text block = %#v", blocks[1])
+	}
+	active := snapshot.ActiveBlocks()
+	if len(active) != 2 || active[0].Kind() != llm.AssistantBlockThinking || active[1].Kind() != llm.AssistantBlockText {
+		t.Fatalf("active blocks = %#v", active)
+	}
+	active[0] = llm.StreamActiveBlock{}
+	if again := snapshot.ActiveBlocks(); len(again) != 2 || again[0].Kind() != llm.AssistantBlockThinking {
+		t.Fatalf("active blocks mutated through accessor: %#v", again)
+	}
+	assertTextContent(t, snapshot.TextContent(), "visible answer")
+
+	finalThinking, err := llm.NewThinkingBlock("still reasoning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingEnd, err := llm.NewThinkingEndEvent(0, finalThinking)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept(t, collector, thinkingEnd)
+	accept(t, collector, textEnd(t, 1, "visible answer"))
+	accept(t, collector, done(t, llm.FinishStop, time.Time{}))
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStreamCollectorErrorBeforeStart(t *testing.T) {
 	t.Parallel()
 

@@ -717,11 +717,12 @@ func (b StreamActiveBlock) ToolCall() (id, name string, argumentsJSON []byte, ok
 	return b.toolCallID, b.toolName, bytes.Clone(b.arguments), true
 }
 
-// StreamSnapshot is an immutable view of completed blocks plus an optional
-// active partial block.
+// StreamSnapshot is an immutable view of completed and active blocks. Some
+// provider dialects begin a text block before ending a thinking block, so a
+// snapshot must retain every concurrently active content slot.
 type StreamSnapshot struct {
 	blocks     []AssistantBlock
-	active     *StreamActiveBlock
+	active     []StreamActiveBlock
 	finish     FinishReason
 	terminal   bool
 	failure    *Failure
@@ -730,22 +731,23 @@ type StreamSnapshot struct {
 }
 
 func (s StreamSnapshot) Blocks() []AssistantBlock {
-	blocks := append([]AssistantBlock(nil), s.blocks...)
-	if s.active == nil {
-		return blocks
+	if len(s.active) == 0 {
+		return append([]AssistantBlock(nil), s.blocks...)
 	}
-	switch s.active.kind {
-	case AssistantBlockText:
-		blocks = append(blocks, TextBlock{text: s.active.text})
-	case AssistantBlockThinking:
-		blocks = append(blocks, PartialThinkingBlock{thinking: s.active.text})
-	case AssistantBlockToolCall:
-		blocks = append(blocks, PartialToolCallBlock{
-			id: s.active.toolCallID, name: s.active.toolName,
-			arguments: bytes.Clone(s.active.arguments),
-		})
+	result := make([]AssistantBlock, 0, len(s.blocks)+len(s.active))
+	completedIndex, activeIndex := 0, 0
+	for contentIndex := range len(s.blocks) + len(s.active) {
+		if activeIndex < len(s.active) && s.active[activeIndex].contentIndex == contentIndex {
+			result = append(result, activeAssistantBlock(s.active[activeIndex]))
+			activeIndex++
+			continue
+		}
+		if completedIndex < len(s.blocks) {
+			result = append(result, s.blocks[completedIndex])
+			completedIndex++
+		}
 	}
-	return blocks
+	return result
 }
 
 func (s StreamSnapshot) CompletedBlocks() []AssistantBlock {
@@ -753,25 +755,50 @@ func (s StreamSnapshot) CompletedBlocks() []AssistantBlock {
 }
 
 func (s StreamSnapshot) ActiveBlock() (StreamActiveBlock, bool) {
-	if s.active == nil {
+	if len(s.active) == 0 {
 		return StreamActiveBlock{}, false
 	}
-	active := *s.active
-	active.arguments = bytes.Clone(active.arguments)
-	return active, true
+	return cloneStreamActiveBlock(s.active[0]), true
+}
+
+// ActiveBlocks returns every open content slot in provider content order.
+func (s StreamSnapshot) ActiveBlocks() []StreamActiveBlock {
+	result := make([]StreamActiveBlock, len(s.active))
+	for index, active := range s.active {
+		result[index] = cloneStreamActiveBlock(active)
+	}
+	return result
 }
 
 func (s StreamSnapshot) TextContent() []TextBlock {
-	content := make([]TextBlock, 0, len(s.blocks)+1)
-	for _, block := range s.blocks {
+	content := make([]TextBlock, 0, len(s.blocks)+len(s.active))
+	for _, block := range s.Blocks() {
 		if text, ok := block.(TextBlock); ok {
 			content = append(content, text)
 		}
 	}
-	if s.active != nil && s.active.kind == AssistantBlockText {
-		content = append(content, TextBlock{text: s.active.text})
-	}
 	return content
+}
+
+func cloneStreamActiveBlock(active StreamActiveBlock) StreamActiveBlock {
+	active.arguments = bytes.Clone(active.arguments)
+	return active
+}
+
+func activeAssistantBlock(active StreamActiveBlock) AssistantBlock {
+	switch active.kind {
+	case AssistantBlockText:
+		return TextBlock{text: active.text}
+	case AssistantBlockThinking:
+		return PartialThinkingBlock{thinking: active.text}
+	case AssistantBlockToolCall:
+		return PartialToolCallBlock{
+			id: active.toolCallID, name: active.toolName,
+			arguments: bytes.Clone(active.arguments),
+		}
+	default:
+		return TextBlock{}
+	}
 }
 
 func (s StreamSnapshot) FinishReason() FinishReason {
@@ -1095,16 +1122,16 @@ func (c *StreamCollector) Snapshot() (StreamSnapshot, error) {
 		blocks: c.orderedBlocks(), finish: FinishPending,
 		provenance: c.start.provenance, timestamp: c.start.timestamp,
 	}
-	if indices := c.openIndices(); len(indices) != 0 {
-		slot := c.slots[indices[0]]
-		snapshot.active = &StreamActiveBlock{
+	for _, index := range c.openIndices() {
+		slot := c.slots[index]
+		snapshot.active = append(snapshot.active, StreamActiveBlock{
 			kind:         slot.kind,
-			contentIndex: indices[0],
+			contentIndex: index,
 			text:         slot.text.String(),
 			toolCallID:   slot.id,
 			toolName:     slot.name,
 			arguments:    bytes.Clone(slot.arguments),
-		}
+		})
 	}
 	return snapshot, nil
 }

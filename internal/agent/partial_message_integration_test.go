@@ -98,7 +98,7 @@ func TestStreamingAssistantPartialReachesHooksAndObserversWithoutPersistence(t *
 		if usage.Input() != 0 || usage.Output() != 0 || usage.CacheRead() != 0 || usage.CacheWrite() != 0 || usage.TotalTokens() != 0 || cost != (llm.Cost{}) {
 			t.Fatalf("partial usage = %#v, cost=%#v", usage, cost)
 		}
-		if active, ok := partial.Snapshot().ActiveBlock(); ok {
+		for _, active := range partial.Snapshot().ActiveBlocks() {
 			seen[active.Kind()] = true
 			if _, _, arguments, toolOK := active.ToolCall(); toolOK && len(arguments) != 0 {
 				seenRawToolDelta = true
