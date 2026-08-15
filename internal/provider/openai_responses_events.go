@@ -1134,14 +1134,16 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if event.Response.Usage != nil {
 		var costErr error
 		cost := s.model.CalculateCost(usage)
-		serviceTier := event.Response.ServiceTier
-		if s.codexServiceTier && serviceTier == "default" && (s.serviceTier == "flex" || s.serviceTier == "priority") {
-			serviceTier = s.serviceTier
+		if s.applyServiceTierPricing {
+			serviceTier := event.Response.ServiceTier
+			if s.codexServiceTier && serviceTier == "default" && (s.serviceTier == "flex" || s.serviceTier == "priority") {
+				serviceTier = s.serviceTier
+			}
+			if serviceTier == "" {
+				serviceTier = s.serviceTier
+			}
+			cost = applyOpenAIServiceTierPricing(cost, s.model.ID(), serviceTier)
 		}
-		if serviceTier == "" {
-			serviceTier = s.serviceTier
-		}
-		cost = applyOpenAIServiceTierPricing(cost, s.model.ID(), serviceTier)
 		usage, costErr = usage.WithCost(cost)
 		if costErr != nil {
 			return invalidResponsesEventFailure(fmt.Errorf("calculate token cost: %w", costErr))

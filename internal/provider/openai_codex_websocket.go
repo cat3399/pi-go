@@ -94,11 +94,12 @@ func (c openAICodexStreamConfig) newResponsesStream(client HTTPDoer, onResponse 
 	streamContext, cancel := context.WithCancelCause(c.ctx)
 	return &openAIResponsesStream{
 		ctx: streamContext, cancel: cancel, timeoutCancel: func() {}, endpoint: c.endpoint, apiKey: c.token,
+		authHeader: "authorization", displayName: "OpenAI Codex", configurationError: ErrInvalidOpenAICodexConfig,
 		client: client, clock: c.clock, timestamp: c.clock(), payload: append([]byte(nil), c.payload...), model: c.model,
 		headers: cloneStrings(c.headers), maxEventBytes: c.maxEventBytes, maxErrorBodyBytes: c.maxErrorBodyBytes,
 		onResponse: onResponse, onHeaders: onHeaders, headerOverrides: cloneHeaderOverrides(overrides),
 		configurationFail: c.configurationFail, maxRetries: maxRetries, maxRetryDelayMS: cloneUint64(c.options.MaxRetryDelayMS),
-		serviceTier: c.options.ServiceTier, codexServiceTier: true, codexRetry: retry,
+		serviceTier: c.options.ServiceTier, applyServiceTierPricing: true, codexServiceTier: true, codexRetry: retry,
 		grammarProperties: cloneStrings(c.grammarProperties), slots: make(map[int]*responsesTextSlot),
 		reasoningSlots: make(map[int]*responsesReasoningSlot), toolSlots: make(map[int]*responsesToolSlot),
 		completedOutputs: make(map[int]struct{}), completedItemIDs: make(map[int]string), completedPhases: make(map[int]string),

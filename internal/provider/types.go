@@ -681,6 +681,18 @@ func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
 	if overlay.AnthropicEffort != "" {
 		result.AnthropicEffort = overlay.AnthropicEffort
 	}
+	if overlay.AzureAPIVersion != "" {
+		result.AzureAPIVersion = overlay.AzureAPIVersion
+	}
+	if overlay.AzureResourceName != "" {
+		result.AzureResourceName = overlay.AzureResourceName
+	}
+	if overlay.AzureBaseURL != "" {
+		result.AzureBaseURL = overlay.AzureBaseURL
+	}
+	if overlay.AzureDeploymentName != "" {
+		result.AzureDeploymentName = overlay.AzureDeploymentName
+	}
 	result.Metadata = mergeAnyMap(result.Metadata, overlay.Metadata)
 	// AgentSession supplies auth resolution as the overlay, while caller env is
 	// already in the base. Explicit request values have upstream precedence.
@@ -996,6 +1008,10 @@ type StreamOptions struct {
 	ThinkingDisplay      string
 	InterleavedThinking  *bool
 	AnthropicEffort      string
+	AzureAPIVersion      string
+	AzureResourceName    string
+	AzureBaseURL         string
+	AzureDeploymentName  string
 	Metadata             map[string]any
 	Env                  map[string]string
 	// Extra is retained for source compatibility only. New portable options
@@ -1147,6 +1163,14 @@ func (r Request) validate() error {
 	case "", "low", "medium", "high", "xhigh", "max":
 	default:
 		return fmt.Errorf("%w: invalid Anthropic effort", ErrInvalidRequest)
+	}
+	for name, value := range map[string]string{
+		"Azure API version": r.stream.AzureAPIVersion, "Azure resource name": r.stream.AzureResourceName,
+		"Azure base URL": r.stream.AzureBaseURL, "Azure deployment name": r.stream.AzureDeploymentName,
+	} {
+		if !utf8.ValidString(value) || strings.ContainsFunc(value, unicode.IsControl) {
+			return fmt.Errorf("%w: invalid %s", ErrInvalidRequest, name)
+		}
 	}
 	for name, value := range r.stream.Headers {
 		if !utf8.ValidString(name) || !utf8.ValidString(value) || strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {

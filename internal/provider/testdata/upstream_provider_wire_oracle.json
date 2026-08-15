@@ -86,6 +86,7 @@
           "content-type": "application/json",
           "content-encoding": null,
           "authorization": null,
+          "api-key": null,
           "x-api-key": "oracle-anthropic-key",
           "anthropic-version": "2023-06-01",
           "anthropic-beta": "interleaved-thinking-2025-05-14",
@@ -355,6 +356,7 @@
           "content-type": "application/json",
           "content-encoding": null,
           "authorization": "Bearer oracle-openai-key",
+          "api-key": null,
           "x-api-key": null,
           "anthropic-version": null,
           "anthropic-beta": null,
@@ -610,6 +612,7 @@
           "content-type": "application/json",
           "content-encoding": null,
           "authorization": "Bearer oracle-openai-key",
+          "api-key": null,
           "x-api-key": null,
           "anthropic-version": null,
           "anthropic-beta": null,
@@ -805,6 +808,274 @@
       }
     },
     {
+      "name": "azure-openai-responses-rich-wire",
+      "api": "azure-openai-responses",
+      "input": {
+        "model": {
+          "provider": "azure-openai-responses",
+          "api": "azure-openai-responses",
+          "id": "gpt-wire-azure",
+          "name": "GPT Azure Responses Wire",
+          "baseUrl": "https://wire-resource.openai.azure.com",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "high": "high"
+          },
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 400000,
+          "maxTokens": 128000,
+          "compat": {
+            "supportsDeveloperRole": true,
+            "supportsStrictMode": true,
+            "supportsOpenAIGrammarTools": false,
+            "supportsToolSearch": false
+          }
+        },
+        "systemPrompt": "You are the wire oracle.",
+        "userPrompt": "Look up pi-go.",
+        "sessionId": "wire-session-123",
+        "tool": {
+          "name": "lookup",
+          "description": "Look up a project by name.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "options": {
+          "maxTokens": 4096,
+          "temperature": 0.25,
+          "cacheRetention": "long",
+          "reasoningEffort": "high",
+          "maxRetries": 0,
+          "headers": {
+            "x-oracle": "upstream-wire"
+          },
+          "reasoningSummary": "detailed",
+          "serviceTier": "priority",
+          "toolChoice": "required",
+          "azureApiVersion": "2026-01-15-preview",
+          "azureDeploymentName": "deployment-wire"
+        }
+      },
+      "request": {
+        "url": "https://wire-resource.openai.azure.com/openai/v1/responses?api-version=2026-01-15-preview",
+        "method": "POST",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "content-encoding": null,
+          "authorization": null,
+          "api-key": "oracle-openai-key",
+          "x-api-key": null,
+          "anthropic-version": null,
+          "anthropic-beta": null,
+          "x-session-affinity": null,
+          "session_id": null,
+          "session-id": null,
+          "x-client-request-id": null,
+          "x-session-id": null,
+          "chatgpt-account-id": null,
+          "openai-beta": null,
+          "originator": null,
+          "x-oracle": "upstream-wire"
+        },
+        "body": {
+          "model": "deployment-wire",
+          "input": [
+            {
+              "role": "developer",
+              "content": "You are the wire oracle."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Look up pi-go."
+                }
+              ]
+            }
+          ],
+          "stream": true,
+          "prompt_cache_key": "wire-session-123",
+          "store": false,
+          "max_output_tokens": 4096,
+          "temperature": 0.25,
+          "tools": [
+            {
+              "type": "function",
+              "name": "lookup",
+              "description": "Look up a project by name.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false
+              },
+              "strict": false
+            }
+          ],
+          "reasoning": {
+            "effort": "high",
+            "summary": "detailed"
+          },
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        }
+      },
+      "events": [
+        {
+          "type": "start"
+        },
+        {
+          "type": "thinking_start",
+          "contentIndex": 0
+        },
+        {
+          "type": "thinking_delta",
+          "contentIndex": 0,
+          "delta": "plan"
+        },
+        {
+          "type": "thinking_end",
+          "contentIndex": 0,
+          "content": "plan",
+          "signature": {
+            "type": "reasoning",
+            "id": "rs_azure_wire",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "plan"
+              }
+            ],
+            "encrypted_content": "azure-encrypted"
+          },
+          "redacted": false
+        },
+        {
+          "type": "text_start",
+          "contentIndex": 1
+        },
+        {
+          "type": "text_delta",
+          "contentIndex": 1,
+          "delta": "answer "
+        },
+        {
+          "type": "text_end",
+          "contentIndex": 1,
+          "content": "answer "
+        },
+        {
+          "type": "toolcall_start",
+          "contentIndex": 2,
+          "id": "call_1|fc_azure_wire",
+          "name": "lookup"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "{\"query\":\"pi-go\"}"
+        },
+        {
+          "type": "toolcall_end",
+          "contentIndex": 2,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call_1|fc_azure_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        },
+        {
+          "type": "done",
+          "reason": "toolUse"
+        }
+      ],
+      "result": {
+        "role": "assistant",
+        "api": "azure-openai-responses",
+        "provider": "azure-openai-responses",
+        "model": "gpt-wire-azure",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": {
+              "type": "reasoning",
+              "id": "rs_azure_wire",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": "plan"
+                }
+              ],
+              "encrypted_content": "azure-encrypted"
+            },
+            "redacted": false
+          },
+          {
+            "type": "text",
+            "text": "answer ",
+            "signature": {
+              "v": 1,
+              "id": "msg_azure_wire",
+              "phase": "final_answer"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_1|fc_azure_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        ],
+        "usage": {
+          "input": 15,
+          "output": 8,
+          "cacheRead": 3,
+          "cacheWrite": 2,
+          "totalTokens": 28,
+          "reasoning": 3
+        },
+        "stopReason": "toolUse",
+        "responseId": "resp_azure_wire",
+        "rawStopReason": "completed"
+      }
+    },
+    {
       "name": "openai-codex-responses-rich-wire",
       "api": "openai-codex-responses",
       "input": {
@@ -879,6 +1150,7 @@
           "content-type": "application/json",
           "content-encoding": "zstd",
           "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC13aXJlIn19.signature",
+          "api-key": null,
           "x-api-key": null,
           "anthropic-version": null,
           "anthropic-beta": null,

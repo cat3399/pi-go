@@ -26,6 +26,7 @@ var providerWireHeaderNames = []string{
 	"content-type",
 	"content-encoding",
 	"authorization",
+	"api-key",
 	"x-api-key",
 	"anthropic-version",
 	"anthropic-beta",
@@ -102,6 +103,10 @@ type providerWireOpts struct {
 	ToolChoice           string            `json:"toolChoice"`
 	Transport            string            `json:"transport"`
 	Metadata             map[string]any    `json:"metadata"`
+	AzureAPIVersion      string            `json:"azureApiVersion"`
+	AzureResourceName    string            `json:"azureResourceName"`
+	AzureBaseURL         string            `json:"azureBaseUrl"`
+	AzureDeploymentName  string            `json:"azureDeploymentName"`
 }
 
 func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
@@ -116,8 +121,8 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 	if oracle.UpstreamCommit != providerWireUpstreamCommit {
 		t.Fatalf("upstream commit = %q, want %q", oracle.UpstreamCommit, providerWireUpstreamCommit)
 	}
-	if len(oracle.Scenarios) != 4 {
-		t.Fatalf("provider wire scenarios = %d, want 4", len(oracle.Scenarios))
+	if len(oracle.Scenarios) != 5 {
+		t.Fatalf("provider wire scenarios = %d, want 5", len(oracle.Scenarios))
 	}
 
 	seen := make(map[string]bool, len(oracle.Scenarios))
@@ -138,6 +143,7 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 		provider.AnthropicMessagesAPI,
 		provider.OpenAICompletionsAPI,
 		provider.OpenAIResponsesAPI,
+		provider.AzureOpenAIResponsesAPI,
 		provider.OpenAICodexResponsesAPI,
 	} {
 		if !seen[api] {
@@ -212,6 +218,10 @@ func runProviderWireScenario(t *testing.T, scenario providerWireScenario) (map[s
 		InterleavedThinking:  scenario.Input.Options.InterleavedThinking,
 		AnthropicEffort:      scenario.Input.Options.AnthropicEffort,
 		Metadata:             scenario.Input.Options.Metadata,
+		AzureAPIVersion:      scenario.Input.Options.AzureAPIVersion,
+		AzureResourceName:    scenario.Input.Options.AzureResourceName,
+		AzureBaseURL:         scenario.Input.Options.AzureBaseURL,
+		AzureDeploymentName:  scenario.Input.Options.AzureDeploymentName,
 		OnPayload: func(_ provider.Model, payload []byte) ([]byte, error) {
 			capturedPayload = bytes.Clone(payload)
 			return payload, nil
@@ -279,7 +289,7 @@ func newProviderWireModel(t *testing.T, input providerWireModel) provider.Model 
 			t.Fatal(err)
 		}
 		compat.OpenAICompletions = &value
-	case provider.OpenAIResponsesAPI, provider.OpenAICodexResponsesAPI:
+	case provider.OpenAIResponsesAPI, provider.AzureOpenAIResponsesAPI, provider.OpenAICodexResponsesAPI:
 		var value provider.OpenAIResponsesCompat
 		if err := json.Unmarshal(input.Compat, &value); err != nil {
 			t.Fatal(err)
@@ -313,6 +323,8 @@ func newProviderWireImplementation(t *testing.T, api, baseURL, key string, clien
 		implementation, err = provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: baseURL, APIKey: key, Client: client, Clock: clock})
 	case provider.OpenAIResponsesAPI:
 		implementation, err = provider.NewOpenAIResponsesProvider(provider.OpenAIResponsesConfig{BaseURL: baseURL, APIKey: key, Client: client, Clock: clock})
+	case provider.AzureOpenAIResponsesAPI:
+		implementation, err = provider.NewAzureOpenAIResponsesProvider(provider.AzureOpenAIResponsesConfig{APIKey: key, Client: client, Clock: clock})
 	case provider.OpenAICodexResponsesAPI:
 		implementation, err = provider.NewOpenAICodexResponsesProvider(provider.OpenAICodexResponsesConfig{BaseURL: baseURL, AccessToken: key, Client: client, Clock: clock})
 	default:
@@ -496,6 +508,8 @@ func providerWireResponseSSE(t *testing.T, api string) string {
 		return providerWireCompletionsSSE(t)
 	case provider.OpenAIResponsesAPI:
 		return providerWireResponsesSSE(t, "responses")
+	case provider.AzureOpenAIResponsesAPI:
+		return providerWireResponsesSSE(t, "azure")
 	case provider.OpenAICodexResponsesAPI:
 		return providerWireResponsesSSE(t, "codex")
 	default:
@@ -595,7 +609,7 @@ func TestProviderWireOracleGeneratorMetadataIsStable(t *testing.T) {
 	if got := document["generatedBy"]; got != "pinned packages/ai provider adapters with deterministic HTTP/SSE transport" {
 		t.Fatalf("generatedBy = %#v", got)
 	}
-	if reflect.ValueOf(document["scenarios"]).Len() != 4 {
+	if reflect.ValueOf(document["scenarios"]).Len() != 5 {
 		t.Fatalf("scenario metadata = %#v", document["scenarios"])
 	}
 }

@@ -170,6 +170,46 @@
       }
     },
     {
+      "name": "azure-openai-responses-rich-wire",
+      "api": "azure-openai-responses",
+      "model": {
+        "provider": "azure-openai-responses",
+        "api": "azure-openai-responses",
+        "id": "gpt-wire-azure",
+        "name": "GPT Azure Responses Wire",
+        "baseUrl": "https://wire-resource.openai.azure.com",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": "none",
+          "high": "high"
+        },
+        "input": [
+          "text"
+        ],
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "contextWindow": 400000,
+        "maxTokens": 128000,
+        "compat": {
+          "supportsDeveloperRole": true,
+          "supportsStrictMode": true,
+          "supportsOpenAIGrammarTools": false,
+          "supportsToolSearch": false
+        }
+      },
+      "providerOptions": {
+        "reasoningSummary": "detailed",
+        "serviceTier": "priority",
+        "toolChoice": "required",
+        "azureApiVersion": "2026-01-15-preview",
+        "azureDeploymentName": "deployment-wire"
+      }
+    },
+    {
       "name": "openai-codex-responses-rich-wire",
       "api": "openai-codex-responses",
       "model": {

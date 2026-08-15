@@ -70,31 +70,35 @@ type responsesDeferredEvent struct {
 }
 
 type openAIResponsesStream struct {
-	ctx                context.Context
-	cancel             context.CancelCauseFunc
-	timeoutCancel      context.CancelFunc
-	endpoint           string
-	apiKey             string
-	client             HTTPDoer
-	clock              Clock
-	timestamp          time.Time
-	payload            []byte
-	model              Model
-	headers            map[string]string
-	maxEventBytes      int
-	maxErrorBodyBytes  int
-	onResponse         ResponseHook
-	onHeaders          HeaderHook
-	headerOverrides    map[string]*string
-	maxRetries         uint32
-	maxRetryDelayMS    *uint64
-	serviceTier        string
-	codexServiceTier   bool
-	codexRetry         bool
-	terminalEndsStream bool
-	grammarProperties  map[string]string
-	configurationFail  *responsesFailureSpec
-	preflight          *responsesFailureSpec
+	ctx                     context.Context
+	cancel                  context.CancelCauseFunc
+	timeoutCancel           context.CancelFunc
+	endpoint                string
+	apiKey                  string
+	authHeader              string
+	displayName             string
+	configurationError      error
+	client                  HTTPDoer
+	clock                   Clock
+	timestamp               time.Time
+	payload                 []byte
+	model                   Model
+	headers                 map[string]string
+	maxEventBytes           int
+	maxErrorBodyBytes       int
+	onResponse              ResponseHook
+	onHeaders               HeaderHook
+	headerOverrides         map[string]*string
+	maxRetries              uint32
+	maxRetryDelayMS         *uint64
+	serviceTier             string
+	applyServiceTierPricing bool
+	codexServiceTier        bool
+	codexRetry              bool
+	terminalEndsStream      bool
+	grammarProperties       map[string]string
+	configurationFail       *responsesFailureSpec
+	preflight               *responsesFailureSpec
 
 	lifecycleMu sync.Mutex
 	body        io.ReadCloser
@@ -364,7 +368,11 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 		}
 	}
 	if validBearerAPIKey(s.apiKey) {
-		request.Header.Set("Authorization", "Bearer "+s.apiKey)
+		if s.authHeader == "api-key" {
+			request.Header.Set("api-key", s.apiKey)
+		} else {
+			request.Header.Set("Authorization", "Bearer "+s.apiKey)
+		}
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
@@ -374,15 +382,19 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 	if err := applyFinalHeaders(request.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
 		return &responsesFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Responses header hook failed"}
 	}
-	if !openAIHTTPHeadersHaveAuthorization(request.Header) {
+	authorized := openAIHTTPHeadersHaveAuthorization(request.Header)
+	if s.authHeader == "api-key" {
+		authorized = strings.TrimSpace(request.Header.Get("api-key")) != ""
+	}
+	if !authorized {
 		if s.configurationFail != nil {
 			spec := *s.configurationFail
 			return &spec
 		}
 		return &responsesFailureSpec{
 			kind:    FailureConfiguration,
-			cause:   fmt.Errorf("%w: final Authorization header is missing", ErrInvalidOpenAIResponsesConfig),
-			message: "OpenAI API authorization was removed before the request",
+			cause:   fmt.Errorf("%w: final %s header is missing", s.configurationError, s.authHeader),
+			message: s.displayName + " API authorization was removed before the request",
 		}
 	}
 

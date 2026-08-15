@@ -80,18 +80,18 @@ func TestRawReasoningEffortOptionsReachEachImplementedDialect(t *testing.T) {
 }
 
 func TestRawReasoningEffortOptionsCloneMergeAndValidate(t *testing.T) {
-	base := StreamOptions{ReasoningEffort: "low", AnthropicEffort: "medium"}
-	overlay := StreamOptions{ReasoningEffort: "high", AnthropicEffort: "xhigh"}
+	base := StreamOptions{ReasoningEffort: "low", AnthropicEffort: "medium", AzureAPIVersion: "v1", AzureResourceName: "old-resource", AzureBaseURL: "https://old.openai.azure.com", AzureDeploymentName: "old-deployment"}
+	overlay := StreamOptions{ReasoningEffort: "high", AnthropicEffort: "xhigh", AzureAPIVersion: "2026-preview", AzureResourceName: "new-resource", AzureBaseURL: "https://new.openai.azure.com", AzureDeploymentName: "new-deployment"}
 	merged := MergeStreamOptions(base, overlay)
-	if merged.ReasoningEffort != "high" || merged.AnthropicEffort != "xhigh" {
+	if merged.ReasoningEffort != "high" || merged.AnthropicEffort != "xhigh" || merged.AzureAPIVersion != "2026-preview" || merged.AzureResourceName != "new-resource" || merged.AzureBaseURL != "https://new.openai.azure.com" || merged.AzureDeploymentName != "new-deployment" {
 		t.Fatalf("merged options = %#v", merged)
 	}
 	cloned := CloneStreamOptions(merged)
-	if cloned.ReasoningEffort != merged.ReasoningEffort || cloned.AnthropicEffort != merged.AnthropicEffort {
+	if cloned.ReasoningEffort != merged.ReasoningEffort || cloned.AnthropicEffort != merged.AnthropicEffort || cloned.AzureAPIVersion != merged.AzureAPIVersion || cloned.AzureResourceName != merged.AzureResourceName || cloned.AzureBaseURL != merged.AzureBaseURL || cloned.AzureDeploymentName != merged.AzureDeploymentName {
 		t.Fatalf("cloned options = %#v", cloned)
 	}
 	model := mustParityOptionModel(t, ModelSpec{Provider: "openai", API: OpenAIResponsesAPI, ID: "validation", Reasoning: true})
-	for _, stream := range []StreamOptions{{ReasoningEffort: "extreme"}, {AnthropicEffort: "minimal"}} {
+	for _, stream := range []StreamOptions{{ReasoningEffort: "extreme"}, {AnthropicEffort: "minimal"}, {AzureAPIVersion: "v1\ninvalid"}} {
 		if _, err := NewRequestWithOptions(model, "", nil, RequestOptions{Stream: stream}); err == nil {
 			t.Fatalf("invalid options accepted: %#v", stream)
 		}

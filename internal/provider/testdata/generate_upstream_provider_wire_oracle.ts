@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
@@ -212,7 +212,7 @@ function completionsSSE(): string {
   return `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
 }
 
-function responsesSSE(prefix: "responses" | "codex"): string {
+function responsesSSE(prefix: "responses" | "azure" | "codex"): string {
   const responseId = `resp_${prefix}_wire`;
   const reasoningItem = {
     type: "reasoning",
@@ -322,6 +322,8 @@ function responseBodyFor(api: string): string {
       return completionsSSE();
     case "openai-responses":
       return responsesSSE("responses");
+    case "azure-openai-responses":
+      return responsesSSE("azure");
     case "openai-codex-responses":
       return responsesSSE("codex");
     default:
@@ -334,6 +336,7 @@ const observedHeaderNames = [
   "content-type",
   "content-encoding",
   "authorization",
+  "api-key",
   "x-api-key",
   "anthropic-version",
   "anthropic-beta",
@@ -507,12 +510,12 @@ async function main(): Promise<void> {
     "anthropic-messages": await import(moduleURL(join(apiRoot, "anthropic-messages.ts"))),
     "openai-completions": await import(moduleURL(join(apiRoot, "openai-completions.ts"))),
     "openai-responses": await import(moduleURL(join(apiRoot, "openai-responses.ts"))),
+    "azure-openai-responses": await import(moduleURL(join(apiRoot, "azure-openai-responses.ts"))),
     "openai-codex-responses": await import(moduleURL(join(apiRoot, "openai-codex-responses.ts"))),
   };
   const scenarios = [];
   for (const scenario of corpus.scenarios) scenarios.push(await runScenario(scenario, modules));
-  process.stdout.write(
-    `${JSON.stringify(
+  const output = `${JSON.stringify(
       {
         upstreamCommit: commit,
         generatedBy: "pinned packages/ai provider adapters with deterministic HTTP/SSE transport",
@@ -524,8 +527,10 @@ async function main(): Promise<void> {
       },
       null,
       2,
-    )}\n`,
-  );
+    )}\n`;
+  const outputPath = process.env.PI_PROVIDER_WIRE_ORACLE_OUTPUT;
+  if (outputPath) writeFileSync(resolve(outputPath), output);
+  else process.stdout.write(output);
 }
 
 void main().catch((error) => {

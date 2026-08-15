@@ -18,20 +18,24 @@ import (
 
 const (
 	OpenAIResponsesAPI         = "openai-responses"
+	AzureOpenAIResponsesAPI    = "azure-openai-responses"
 	OpenAIProviderID           = "openai"
+	AzureOpenAIProviderID      = "azure-openai-responses"
 	defaultOpenAIResponsesBase = "https://api.openai.com/v1"
+	defaultAzureOpenAPIVersion = "v1"
 	defaultResponsesEventBytes = 1 << 20
 	defaultResponsesErrorBytes = 64 << 10
 )
 
 var (
-	ErrInvalidOpenAIResponsesConfig  = errors.New("invalid OpenAI Responses configuration")
-	ErrOpenAIResponsesRequest        = errors.New("invalid OpenAI Responses request")
-	ErrOpenAIResponsesStream         = errors.New("invalid OpenAI Responses stream")
-	ErrOpenAIResponsesAborted        = errors.New("OpenAI Responses request aborted")
-	ErrOpenAIResponsesUnsupported    = errors.New("unsupported OpenAI Responses behavior")
-	errOpenAIResponsesStreamClosed   = errors.New("OpenAI Responses stream closed")
-	errOpenAIResponsesStreamFinished = errors.New("OpenAI Responses stream finished")
+	ErrInvalidOpenAIResponsesConfig      = errors.New("invalid OpenAI Responses configuration")
+	ErrOpenAIResponsesRequest            = errors.New("invalid OpenAI Responses request")
+	ErrOpenAIResponsesStream             = errors.New("invalid OpenAI Responses stream")
+	ErrOpenAIResponsesAborted            = errors.New("OpenAI Responses request aborted")
+	ErrOpenAIResponsesUnsupported        = errors.New("unsupported OpenAI Responses behavior")
+	ErrInvalidAzureOpenAIResponsesConfig = errors.New("invalid Azure OpenAI Responses configuration")
+	errOpenAIResponsesStreamClosed       = errors.New("OpenAI Responses stream closed")
+	errOpenAIResponsesStreamFinished     = errors.New("OpenAI Responses stream finished")
 )
 
 // HTTPDoer is the transport seam used by the production adapter. A normal
@@ -62,20 +66,58 @@ type OpenAIResponsesConfig struct {
 	MaxErrorBodyBytes int
 }
 
-// OpenAIResponsesProvider implements the standard OpenAI Responses text
-// dialect. Tool calls, thinking/reasoning replay, images, retries, and prompt
-// cache policy remain explicit later milestones.
-type OpenAIResponsesProvider struct {
-	endpoint          string
-	apiKey            string
-	headers           map[string]string
-	client            HTTPDoer
-	clock             Clock
-	systemRole        OpenAIResponsesSystemRole
-	maxEventBytes     int
-	maxErrorBodyBytes int
-	configurationFail *responsesFailureSpec
+// AzureOpenAIResponsesConfig contains construction-time fallbacks. The typed
+// StreamOptions Azure fields and request environment take precedence, matching
+// the upstream per-call AzureOpenAIResponsesOptions contract.
+type AzureOpenAIResponsesConfig struct {
+	BaseURL           string
+	ResourceName      string
+	APIVersion        string
+	DeploymentName    string
+	APIKey            string
+	Headers           map[string]string
+	Client            HTTPDoer
+	Clock             Clock
+	SystemRole        OpenAIResponsesSystemRole
+	MaxEventBytes     int
+	MaxErrorBodyBytes int
 }
+
+type responsesDialect uint8
+
+const (
+	responsesDialectOpenAI responsesDialect = iota
+	responsesDialectAzure
+)
+
+type azureOpenAIResponsesDefaults struct {
+	baseURL, resourceName, apiVersion, deploymentName string
+}
+
+// OpenAIResponsesProvider owns the shared bounded Responses transport and
+// state machine. Constructors select the standard OpenAI or Azure wire
+// dialect without duplicating replay, tool, image, retry, or stream behavior.
+type OpenAIResponsesProvider struct {
+	api                string
+	displayName        string
+	dialect            responsesDialect
+	configurationError error
+	endpoint           string
+	azure              azureOpenAIResponsesDefaults
+	apiKey             string
+	headers            map[string]string
+	client             HTTPDoer
+	clock              Clock
+	systemRole         OpenAIResponsesSystemRole
+	maxEventBytes      int
+	maxErrorBodyBytes  int
+	configurationFail  *responsesFailureSpec
+}
+
+// AzureOpenAIResponsesProvider uses the same bounded Responses parser and
+// replay machinery with Azure's distinct endpoint, deployment, and api-key
+// wire contract.
+type AzureOpenAIResponsesProvider struct{ *OpenAIResponsesProvider }
 
 type OpenAIResponsesSystemRole uint8
 
@@ -92,7 +134,7 @@ func (r OpenAIResponsesSystemRole) wireValue() (string, error) {
 	case OpenAIResponsesSystemRoleDeveloper:
 		return "developer", nil
 	default:
-		return "", fmt.Errorf("%w: unknown system role %d", ErrInvalidOpenAIResponsesConfig, r)
+		return "", fmt.Errorf("unknown system role %d", r)
 	}
 }
 
@@ -105,29 +147,48 @@ func NewOpenAIResponsesProvider(config OpenAIResponsesConfig) (*OpenAIResponsesP
 	if err != nil {
 		return nil, err
 	}
+	return newOpenAIResponsesProvider(config, endpoint, OpenAIResponsesAPI, "OpenAI", responsesDialectOpenAI, ErrInvalidOpenAIResponsesConfig)
+}
+
+func NewAzureOpenAIResponsesProvider(config AzureOpenAIResponsesConfig) (*AzureOpenAIResponsesProvider, error) {
+	common := OpenAIResponsesConfig{
+		APIKey: config.APIKey, Headers: config.Headers, Client: config.Client, Clock: config.Clock,
+		SystemRole: config.SystemRole, MaxEventBytes: config.MaxEventBytes, MaxErrorBodyBytes: config.MaxErrorBodyBytes,
+	}
+	implementation, err := newOpenAIResponsesProvider(common, "", AzureOpenAIResponsesAPI, "Azure OpenAI", responsesDialectAzure, ErrInvalidAzureOpenAIResponsesConfig)
+	if err != nil {
+		return nil, err
+	}
+	implementation.azure = azureOpenAIResponsesDefaults{
+		baseURL: config.BaseURL, resourceName: config.ResourceName, apiVersion: config.APIVersion, deploymentName: config.DeploymentName,
+	}
+	return &AzureOpenAIResponsesProvider{OpenAIResponsesProvider: implementation}, nil
+}
+
+func newOpenAIResponsesProvider(config OpenAIResponsesConfig, endpoint, api, displayName string, dialect responsesDialect, configurationError error) (*OpenAIResponsesProvider, error) {
 	var configurationFail *responsesFailureSpec
 	if !utf8.ValidString(config.APIKey) || strings.TrimSpace(config.APIKey) == "" {
-		cause := fmt.Errorf("%w: API key must be non-empty valid UTF-8", ErrInvalidOpenAIResponsesConfig)
+		cause := fmt.Errorf("%w: API key must be non-empty valid UTF-8", configurationError)
 		configurationFail = &responsesFailureSpec{
-			kind: FailureConfiguration, cause: cause, message: "OpenAI API key is not configured",
+			kind: FailureConfiguration, cause: cause, message: displayName + " API key is not configured",
 		}
 	} else if strings.ContainsFunc(config.APIKey, unicode.IsControl) {
-		cause := fmt.Errorf("%w: API key contains a control character", ErrInvalidOpenAIResponsesConfig)
+		cause := fmt.Errorf("%w: API key contains a control character", configurationError)
 		configurationFail = &responsesFailureSpec{
-			kind: FailureConfiguration, cause: cause, message: "OpenAI API key is invalid",
+			kind: FailureConfiguration, cause: cause, message: displayName + " API key is invalid",
 		}
 	}
 	if config.MaxEventBytes < 0 || config.MaxErrorBodyBytes < 0 {
-		return nil, fmt.Errorf("%w: byte limits cannot be negative", ErrInvalidOpenAIResponsesConfig)
+		return nil, fmt.Errorf("%w: byte limits cannot be negative", configurationError)
 	}
 	if _, err := config.SystemRole.wireValue(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", configurationError, err)
 	}
 	client := config.Client
 	if client == nil {
 		client = http.DefaultClient
 	} else if isTypedNil(client) {
-		return nil, fmt.Errorf("%w: HTTP client is a typed nil", ErrInvalidOpenAIResponsesConfig)
+		return nil, fmt.Errorf("%w: HTTP client is a typed nil", configurationError)
 	}
 	clock := config.Clock
 	if clock == nil {
@@ -142,15 +203,19 @@ func NewOpenAIResponsesProvider(config OpenAIResponsesConfig) (*OpenAIResponsesP
 		maxErrorBodyBytes = defaultResponsesErrorBytes
 	}
 	return &OpenAIResponsesProvider{
-		endpoint:          endpoint,
-		apiKey:            config.APIKey,
-		headers:           cloneStrings(config.Headers),
-		client:            client,
-		clock:             synchronizedClock(clock),
-		systemRole:        config.SystemRole,
-		maxEventBytes:     maxEventBytes,
-		maxErrorBodyBytes: maxErrorBodyBytes,
-		configurationFail: configurationFail,
+		api:                api,
+		displayName:        displayName,
+		dialect:            dialect,
+		configurationError: configurationError,
+		endpoint:           endpoint,
+		apiKey:             config.APIKey,
+		headers:            cloneStrings(config.Headers),
+		client:             client,
+		clock:              synchronizedClock(clock),
+		systemRole:         config.SystemRole,
+		maxEventBytes:      maxEventBytes,
+		maxErrorBodyBytes:  maxErrorBodyBytes,
+		configurationFail:  configurationFail,
 	}, nil
 }
 
@@ -175,8 +240,12 @@ func responsesEndpoint(rawBaseURL string) (string, error) {
 
 func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) EventStream {
 	clock := Clock(time.Now)
+	displayName := "OpenAI"
+	configurationError := error(ErrInvalidOpenAIResponsesConfig)
 	if p != nil && p.clock != nil {
 		clock = p.clock
+		displayName = p.displayName
+		configurationError = p.configurationError
 	}
 	if ctx == nil {
 		return newResponsesFailureStream(
@@ -185,7 +254,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 			request.Model(),
 			FailureInvalidRequest,
 			fmt.Errorf("%w: nil context", ErrInvalidRequest),
-			"OpenAI Responses request requires a context",
+			displayName+" Responses request requires a context",
 		)
 	}
 	if p == nil {
@@ -194,14 +263,14 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 			clock,
 			request.Model(),
 			FailureConfiguration,
-			fmt.Errorf("%w: nil provider", ErrInvalidOpenAIResponsesConfig),
-			"OpenAI Responses provider is not configured",
+			fmt.Errorf("%w: nil provider", configurationError),
+			displayName+" Responses provider is not configured",
 		)
 	}
 	if err := request.validate(); err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
-	if request.Model().API() != OpenAIResponsesAPI {
+	if request.Model().API() != p.api {
 		cause := fmt.Errorf(
 			"%w: model routes to provider %q API %q",
 			ErrOpenAIResponsesRequest,
@@ -221,11 +290,26 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if compat != nil && compat.SupportsDeveloperRole != nil && !*compat.SupportsDeveloperRole {
 		systemRole = "system"
 	}
-	payload, err := encodeOpenAIResponsesRequest(request, systemRole)
+	options := request.StreamOptions()
+	endpoint := p.endpoint
+	var payload []byte
+	if p.dialect == responsesDialectAzure {
+		var deploymentName string
+		endpoint, deploymentName, err = p.resolveAzureResponsesTarget(request.Model(), options)
+		if err == nil {
+			payload, err = encodeAzureOpenAIResponsesRequest(request, systemRole, deploymentName)
+		}
+	} else {
+		if baseURL := request.Model().BaseURL(); baseURL != "" {
+			endpoint, err = responsesEndpoint(baseURL)
+		}
+		if err == nil {
+			payload, err = encodeOpenAIResponsesRequest(request, systemRole)
+		}
+	}
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
-	options := request.StreamOptions()
 	if payload, err = applyPayloadHook(options.OnPayload, request.Model(), payload); err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
@@ -233,16 +317,9 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
-	endpoint := p.endpoint
-	if baseURL := request.Model().BaseURL(); baseURL != "" {
-		endpoint, err = responsesEndpoint(baseURL)
-		if err != nil {
-			return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
-		}
-	}
 	streamContext, cancel, timeoutCancel := streamContextWithTimeout(ctx, options.TimeoutMS)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
-	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone {
+	if sessionID := options.SessionID; p.dialect == responsesDialectOpenAI && sessionID != "" && options.CacheRetention != CacheRetentionNone {
 		format := "openai"
 		if compat := request.Model().Compat().OpenAIResponses; compat != nil && compat.SessionAffinityFormat != nil {
 			format = *compat.SessionAffinityFormat
@@ -262,34 +339,38 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		client = options.Fetch
 	}
 	return &openAIResponsesStream{
-		ctx:               streamContext,
-		cancel:            cancel,
-		timeoutCancel:     timeoutCancel,
-		endpoint:          endpoint,
-		apiKey:            requestAPIKey(request, p.apiKey),
-		client:            client,
-		clock:             clock,
-		timestamp:         clock(),
-		payload:           payload,
-		model:             request.Model(),
-		headers:           headers,
-		maxEventBytes:     p.maxEventBytes,
-		maxErrorBodyBytes: p.maxErrorBodyBytes,
-		onResponse:        options.OnResponse,
-		onHeaders:         options.OnHeaders,
-		headerOverrides:   cloneHeaderOverrides(options.HeaderOverrides),
-		maxRetries:        valueOrZero32(options.MaxRetries),
-		maxRetryDelayMS:   cloneUint64(options.MaxRetryDelayMS),
-		serviceTier:       options.ServiceTier,
-		grammarProperties: grammarProperties,
-		configurationFail: p.configurationFail,
-		slots:             make(map[int]*responsesTextSlot),
-		reasoningSlots:    make(map[int]*responsesReasoningSlot),
-		toolSlots:         make(map[int]*responsesToolSlot),
-		completedOutputs:  make(map[int]struct{}),
-		completedItemIDs:  make(map[int]string),
-		completedPhases:   make(map[int]string),
-		pendingReasoning:  make(map[int]*responsesCompletedReasoning),
+		ctx:                     streamContext,
+		cancel:                  cancel,
+		timeoutCancel:           timeoutCancel,
+		endpoint:                endpoint,
+		apiKey:                  requestAPIKey(request, p.apiKey),
+		authHeader:              map[responsesDialect]string{responsesDialectOpenAI: "authorization", responsesDialectAzure: "api-key"}[p.dialect],
+		displayName:             displayName,
+		configurationError:      configurationError,
+		client:                  client,
+		clock:                   clock,
+		timestamp:               clock(),
+		payload:                 payload,
+		model:                   request.Model(),
+		headers:                 headers,
+		maxEventBytes:           p.maxEventBytes,
+		maxErrorBodyBytes:       p.maxErrorBodyBytes,
+		onResponse:              options.OnResponse,
+		onHeaders:               options.OnHeaders,
+		headerOverrides:         cloneHeaderOverrides(options.HeaderOverrides),
+		maxRetries:              valueOrZero32(options.MaxRetries),
+		maxRetryDelayMS:         cloneUint64(options.MaxRetryDelayMS),
+		serviceTier:             options.ServiceTier,
+		applyServiceTierPricing: p.dialect == responsesDialectOpenAI,
+		grammarProperties:       grammarProperties,
+		configurationFail:       p.configurationFail,
+		slots:                   make(map[int]*responsesTextSlot),
+		reasoningSlots:          make(map[int]*responsesReasoningSlot),
+		toolSlots:               make(map[int]*responsesToolSlot),
+		completedOutputs:        make(map[int]struct{}),
+		completedItemIDs:        make(map[int]string),
+		completedPhases:         make(map[int]string),
+		pendingReasoning:        make(map[int]*responsesCompletedReasoning),
 	}
 }
 
@@ -300,8 +381,19 @@ func valueOrZero32(value *uint32) uint32 {
 	return *value
 }
 
-func (*OpenAIResponsesProvider) SupportsModel(model Model) bool {
-	return model.API() == OpenAIResponsesAPI
+func (p *OpenAIResponsesProvider) SupportsModel(model Model) bool {
+	return p != nil && model.API() == p.api
+}
+
+func (p *AzureOpenAIResponsesProvider) Stream(ctx context.Context, request Request) EventStream {
+	if p == nil {
+		return (*OpenAIResponsesProvider)(nil).Stream(ctx, request)
+	}
+	return p.OpenAIResponsesProvider.Stream(ctx, request)
+}
+
+func (p *AzureOpenAIResponsesProvider) SupportsModel(model Model) bool {
+	return p != nil && p.OpenAIResponsesProvider.SupportsModel(model)
 }
 
 func requestAPIKey(request Request, fallback string) string {
