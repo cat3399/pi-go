@@ -189,6 +189,9 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 	case "ctrl+g":
 		m.helpVisible = !m.helpVisible
 		return true, nil
+	case "ctrl+o":
+		m.renderer.SetToolsExpanded(!m.renderer.toolsExpanded)
+		return true, nil
 	case "pgup", "ctrl+up":
 		m.transcript.ScrollUp(max(1, m.transcript.lastHeight-2))
 		return true, nil
@@ -555,6 +558,7 @@ func (m *Model) renderHelp(width, height int) string {
 		"Esc                abort current operation",
 		"PgUp / PgDn        scroll conversation",
 		"Ctrl+End           follow live output",
+		"Ctrl+O             collapse / expand tool output",
 		"Ctrl+D             quit when editor is empty",
 		"",
 		"/new               create a session",

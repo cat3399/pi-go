@@ -103,6 +103,70 @@ func (m *transcriptModel) Upsert(value contentItem) {
 	m.hasLayout = false
 }
 
+func (m *transcriptModel) UpdateToolExecution(
+	callID, name, arguments string,
+	result []contentBlock,
+	live, failed bool,
+) (contentItem, bool) {
+	if m == nil || callID == "" {
+		return contentItem{}, false
+	}
+	for index := len(m.items) - 1; index >= 0; index-- {
+		entry := &m.items[index]
+		callIndex := -1
+		blocks := make([]contentBlock, 0, len(entry.content.Blocks)+len(result))
+		for _, block := range entry.content.Blocks {
+			if block.Kind == contentBlockToolCall && block.ToolCallID == callID {
+				callIndex = len(blocks)
+				block.ToolName = name
+				block.Text = arguments
+				block.Live = live
+				block.IsError = failed
+				blocks = append(blocks, block)
+				continue
+			}
+			if block.ToolCallID == callID {
+				continue
+			}
+			blocks = append(blocks, block)
+		}
+		if callIndex < 0 {
+			continue
+		}
+		owned := append([]contentBlock(nil), result...)
+		blocks = append(blocks, make([]contentBlock, len(owned))...)
+		copy(blocks[callIndex+1+len(owned):], blocks[callIndex+1:len(blocks)-len(owned)])
+		copy(blocks[callIndex+1:], owned)
+		entry.content.Blocks = blocks
+		entry.content.Revision++
+		entry.content.Live = false
+		for _, block := range blocks {
+			entry.content.Live = entry.content.Live || block.Live
+		}
+		entry.content.Failed = entry.content.Failed || failed
+		entry.cache = make(map[transcriptRenderKey][]string)
+		m.hasLayout = false
+		return entry.content, true
+	}
+	return contentItem{}, false
+}
+
+func (m *transcriptModel) MergeToolResult(callID string, result []contentBlock) (contentItem, bool) {
+	if m == nil || callID == "" {
+		return contentItem{}, false
+	}
+	for index := len(m.items) - 1; index >= 0; index-- {
+		entry := &m.items[index]
+		if !mergeToolResultBlocks(&entry.content, callID, result) {
+			continue
+		}
+		entry.cache = make(map[transcriptRenderKey][]string)
+		m.hasLayout = false
+		return entry.content, true
+	}
+	return contentItem{}, false
+}
+
 func (m *transcriptModel) Remove(id string) {
 	if m == nil || id == "" {
 		return

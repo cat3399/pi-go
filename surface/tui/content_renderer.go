@@ -15,8 +15,9 @@ type itemRenderer interface {
 }
 
 type contentRenderer struct {
-	theme    Theme
-	markdown map[int]*glamour.TermRenderer
+	theme         Theme
+	markdown      map[int]*glamour.TermRenderer
+	toolsExpanded bool
 }
 
 func newContentRenderer(theme Theme) *contentRenderer {
@@ -27,7 +28,13 @@ func (r *contentRenderer) CacheKey() string {
 	if r == nil {
 		return ""
 	}
-	return r.theme.ID
+	return fmt.Sprintf("%s:tools=%t", r.theme.ID, r.toolsExpanded)
+}
+
+func (r *contentRenderer) SetToolsExpanded(expanded bool) {
+	if r != nil {
+		r.toolsExpanded = expanded
+	}
 }
 
 func (r *contentRenderer) Render(item contentItem, width int) []string {
@@ -37,23 +44,46 @@ func (r *contentRenderer) Render(item contentItem, width int) []string {
 	if r == nil {
 		return Wrap(item.Title, width)
 	}
-	title := item.Title
+	title := sanitizeDisplayText(item.Title)
 	if title == "" {
 		title = "Message"
 	}
 	if item.Live {
 		title += "  " + r.theme.mutedStyle().Render("streaming")
 	}
-	lines := []string{r.theme.titleStyle(item.Role, item.Failed).Render(title)}
+	lines := make([]string, 0)
+	if !toolOnlyItem(item) {
+		lines = append(lines, r.theme.titleStyle(item.Role, item.Failed).Render(title))
+	}
 	bodyWidth := max(1, width-2)
-	for _, block := range item.Blocks {
-		blockLines := r.renderBlock(block, bodyWidth)
+	for index := 0; index < len(item.Blocks); index++ {
+		block := item.Blocks[index]
+		var blockLines []string
+		if block.Kind == contentBlockToolCall {
+			result := make([]contentBlock, 0)
+			for index+1 < len(item.Blocks) {
+				next := item.Blocks[index+1]
+				if next.ToolCallID == "" || next.ToolCallID != block.ToolCallID || next.Kind == contentBlockToolCall {
+					break
+				}
+				result = append(result, next)
+				index++
+			}
+			blockLines = r.renderToolExecution(block, result, bodyWidth)
+		} else if block.Kind == contentBlockToolResult {
+			blockLines = r.renderToolExecution(contentBlock{ToolName: block.ToolName}, []contentBlock{block}, bodyWidth)
+		} else {
+			blockLines = r.renderBlock(block, bodyWidth)
+		}
 		for _, line := range blockLines {
 			lines = append(lines, "  "+line)
 		}
 	}
 	if len(item.Blocks) == 0 && item.Live {
 		lines = append(lines, "  "+r.theme.mutedStyle().Render("…"))
+	}
+	if len(lines) == 0 {
+		lines = append(lines, r.theme.titleStyle(item.Role, item.Failed).Render(title))
 	}
 	for index, line := range lines {
 		if VisibleWidth(line) > width {
@@ -73,36 +103,18 @@ func (r *contentRenderer) renderBlock(block contentBlock, width int) []string {
 	case contentBlockThinking:
 		label := r.theme.mutedStyle().Italic(true).Render("Thinking")
 		lines := []string{label}
-		for _, line := range Wrap(block.Text, max(1, width-2)) {
+		for _, line := range Wrap(sanitizeDisplayText(block.Text), max(1, width-2)) {
 			lines = append(lines, r.theme.mutedStyle().Render("│ "+line))
 		}
 		return lines
 	case contentBlockToolCall:
-		name := block.ToolName
-		if name == "" {
-			name = "tool"
-		}
-		lines := []string{r.theme.toolStyle().Bold(true).Render("→ " + name)}
-		if strings.TrimSpace(block.Text) != "" {
-			lines = append(lines, r.renderCode(block.Text, width, false)...)
-		}
-		return lines
+		return r.renderToolExecution(block, nil, width)
 	case contentBlockToolResult:
-		name := block.ToolName
-		if name == "" {
-			name = "result"
-		}
-		style := r.theme.toolStyle()
-		if block.IsError {
-			style = r.theme.errorStyle()
-		}
-		lines := []string{style.Bold(true).Render("← " + name)}
-		lines = append(lines, r.renderCode(block.Text, width, block.IsError)...)
-		return lines
+		return r.renderToolExecution(contentBlock{ToolName: block.ToolName}, []contentBlock{block}, width)
 	case contentBlockCode:
 		return r.renderCode(block.Text, width, block.IsError)
 	case contentBlockImage:
-		detail := block.MediaType
+		detail := sanitizeDisplayText(block.MediaType)
 		if detail == "" {
 			detail = "image"
 		}
@@ -115,15 +127,16 @@ func (r *contentRenderer) renderBlock(block contentBlock, width int) []string {
 		if block.IsError {
 			style = r.theme.errorStyle()
 		}
-		return styleLines(style, Wrap(block.Text, width))
+		return styleLines(style, Wrap(sanitizeDisplayText(block.Text), width))
 	case contentBlockText:
 		fallthrough
 	default:
-		return Wrap(block.Text, width)
+		return Wrap(sanitizeDisplayText(block.Text), width)
 	}
 }
 
 func (r *contentRenderer) renderMarkdown(text string, width int) []string {
+	text = sanitizeDisplayText(text)
 	if strings.TrimSpace(text) == "" {
 		return []string{""}
 	}
@@ -151,6 +164,7 @@ func (r *contentRenderer) renderMarkdown(text string, width int) []string {
 }
 
 func (r *contentRenderer) renderCode(text string, width int, failed bool) []string {
+	text = sanitizeDisplayText(text)
 	style := lipgloss.NewStyle().Foreground(r.theme.color(r.theme.Muted))
 	if failed {
 		style = lipgloss.NewStyle().Foreground(r.theme.color(r.theme.Danger))

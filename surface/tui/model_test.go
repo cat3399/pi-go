@@ -260,6 +260,69 @@ func TestModelToolLifecycleUsesOneStableVirtualItem(t *testing.T) {
 	}
 }
 
+func TestModelToolLifecycleJoinsExistingAssistantCall(t *testing.T) {
+	model := newModelForTest(t)
+	model.transcript.Upsert(contentItem{
+		ID: "assistant", Revision: 1, Role: contentRoleAssistant, Title: "Assistant",
+		Blocks: []contentBlock{{
+			Kind: contentBlockToolCall, ToolCallID: "call-joined", ToolName: "read", Text: `{"path":"a.go"}`,
+		}},
+	})
+	model.applyAgentEvent(agent.ToolExecutionStartEvent{
+		RunID: 1, Turn: 2, ToolCallID: "call-joined", ToolName: "read", Arguments: []byte(`{"path":"a.go"}`),
+	})
+	model.applyAgentEvent(agent.ToolExecutionEndEvent{
+		RunID: 1, Turn: 2, ToolCallID: "call-joined", ToolName: "read", Arguments: []byte(`{"path":"a.go"}`),
+		Result: agent.ToolOutput{Text: "complete", Details: map[string]any{"kept": true}},
+	})
+	if model.transcript.Len() != 1 {
+		t.Fatalf("transcript length = %d, want one joined execution", model.transcript.Len())
+	}
+	item := model.transcript.items[0].content
+	if len(item.Blocks) != 2 || item.Blocks[0].Kind != contentBlockToolCall || item.Blocks[1].Kind != contentBlockToolResult {
+		t.Fatalf("joined item = %#v", item)
+	}
+	if item.Blocks[1].Text != "complete" || string(item.Blocks[1].ToolDetails) != `{"kept":true}` {
+		t.Fatalf("joined result = %#v", item.Blocks[1])
+	}
+}
+
+func TestModelToolResultMessageReplacesLiveResultWithoutDuplicateItem(t *testing.T) {
+	model := newModelForTest(t)
+	model.transcript.Upsert(contentItem{
+		ID: "live:assistant:1:2", Revision: 1, Role: contentRoleAssistant, Title: "Assistant", Live: true,
+		Blocks: []contentBlock{{
+			Kind: contentBlockToolCall, ToolCallID: "call-result", ToolName: "read", Text: `{"path":"a.go"}`, Live: true,
+		}},
+	})
+	model.liveItems["live:assistant:1:2"] = model.transcript.items[0].content
+	model.upsertToolEnd(
+		1, 2, "call-result", "read", []byte(`{"path":"a.go"}`), agent.ToolOutput{Text: "ephemeral"}, false, nil,
+	)
+	text, err := llm.NewTextBlock("durable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultMessageWithDetails(
+		"call-result", "read", []llm.TextBlock{text}, false, time.UnixMilli(3), []byte(`{"source":"durable"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper, err := agentmsg.NewLLM(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.upsertAssistant(1, 2, wrapper, false)
+	if model.transcript.Len() != 1 {
+		t.Fatalf("transcript length = %d, want one execution", model.transcript.Len())
+	}
+	item := model.transcript.items[0].content
+	if len(item.Blocks) != 2 || item.Blocks[1].Text != "durable" || string(item.Blocks[1].ToolDetails) != `{"source":"durable"}` {
+		t.Fatalf("merged durable result = %#v", item)
+	}
+}
+
 func TestModelUsesRoleSpecificLiveMessageIDs(t *testing.T) {
 	model := newModelForTest(t)
 	now := time.Unix(1700000000, 0)

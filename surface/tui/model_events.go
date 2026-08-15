@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -158,6 +159,14 @@ func (m *Model) upsertAssistant(runID uint64, turn uint32, message agentmsg.Mess
 		return
 	}
 	item.Live = live
+	if callID, result, toolResult := toolResultBlocks(item); toolResult {
+		if merged, found := m.transcript.MergeToolResult(callID, result); found {
+			if _, tracked := m.liveItems[merged.ID]; tracked {
+				m.liveItems[merged.ID] = merged
+			}
+			return
+		}
+	}
 	m.liveItems[id] = item
 	if item.Role == contentRoleAssistant {
 		m.liveAssistantID = id
@@ -166,40 +175,58 @@ func (m *Model) upsertAssistant(runID uint64, turn uint32, message agentmsg.Mess
 }
 
 func (m *Model) upsertToolStart(runID uint64, turn uint32, callID, name string, arguments []byte) {
-	id := liveToolID(callID)
-	item := contentItem{
-		ID: id, Revision: 1, Role: contentRoleTool, Title: name, Live: true,
-		Blocks: []contentBlock{{Kind: contentBlockToolCall, ToolCallID: callID, ToolName: name, Text: prettyJSON(arguments), Live: true}},
-	}
-	if existing, ok := m.liveItems[id]; ok {
-		item.Revision = existing.Revision + 1
-	}
-	m.liveItems[id] = item
-	m.transcript.Upsert(item)
+	m.upsertToolExecution(callID, name, arguments, nil, true, false)
 	_ = runID
 	_ = turn
 }
 
 func (m *Model) upsertToolUpdate(runID uint64, turn uint32, callID, name string, arguments []byte, update agent.ToolUpdate) {
-	m.upsertToolStart(runID, turn, callID, name, arguments)
-	id := liveToolID(callID)
-	item := m.liveItems[id]
-	item.Revision++
-	item.Blocks = append(item.Blocks[:1], toolResultContentBlocks(name, callID, update.Text, update.Content, false, true)...)
-	m.liveItems[id] = item
-	m.transcript.Upsert(item)
+	result := toolResultContentBlocks(name, callID, update.Text, update.Content, encodeToolDetails(update.Details), false, true)
+	m.upsertToolExecution(callID, name, arguments, result, true, false)
+	_ = runID
+	_ = turn
 }
 
 func (m *Model) upsertToolEnd(runID uint64, turn uint32, callID, name string, arguments []byte, output agent.ToolOutput, failed bool, err error) {
-	m.upsertToolStart(runID, turn, callID, name, arguments)
-	id := liveToolID(callID)
-	item := m.liveItems[id]
-	item.Revision++
-	item.Live = false
-	item.Failed = failed || err != nil
-	item.Blocks = append(item.Blocks[:1], toolResultContentBlocks(name, callID, output.Text, output.Content, item.Failed, false)...)
+	failed = failed || err != nil
+	result := toolResultContentBlocks(name, callID, output.Text, output.Content, encodeToolDetails(output.Details), failed, false)
 	if err != nil {
-		item.Blocks = append(item.Blocks, contentBlock{Kind: contentBlockNotice, Text: err.Error(), IsError: true})
+		result = append(result, contentBlock{
+			Kind: contentBlockNotice, Text: err.Error(), ToolCallID: callID, ToolName: name, IsError: true,
+		})
+	}
+	m.upsertToolExecution(callID, name, arguments, result, false, failed)
+	_ = runID
+	_ = turn
+}
+
+func (m *Model) upsertToolExecution(
+	callID, name string,
+	arguments []byte,
+	result []contentBlock,
+	live, failed bool,
+) {
+	formattedArguments := prettyJSON(arguments)
+	if item, found := m.transcript.UpdateToolExecution(callID, name, formattedArguments, result, live, failed); found {
+		if _, tracked := m.liveItems[item.ID]; tracked {
+			m.liveItems[item.ID] = item
+		}
+		if item.ID != liveToolID(callID) {
+			m.removeLive(liveToolID(callID))
+		}
+		return
+	}
+	id := liveToolID(callID)
+	item := contentItem{
+		ID: id, Revision: 1, Role: contentRoleTool, Title: name, Live: live, Failed: failed,
+		Blocks: []contentBlock{{
+			Kind: contentBlockToolCall, ToolCallID: callID, ToolName: name,
+			Text: formattedArguments, Live: live, IsError: failed,
+		}},
+	}
+	item.Blocks = append(item.Blocks, result...)
+	if existing, ok := m.liveItems[id]; ok {
+		item.Revision = existing.Revision + 1
 	}
 	m.liveItems[id] = item
 	m.transcript.Upsert(item)
@@ -211,16 +238,19 @@ func (m *Model) upsertBashUpdate(update agent.BashExecutionUpdateEvent) {
 		key = *update.ID
 	}
 	id := "live:bash:" + key
+	callID := "bash:" + key
 	item, ok := m.liveItems[id]
 	if !ok {
-		item = contentItem{ID: id, Role: contentRoleTool, Title: "Bash", Live: true}
+		item = contentItem{
+			ID: id, Role: contentRoleTool, Title: "Bash", Live: true,
+			Blocks: []contentBlock{
+				{Kind: contentBlockToolCall, ToolCallID: callID, ToolName: "bash", Live: true},
+				{Kind: contentBlockToolResult, ToolCallID: callID, ToolName: "bash", Live: true},
+			},
+		}
 	}
 	item.Revision++
-	if len(item.Blocks) == 0 {
-		item.Blocks = []contentBlock{{Kind: contentBlockCode, Text: update.Delta, Live: true}}
-	} else {
-		item.Blocks[0].Text += update.Delta
-	}
+	item.Blocks[1].Text += update.Delta
 	m.liveItems[id] = item
 	m.transcript.Upsert(item)
 }
@@ -229,8 +259,37 @@ func (m *Model) applyEntry(entry session.Entry) {
 	if message, ok := entry.AgentMessage(); ok {
 		m.removeLiveForMessage(message)
 	}
-	if item, ok := contentItemFromEntry(entry); ok {
-		m.transcript.Upsert(item)
+	item, ok := contentItemFromEntry(entry)
+	if !ok {
+		return
+	}
+	if callID, result, toolResult := toolResultBlocks(item); toolResult {
+		if merged, found := m.transcript.MergeToolResult(callID, result); found {
+			if _, tracked := m.liveItems[merged.ID]; tracked {
+				m.liveItems[merged.ID] = merged
+			}
+			return
+		}
+	}
+	m.transcript.Upsert(item)
+	m.adoptLiveToolExecutions(item)
+}
+
+func (m *Model) adoptLiveToolExecutions(item contentItem) {
+	for _, call := range item.Blocks {
+		if call.Kind != contentBlockToolCall || call.ToolCallID == "" {
+			continue
+		}
+		liveID := liveToolID(call.ToolCallID)
+		live, found := m.liveItems[liveID]
+		if !found || len(live.Blocks) == 0 {
+			continue
+		}
+		result := append([]contentBlock(nil), live.Blocks[1:]...)
+		m.transcript.UpdateToolExecution(
+			call.ToolCallID, call.ToolName, call.Text, result, live.Live, live.Failed,
+		)
+		m.removeLive(liveID)
 	}
 }
 
@@ -269,11 +328,17 @@ func (m *Model) removeLive(id string) {
 
 func liveToolID(callID string) string { return "live:tool:" + callID }
 
-func toolResultContentBlocks(name, callID, text string, rich []llm.ToolResultContentBlock, failed, live bool) []contentBlock {
+func toolResultContentBlocks(
+	name, callID, text string,
+	rich []llm.ToolResultContentBlock,
+	details json.RawMessage,
+	failed, live bool,
+) []contentBlock {
 	result := make([]contentBlock, 0, len(rich)+1)
 	if len(rich) == 0 {
 		result = append(result, contentBlock{
-			Kind: contentBlockToolResult, Text: text, ToolName: name, ToolCallID: callID, IsError: failed, Live: live,
+			Kind: contentBlockToolResult, Text: text, ToolName: name, ToolCallID: callID,
+			ToolDetails: details, IsError: failed, Live: live,
 		})
 		return result
 	}
@@ -282,15 +347,27 @@ func toolResultContentBlocks(name, callID, text string, rich []llm.ToolResultCon
 		case llm.TextBlock:
 			result = append(result, contentBlock{
 				Kind: contentBlockToolResult, Text: block.Text(), ToolName: name, ToolCallID: callID,
-				IsError: failed, Live: live,
+				ToolDetails: details, IsError: failed, Live: live,
 			})
 		case llm.ImageBlock:
 			image := imageContentBlock(block)
+			image.ToolCallID, image.ToolName, image.ToolDetails = callID, name, details
 			image.IsError, image.Live = failed, live
 			result = append(result, image)
 		}
 	}
 	return result
+}
+
+func encodeToolDetails(value any) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil || !json.Valid(encoded) {
+		return nil
+	}
+	return encoded
 }
 
 func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //nolint:gocyclo

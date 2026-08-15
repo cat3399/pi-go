@@ -50,23 +50,37 @@ const (
 )
 
 type contentBlock struct {
-	Kind       contentBlockKind
-	Text       string
-	Language   string
-	ToolCallID string
-	ToolName   string
-	MediaType  string
-	ByteSize   int
-	IsError    bool
-	Live       bool
+	Kind        contentBlockKind
+	Text        string
+	Language    string
+	ToolCallID  string
+	ToolName    string
+	ToolDetails json.RawMessage
+	MediaType   string
+	ByteSize    int
+	IsError     bool
+	Live        bool
 }
 
 func contentItemsFromSnapshot(snapshot application.SessionSnapshot) []contentItem {
 	items := make([]contentItem, 0, len(snapshot.Entries))
+	toolOwners := make(map[string]int)
 	for _, entry := range snapshot.Entries {
 		item, ok := contentItemFromEntry(entry)
-		if ok {
-			items = append(items, item)
+		if !ok {
+			continue
+		}
+		if callID, resultBlocks, result := toolResultBlocks(item); result {
+			if owner, found := toolOwners[callID]; found && mergeToolResultBlocks(&items[owner], callID, resultBlocks) {
+				continue
+			}
+		}
+		items = append(items, item)
+		itemIndex := len(items) - 1
+		for _, block := range item.Blocks {
+			if block.Kind == contentBlockToolCall && block.ToolCallID != "" {
+				toolOwners[block.ToolCallID] = itemIndex
+			}
 		}
 	}
 	return items
@@ -115,16 +129,20 @@ func contentItemFromAgentMessage(id string, revision uint64, message agentmsg.Me
 	case agentmsg.BashExecution:
 		item.Role = contentRoleTool
 		item.Title = "Bash"
+		callID := "bash:" + id
 		body := value.Output
 		if body == "" {
 			body = "(no output)"
 		}
 		item.Blocks = []contentBlock{
-			{Kind: contentBlockToolCall, ToolName: "bash", Text: value.Command},
-			{Kind: contentBlockCode, Language: "text", Text: body, IsError: value.Cancelled || value.ExitCode != nil && *value.ExitCode != 0},
+			{Kind: contentBlockToolCall, ToolCallID: callID, ToolName: "bash", Text: value.Command},
+			{Kind: contentBlockToolResult, ToolCallID: callID, ToolName: "bash", Language: "text", Text: body, IsError: value.Cancelled || value.ExitCode != nil && *value.ExitCode != 0},
 		}
 		if value.Truncated && value.FullOutputPath != "" {
-			item.Blocks = append(item.Blocks, contentBlock{Kind: contentBlockNotice, Text: "Full output: " + value.FullOutputPath})
+			item.Blocks = append(item.Blocks, contentBlock{
+				Kind: contentBlockNotice, ToolCallID: callID, ToolName: "bash",
+				Text: "Full output: " + value.FullOutputPath,
+			})
 		}
 		return item, true
 	case agentmsg.Custom:
@@ -175,24 +193,41 @@ func contentItemFromConversation(item contentItem, message llm.ConversationMessa
 		item.Blocks = userContentBlocks(value.Content())
 	case llm.ToolResultMessage:
 		item.Role, item.Title = contentRoleTool, value.ToolName()
+		details := value.Details()
 		for _, block := range value.Content() {
 			item.Blocks = append(item.Blocks, contentBlock{
 				Kind: contentBlockToolResult, Text: block.Text(), ToolCallID: value.ToolCallID(),
-				ToolName: value.ToolName(), IsError: value.IsError(),
+				ToolName: value.ToolName(), ToolDetails: details, IsError: value.IsError(),
 			})
+		}
+		if len(item.Blocks) == 0 {
+			item.Blocks = []contentBlock{{
+				Kind: contentBlockToolResult, ToolCallID: value.ToolCallID(), ToolName: value.ToolName(),
+				ToolDetails: details, IsError: value.IsError(),
+			}}
 		}
 	case llm.ToolResultContentMessage:
 		item.Role, item.Title = contentRoleTool, value.ToolName()
+		details := value.Details()
 		for _, block := range value.Content() {
 			switch block := block.(type) {
 			case llm.TextBlock:
 				item.Blocks = append(item.Blocks, contentBlock{
 					Kind: contentBlockToolResult, Text: block.Text(), ToolCallID: value.ToolCallID(),
-					ToolName: value.ToolName(), IsError: value.IsError(),
+					ToolName: value.ToolName(), ToolDetails: details, IsError: value.IsError(),
 				})
 			case llm.ImageBlock:
-				item.Blocks = append(item.Blocks, imageContentBlock(block))
+				image := imageContentBlock(block)
+				image.ToolCallID, image.ToolName = value.ToolCallID(), value.ToolName()
+				image.ToolDetails, image.IsError = details, value.IsError()
+				item.Blocks = append(item.Blocks, image)
 			}
+		}
+		if len(item.Blocks) == 0 {
+			item.Blocks = []contentBlock{{
+				Kind: contentBlockToolResult, ToolCallID: value.ToolCallID(), ToolName: value.ToolName(),
+				ToolDetails: details, IsError: value.IsError(),
+			}}
 		}
 	case llm.AssistantTerminal:
 		item.Role, item.Title = contentRoleAssistant, "Assistant"
@@ -287,4 +322,61 @@ func compactJSON(data []byte) string {
 		return string(data)
 	}
 	return string(formatted)
+}
+
+func toolResultBlocks(item contentItem) (string, []contentBlock, bool) {
+	if item.Role != contentRoleTool || len(item.Blocks) == 0 {
+		return "", nil, false
+	}
+	callID := ""
+	for _, block := range item.Blocks {
+		if block.Kind == contentBlockToolCall {
+			return "", nil, false
+		}
+		if block.ToolCallID == "" {
+			continue
+		}
+		if callID == "" {
+			callID = block.ToolCallID
+		} else if callID != block.ToolCallID {
+			return "", nil, false
+		}
+	}
+	if callID == "" {
+		return "", nil, false
+	}
+	return callID, append([]contentBlock(nil), item.Blocks...), true
+}
+
+func mergeToolResultBlocks(item *contentItem, callID string, result []contentBlock) bool {
+	if item == nil || callID == "" {
+		return false
+	}
+	callIndex := -1
+	blocks := make([]contentBlock, 0, len(item.Blocks)+len(result))
+	for _, block := range item.Blocks {
+		if block.Kind == contentBlockToolCall && block.ToolCallID == callID {
+			callIndex = len(blocks)
+			block.Live = false
+			blocks = append(blocks, block)
+			continue
+		}
+		if block.ToolCallID == callID {
+			continue
+		}
+		blocks = append(blocks, block)
+	}
+	if callIndex < 0 {
+		return false
+	}
+	owned := append([]contentBlock(nil), result...)
+	blocks = append(blocks, make([]contentBlock, len(owned))...)
+	copy(blocks[callIndex+1+len(owned):], blocks[callIndex+1:len(blocks)-len(owned)])
+	copy(blocks[callIndex+1:], owned)
+	item.Blocks = blocks
+	item.Revision++
+	for _, block := range owned {
+		item.Failed = item.Failed || block.IsError
+	}
+	return true
 }

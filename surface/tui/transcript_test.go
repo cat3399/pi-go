@@ -1,13 +1,17 @@
 package tui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 type countingItemRenderer struct {
@@ -122,5 +126,52 @@ func TestContentProjectionDoesNotDisplayHiddenCustomMessages(t *testing.T) {
 	item, ok := contentItemFromAgentMessage("visible", 1, visible, false)
 	if !ok || item.Title != "notice" || len(item.Blocks) != 1 || item.Blocks[0].Text != "shown" {
 		t.Fatalf("visible item = %#v, ok=%t", item, ok)
+	}
+}
+
+func TestSnapshotProjectionJoinsDurableToolCallAndResult(t *testing.T) {
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("durable-call", "read", []byte(`{"path":"a.go"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenance := llm.AssistantProvenance{Provider: "test", API: "test", Model: "test"}
+	assistant, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, usage, time.UnixMilli(1), provenance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), assistant); err != nil {
+		t.Fatal(err)
+	}
+	output, err := llm.NewTextBlock("durable output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := llm.NewToolResultMessageWithDetails(
+		"durable-call", "read", []llm.TextBlock{output}, false, time.UnixMilli(2), json.RawMessage(`{"kept":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+
+	items := contentItemsFromSnapshot(application.SessionSnapshot{Entries: manager.Entries()})
+	if len(items) != 1 || len(items[0].Blocks) != 2 {
+		t.Fatalf("projected items = %#v", items)
+	}
+	if items[0].Blocks[0].Kind != contentBlockToolCall || items[0].Blocks[1].Kind != contentBlockToolResult || items[0].Blocks[1].Text != "durable output" {
+		t.Fatalf("projected transaction = %#v", items[0])
+	}
+	if string(items[0].Blocks[1].ToolDetails) != `{"kept":true}` {
+		t.Fatalf("projected details = %s", items[0].Blocks[1].ToolDetails)
 	}
 }
