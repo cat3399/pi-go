@@ -46,6 +46,8 @@ type ProductionConfig struct {
 	// Provider-specific clients fall back to OpenAIHTTPClient when omitted so
 	// existing embedders can keep one transport seam while tests can isolate
 	// dialects independently.
+	AzureOpenAIHTTPClient provider.HTTPDoer
+	AzureOpenAIClock      provider.Clock
 	OpenAICodexHTTPClient provider.HTTPDoer
 	OpenAICodexClock      provider.Clock
 	AnthropicHTTPClient   provider.HTTPDoer
@@ -542,6 +544,14 @@ func clockBeginningWith(first time.Time, subsequent session.Clock) session.Clock
 }
 
 func newProductionProviderAdapters(config ProductionConfig) (map[string]provider.Streamer, error) {
+	azureClient := config.AzureOpenAIHTTPClient
+	if azureClient == nil {
+		azureClient = config.OpenAIHTTPClient
+	}
+	azureClock := config.AzureOpenAIClock
+	if azureClock == nil {
+		azureClock = config.OpenAIClock
+	}
 	codexClient := config.OpenAICodexHTTPClient
 	if codexClient == nil {
 		codexClient = config.OpenAIHTTPClient
@@ -562,6 +572,10 @@ func newProductionProviderAdapters(config ProductionConfig) (map[string]provider
 	if err != nil {
 		return nil, fmt.Errorf("%w: initialize OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
 	}
+	azure, err := provider.NewAzureOpenAIResponsesProvider(provider.AzureOpenAIResponsesConfig{Client: azureClient, Clock: azureClock})
+	if err != nil {
+		return nil, fmt.Errorf("%w: initialize Azure OpenAI Responses provider: %w", ErrInvalidProductionConfig, err)
+	}
 	completions, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{Client: config.OpenAIHTTPClient, Clock: config.OpenAIClock})
 	if err != nil {
 		return nil, fmt.Errorf("%w: initialize OpenAI Chat Completions provider: %w", ErrInvalidProductionConfig, err)
@@ -575,7 +589,8 @@ func newProductionProviderAdapters(config ProductionConfig) (map[string]provider
 		return nil, fmt.Errorf("%w: initialize Anthropic provider: %w", ErrInvalidProductionConfig, err)
 	}
 	return map[string]provider.Streamer{
-		provider.OpenAIResponsesAPI: responses, provider.OpenAICompletionsAPI: completions,
+		provider.OpenAIResponsesAPI: responses, provider.AzureOpenAIResponsesAPI: azure,
+		provider.OpenAICompletionsAPI:    completions,
 		provider.OpenAICodexResponsesAPI: codex, provider.AnthropicMessagesAPI: anthropic,
 	}, nil
 }
@@ -852,6 +867,10 @@ func authHeadersAuthorizeModel(api string, headers map[string]string) bool {
 			if strings.EqualFold(name, "authorization") || strings.EqualFold(name, "cf-aig-authorization") {
 				return true
 			}
+		case modelcatalog.AzureOpenAIResponsesAPI:
+			if strings.EqualFold(name, "api-key") {
+				return true
+			}
 		}
 	}
 	return false
@@ -862,8 +881,16 @@ func productionProviderEnv(authEnv, ambient map[string]string) map[string]string
 	if result == nil {
 		result = make(map[string]string)
 	}
-	if _, explicit := result["PI_CACHE_RETENTION"]; !explicit && ambient["PI_CACHE_RETENTION"] != "" {
-		result["PI_CACHE_RETENTION"] = ambient["PI_CACHE_RETENTION"]
+	for _, name := range []string{
+		"PI_CACHE_RETENTION",
+		"AZURE_OPENAI_API_VERSION",
+		"AZURE_OPENAI_BASE_URL",
+		"AZURE_OPENAI_RESOURCE_NAME",
+		"AZURE_OPENAI_DEPLOYMENT_NAME_MAP",
+	} {
+		if _, explicit := result[name]; !explicit && ambient[name] != "" {
+			result[name] = ambient[name]
+		}
 	}
 	if len(result) == 0 {
 		return nil

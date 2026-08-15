@@ -20,6 +20,54 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
+func TestRunProductionRoutesBuiltinAzureOpenAIResponses(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), t.TempDir()
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/openai/v1/responses" || request.URL.Query().Get("api-version") != "2026-preview" {
+			t.Errorf("request = %s %s?%s", request.Method, request.URL.Path, request.URL.RawQuery)
+		}
+		if request.Header.Get("api-key") != "azure-production-key" || request.Header.Get("Authorization") != "" {
+			t.Errorf("Azure auth headers = %#v", request.Header)
+		}
+		if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		item := map[string]any{
+			"type": "message", "id": "msg-production-azure", "role": "assistant", "status": "completed",
+			"content": []any{map[string]any{"type": "output_text", "text": "azure answer"}},
+		}
+		writeProviderSSE(t, writer,
+			map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item},
+			map[string]any{"type": "response.completed", "response": map[string]any{
+				"status": "completed", "output": []any{item},
+				"usage": map[string]any{"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+			}},
+		)
+	}))
+	defer server.Close()
+
+	config := productionTestConfig(workingDir, agentDir, []string{
+		"AZURE_OPENAI_API_KEY=azure-production-key",
+		"AZURE_OPENAI_BASE_URL=" + server.URL + "/openai/v1",
+		"AZURE_OPENAI_API_VERSION=2026-preview",
+		"AZURE_OPENAI_DEPLOYMENT_NAME_MAP=gpt-5.4=production-deployment",
+	})
+	config.AzureOpenAIHTTPClient = server.Client()
+	config.AzureOpenAIClock = func() time.Time { return productionTestTime }
+	var stdout, stderr bytes.Buffer
+	code := app.RunProduction(context.Background(), config, []string{
+		"--model", "azure-openai-responses/gpt-5.4", "--session", filepath.Join(workingDir, "azure.jsonl"), "-p", "hello",
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stdout.String() != "azure answer\n" || stderr.Len() != 0 {
+		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if captured["model"] != "production-deployment" || captured["stream"] != true || captured["service_tier"] != nil {
+		t.Fatalf("Azure payload = %#v", captured)
+	}
+}
+
 func TestRunProductionRoutesAnthropicWithRequestTimeHeaders(t *testing.T) {
 	workingDir, agentDir := t.TempDir(), t.TempDir()
 	var captured map[string]any

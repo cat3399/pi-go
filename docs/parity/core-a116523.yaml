@@ -614,6 +614,24 @@ capabilities:
     intentionalGoDifference: One adapter consumes typed compat metadata for multiple OpenAI-compatible providers.
     remainingDifference: none
 
+  - id: provider.azure_openai_responses
+    category: provider
+    status: oracle_verified
+    upstream:
+      path: packages/ai/src/api/azure-openai-responses.ts
+      symbol: stream
+    go:
+      path: internal/provider/openai_responses.go
+      symbol: func NewAzureOpenAIResponsesProvider
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/azure_openai_responses_test.go, symbol: TestAzureOpenAIResponsesUsesAzureWireAndBasePricing}
+      - {kind: go_test, path: internal/app/production_provider_integration_test.go, symbol: TestRunProductionRoutesBuiltinAzureOpenAIResponses}
+      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI083}
+      - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
+    intentionalGoDifference: Azure shares the bounded Go Responses parser and replay state machine while retaining its own endpoint, deployment, environment, and api-key wire contract.
+    remainingDifference: none
+
   - id: provider.openai_codex_responses
     category: provider
     status: oracle_verified
@@ -659,7 +677,7 @@ capabilities:
       - {kind: upstream_source, path: packages/ai/src/types.ts, symbol: KnownApi}
       - {kind: go_source, path: internal/app/production.go, symbol: func newProductionProviderAdapters}
     intentionalGoDifference: none
-    remainingDifference: mistral-conversations, azure-openai-responses, bedrock-converse-stream, google-generative-ai, google-vertex, and pi-messages have no production Go adapters.
+    remainingDifference: mistral-conversations, bedrock-converse-stream, google-generative-ai, google-vertex, and pi-messages have no production Go adapters.
 
   - id: provider.builtin_catalog_auth_coverage
     category: provider
@@ -673,7 +691,7 @@ capabilities:
       - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI083}
       - {kind: go_test, path: internal/auth/provider_auth_test.go, symbol: TestStandardOpenAIAndCodexCredentialsAreIndependent}
     intentionalGoDifference: OpenAI-compatible providers should share one dialect adapter rather than duplicate transport code.
-    remainingDifference: pi-go has 8 built-in providers while upstream registers 38; independent auth/catalog/compat behavior remains to migrate.
+    remainingDifference: pi-go has 9 built-in providers while upstream registers 38; independent auth/catalog/compat behavior remains deferred until those providers are needed.
 
   - id: application.authoritative_session_snapshot
     category: application_boundary

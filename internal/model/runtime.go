@@ -27,13 +27,16 @@ import (
 
 const (
 	OpenAIProviderID          = "openai"
+	AzureOpenAIProviderID     = "azure-openai-responses"
 	OpenAICodexProviderID     = "openai-codex"
 	AnthropicProviderID       = "anthropic"
 	OpenAIResponsesAPI        = "openai-responses"
+	AzureOpenAIResponsesAPI   = "azure-openai-responses"
 	OpenAICompletionsAPI      = "openai-completions"
 	OpenAICodexResponsesAPI   = "openai-codex-responses"
 	AnthropicMessagesAPI      = "anthropic-messages"
 	DefaultOpenAIModel        = "gpt-5.5"
+	DefaultAzureOpenAIModel   = "gpt-5.4"
 	DefaultOpenAICodexModel   = "gpt-5.5"
 	DefaultAnthropicModel     = "claude-opus-4-8"
 	defaultOpenAIBaseURL      = "https://api.openai.com/v1"
@@ -515,7 +518,7 @@ func (r *Runtime) ValidateRoute(selected Model) error {
 		return nil
 	}
 	switch selected.API {
-	case OpenAIResponsesAPI, OpenAICompletionsAPI, OpenAICodexResponsesAPI, AnthropicMessagesAPI:
+	case OpenAIResponsesAPI, AzureOpenAIResponsesAPI, OpenAICompletionsAPI, OpenAICodexResponsesAPI, AnthropicMessagesAPI:
 	default:
 		return fmt.Errorf("%w: selected model uses an unimplemented API", ErrUnsupported)
 	}
@@ -1194,6 +1197,8 @@ func defaultProviderAPI(providerID string) string {
 	switch providerID {
 	case OpenAIProviderID:
 		return OpenAIResponsesAPI
+	case AzureOpenAIProviderID:
+		return AzureOpenAIResponsesAPI
 	case OpenAICodexProviderID:
 		return OpenAICodexResponsesAPI
 	case AnthropicProviderID:
@@ -1211,6 +1216,8 @@ func defaultProviderBaseURL(providerID string) string {
 		return defaultOpenAICodexBaseURL
 	case AnthropicProviderID:
 		return defaultAnthropicBaseURL
+	case AzureOpenAIProviderID:
+		return ""
 	default:
 		return ""
 	}
@@ -2337,7 +2344,7 @@ func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat,
 			Additional: compatAdditional(api, raw),
 		}, nil
 	}
-	if api != "openai-completions" && api != "openai-responses" && api != "azure-openai-responses" && api != "openai-codex-responses" {
+	if api != OpenAICompletionsAPI && api != OpenAIResponsesAPI && api != AzureOpenAIResponsesAPI && api != OpenAICodexResponsesAPI {
 		return provider.ModelCompat{Additional: map[string]json.RawMessage{api: bytes.Clone(raw)}}, nil
 	}
 	supportsDeveloperRole := compatBool(object, "supportsDeveloperRole")
@@ -2840,7 +2847,7 @@ func reprojectCompat(target *provider.ModelCompat, api string, raw json.RawMessa
 	switch api {
 	case OpenAICompletionsAPI:
 		target.OpenAICompletions = projected.OpenAICompletions
-	case OpenAIResponsesAPI, "azure-openai-responses", OpenAICodexResponsesAPI:
+	case OpenAIResponsesAPI, AzureOpenAIResponsesAPI, OpenAICodexResponsesAPI:
 		target.OpenAIResponses = projected.OpenAIResponses
 	case AnthropicMessagesAPI:
 		target.AnthropicMessages = projected.AnthropicMessages

@@ -23,12 +23,14 @@ import (
 )
 
 type target struct {
-	File, Provider string
-	APIs           []string
+	File, Provider    string
+	APIs              []string
+	AllowEmptyBaseURL bool
 }
 
 var targets = []target{
 	{File: "anthropic.json", Provider: "anthropic", APIs: []string{"anthropic-messages"}},
+	{File: "azure-openai-responses.json", Provider: "azure-openai-responses", APIs: []string{"azure-openai-responses"}, AllowEmptyBaseURL: true},
 	{File: "cerebras.json", Provider: "cerebras", APIs: []string{"openai-completions"}},
 	{File: "deepseek.json", Provider: "deepseek", APIs: []string{"openai-completions"}},
 	{File: "groq.json", Provider: "groq", APIs: []string{"openai-completions"}},
@@ -144,7 +146,7 @@ func validateAndCanonicalize(raw []byte, target target) ([]byte, []string, error
 			if strings.TrimSpace(id) == "" || identity.ID != id || identity.Provider != target.Provider || identity.API != api {
 				return nil, nil, fmt.Errorf("model %q has inconsistent identity", id)
 			}
-			if identity.Name == "" || identity.BaseURL == "" || identity.Cost == nil || identity.Input == nil || identity.Context == 0 || identity.Max == 0 {
+			if identity.Name == "" || (!target.AllowEmptyBaseURL && identity.BaseURL == "") || identity.Cost == nil || identity.Input == nil || identity.Context == 0 || identity.Max == 0 {
 				return nil, nil, fmt.Errorf("model %q is missing required catalog metadata", id)
 			}
 			if _, duplicate := seenIDs[id]; duplicate {

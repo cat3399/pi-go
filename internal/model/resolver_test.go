@@ -428,7 +428,7 @@ func TestRestoreModelFromSessionExactAvailabilityAndFallback(t *testing.T) {
 
 func TestDefaultModelPreferencesMatchPiAndAreDefensivelyCopied(t *testing.T) {
 	tests := map[string]string{
-		"openai": "gpt-5.5", "openai-codex": "gpt-5.5", "zai": "glm-5.1",
+		"openai": "gpt-5.5", AzureOpenAIProviderID: DefaultAzureOpenAIModel, "openai-codex": "gpt-5.5", "zai": "glm-5.1",
 		"minimax": "MiniMax-M2.7", "minimax-cn": "MiniMax-M2.7", "cerebras": "zai-glm-4.7",
 		"ant-ling": "Ring-2.6-1T", "vercel-ai-gateway": "zai/glm-5.1",
 	}

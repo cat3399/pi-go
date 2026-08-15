@@ -11,6 +11,10 @@ import (
 
 func TestBuiltinStaticProviderMetadataMatchesPiAI083(t *testing.T) {
 	want := map[string]ProviderConfig{
+		AzureOpenAIProviderID: {
+			ID: AzureOpenAIProviderID, Name: "Azure OpenAI", API: AzureOpenAIResponsesAPI,
+			APIKeyEnvironment: []string{"AZURE_OPENAI_API_KEY"},
+		},
 		"deepseek": {
 			ID: "deepseek", Name: "DeepSeek", API: OpenAICompletionsAPI,
 			BaseURL: "https://api.deepseek.com", APIKeyEnvironment: []string{"DEEPSEEK_API_KEY"},
@@ -46,6 +50,10 @@ func TestBuiltinStaticProviderMetadataMatchesPiAI083(t *testing.T) {
 
 func TestBuiltinStaticProviderCatalogOracleMatchesPiAI083(t *testing.T) {
 	want := map[string]catalogOracle{
+		"azure-openai-responses.json": {
+			Provider: AzureOpenAIProviderID, APIs: []string{AzureOpenAIResponsesAPI},
+			SHA256: "96746b29f5901bed871996498a8a902c4bbcc636f334edfbac5cdaa8b7b9fe38", Count: 38,
+		},
 		"cerebras.json": {
 			Provider: "cerebras", APIs: []string{OpenAICompletionsAPI},
 			SHA256: "ff7c257444fa2635864348cbfb8ec51b4a623616bc5c3d2b47758a2d949ff9bb", Count: 3,
@@ -85,7 +93,7 @@ func TestBuiltinStaticProviderCatalogOracleMatchesPiAI083(t *testing.T) {
 }
 
 func TestBuiltinStaticProviderModelsPreservePiAI083Fields(t *testing.T) {
-	wantCounts := map[string]int{"deepseek": 2, "xai": 3, "groq": 7, "cerebras": 3, "together": 17}
+	wantCounts := map[string]int{AzureOpenAIProviderID: 38, "deepseek": 2, "xai": 3, "groq": 7, "cerebras": 3, "together": 17}
 	counts := make(map[string]int, len(wantCounts))
 	models := make(map[string]Model)
 	for _, candidate := range generatedBuiltinModels() {
@@ -100,6 +108,18 @@ func TestBuiltinStaticProviderModelsPreservePiAI083Fields(t *testing.T) {
 	}
 	if !reflect.DeepEqual(counts, wantCounts) {
 		t.Fatalf("static Provider model counts = %#v, want %#v", counts, wantCounts)
+	}
+
+	azure := models[AzureOpenAIProviderID+"/"+DefaultAzureOpenAIModel]
+	azureOff, hasAzureOff := azure.ThinkingLevelMap[provider.ThinkingOff]
+	azureXHigh, hasAzureXHigh := azure.ThinkingLevelMap[provider.ThinkingXHigh]
+	if azure.Name != "GPT-5.4" || azure.API != AzureOpenAIResponsesAPI || azure.BaseURL != "" || !azure.Reasoning ||
+		!reflect.DeepEqual(azure.Input, []provider.InputKind{provider.InputText, provider.InputImage}) ||
+		!reflect.DeepEqual(azure.Cost, provider.CostRates{Input: 2.5, Output: 15, CacheRead: 0.25}) ||
+		azure.ContextWindow != 1_050_000 || azure.MaxTokens != 128_000 || azure.Compat.OpenAIResponses == nil ||
+		!boolValue(azure.Compat.OpenAIResponses.SupportsOpenAIGrammarTools) || !hasAzureOff || azureOff != nil ||
+		!hasAzureXHigh || stringValue(azureXHigh) != "xhigh" {
+		t.Fatalf("Azure GPT-5.4 fields = %#v", azure)
 	}
 
 	deepseek := models["deepseek/deepseek-v4-pro"]

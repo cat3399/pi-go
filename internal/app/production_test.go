@@ -895,7 +895,7 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 		},
 		{
 			name:          "models JSON template overrides ambient",
-			args:          []string{"--model", "gpt-5.5", "-p", "hello"},
+			args:          []string{"--model", "openai/gpt-5.5", "-p", "hello"},
 			configuredKey: stringPointer("configured-$$-$!-${MODEL_KEY}"),
 			environment:   []string{"MODEL_KEY=template", "OPENAI_API_KEY=ambient-key"},
 			wantKey:       "configured-$-!-template",

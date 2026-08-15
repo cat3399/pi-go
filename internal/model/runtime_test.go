@@ -703,11 +703,12 @@ func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
 		t.Fatalf("catalog source = %q", generatedCatalogSource)
 	}
 	models := builtinModels()
-	if len(models) != 92 {
-		t.Fatalf("builtin model count = %d, want 92", len(models))
+	if len(models) != 130 {
+		t.Fatalf("builtin model count = %d, want 130", len(models))
 	}
 	allowedAPIs := map[string]map[string]bool{
 		OpenAIProviderID:      {OpenAIResponsesAPI: true},
+		AzureOpenAIProviderID: {AzureOpenAIResponsesAPI: true},
 		OpenAICodexProviderID: {OpenAICodexResponsesAPI: true},
 		AnthropicProviderID:   {AnthropicMessagesAPI: true},
 		"deepseek":            {OpenAICompletionsAPI: true},
@@ -735,6 +736,7 @@ func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
 		t.Fatalf("generated catalog IDs differ from oracle\n got: %v\nwant: %v", ids, generatedCatalogModelIDs)
 	}
 	for _, required := range []string{
+		"azure-openai-responses/gpt-5.4", "azure-openai-responses/gpt-5.5",
 		"openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "openai/gpt-5.4-pro",
 		"openai/gpt-5.5-pro", "openai/gpt-5.6-sol", "openai-codex/gpt-5.6-sol",
 		"anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-6", "anthropic/claude-opus-4-8",
@@ -834,7 +836,7 @@ func TestRuntimeMergesProviderAndModelCompatFieldwise(t *testing.T) {
 
 func TestRuntimeModelOverrideDoesNotEraseBuiltinMetadata(t *testing.T) {
 	r, _, _ := newTestRuntime(t, `{"providers":{"openai":{"headers":{"X-Base":"one"},"modelOverrides":{"gpt-5.5":{"name":"renamed","reasoning":true,"headers":{"x-base":"two"}}}}}}`, "", false)
-	got, err := r.Resolve(Selection{Model: "gpt-5.5"})
+	got, err := r.Resolve(Selection{Provider: OpenAIProviderID, Model: "gpt-5.5"})
 	if err != nil {
 		t.Fatal(err)
 	}

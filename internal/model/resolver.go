@@ -23,7 +23,7 @@ var defaultModelPreferences = []ProviderDefault{
 	{Provider: "ant-ling", ModelID: "Ring-2.6-1T"},
 	{Provider: "anthropic", ModelID: "claude-opus-4-8"},
 	{Provider: "openai", ModelID: "gpt-5.5"},
-	{Provider: "azure-openai-responses", ModelID: "gpt-5.4"},
+	{Provider: AzureOpenAIProviderID, ModelID: DefaultAzureOpenAIModel},
 	{Provider: "openai-codex", ModelID: "gpt-5.5"},
 	{Provider: "radius", ModelID: "auto"},
 	{Provider: "nvidia", ModelID: "nvidia/nemotron-3-super-120b-a12b"},

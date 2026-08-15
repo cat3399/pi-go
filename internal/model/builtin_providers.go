@@ -10,6 +10,10 @@ func builtinProviderConfigs() []ProviderConfig {
 			BaseURL: defaultOpenAIBaseURL, APIKeyEnvironment: []string{"OPENAI_API_KEY"},
 		},
 		{
+			ID: AzureOpenAIProviderID, Name: "Azure OpenAI", API: AzureOpenAIResponsesAPI,
+			APIKeyEnvironment: []string{"AZURE_OPENAI_API_KEY"},
+		},
+		{
 			ID: OpenAICodexProviderID, Name: "OpenAI Codex", API: OpenAICodexResponsesAPI,
 			BaseURL: defaultOpenAICodexBaseURL,
 		},
