@@ -1,0 +1,677 @@
+schemaVersion: 1
+
+upstream:
+  repository: ../pi
+  commit: a116523434806910336b9de3e38a41aa5860030b
+  productionChain:
+    - AgentSessionRuntime
+    - AgentSession
+    - Agent
+    - AgentLoop
+    - SessionManager
+
+scope:
+  included:
+    - provider-neutral model, message, tool, event, hook, and stream contracts
+    - AgentLoop and stateful Agent behavior
+    - coding-agent AgentSession policy and lifecycle
+    - JSONL SessionManager semantics and compatibility
+    - Runtime session replacement lifecycle
+    - built-in coding tools, resources, settings, auth, and production provider adapters
+  deferred:
+    - name: JavaScript extension loader and extension UI
+      reason: The loader and UI are explicitly deferred; their transport-neutral hook and custom-data contracts remain in scope.
+      upstreamPath: packages/coding-agent/src/core/extensions
+    - name: TUI, GUI, and complete legacy RPC command exposure
+      reason: These are Surface adapters and do not define Agent Core semantics.
+      upstreamPath: packages/coding-agent/src/modes
+    - name: PiClient, SessionLease, CBOR protocol, and remote server deployment
+      reason: These are remote-client and transport products, not the pinned coding-agent production AgentSession chain.
+      upstreamPath: packages/client
+    - name: AgentHarness SessionRepository and SQLite store
+      reason: AgentHarness is an exported upstream library direction but is not the pinned coding-agent production state owner.
+      upstreamPath: packages/agent/src/harness
+
+statusDefinitions:
+  oracle_verified: A frozen scenario generated through the pinned upstream production implementation is asserted by Go.
+  source_aligned: The production behavior is implemented and tested from the pinned source contract but lacks a frozen end-to-end upstream oracle.
+  remaining: A real product-integration difference remains at the named Go boundary.
+
+capabilities:
+  - id: agent_loop.streaming_lifecycle
+    category: agent_loop
+    status: oracle_verified
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: streamAssistantResponse
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: func (l *AgentLoop) streamAssistant
+    surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_test.go, symbol: TestAgentLoopStreamingLifecycle}
+      - {kind: upstream_oracle, path: internal/agent/upstream_workflow_oracle_test.go, symbol: TestUpstreamAgentSessionWorkflowOracle}
+    intentionalGoDifference: Pull-based Go EventStream and context cancellation replace AsyncIterable and AbortSignal.
+    remainingDifference: none
+
+  - id: agent_loop.context_conversion_and_dynamic_auth
+    category: agent_loop
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: runLoop
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: func (l *AgentLoop) streamAssistant
+    surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopTransformConvertAndDynamicAPIKeyOrderEachTurn}
+    intentionalGoDifference: Conversion failures use typed Go errors while preserving the same lifecycle boundary.
+    remainingDifference: No frozen upstream oracle isolates callback failure and dynamic credential ordering.
+
+  - id: agent_loop.tool_preparation_schema_and_hooks
+    category: agent_loop
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: prepareToolCall
+    go:
+      path: internal/agent/agent_loop_tool.go
+      symbol: func validateAndCoerceAgentLoopArguments
+    surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopCompleteJSONSchemaValidationAndCoercion}
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopExecuteFailureStillRunsAfterAndAppliesFieldOverrides}
+    intentionalGoDifference: JSON Schema is compiled by a Go implementation and hook values are copied at boundaries.
+    remainingDifference: No frozen upstream oracle covers every schema/coercion and hook-error branch.
+
+  - id: agent_loop.parallel_completion_and_source_order
+    category: agent_loop
+    status: oracle_verified
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: executeToolCallsParallel
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: func (l *AgentLoop) executeToolBatch
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/control_flow_test.go, symbol: TestParallelBatchSettlesEventsByCompletionButCommitsSourceOrder}
+      - {kind: upstream_oracle, path: internal/agent/upstream_workflow_oracle_test.go, symbol: TestUpstreamAgentSessionWorkflowOracle}
+    intentionalGoDifference: Goroutines replace Promise.all while an ordered dispatcher preserves observable event settlement.
+    remainingDifference: none
+
+  - id: agent_loop.truncated_tool_call_guard
+    category: agent_loop
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: failToolCallsFromTruncatedMessage
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: func truncatedToolCallOutcome
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_test.go, symbol: TestAgentLoopLengthToolCallsFailAllAndContinue}
+    intentionalGoDifference: none
+    remainingDifference: A direct frozen upstream lifecycle oracle is not yet recorded for a length-truncated multi-call message.
+
+  - id: agent_loop.prepare_next_turn_and_stop
+    category: agent_loop
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: prepareNextTurn
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: AgentLoopPrepareNextTurn
+    surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain}
+      - {kind: upstream_oracle, path: internal/agent/upstream_turn_snapshot_oracle_test.go, symbol: TestUpstreamAgentSessionTurnSnapshotOracle}
+    intentionalGoDifference: Request state is an immutable Go value snapshot rather than a mutable TypeScript object graph.
+    remainingDifference: none
+
+  - id: agent_loop.abort_partial_failure_and_settlement
+    category: agent_loop
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent-loop.ts
+      symbol: runLoop
+    go:
+      path: internal/agent/agent_loop.go
+      symbol: func (l *AgentLoop) emitProviderFailure
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopPartialTransportFailurePreservesCompletedContent}
+      - {kind: go_test, path: internal/agent/agent_loop_test.go, symbol: TestAgentLoopAbortDuringToolSettlesResultsAndTerminal}
+    intentionalGoDifference: Cancellation causes are retained with errors.Join instead of AbortError identity.
+    remainingDifference: No single frozen upstream scenario spans pre-start, mid-stream, and tool-time cancellation.
+
+  - id: agent.state_and_prompt_forms
+    category: agent
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent.ts
+      symbol: class Agent
+    go:
+      path: internal/agent/agent.go
+      symbol: type Agent struct
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentCopiesMutableInputsAndAcceptsAllPromptForms}
+    intentionalGoDifference: Mutators are methods returning errors and State is an immutable snapshot.
+    remainingDifference: none
+
+  - id: agent.queue_priority_modes_and_continue
+    category: agent
+    status: oracle_verified
+    upstream:
+      path: packages/agent/src/agent.ts
+      symbol: class PendingMessageQueue
+    go:
+      path: internal/agent/agent.go
+      symbol: func (a *Agent) drainQueueLocked
+    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentContinueDrainsAssistantTailQueuesByModeAndPriority}
+      - {kind: upstream_oracle, path: internal/agent/upstream_queue_abort_oracle_test.go, symbol: TestUpstreamAgentSessionQueueAbortOracle}
+    intentionalGoDifference: Queue delivery staging is explicit so cancellation and UI queue snapshots remain race-free.
+    remainingDifference: SetSteeringMode and SetFollowUpMode are not exposed through Application/protocol commands.
+
+  - id: agent.listener_settlement_and_reentry
+    category: agent
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent.ts
+      symbol: subscribe
+    go:
+      path: internal/agent/agent.go
+      symbol: func (a *Agent) Subscribe
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentActiveRunIncludesAgentEndListenerSettlementAndRejectsReentry}
+    intentionalGoDifference: Listener panics become typed run failures instead of rejected promises.
+    remainingDifference: none
+
+  - id: agent.abort_wait_and_reset
+    category: agent
+    status: source_aligned
+    upstream:
+      path: packages/agent/src/agent.ts
+      symbol: waitForIdle
+    go:
+      path: internal/agent/agent.go
+      symbol: func (a *Agent) WaitForIdle
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentAbortIsNonBlockingAndPreservesQueuedMessages}
+      - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentResetDuringActiveRunDoesNotReleaseAdmission}
+    intentionalGoDifference: WaitForIdle accepts a context and can return its cancellation cause.
+    remainingDifference: none
+
+  - id: agent_session.prompt_resources_images_and_preflight
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: async prompt
+    go:
+      path: internal/agent/prompt_pipeline.go
+      symbol: func (s *AgentSession) PromptWithOptions
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_request_assembly_oracle_test.go, symbol: TestUpstreamRequestAssemblyOracle}
+      - {kind: go_test, path: internal/agent/prompt_pipeline_test.go, symbol: TestAgentSessionPromptPreflightMatchesCommandInputAndExpansionOrder}
+    intentionalGoDifference: File and resource reads return explicit Go errors instead of extension-runner diagnostics where no JS loader exists.
+    remainingDifference: none
+
+  - id: agent_session.ordered_persistence_and_settled
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: _handleAgentEvent
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) handleLoopEvent
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_workflow_oracle_test.go, symbol: TestUpstreamAgentSessionWorkflowOracle}
+      - {kind: go_test, path: internal/agent/lifecycle_alignment_test.go, symbol: TestAgentSessionSettledIsIdleAndAcceptsImmediatePrompt}
+    intentionalGoDifference: Persistence is serialized through a coordinator and returns commit-unknown errors explicitly.
+    remainingDifference: none
+
+  - id: agent_session.provider_retry_and_retry_after
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: _prepareRetry
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) beginRetrySeries
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_retry_oracle_test.go, symbol: TestUpstreamAgentSessionRetryOracle}
+      - {kind: go_test, path: internal/agent/runtime_controls_test.go, symbol: TestAgentSessionRetryReadsRuntimeSettingsAfterEachFailure}
+    intentionalGoDifference: Retry policy uses a typed controller shared with summarization.
+    remainingDifference: none
+
+  - id: agent_session.abort_retry
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: abortRetry
+    go:
+      path: internal/agent/runtime_controls.go
+      symbol: func (s *AgentSession) AbortRetry
+    surfaceExposure: {application: partial, jsonl: deferred, http: deferred}
+    evidence:
+      - {kind: go_test, path: internal/agent/runtime_controls_test.go, symbol: TestAbortRetryCancelsOnlySleepAndEmitsExactCleanup}
+    intentionalGoDifference: Only the retry-delay child context is cancelled; the owning run context remains valid.
+    remainingDifference: A frozen upstream oracle and Application command are not yet present.
+
+  - id: agent_session.manual_compaction
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: async compact
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) Compact
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_manual_compaction_oracle_test.go, symbol: TestUpstreamAgentSessionManualCompactionOracle}
+    intentionalGoDifference: Compaction preparation and commit are explicit SessionManager transactions.
+    remainingDifference: none
+
+  - id: agent_session.threshold_and_overflow_compaction
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: _checkCompaction
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) checkCompaction
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestUpstreamAgentSessionOverflowCompactionOracle}
+      - {kind: go_test, path: internal/agent/context_retry_test.go, symbol: TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTranscript}
+    intentionalGoDifference: Compaction cancellation is an owned child context rather than AbortController state.
+    remainingDifference: Threshold compaction does not yet have its own frozen upstream workflow.
+
+  - id: agent_session.model_set_cycle_and_availability
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: cycleModel
+    go:
+      path: internal/agent/model_management.go
+      symbol: func (s *AgentSession) CycleModel
+    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionCycleHookSourceAndSettingsFailureAreAtomic}
+      - {kind: go_test, path: internal/agent/model_management_internal_test.go, symbol: TestScopedAvailabilityChecksConcurrentlyPreserveOrderAndFirstError}
+    intentionalGoDifference: Model/settings publication exposes definite-failure versus commit-unknown outcomes.
+    remainingDifference: CycleModel and AvailableModels lack a frozen upstream oracle and direct Application commands.
+
+  - id: agent_session.thinking_selection_cycle_and_clamp
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: cycleThinkingLevel
+    go:
+      path: internal/agent/model_management.go
+      symbol: func (s *AgentSession) CycleThinkingLevel
+    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionThinkingLevelsClampAndCycle}
+    intentionalGoDifference: Supported levels are model-owned immutable metadata.
+    remainingDifference: Cycle and available-level queries lack a frozen upstream oracle and Application commands.
+
+  - id: agent_session.tool_registry_active_tools_and_reload
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: _refreshToolRegistry
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) SetActiveToolsByName
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_turn_snapshot_oracle_test.go, symbol: TestUpstreamAgentSessionTurnSnapshotOracle}
+      - {kind: go_test, path: internal/agent/reload_test.go, symbol: TestAgentSessionReloadMatchesLifecycleSettingsResourceAndPromptOrder}
+    intentionalGoDifference: Registry, executor, and rebuilt prompt are atomically published as copied Go values.
+    remainingDifference: Reload failure/last-healthy behavior lacks a frozen upstream workflow.
+
+  - id: agent_session.extension_neutral_hooks_and_custom_data
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/extensions/types.ts
+      symbol: ExtensionEvent
+    go:
+      path: internal/agent/extensions.go
+      symbol: type Hooks struct
+    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/agent/extensions_integration_test.go, symbol: TestBeforeAgentStartAndMessageHooksMutateOneDurableRun}
+      - {kind: go_test, path: internal/session/entry_compatibility_test.go, symbol: TestAgentMessageAndBranchSettingsSurviveReopen}
+    intentionalGoDifference: A typed host callback set replaces dynamic JS registration and string dispatch.
+    remainingDifference: The JS loader, extension UI, dynamic provider registration, and custom renderer are intentionally deferred.
+
+  - id: agent_session.standalone_bash
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: executeBash
+    go:
+      path: internal/agent/bash.go
+      symbol: func (s *AgentSession) ExecuteBash
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/bash_test.go, symbol: TestAgentSessionExecuteBashStreamsRecordsPrefixAndContextVisibility}
+    intentionalGoDifference: Process-tree ownership and output artifacts use platform-specific Go implementations.
+    remainingDifference: No frozen upstream workflow covers concurrent standalone bash and an active agent run.
+
+  - id: agent_session.tree_navigation_and_branch_summary
+    category: agent_session
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: navigateTree
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) NavigateTree
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_tree_fork_oracle_test.go, symbol: TestUpstreamTreeNavigationRuntimeForkOracle}
+      - {kind: go_test, path: internal/agent/branch_navigation_test.go, symbol: TestNavigateTreeRetryEventsCarryBranchSummarySource}
+    intentionalGoDifference: Navigation and summary commit are serialized by lifecycle locks.
+    remainingDifference: none
+
+  - id: agent_session.stats_context_usage_and_last_text
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: getSessionStats
+    go:
+      path: internal/agent/session_inspection.go
+      symbol: func (s *AgentSession) GetSessionStats
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/session_inspection_test.go, symbol: TestAgentSessionStatsAndContextUsageAcrossCompaction}
+    intentionalGoDifference: Optional values use value-plus-bool or pointers rather than undefined.
+    remainingDifference: No frozen upstream oracle isolates post-compaction context-usage reporting.
+
+  - id: agent_session.shutdown_and_late_event_barrier
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session-runtime.ts
+      symbol: teardownCurrent
+    go:
+      path: internal/agent/session_runtime.go
+      symbol: func (s *AgentSession) Shutdown
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/agent/lifecycle_alignment_test.go, symbol: TestAgentSessionShutdownPreventsSettledPromptAndIsIdempotent}
+      - {kind: go_test, path: internal/agent/lifecycle_alignment_test.go, symbol: TestAgentSessionConcurrentCloseSharesOneShutdownAttempt}
+    intentionalGoDifference: Explicit wait groups and generation identities replace promise disposal ordering.
+    remainingDifference: A frozen upstream replacement-during-active-run workflow is not yet present.
+
+  - id: session_manager.v3_jsonl_unknown_and_legacy_compatibility
+    category: session_manager
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/session-manager.ts
+      symbol: parseSessionEntries
+    go:
+      path: internal/session/codec.go
+      symbol: func decodeSession
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/session/session_manager_compat_test.go, symbol: TestSessionManagerMatchesTypeScriptGolden}
+      - {kind: upstream_oracle, path: internal/agent/upstream_damaged_session_oracle_test.go, symbol: TestUpstreamDamagedSessionResumeContinueOracle}
+    intentionalGoDifference: Parse diagnostics are preserved instead of silently discarding every malformed condition.
+    remainingDifference: none
+
+  - id: session_manager.append_publication_and_commit_unknown
+    category: session_manager
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/session-manager.ts
+      symbol: _persist
+    go:
+      path: internal/session/session.go
+      symbol: func (s *Session) Append
+    surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
+    evidence:
+      - {kind: go_test, path: internal/session/fault_test.go, symbol: TestAppendWriteSyncOrCloseFailurePoisonsWithoutAdvancingLeaf}
+      - {kind: go_test, path: internal/session/writer_lock_contract_test.go, symbol: TestWindowsIdentityAndReplacementContractOnly}
+    intentionalGoDifference: Go adds atomic no-replace publication, inode claims, fsync boundaries, and commit-unknown errors.
+    remainingDifference: This is deliberately stronger than the synchronous upstream file writer and is not byte-for-byte failure equivalent.
+
+  - id: session_manager.context_compaction_and_tree
+    category: session_manager
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/session-manager.ts
+      symbol: buildSessionContext
+    go:
+      path: internal/session/manager.go
+      symbol: func (m *SessionManager) BuildContext
+    surfaceExposure: {application: full, jsonl: partial, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/session/session_manager_compat_test.go, symbol: TestSessionManagerMatchesTypeScriptGolden}
+      - {kind: go_test, path: internal/session/compaction_parity_test.go, symbol: TestPrepareCompactionSplitsAssistantTurnExactlyLikePi}
+    intentionalGoDifference: Tree traversal uses bounded iterative indexes to avoid recursion and quadratic scans.
+    remainingDifference: none
+
+  - id: session_manager.branch_fork_and_clone
+    category: session_manager
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/session-manager.ts
+      symbol: createBranchedSession
+    go:
+      path: internal/session/manager.go
+      symbol: func (m *SessionManager) CloneBranchedSession
+    surfaceExposure: {application: full, jsonl: partial, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_tree_fork_oracle_test.go, symbol: TestUpstreamTreeNavigationRuntimeForkOracle}
+      - {kind: go_test, path: internal/session/tree_test.go, symbol: TestForkFromCopiesForestAndCancellationCannotCreateTarget}
+    intentionalGoDifference: Clone returns a separately owned manager rather than mutating and reusing the current instance.
+    remainingDifference: The legacy RPC clone convenience command is not exposed.
+
+  - id: runtime.switch_new_fork_import_dispose
+    category: runtime
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session-runtime.ts
+      symbol: class AgentSessionRuntime
+    go:
+      path: internal/runtime/runtime.go
+      symbol: type Runtime struct
+    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_tree_fork_oracle_test.go, symbol: TestUpstreamTreeNavigationRuntimeForkOracle}
+      - {kind: go_test, path: internal/runtime/runtime_test.go, symbol: TestRuntimeSwitchCwdValidationImportAndFactoryFailureOwnership}
+    intentionalGoDifference: Replacement is serialized by an operation mutex and resource ownership is explicit.
+    remainingDifference: New, switch, and import have unit/integration coverage but no frozen upstream replacement oracle; single-session JSONL does not expose them.
+
+  - id: tools.seven_builtin_coding_tools
+    category: tools_resources
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/tools/index.ts
+      symbol: allToolNames
+    go:
+      path: internal/tool/registry.go
+      symbol: func NewBuiltInRegistry
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/tool/upstream_oracle_fixture_test.go, symbol: TestFrozenUpstreamToolOracle}
+      - {kind: go_test, path: internal/tool/filesystem_test.go, symbol: TestFilesystemRegistryJSONParseSemanticsAndDispatch}
+    intentionalGoDifference: Managed rg/fd behavior is reproduced with Go process and filesystem abstractions.
+    remainingDifference: Frozen managed-binary oracle currently records darwin-arm64 only.
+
+  - id: resources.skills_templates_agents_files_and_trust
+    category: tools_resources
+    status: oracle_verified
+    upstream:
+      path: packages/coding-agent/src/core/resource-loader.ts
+      symbol: class DefaultResourceLoader
+    go:
+      path: internal/resource/service.go
+      symbol: type Service struct
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: upstream_oracle, path: internal/resource/upstream_oracle_fixture_test.go, symbol: TestFrozenUpstreamFrontmatterAndSourceOracle}
+      - {kind: go_test, path: internal/resource/upstream_behavior_test.go, symbol: TestExpandSkillCommandReadsLatestBodyAndPrecedesTemplates}
+    intentionalGoDifference: Resource snapshots and trust leases are immutable Go values.
+    remainingDifference: Extension-driven resources_discover is deferred with the JS loader.
+
+  - id: provider.vendor_neutral_contract
+    category: provider
+    status: source_aligned
+    upstream:
+      path: packages/ai/src/types.ts
+      symbol: type Model
+    go:
+      path: internal/provider/types.go
+      symbol: type Model struct
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/types_test.go, symbol: TestRequestValidatesAndCopiesConversation}
+      - {kind: go_test, path: internal/provider/portable_options_test.go, symbol: TestGenericProviderContractHasNoOpenAIShape}
+    intentionalGoDifference: Vendor unions are represented as typed optional compat records plus preserved additional JSON.
+    remainingDifference: Implemented contract fields are extensively tested but not generated from one upstream schema oracle.
+
+  - id: provider.openai_responses
+    category: provider
+    status: source_aligned
+    upstream:
+      path: packages/ai/src/api/openai-responses.ts
+      symbol: streamOpenAIResponses
+    go:
+      path: internal/provider/openai_responses.go
+      symbol: func NewOpenAIResponsesProvider
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/openai_responses_test.go, symbol: TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage}
+      - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay}
+    intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines.
+    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+
+  - id: provider.openai_completions
+    category: provider
+    status: source_aligned
+    upstream:
+      path: packages/ai/src/api/openai-completions.ts
+      symbol: streamOpenAICompletions
+    go:
+      path: internal/provider/openai_completions.go
+      symbol: func NewOpenAICompletionsProvider
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/openai_completions_test.go, symbol: TestOpenAICompletionsStreamsTextAndEncodesRichRequest}
+    intentionalGoDifference: One adapter consumes typed compat metadata for multiple OpenAI-compatible providers.
+    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+
+  - id: provider.openai_codex_responses
+    category: provider
+    status: source_aligned
+    upstream:
+      path: packages/ai/src/api/openai-codex-responses.ts
+      symbol: streamOpenAICodexResponses
+    go:
+      path: internal/provider/openai_codex.go
+      symbol: func NewOpenAICodexResponsesProvider
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexWebSocketStreamsAndReusesCachedContinuation}
+    intentionalGoDifference: WebSocket affinity state is synchronized explicitly and SSE fallback is an owned adapter policy.
+    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+
+  - id: provider.anthropic_messages
+    category: provider
+    status: source_aligned
+    upstream:
+      path: packages/ai/src/api/anthropic-messages.ts
+      symbol: streamAnthropic
+    go:
+      path: internal/provider/anthropic.go
+      symbol: func NewAnthropicProvider
+    surfaceExposure: {application: full, jsonl: full, http: full}
+    evidence:
+      - {kind: go_test, path: internal/provider/anthropic_test.go, symbol: TestAnthropicMessagesRequestAndRichStreamMatchPiContract}
+    intentionalGoDifference: SSE content blocks are decoded by a bounded typed state machine.
+    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+
+  - id: provider.remaining_known_api_dialects
+    category: provider
+    status: remaining
+    upstream:
+      path: packages/ai/src/types.ts
+      symbol: type KnownApi
+    targetGoBoundary: internal/provider adapters registered by internal/app.newProductionProviderAdapters
+    surfaceExposure: {application: deferred, jsonl: deferred, http: deferred}
+    evidence:
+      - {kind: upstream_source, path: packages/ai/src/types.ts, symbol: KnownApi}
+      - {kind: go_source, path: internal/app/production.go, symbol: func newProductionProviderAdapters}
+    intentionalGoDifference: none
+    remainingDifference: mistral-conversations, azure-openai-responses, bedrock-converse-stream, google-generative-ai, google-vertex, and pi-messages have no production Go adapters.
+
+  - id: provider.builtin_catalog_auth_coverage
+    category: provider
+    status: remaining
+    upstream:
+      path: packages/ai/src/providers/all.ts
+      symbol: builtinProviders
+    targetGoBoundary: internal/model/builtin_providers.go plus auth/runtime production composition
+    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI083}
+      - {kind: go_test, path: internal/auth/provider_auth_test.go, symbol: TestStandardOpenAIAndCodexCredentialsAreIndependent}
+    intentionalGoDifference: OpenAI-compatible providers should share one dialect adapter rather than duplicate transport code.
+    remainingDifference: pi-go has 8 built-in providers while upstream registers 38; independent auth/catalog/compat behavior remains to migrate.
+
+  - id: application.authoritative_session_snapshot
+    category: application_boundary
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/modes/rpc/rpc-mode.ts
+      symbol: get_entries
+    go:
+      path: internal/application/sessions.go
+      symbol: type SessionSnapshot struct
+    surfaceExposure: {application: full, jsonl: partial, http: full}
+    evidence:
+      - {kind: go_test, path: internal/application/session_test.go, symbol: TestApplicationSessionStateAndQueueCommandsReadAgentSessionOwners}
+      - {kind: go_test, path: surface/web/session_view_test.go, symbol: TestProjectedSessionTreeFlattensBeyondClientDepthLimit}
+    intentionalGoDifference: Entries, tree, context, and optional live state are returned as one consistent multi-session projection.
+    remainingDifference: Legacy JSONL get_entries/get_tree/get_messages convenience commands are not duplicated.
+
+  - id: application.core_control_exposure
+    category: application_boundary
+    status: remaining
+    upstream:
+      path: packages/coding-agent/src/modes/rpc/rpc-types.ts
+      symbol: type RpcCommand
+    targetGoBoundary: internal/application Command and internal/protocol/v1 adapters
+    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/application/session_test.go, symbol: TestApplicationSessionModelThinkingPolicyAndToolCommands}
+      - {kind: go_test, path: internal/rpc/server_test.go, symbol: TestServerStreamsRealAgentSessionProtocol}
+    intentionalGoDifference: Surface commands are added only for real consumers; core methods remain transport-neutral.
+    remainingDifference: Cycle model/thinking, available model/thinking queries, queue-mode setters, and AbortRetry are not exposed as Application/protocol commands.
