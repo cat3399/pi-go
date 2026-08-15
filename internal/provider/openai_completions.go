@@ -408,7 +408,6 @@ type completionsRequestPayload struct {
 	Messages            []any                     `json:"messages"`
 	Tools               *[]any                    `json:"tools,omitempty"`
 	ToolChoice          any                       `json:"tool_choice,omitempty"`
-	ParallelToolCalls   *bool                     `json:"parallel_tool_calls,omitempty"`
 	Stream              bool                      `json:"stream"`
 	StreamOptions       *completionsStreamOptions `json:"stream_options,omitempty"`
 	MaxCompletionTokens uint64                    `json:"max_completion_tokens,omitempty"`
@@ -423,7 +422,7 @@ type completionsRequestPayload struct {
 	ChatTemplateKwargs  map[string]any            `json:"chat_template_kwargs,omitempty"`
 	Reasoning           any                       `json:"reasoning,omitempty"`
 	ToolStream          *bool                     `json:"tool_stream,omitempty"`
-	ProviderRouting     map[string]any            `json:"provider,omitempty"`
+	ProviderRouting     *map[string]any           `json:"provider,omitempty"`
 	ProviderOptions     map[string]any            `json:"providerOptions,omitempty"`
 }
 type completionsStreamOptions struct {
@@ -594,10 +593,6 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	if completionsSupportsUsage(request.Model()) {
 		p.StreamOptions = &completionsStreamOptions{IncludeUsage: true}
 	}
-	if len(tools) > 0 {
-		parallel := request.ParallelToolCalls()
-		p.ParallelToolCalls = &parallel
-	}
 	options := request.StreamOptions()
 	p.Temperature = options.Temperature
 	cacheRetention := resolveOpenAICacheRetention(options)
@@ -637,7 +632,10 @@ func encodeOpenAICompletionsRequest(request Request) ([]byte, error) {
 	applyCompletionsThinkingOptions(&p, request, thinkingFormat)
 	compat := completionsCompat(request.Model())
 	if compat != nil {
-		p.ProviderRouting = cloneAny(compat.OpenRouterRouting)
+		if compat.OpenRouterRouting != nil {
+			routing := cloneAny(compat.OpenRouterRouting)
+			p.ProviderRouting = &routing
+		}
 		if len(compat.VercelGatewayRouting) != 0 {
 			gateway := map[string]any{}
 			for _, key := range []string{"only", "order"} {
@@ -1377,7 +1375,7 @@ func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
 		req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Accept", "application/json")
 	for k, v := range s.headers {
 		req.Header.Set(k, v)
 	}
@@ -1631,9 +1629,6 @@ func completionsUsage(raw *completionsUsageWire) (llm.Usage, error) {
 }
 
 func (s *openAICompletionsStream) textDelta(delta string) *completionsFailureSpec {
-	if err := s.finishThinkingBlock(); err != nil {
-		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "invalid reasoning stream event"}
-	}
 	if s.text == nil {
 		s.text = &strings.Builder{}
 		s.textIndex = s.nextContentIndex
@@ -1653,9 +1648,6 @@ func (s *openAICompletionsStream) textDelta(delta string) *completionsFailureSpe
 	return nil
 }
 func (s *openAICompletionsStream) thinkingDelta(delta, field string) *completionsFailureSpec {
-	if err := s.finishTextBlock(); err != nil {
-		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "invalid text stream event"}
-	}
 	if s.thinking == nil {
 		s.thinking = &strings.Builder{}
 		s.thinkingIndex = s.nextContentIndex

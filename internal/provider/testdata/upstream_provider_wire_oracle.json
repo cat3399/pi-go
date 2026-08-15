@@ -1,0 +1,1076 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "generatedBy": "pinned packages/ai provider adapters with deterministic HTTP/SSE transport",
+  "generator": {
+    "nodeVersion": "v24.18.1",
+    "corpus": "upstream_provider_wire_corpus.json"
+  },
+  "scenarios": [
+    {
+      "name": "anthropic-messages-rich-wire",
+      "api": "anthropic-messages",
+      "input": {
+        "model": {
+          "provider": "anthropic",
+          "api": "anthropic-messages",
+          "id": "claude-sonnet-4-5",
+          "name": "Claude Sonnet Wire",
+          "baseUrl": "https://wire.example",
+          "reasoning": true,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 200000,
+          "maxTokens": 32000,
+          "compat": {
+            "supportsEagerToolInputStreaming": true,
+            "supportsLongCacheRetention": true,
+            "sendSessionAffinityHeaders": true,
+            "supportsCacheControlOnTools": true,
+            "supportsTemperature": true,
+            "forceAdaptiveThinking": false,
+            "allowEmptySignature": false,
+            "supportsStrictTools": true,
+            "supportsToolReferences": true
+          }
+        },
+        "systemPrompt": "You are the wire oracle.",
+        "userPrompt": "Look up pi-go.",
+        "sessionId": "wire-session-123",
+        "tool": {
+          "name": "lookup",
+          "description": "Look up a project by name.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "options": {
+          "maxTokens": 4096,
+          "temperature": 0.25,
+          "cacheRetention": "long",
+          "reasoningEffort": "high",
+          "maxRetries": 0,
+          "headers": {
+            "x-oracle": "upstream-wire"
+          },
+          "thinkingEnabled": true,
+          "thinkingBudgetTokens": 2048,
+          "thinkingDisplay": "summarized",
+          "interleavedThinking": true,
+          "toolChoice": "any",
+          "metadata": {
+            "user_id": "oracle-user"
+          }
+        }
+      },
+      "request": {
+        "url": "https://wire.example/v1/messages",
+        "method": "POST",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "content-encoding": null,
+          "authorization": null,
+          "x-api-key": "oracle-anthropic-key",
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "interleaved-thinking-2025-05-14",
+          "x-session-affinity": "wire-session-123",
+          "session_id": null,
+          "session-id": null,
+          "x-client-request-id": null,
+          "x-session-id": null,
+          "chatgpt-account-id": null,
+          "openai-beta": null,
+          "originator": null,
+          "x-oracle": "upstream-wire"
+        },
+        "body": {
+          "model": "claude-sonnet-4-5",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Look up pi-go.",
+                  "cache_control": {
+                    "type": "ephemeral",
+                    "ttl": "1h"
+                  }
+                }
+              ]
+            }
+          ],
+          "max_tokens": 4096,
+          "stream": true,
+          "system": [
+            {
+              "type": "text",
+              "text": "You are the wire oracle.",
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ],
+          "tools": [
+            {
+              "name": "lookup",
+              "description": "Look up a project by name.",
+              "eager_input_streaming": true,
+              "input_schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ]
+              },
+              "cache_control": {
+                "type": "ephemeral",
+                "ttl": "1h"
+              }
+            }
+          ],
+          "thinking": {
+            "type": "enabled",
+            "budget_tokens": 2048,
+            "display": "summarized"
+          },
+          "metadata": {
+            "user_id": "oracle-user"
+          },
+          "tool_choice": {
+            "type": "any"
+          }
+        }
+      },
+      "events": [
+        {
+          "type": "start"
+        },
+        {
+          "type": "thinking_start",
+          "contentIndex": 0
+        },
+        {
+          "type": "thinking_delta",
+          "contentIndex": 0,
+          "delta": "plan"
+        },
+        {
+          "type": "thinking_end",
+          "contentIndex": 0,
+          "content": "plan",
+          "signature": "anthropic-signature",
+          "redacted": false
+        },
+        {
+          "type": "text_start",
+          "contentIndex": 1
+        },
+        {
+          "type": "text_delta",
+          "contentIndex": 1,
+          "delta": "answer "
+        },
+        {
+          "type": "text_end",
+          "contentIndex": 1,
+          "content": "answer "
+        },
+        {
+          "type": "toolcall_start",
+          "contentIndex": 2,
+          "id": "call_1",
+          "name": "lookup"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "{\"query\":\"pi-go\"}"
+        },
+        {
+          "type": "toolcall_end",
+          "contentIndex": 2,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call_1",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        },
+        {
+          "type": "done",
+          "reason": "toolUse"
+        }
+      ],
+      "result": {
+        "role": "assistant",
+        "api": "anthropic-messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": "anthropic-signature",
+            "redacted": false
+          },
+          {
+            "type": "text",
+            "text": "answer ",
+            "signature": null
+          },
+          {
+            "type": "toolCall",
+            "id": "call_1",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        ],
+        "usage": {
+          "input": 12,
+          "output": 8,
+          "cacheRead": 2,
+          "cacheWrite": 1,
+          "totalTokens": 23,
+          "reasoning": 3,
+          "cacheWrite1h": 1
+        },
+        "stopReason": "toolUse",
+        "responseId": "msg_anthropic_wire",
+        "rawStopReason": "tool_use"
+      }
+    },
+    {
+      "name": "openai-completions-rich-wire",
+      "api": "openai-completions",
+      "input": {
+        "model": {
+          "provider": "openai",
+          "api": "openai-completions",
+          "id": "gpt-wire-chat",
+          "name": "GPT Chat Wire",
+          "baseUrl": "https://wire.example/v1",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "high": "high"
+          },
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "compat": {
+            "supportsStore": true,
+            "supportsDeveloperRole": true,
+            "supportsReasoningEffort": true,
+            "supportsUsageInStreaming": true,
+            "supportsFinishReason": true,
+            "maxTokensField": "max_completion_tokens",
+            "requiresToolResultName": false,
+            "requiresAssistantAfterToolResult": false,
+            "requiresThinkingAsText": false,
+            "requiresReasoningContentOnAssistantMessages": false,
+            "thinkingFormat": "openai",
+            "openRouterRouting": {},
+            "vercelGatewayRouting": {},
+            "chatTemplateKwargs": {},
+            "zaiToolStream": false,
+            "supportsStrictMode": true,
+            "supportsOpenAIGrammarTools": false,
+            "sendSessionAffinityHeaders": true,
+            "sessionAffinityFormat": "openai",
+            "supportsLongCacheRetention": true
+          }
+        },
+        "systemPrompt": "You are the wire oracle.",
+        "userPrompt": "Look up pi-go.",
+        "sessionId": "wire-session-123",
+        "tool": {
+          "name": "lookup",
+          "description": "Look up a project by name.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "options": {
+          "maxTokens": 4096,
+          "temperature": 0.25,
+          "cacheRetention": "long",
+          "reasoningEffort": "high",
+          "maxRetries": 0,
+          "headers": {
+            "x-oracle": "upstream-wire"
+          },
+          "toolChoice": "required"
+        }
+      },
+      "request": {
+        "url": "https://wire.example/v1/chat/completions",
+        "method": "POST",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "content-encoding": null,
+          "authorization": "Bearer oracle-openai-key",
+          "x-api-key": null,
+          "anthropic-version": null,
+          "anthropic-beta": null,
+          "x-session-affinity": "wire-session-123",
+          "session_id": "wire-session-123",
+          "session-id": null,
+          "x-client-request-id": "wire-session-123",
+          "x-session-id": null,
+          "chatgpt-account-id": null,
+          "openai-beta": null,
+          "originator": null,
+          "x-oracle": "upstream-wire"
+        },
+        "body": {
+          "model": "gpt-wire-chat",
+          "messages": [
+            {
+              "role": "developer",
+              "content": "You are the wire oracle."
+            },
+            {
+              "role": "user",
+              "content": "Look up pi-go."
+            }
+          ],
+          "stream": true,
+          "prompt_cache_key": "wire-session-123",
+          "prompt_cache_retention": "24h",
+          "stream_options": {
+            "include_usage": true
+          },
+          "store": false,
+          "max_completion_tokens": 4096,
+          "temperature": 0.25,
+          "tools": [
+            {
+              "type": "function",
+              "function": {
+                "name": "lookup",
+                "description": "Look up a project by name.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "additionalProperties": false
+                },
+                "strict": false
+              }
+            }
+          ],
+          "tool_choice": "required",
+          "reasoning_effort": "high",
+          "provider": {}
+        }
+      },
+      "events": [
+        {
+          "type": "start"
+        },
+        {
+          "type": "thinking_start",
+          "contentIndex": 0
+        },
+        {
+          "type": "thinking_delta",
+          "contentIndex": 0,
+          "delta": "plan"
+        },
+        {
+          "type": "text_start",
+          "contentIndex": 1
+        },
+        {
+          "type": "text_delta",
+          "contentIndex": 1,
+          "delta": "answer "
+        },
+        {
+          "type": "toolcall_start",
+          "contentIndex": 2,
+          "id": "call_1",
+          "name": "lookup"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "{\"query\":"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "\"pi-go\"}"
+        },
+        {
+          "type": "thinking_end",
+          "contentIndex": 0,
+          "content": "plan",
+          "signature": "reasoning_content",
+          "redacted": false
+        },
+        {
+          "type": "text_end",
+          "contentIndex": 1,
+          "content": "answer "
+        },
+        {
+          "type": "toolcall_end",
+          "contentIndex": 2,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call_1",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": {
+              "type": "reasoning.encrypted",
+              "id": "call_1",
+              "data": "completion-signature"
+            }
+          }
+        },
+        {
+          "type": "done",
+          "reason": "toolUse"
+        }
+      ],
+      "result": {
+        "role": "assistant",
+        "api": "openai-completions",
+        "provider": "openai",
+        "model": "gpt-wire-chat",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": "reasoning_content",
+            "redacted": false
+          },
+          {
+            "type": "text",
+            "text": "answer ",
+            "signature": null
+          },
+          {
+            "type": "toolCall",
+            "id": "call_1",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": {
+              "type": "reasoning.encrypted",
+              "id": "call_1",
+              "data": "completion-signature"
+            }
+          }
+        ],
+        "usage": {
+          "input": 15,
+          "output": 8,
+          "cacheRead": 3,
+          "cacheWrite": 2,
+          "totalTokens": 28,
+          "reasoning": 3
+        },
+        "stopReason": "toolUse",
+        "responseId": "chatcmpl-wire",
+        "responseModel": "gpt-wire-chat-actual",
+        "rawStopReason": "tool_calls"
+      }
+    },
+    {
+      "name": "openai-responses-rich-wire",
+      "api": "openai-responses",
+      "input": {
+        "model": {
+          "provider": "openai",
+          "api": "openai-responses",
+          "id": "gpt-wire-responses",
+          "name": "GPT Responses Wire",
+          "baseUrl": "https://wire.example/v1",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "high": "high"
+          },
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 400000,
+          "maxTokens": 128000,
+          "compat": {
+            "supportsDeveloperRole": true,
+            "sessionAffinityFormat": "openai",
+            "supportsLongCacheRetention": true,
+            "supportsStrictMode": true,
+            "supportsOpenAIGrammarTools": false,
+            "supportsToolSearch": false,
+            "supportsExplicitPromptCacheMode": true
+          }
+        },
+        "systemPrompt": "You are the wire oracle.",
+        "userPrompt": "Look up pi-go.",
+        "sessionId": "wire-session-123",
+        "tool": {
+          "name": "lookup",
+          "description": "Look up a project by name.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "options": {
+          "maxTokens": 4096,
+          "temperature": 0.25,
+          "cacheRetention": "long",
+          "reasoningEffort": "high",
+          "maxRetries": 0,
+          "headers": {
+            "x-oracle": "upstream-wire"
+          },
+          "reasoningSummary": "detailed",
+          "serviceTier": "priority",
+          "toolChoice": "required"
+        }
+      },
+      "request": {
+        "url": "https://wire.example/v1/responses",
+        "method": "POST",
+        "headers": {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "content-encoding": null,
+          "authorization": "Bearer oracle-openai-key",
+          "x-api-key": null,
+          "anthropic-version": null,
+          "anthropic-beta": null,
+          "x-session-affinity": null,
+          "session_id": "wire-session-123",
+          "session-id": null,
+          "x-client-request-id": "wire-session-123",
+          "x-session-id": null,
+          "chatgpt-account-id": null,
+          "openai-beta": null,
+          "originator": null,
+          "x-oracle": "upstream-wire"
+        },
+        "body": {
+          "model": "gpt-wire-responses",
+          "input": [
+            {
+              "role": "developer",
+              "content": "You are the wire oracle."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Look up pi-go."
+                }
+              ]
+            }
+          ],
+          "stream": true,
+          "prompt_cache_key": "wire-session-123",
+          "prompt_cache_retention": "24h",
+          "store": false,
+          "max_output_tokens": 4096,
+          "temperature": 0.25,
+          "service_tier": "priority",
+          "tools": [
+            {
+              "type": "function",
+              "name": "lookup",
+              "description": "Look up a project by name.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false
+              },
+              "strict": false
+            }
+          ],
+          "tool_choice": "required",
+          "reasoning": {
+            "effort": "high",
+            "summary": "detailed"
+          },
+          "include": [
+            "reasoning.encrypted_content"
+          ]
+        }
+      },
+      "events": [
+        {
+          "type": "start"
+        },
+        {
+          "type": "thinking_start",
+          "contentIndex": 0
+        },
+        {
+          "type": "thinking_delta",
+          "contentIndex": 0,
+          "delta": "plan"
+        },
+        {
+          "type": "thinking_end",
+          "contentIndex": 0,
+          "content": "plan",
+          "signature": {
+            "type": "reasoning",
+            "id": "rs_responses_wire",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "plan"
+              }
+            ],
+            "encrypted_content": "responses-encrypted"
+          },
+          "redacted": false
+        },
+        {
+          "type": "text_start",
+          "contentIndex": 1
+        },
+        {
+          "type": "text_delta",
+          "contentIndex": 1,
+          "delta": "answer "
+        },
+        {
+          "type": "text_end",
+          "contentIndex": 1,
+          "content": "answer "
+        },
+        {
+          "type": "toolcall_start",
+          "contentIndex": 2,
+          "id": "call_1|fc_responses_wire",
+          "name": "lookup"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "{\"query\":\"pi-go\"}"
+        },
+        {
+          "type": "toolcall_end",
+          "contentIndex": 2,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call_1|fc_responses_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        },
+        {
+          "type": "done",
+          "reason": "toolUse"
+        }
+      ],
+      "result": {
+        "role": "assistant",
+        "api": "openai-responses",
+        "provider": "openai",
+        "model": "gpt-wire-responses",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": {
+              "type": "reasoning",
+              "id": "rs_responses_wire",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": "plan"
+                }
+              ],
+              "encrypted_content": "responses-encrypted"
+            },
+            "redacted": false
+          },
+          {
+            "type": "text",
+            "text": "answer ",
+            "signature": {
+              "v": 1,
+              "id": "msg_responses_wire",
+              "phase": "final_answer"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_1|fc_responses_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        ],
+        "usage": {
+          "input": 15,
+          "output": 8,
+          "cacheRead": 3,
+          "cacheWrite": 2,
+          "totalTokens": 28,
+          "reasoning": 3
+        },
+        "stopReason": "toolUse",
+        "responseId": "resp_responses_wire",
+        "rawStopReason": "completed"
+      }
+    },
+    {
+      "name": "openai-codex-responses-rich-wire",
+      "api": "openai-codex-responses",
+      "input": {
+        "model": {
+          "provider": "openai-codex",
+          "api": "openai-codex-responses",
+          "id": "gpt-wire-codex",
+          "name": "GPT Codex Wire",
+          "baseUrl": "https://wire.example/backend-api",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": "none",
+            "high": "high"
+          },
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 400000,
+          "maxTokens": 128000,
+          "compat": {
+            "supportsStrictMode": true,
+            "supportsOpenAIGrammarTools": false,
+            "supportsToolSearch": false
+          }
+        },
+        "systemPrompt": "You are the wire oracle.",
+        "userPrompt": "Look up pi-go.",
+        "sessionId": "wire-session-123",
+        "tool": {
+          "name": "lookup",
+          "description": "Look up a project by name.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "options": {
+          "maxTokens": 4096,
+          "temperature": 0.25,
+          "cacheRetention": "long",
+          "reasoningEffort": "high",
+          "maxRetries": 0,
+          "headers": {
+            "x-oracle": "upstream-wire"
+          },
+          "reasoningSummary": "concise",
+          "serviceTier": "flex",
+          "textVerbosity": "medium",
+          "toolChoice": "required",
+          "transport": "sse"
+        }
+      },
+      "request": {
+        "url": "https://wire.example/backend-api/codex/responses",
+        "method": "POST",
+        "headers": {
+          "accept": "text/event-stream",
+          "content-type": "application/json",
+          "content-encoding": "zstd",
+          "authorization": "Bearer eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC13aXJlIn19.signature",
+          "x-api-key": null,
+          "anthropic-version": null,
+          "anthropic-beta": null,
+          "x-session-affinity": null,
+          "session_id": null,
+          "session-id": "wire-session-123",
+          "x-client-request-id": "wire-session-123",
+          "x-session-id": null,
+          "chatgpt-account-id": "acct-wire",
+          "openai-beta": "responses=experimental",
+          "originator": "pi",
+          "x-oracle": "upstream-wire"
+        },
+        "body": {
+          "model": "gpt-wire-codex",
+          "store": false,
+          "stream": true,
+          "instructions": "You are the wire oracle.",
+          "input": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "input_text",
+                  "text": "Look up pi-go."
+                }
+              ]
+            }
+          ],
+          "text": {
+            "verbosity": "medium"
+          },
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "prompt_cache_key": "wire-session-123",
+          "tool_choice": "required",
+          "parallel_tool_calls": true,
+          "temperature": 0.25,
+          "service_tier": "flex",
+          "tools": [
+            {
+              "type": "function",
+              "name": "lookup",
+              "description": "Look up a project by name.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false
+              },
+              "strict": null
+            }
+          ],
+          "reasoning": {
+            "effort": "high",
+            "summary": "concise"
+          }
+        }
+      },
+      "events": [
+        {
+          "type": "start"
+        },
+        {
+          "type": "thinking_start",
+          "contentIndex": 0
+        },
+        {
+          "type": "thinking_delta",
+          "contentIndex": 0,
+          "delta": "plan"
+        },
+        {
+          "type": "thinking_end",
+          "contentIndex": 0,
+          "content": "plan",
+          "signature": {
+            "type": "reasoning",
+            "id": "rs_codex_wire",
+            "summary": [
+              {
+                "type": "summary_text",
+                "text": "plan"
+              }
+            ],
+            "encrypted_content": "codex-encrypted"
+          },
+          "redacted": false
+        },
+        {
+          "type": "text_start",
+          "contentIndex": 1
+        },
+        {
+          "type": "text_delta",
+          "contentIndex": 1,
+          "delta": "answer "
+        },
+        {
+          "type": "text_end",
+          "contentIndex": 1,
+          "content": "answer "
+        },
+        {
+          "type": "toolcall_start",
+          "contentIndex": 2,
+          "id": "call_1|fc_codex_wire",
+          "name": "lookup"
+        },
+        {
+          "type": "toolcall_delta",
+          "contentIndex": 2,
+          "delta": "{\"query\":\"pi-go\"}"
+        },
+        {
+          "type": "toolcall_end",
+          "contentIndex": 2,
+          "toolCall": {
+            "type": "toolCall",
+            "id": "call_1|fc_codex_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        },
+        {
+          "type": "done",
+          "reason": "toolUse"
+        }
+      ],
+      "result": {
+        "role": "assistant",
+        "api": "openai-codex-responses",
+        "provider": "openai-codex",
+        "model": "gpt-wire-codex",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": {
+              "type": "reasoning",
+              "id": "rs_codex_wire",
+              "summary": [
+                {
+                  "type": "summary_text",
+                  "text": "plan"
+                }
+              ],
+              "encrypted_content": "codex-encrypted"
+            },
+            "redacted": false
+          },
+          {
+            "type": "text",
+            "text": "answer ",
+            "signature": {
+              "v": 1,
+              "id": "msg_codex_wire",
+              "phase": "final_answer"
+            }
+          },
+          {
+            "type": "toolCall",
+            "id": "call_1|fc_codex_wire",
+            "name": "lookup",
+            "arguments": {
+              "query": "pi-go"
+            },
+            "thoughtSignature": null
+          }
+        ],
+        "usage": {
+          "input": 15,
+          "output": 8,
+          "cacheRead": 3,
+          "cacheWrite": 2,
+          "totalTokens": 28,
+          "reasoning": 3
+        },
+        "stopReason": "toolUse",
+        "responseId": "resp_codex_wire",
+        "rawStopReason": "completed"
+      }
+    }
+  ]
+}

@@ -284,9 +284,6 @@ func (s *openAIResponsesStream) addResponsesOutputItem(event responsesOutputEven
 	if index != s.nextOutputIndex {
 		return invalidResponsesEventFailure(fmt.Errorf("output item index %d, want %d", index, s.nextOutputIndex))
 	}
-	if s.sawFinalAnswer {
-		return invalidResponsesEventFailure(errors.New("output item arrived after a final_answer message"))
-	}
 	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("output item started before previous item completed"))
 	}
@@ -514,9 +511,6 @@ func (s *openAIResponsesStream) startResponsesTextSlot(index int, itemID, phase 
 	if failure := validateResponsesMessagePhase(phase); failure != nil {
 		return failure
 	}
-	if s.sawFinalAnswer {
-		return invalidResponsesEventFailure(errors.New("output message arrived after a final_answer message"))
-	}
 	if _, exists := s.slots[index]; exists {
 		return invalidResponsesEventFailure(fmt.Errorf("output index %d was added twice", index))
 	}
@@ -552,11 +546,6 @@ func (s *openAIResponsesStream) startResponsesToolSlot(index int, itemID, callID
 	s.enqueueResponsesEvent(start)
 	if arguments != "" {
 		slot.arguments = append(slot.arguments, arguments...)
-		delta, err := llm.NewToolCallDeltaEvent(slot.contentIndex, []byte(arguments))
-		if err != nil {
-			return invalidResponsesEventFailure(err)
-		}
-		s.enqueueResponsesEvent(delta)
 	}
 	return nil
 }
@@ -769,9 +758,6 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 	if index != s.nextOutputIndex {
 		return invalidResponsesEventFailure(fmt.Errorf("completed output item index %d, want %d", index, s.nextOutputIndex))
 	}
-	if s.sawFinalAnswer && s.slots[index] == nil && s.toolSlots[index] == nil && s.reasoningSlots[index] == nil {
-		return invalidResponsesEventFailure(errors.New("output item arrived after a final_answer message"))
-	}
 	switch event.Item.Type {
 	case "message":
 		if failure := validateResponsesMessagePhase(event.Item.Phase); failure != nil {
@@ -841,14 +827,41 @@ func (s *openAIResponsesStream) finishResponsesOutputItem(event responsesOutputE
 
 	case "function_call":
 		slot := s.toolSlots[index]
-		if slot == nil || !slot.argumentsDone {
-			return invalidResponsesEventFailure(fmt.Errorf("function call at index %d ended before arguments were complete", index))
+		if slot == nil {
+			if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
+				return invalidResponsesEventFailure(fmt.Errorf("completed function call at index %d does not match the open output item", index))
+			}
+			if failure := s.startResponsesToolSlot(index, event.Item.ID, event.Item.CallID, event.Item.Name, event.Item.Arguments); failure != nil {
+				return failure
+			}
+			slot = s.toolSlots[index]
 		}
 		if event.Item.ID != "" && event.Item.ID != slot.itemID ||
 			event.Item.CallID != "" && event.Item.CallID != slot.callID ||
-			event.Item.Name != "" && event.Item.Name != slot.name ||
-			event.Item.Arguments != "" && event.Item.Arguments != string(slot.arguments) {
+			event.Item.Name != "" && event.Item.Name != slot.name {
 			return invalidResponsesEventFailure(fmt.Errorf("completed function call at index %d does not match start", index))
+		}
+		if !slot.argumentsDone {
+			arguments := event.Item.Arguments
+			if arguments == "" {
+				arguments = string(slot.arguments)
+			}
+			if arguments == "" {
+				arguments = "{}"
+			}
+			call, err := llm.NewToolCallBlock(slot.callID+"|"+slot.itemID, slot.name, []byte(arguments))
+			if err != nil {
+				return invalidResponsesEventFailure(fmt.Errorf("completed function call is invalid: %w", err))
+			}
+			end, err := llm.NewToolCallEndEvent(slot.contentIndex, call)
+			if err != nil {
+				return invalidResponsesEventFailure(err)
+			}
+			slot.arguments = append(slot.arguments[:0], arguments...)
+			slot.argumentsDone = true
+			s.enqueueResponsesEvent(end)
+		} else if event.Item.Arguments != "" && event.Item.Arguments != string(slot.arguments) {
+			return invalidResponsesEventFailure(fmt.Errorf("completed function call at index %d does not match streamed arguments", index))
 		}
 		delete(s.toolSlots, index)
 		s.nextContentIndex++

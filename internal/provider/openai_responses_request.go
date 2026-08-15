@@ -13,21 +13,20 @@ import (
 )
 
 type responsesRequestPayload struct {
-	Model             string                     `json:"model"`
-	Input             []any                      `json:"input"`
-	Tools             []any                      `json:"tools,omitempty"`
-	ToolChoice        any                        `json:"tool_choice,omitempty"`
-	ParallelToolCalls bool                       `json:"parallel_tool_calls"`
-	Stream            bool                       `json:"stream"`
-	Store             bool                       `json:"store"`
-	Reasoning         *responsesReasoningOptions `json:"reasoning,omitempty"`
-	Include           []string                   `json:"include,omitempty"`
-	MaxOutputTokens   uint64                     `json:"max_output_tokens,omitempty"`
-	Temperature       *float64                   `json:"temperature,omitempty"`
-	ServiceTier       string                     `json:"service_tier,omitempty"`
-	PromptCacheKey    string                     `json:"prompt_cache_key,omitempty"`
-	PromptCacheTTL    string                     `json:"prompt_cache_retention,omitempty"`
-	PromptCacheMode   *responsesPromptCacheMode  `json:"prompt_cache_options,omitempty"`
+	Model           string                     `json:"model"`
+	Input           []any                      `json:"input"`
+	Tools           []any                      `json:"tools,omitempty"`
+	ToolChoice      any                        `json:"tool_choice,omitempty"`
+	Stream          bool                       `json:"stream"`
+	Store           bool                       `json:"store"`
+	Reasoning       *responsesReasoningOptions `json:"reasoning,omitempty"`
+	Include         []string                   `json:"include,omitempty"`
+	MaxOutputTokens uint64                     `json:"max_output_tokens,omitempty"`
+	Temperature     *float64                   `json:"temperature,omitempty"`
+	ServiceTier     string                     `json:"service_tier,omitempty"`
+	PromptCacheKey  string                     `json:"prompt_cache_key,omitempty"`
+	PromptCacheTTL  string                     `json:"prompt_cache_retention,omitempty"`
+	PromptCacheMode *responsesPromptCacheMode  `json:"prompt_cache_options,omitempty"`
 }
 
 type responsesPromptCacheMode struct {
@@ -219,12 +218,11 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 		return nil, err
 	}
 	payloadValue := responsesRequestPayload{
-		Model:             request.Model().ID(),
-		Input:             input,
-		Tools:             tools,
-		ParallelToolCalls: request.ParallelToolCalls(),
-		Stream:            true,
-		Store:             false,
+		Model:  request.Model().ID(),
+		Input:  input,
+		Tools:  tools,
+		Stream: true,
+		Store:  false,
 	}
 	options := request.StreamOptions()
 	payloadValue.Temperature = options.Temperature

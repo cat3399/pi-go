@@ -391,8 +391,8 @@ func TestCoreIntegrationRetriesRichParallelToolReplayWithoutDuplicateSession(t *
 		t.Fatalf("provider requests = %d, want 3", len(received))
 	}
 	for requestIndex, payload := range received {
-		if parallel, ok := payload["parallel_tool_calls"].(bool); !ok || !parallel {
-			t.Fatalf("request %d parallel_tool_calls = %#v", requestIndex+1, payload["parallel_tool_calls"])
+		if _, sent := payload["parallel_tool_calls"]; sent {
+			t.Fatalf("request %d sent upstream-absent parallel_tool_calls = %#v", requestIndex+1, payload["parallel_tool_calls"])
 		}
 		tools, ok := payload["tools"].([]any)
 		if !ok || len(tools) != 2 {
@@ -452,8 +452,8 @@ func TestContextSummarizerRequestDoesNotAdvertiseAgentTools(t *testing.T) {
 	if _, advertised := payload["tools"]; advertised {
 		t.Fatalf("summarizer advertised Agent tools: %#v", payload["tools"])
 	}
-	if parallel, ok := payload["parallel_tool_calls"].(bool); !ok || parallel {
-		t.Fatalf("summarizer parallel_tool_calls = %#v, want false", payload["parallel_tool_calls"])
+	if _, sent := payload["parallel_tool_calls"]; sent {
+		t.Fatalf("summarizer sent upstream-absent parallel_tool_calls = %#v", payload["parallel_tool_calls"])
 	}
 }
 

@@ -368,7 +368,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 		request.Header.Set("Authorization", "Bearer "+s.apiKey)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "text/event-stream")
+	request.Header.Set("Accept", "application/json")
 	for name, value := range s.headers {
 		request.Header.Set(name, value)
 	}

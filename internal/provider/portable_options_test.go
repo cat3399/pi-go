@@ -414,7 +414,7 @@ func TestProviderHooksRunAtFinalHTTPBoundariesForBothOpenAIAdapters(t *testing.T
 					return json.Marshal(object)
 				},
 				OnHeaders: func(gotModel provider.Model, headers map[string]*string) error {
-					if !gotModel.Equal(model) || headerHookValue(headers, "Authorization") != "Bearer secret" || headerHookValue(headers, "Accept") != "text/event-stream" || headerHookValue(headers, "X-Model") != "model" || headerHookValue(headers, "X-Adapter") != "" || headerHookValue(headers, "X-Final") != "final" || headerHookValue(headers, "X-Request") != "request" {
+					if !gotModel.Equal(model) || headerHookValue(headers, "Authorization") != "Bearer secret" || headerHookValue(headers, "Accept") != "application/json" || headerHookValue(headers, "X-Model") != "model" || headerHookValue(headers, "X-Adapter") != "" || headerHookValue(headers, "X-Final") != "final" || headerHookValue(headers, "X-Request") != "request" {
 						t.Errorf("header hook model/values = %#v / %#v", gotModel, headers)
 					}
 					headers["X-Request"] = nil

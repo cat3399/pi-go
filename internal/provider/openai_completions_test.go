@@ -665,7 +665,7 @@ func TestOpenAICompletionsPreservesIncomingReasoningButRejectsSSEError(t *testin
 		t.Fatal(err)
 	}
 	events, terminal := collectStream(t, p.Stream(context.Background(), request))
-	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_delta", "thinking_end", "text_start", "text_delta", "text_end", "done"}; !reflect.DeepEqual(got, want) {
+	if got, want := eventKinds(events), []string{"start", "thinking_start", "thinking_delta", "text_start", "text_delta", "thinking_end", "text_end", "done"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("events=%v, want %v", got, want)
 	}
 	rich, ok := terminal.(llm.AssistantRichMessage)

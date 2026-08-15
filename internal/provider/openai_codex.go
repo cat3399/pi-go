@@ -169,6 +169,7 @@ func (p *OpenAICodexResponsesProvider) Stream(ctx context.Context, request Reque
 	headers["originator"] = "pi"
 	headers["User-Agent"] = fmt.Sprintf("pi (%s %s; %s)", runtime.GOOS, runtime.Version(), runtime.GOARCH)
 	headers["OpenAI-Beta"] = "responses=experimental"
+	headers["accept"] = "text/event-stream"
 	if options.SessionID != "" {
 		headers["session-id"] = options.SessionID
 		headers["x-client-request-id"] = options.SessionID

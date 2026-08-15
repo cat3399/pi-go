@@ -1,0 +1,212 @@
+{
+  "upstreamCommit": "a116523434806910336b9de3e38a41aa5860030b",
+  "common": {
+    "systemPrompt": "You are the wire oracle.",
+    "userPrompt": "Look up pi-go.",
+    "sessionId": "wire-session-123",
+    "tool": {
+      "name": "lookup",
+      "description": "Look up a project by name.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "options": {
+      "maxTokens": 4096,
+      "temperature": 0.25,
+      "cacheRetention": "long",
+      "reasoningEffort": "high",
+      "maxRetries": 0,
+      "headers": {
+        "x-oracle": "upstream-wire"
+      }
+    }
+  },
+  "scenarios": [
+    {
+      "name": "anthropic-messages-rich-wire",
+      "api": "anthropic-messages",
+      "model": {
+        "provider": "anthropic",
+        "api": "anthropic-messages",
+        "id": "claude-sonnet-4-5",
+        "name": "Claude Sonnet Wire",
+        "baseUrl": "https://wire.example",
+        "reasoning": true,
+        "input": [
+          "text"
+        ],
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "contextWindow": 200000,
+        "maxTokens": 32000,
+        "compat": {
+          "supportsEagerToolInputStreaming": true,
+          "supportsLongCacheRetention": true,
+          "sendSessionAffinityHeaders": true,
+          "supportsCacheControlOnTools": true,
+          "supportsTemperature": true,
+          "forceAdaptiveThinking": false,
+          "allowEmptySignature": false,
+          "supportsStrictTools": true,
+          "supportsToolReferences": true
+        }
+      },
+      "providerOptions": {
+        "thinkingEnabled": true,
+        "thinkingBudgetTokens": 2048,
+        "thinkingDisplay": "summarized",
+        "interleavedThinking": true,
+        "toolChoice": "any",
+        "metadata": {
+          "user_id": "oracle-user"
+        }
+      }
+    },
+    {
+      "name": "openai-completions-rich-wire",
+      "api": "openai-completions",
+      "model": {
+        "provider": "openai",
+        "api": "openai-completions",
+        "id": "gpt-wire-chat",
+        "name": "GPT Chat Wire",
+        "baseUrl": "https://wire.example/v1",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": "none",
+          "high": "high"
+        },
+        "input": [
+          "text"
+        ],
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "contextWindow": 128000,
+        "maxTokens": 16384,
+        "compat": {
+          "supportsStore": true,
+          "supportsDeveloperRole": true,
+          "supportsReasoningEffort": true,
+          "supportsUsageInStreaming": true,
+          "supportsFinishReason": true,
+          "maxTokensField": "max_completion_tokens",
+          "requiresToolResultName": false,
+          "requiresAssistantAfterToolResult": false,
+          "requiresThinkingAsText": false,
+          "requiresReasoningContentOnAssistantMessages": false,
+          "thinkingFormat": "openai",
+          "openRouterRouting": {},
+          "vercelGatewayRouting": {},
+          "chatTemplateKwargs": {},
+          "zaiToolStream": false,
+          "supportsStrictMode": true,
+          "supportsOpenAIGrammarTools": false,
+          "sendSessionAffinityHeaders": true,
+          "sessionAffinityFormat": "openai",
+          "supportsLongCacheRetention": true
+        }
+      },
+      "providerOptions": {
+        "toolChoice": "required"
+      }
+    },
+    {
+      "name": "openai-responses-rich-wire",
+      "api": "openai-responses",
+      "model": {
+        "provider": "openai",
+        "api": "openai-responses",
+        "id": "gpt-wire-responses",
+        "name": "GPT Responses Wire",
+        "baseUrl": "https://wire.example/v1",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": "none",
+          "high": "high"
+        },
+        "input": [
+          "text"
+        ],
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "contextWindow": 400000,
+        "maxTokens": 128000,
+        "compat": {
+          "supportsDeveloperRole": true,
+          "sessionAffinityFormat": "openai",
+          "supportsLongCacheRetention": true,
+          "supportsStrictMode": true,
+          "supportsOpenAIGrammarTools": false,
+          "supportsToolSearch": false,
+          "supportsExplicitPromptCacheMode": true
+        }
+      },
+      "providerOptions": {
+        "reasoningSummary": "detailed",
+        "serviceTier": "priority",
+        "toolChoice": "required"
+      }
+    },
+    {
+      "name": "openai-codex-responses-rich-wire",
+      "api": "openai-codex-responses",
+      "model": {
+        "provider": "openai-codex",
+        "api": "openai-codex-responses",
+        "id": "gpt-wire-codex",
+        "name": "GPT Codex Wire",
+        "baseUrl": "https://wire.example/backend-api",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": "none",
+          "high": "high"
+        },
+        "input": [
+          "text"
+        ],
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "contextWindow": 400000,
+        "maxTokens": 128000,
+        "compat": {
+          "supportsStrictMode": true,
+          "supportsOpenAIGrammarTools": false,
+          "supportsToolSearch": false
+        }
+      },
+      "providerOptions": {
+        "reasoningSummary": "concise",
+        "serviceTier": "flex",
+        "textVerbosity": "medium",
+        "toolChoice": "required",
+        "transport": "sse"
+      }
+    }
+  ]
+}

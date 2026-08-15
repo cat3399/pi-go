@@ -356,7 +356,7 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := simulatedOpenAIResponsesAdmission(payload, true); err != nil {
+		if err := simulatedOpenAIResponsesAdmission(payload); err != nil {
 			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -410,8 +410,8 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 		t.Fatalf("request count = %d", len(received))
 	}
 	for requestIndex, payload := range received {
-		if parallel, ok := payload["parallel_tool_calls"].(bool); !ok || !parallel {
-			t.Fatalf("request %d parallel_tool_calls = %#v, want true", requestIndex+1, payload["parallel_tool_calls"])
+		if _, sent := payload["parallel_tool_calls"]; sent {
+			t.Fatalf("request %d sent upstream-absent parallel_tool_calls = %#v", requestIndex+1, payload["parallel_tool_calls"])
 		}
 		tools, ok := payload["tools"].([]any)
 		if !ok || len(tools) != 4 {
@@ -601,7 +601,7 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	if snapshot.count != 1 {
 		t.Fatalf("request count = %d, want 1", snapshot.count)
 	}
-	if err := simulatedOpenAIResponsesAdmission(snapshot.payload, true); err != nil {
+	if err := simulatedOpenAIResponsesAdmission(snapshot.payload); err != nil {
 		t.Fatal(err)
 	}
 	tools, ok := snapshot.payload["tools"].([]any)
@@ -1681,12 +1681,12 @@ func writeProductionSSE(t *testing.T, writer io.Writer, events ...map[string]any
 }
 
 // simulatedOpenAIResponsesAdmission models the request rules that matter to
-// the production tool workflow. Capability must match the test's scheduler,
-// and strict objects may not leave a declared property optional.
-func simulatedOpenAIResponsesAdmission(payload map[string]any, wantParallel bool) error {
-	parallel, ok := payload["parallel_tool_calls"].(bool)
-	if !ok || parallel != wantParallel {
-		return fmt.Errorf("parallel_tool_calls = %v, want %t", payload["parallel_tool_calls"], wantParallel)
+// the production tool workflow. The scheduler's execution mode remains local,
+// matching pi's Responses wire request, and strict objects may not leave a
+// declared property optional.
+func simulatedOpenAIResponsesAdmission(payload map[string]any) error {
+	if _, sent := payload["parallel_tool_calls"]; sent {
+		return fmt.Errorf("parallel_tool_calls must be omitted, got %v", payload["parallel_tool_calls"])
 	}
 	tools, _ := payload["tools"].([]any)
 	for index, raw := range tools {

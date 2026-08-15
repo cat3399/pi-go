@@ -141,8 +141,8 @@ func TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay(t *testing.T) {
 	if !ok || tool["type"] != "function" || tool["name"] != "bash" || tool["strict"] != true {
 		t.Fatalf("tool payload = %#v", tools[0])
 	}
-	if parallel, ok := firstPayload["parallel_tool_calls"].(bool); !ok || parallel {
-		t.Fatalf("parallel_tool_calls = %#v, want false", firstPayload["parallel_tool_calls"])
+	if _, sent := firstPayload["parallel_tool_calls"]; sent {
+		t.Fatalf("parallel_tool_calls must follow the upstream adapter by remaining omitted: %#v", firstPayload["parallel_tool_calls"])
 	}
 
 	text, err := llm.NewTextBlock("I will run it.")
@@ -1093,7 +1093,7 @@ func FuzzToolDefinitionStrictLocalReferenceNeverPanics(f *testing.F) {
 	})
 }
 
-func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
+func TestOpenAIResponsesParallelToolExecutionCapabilityStaysCoordinatorLocal(t *testing.T) {
 	t.Parallel()
 
 	model, err := newTestModel("openai", provider.OpenAIResponsesAPI, "gpt-test")
@@ -1142,8 +1142,8 @@ func TestOpenAIResponsesParallelToolCallsCapabilityIsExplicit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got, ok := payload["parallel_tool_calls"].(bool); !ok || got != test.want {
-				t.Fatalf("parallel_tool_calls = %#v, want %t", payload["parallel_tool_calls"], test.want)
+			if _, sent := payload["parallel_tool_calls"]; sent {
+				t.Fatalf("upstream Responses adapter omits parallel_tool_calls: %#v", payload["parallel_tool_calls"])
 			}
 		})
 	}

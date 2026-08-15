@@ -591,12 +591,13 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/provider/openai_responses_test.go, symbol: TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay}
+      - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines.
-    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+    remainingDifference: Completed reasoning items are still reconstructed instead of preserved as original JSON; empty/multipart summary replay is tracked in the next parity batch.
 
   - id: provider.openai_completions
     category: provider
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/ai/src/api/openai-completions.ts
       symbol: streamOpenAICompletions
@@ -606,8 +607,9 @@ capabilities:
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/provider/openai_completions_test.go, symbol: TestOpenAICompletionsStreamsTextAndEncodesRichRequest}
+      - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: One adapter consumes typed compat metadata for multiple OpenAI-compatible providers.
-    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+    remainingDifference: none
 
   - id: provider.openai_codex_responses
     category: provider
@@ -621,12 +623,13 @@ capabilities:
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexWebSocketStreamsAndReusesCachedContinuation}
+      - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: WebSocket affinity state is synchronized explicitly and SSE fallback is an owned adapter policy.
-    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+    remainingDifference: Codex reasoning replay and WebSocket continuation still reconstruct completed items instead of preserving the original JSON.
 
   - id: provider.anthropic_messages
     category: provider
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/ai/src/api/anthropic-messages.ts
       symbol: streamAnthropic
@@ -636,8 +639,9 @@ capabilities:
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/provider/anthropic_test.go, symbol: TestAnthropicMessagesRequestAndRichStreamMatchPiContract}
+      - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: SSE content blocks are decoded by a bounded typed state machine.
-    remainingDifference: No frozen upstream request/stream wire corpus is checked in.
+    remainingDifference: none
 
   - id: provider.remaining_known_api_dialects
     category: provider

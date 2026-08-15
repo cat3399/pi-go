@@ -109,7 +109,7 @@ func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 		if got := incoming.Header.Get("Authorization"); got != "Bearer test-secret" {
 			t.Errorf("Authorization = %q", got)
 		}
-		if got := incoming.Header.Get("Accept"); got != "text/event-stream" {
+		if got := incoming.Header.Get("Accept"); got != "application/json" {
 			t.Errorf("Accept = %q", got)
 		}
 		if err := json.NewDecoder(incoming.Body).Decode(&received); err != nil {

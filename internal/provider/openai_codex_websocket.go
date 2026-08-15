@@ -19,6 +19,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/coder/websocket"
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -53,6 +54,11 @@ type openAICodexStreamConfig struct {
 }
 
 func (c openAICodexStreamConfig) newSSEStream() EventStream {
+	if compressed, ok := compressCodexRequestZstd(c.payload); ok {
+		c.payload = compressed
+		c.headers = cloneStrings(c.headers)
+		c.headers["content-encoding"] = "zstd"
+	}
 	client := c.client
 	if c.options.TimeoutMS != nil && *c.options.TimeoutMS != 0 {
 		client = &codexHeaderTimeoutDoer{next: client, timeout: durationFromMilliseconds(*c.options.TimeoutMS)}
@@ -62,6 +68,19 @@ func (c openAICodexStreamConfig) newSSEStream() EventStream {
 		responses.terminalEndsStream = true
 	}
 	return stream
+}
+
+func compressCodexRequestZstd(payload []byte) ([]byte, bool) {
+	encoder, err := zstd.NewWriter(
+		nil,
+		zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(3)),
+		zstd.WithEncoderConcurrency(1),
+	)
+	if err != nil {
+		return nil, false
+	}
+	defer encoder.Close()
+	return encoder.EncodeAll(payload, nil), true
 }
 
 func (c openAICodexStreamConfig) newWebSocketStream() EventStream {
