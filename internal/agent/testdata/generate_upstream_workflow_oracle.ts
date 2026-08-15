@@ -12,6 +12,15 @@ type ResponseInput = {
   outputTokens: number;
 };
 
+type ThinkingLevelInput = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+type ModelControlInput = {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  thinkingLevelMap?: Partial<Record<ThinkingLevelInput, string | null>>;
+};
+
 type Corpus = {
   upstreamCommit: string;
   nodeVersion: string;
@@ -45,6 +54,30 @@ type Corpus = {
     maxRetries: number;
     baseDelayMs: number;
     retryAfterMs: number;
+    failure: { message: string; httpStatus: number };
+    response: { text: string; inputTokens: number; outputTokens: number };
+  };
+  modelControlScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    initialThinkingLevel: ThinkingLevelInput;
+    clampRequest: ThinkingLevelInput;
+    models: [ModelControlInput, ModelControlInput, ModelControlInput];
+    scopedThinkingLevel: ThinkingLevelInput;
+    steeringMode: "all" | "one-at-a-time";
+    followUpMode: "all" | "one-at-a-time";
+    prompt: string;
+    response: { text: string; inputTokens: number; outputTokens: number };
+  };
+  retryAbortScenario: {
+    name: string;
+    sessionId: string;
+    systemPrompt: string;
+    firstPrompt: string;
+    secondPrompt: string;
+    maxRetries: number;
+    baseDelayMs: number;
     failure: { message: string; httpStatus: number };
     response: { text: string; inputTokens: number; outputTokens: number };
   };
@@ -831,6 +864,463 @@ async function runRetryScenario(
     name: scenario.name,
     input: scenario,
     actions: { promptReturn, settledSnapshots },
+    providerInputs: faux.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
+function normalizeModelCycleResult(result: any): Record<string, unknown> | null {
+  if (result === undefined) return null;
+  return {
+    model: { provider: result.model.provider, api: result.model.api, id: result.model.id },
+    thinkingLevel: result.thinkingLevel,
+    isScoped: result.isScoped,
+  };
+}
+
+function modelControlSnapshot(session: any): Record<string, unknown> {
+  return {
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    availableThinkingLevels: [...session.getAvailableThinkingLevels()],
+    supportsThinking: session.supportsThinking(),
+    steeringMode: session.steeringMode,
+    followUpMode: session.followUpMode,
+    scopedModels: session.scopedModels.map((scoped: any) => ({
+      model: { provider: scoped.model.provider, api: scoped.model.api, id: scoped.model.id },
+      thinkingLevel: scoped.thinkingLevel ?? null,
+    })),
+  };
+}
+
+function modelControlSettingsSnapshot(settingsManager: any): Record<string, unknown> {
+  return {
+    defaultProvider: settingsManager.getDefaultProvider() ?? null,
+    defaultModel: settingsManager.getDefaultModel() ?? null,
+    defaultThinkingLevel: settingsManager.getDefaultThinkingLevel() ?? null,
+    steeringMode: settingsManager.getSteeringMode(),
+    followUpMode: settingsManager.getFollowUpMode(),
+  };
+}
+
+async function runModelControlScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.modelControlScenario;
+  if (scenario.models.length !== 3 || !scenario.models[0].reasoning || scenario.models[1].reasoning || !scenario.models[2].reasoning) {
+    throw new Error("model control workflow requires reasoning, plain, and reasoning models in that order");
+  }
+
+  const scenarioRoot = join(root, "model-control");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const models = scenario.models.map((input) => ({
+    ...harnessModule.fauxModel,
+    id: input.id,
+    name: input.name,
+    reasoning: input.reasoning,
+    thinkingLevelMap: input.thinkingLevelMap,
+  }));
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(models[0].provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  const controlStream = harnessModule.createFauxStreamFn([{
+    text: scenario.response.text,
+    stopReason: "stop",
+    model: { provider: models[0].provider, id: models[0].id },
+    usage: {
+      input: scenario.response.inputTokens,
+      output: scenario.response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: scenario.response.inputTokens + scenario.response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  }]);
+  const providerModels: any[] = [];
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    providerModels.push(model);
+    streamOptions.push(options);
+    return controlStream.streamFn(model, context, options);
+  };
+  modelRegistry.registerProvider(models[0].provider, {
+    baseUrl: models[0].baseUrl,
+    apiKey: "faux-key",
+    api: models[0].api,
+    streamSimple,
+    models: models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    })),
+  });
+
+  const controlActions: string[] = [];
+  const extensionsResult = await utilityModule.createTestExtensionsResult([
+    {
+      factory: (pi: any) => {
+        pi.on("model_select", async (event: any) => {
+          controlActions.push(`model_select:${event.previousModel?.id ?? "none"}->${event.model.id}:${event.source}`);
+        });
+        pi.on("thinking_level_select", async (event: any) => {
+          controlActions.push(`thinking_level_select:${event.previousLevel}->${event.level}`);
+        });
+      },
+      path: "<model-control-extension>",
+    },
+  ], cwd);
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false },
+    transport: "sse",
+    steeringMode: "one-at-a-time",
+    followUpMode: "all",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader({ extensionsResult }),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model: models[0],
+    thinkingLevel: scenario.initialThinkingLevel,
+    scopedModels: [
+      { model: models[0] },
+      { model: models[1] },
+      { model: models[2], thinkingLevel: scenario.scopedThinkingLevel },
+    ],
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  session.subscribe((event: any) => events.push(event));
+  await session.bindExtensions({ shutdownHandler: () => {} });
+
+  const initial = modelControlSnapshot(session);
+  session.setThinkingLevel(scenario.clampRequest);
+  const afterClamp = modelControlSnapshot(session);
+  const thinkingCycle = session.cycleThinkingLevel() ?? null;
+  const afterThinkingCycle = modelControlSnapshot(session);
+  const scopedPlain = normalizeModelCycleResult(await session.cycleModel("forward"));
+  const afterScopedPlain = modelControlSnapshot(session);
+  const plainThinkingCycle = session.cycleThinkingLevel() ?? null;
+  const scopedReasoning = normalizeModelCycleResult(await session.cycleModel("forward"));
+  const afterScopedReasoning = modelControlSnapshot(session);
+  await session.setModel(models[0]);
+  const afterDirectSet = modelControlSnapshot(session);
+  session.setSteeringMode(scenario.steeringMode);
+  session.setFollowUpMode(scenario.followUpMode);
+  const afterQueueModes = modelControlSnapshot(session);
+  const settings = modelControlSettingsSnapshot(settingsManager);
+  await session.prompt(scenario.prompt);
+  const promptReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    ...queueSnapshot(session),
+  };
+  if (controlStream.state.callCount !== 1 || providerModels.length !== 1 || streamOptions.length !== 1) {
+    throw new Error(
+      `model control provider calls ${controlStream.state.callCount}/${providerModels.length}/${streamOptions.length}, want 1/1/1; state=${JSON.stringify(modelControlSnapshot(session))}; events=${events.map((event) => event.type).join(",")}`,
+    );
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent model control AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      initial,
+      afterClamp,
+      thinkingCycle,
+      afterThinkingCycle,
+      scopedPlain,
+      afterScopedPlain,
+      plainThinkingCycle,
+      scopedReasoning,
+      afterScopedReasoning,
+      afterDirectSet,
+      afterQueueModes,
+      settings,
+      promptReturn,
+      controlActions,
+    },
+    providerInputs: controlStream.state.contexts.map((context: any, index: number) =>
+      normalizeProviderInput(
+        providerModels[index],
+        context,
+        streamOptions[index],
+        scenarioRoot,
+        cwd,
+        scenario.sessionId,
+      )),
+    events: events.map((event) => normalizeEvent(event, ids)),
+    finalState,
+    session: {
+      header: normalizeHeader(header, scenarioRoot, cwd),
+      entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+      fileEntries: fileEntries.map((entry: any) => normalizeEntry(entry, ids)),
+      reopened: {
+        header: normalizeHeader(reopened.getHeader(), scenarioRoot, cwd),
+        entries: reopenedEntries.map((entry: any) => normalizeEntry(entry, ids)),
+        context: {
+          messages: reopenedContext.messages.map(normalizeMessage),
+          model: reopenedContext.model,
+          thinkingLevel: reopenedContext.thinkingLevel,
+        },
+      },
+    },
+  };
+}
+
+async function runRetryAbortScenario(
+  root: string,
+  sdkModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  utilityModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.retryAbortScenario;
+  const scenarioRoot = join(root, "retry-abort");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+
+  const faux = harnessModule.createFauxStreamFn([
+    {
+      text: "",
+      stopReason: "error",
+      error: scenario.failure.message,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+    {
+      text: scenario.response.text,
+      stopReason: "stop",
+      usage: {
+        input: scenario.response.inputTokens,
+        output: scenario.response.outputTokens,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: scenario.response.inputTokens + scenario.response.outputTokens,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  ]);
+  const streamOptions: any[] = [];
+  const streamSimple = (model: any, context: any, options: any) => {
+    streamOptions.push(options);
+    return faux.streamFn(model, context, options);
+  };
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: {
+      enabled: true,
+      maxRetries: scenario.maxRetries,
+      baseDelayMs: scenario.baseDelayMs,
+      provider: { maxRetries: 0 },
+    },
+    transport: "sse",
+  });
+  const sessionManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sessionId });
+  const resourceLoader = {
+    ...utilityModule.createTestResourceLoader(),
+    getSystemPrompt: () => scenario.systemPrompt,
+  };
+  const created = await sdkModule.createAgentSession({
+    cwd,
+    agentDir,
+    model,
+    thinkingLevel: "off",
+    tools: [],
+    customTools: [],
+    resourceLoader,
+    sessionManager,
+    settingsManager,
+    modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+  });
+  const session = created.session;
+  const events: any[] = [];
+  const settledSnapshots: Array<Record<string, unknown>> = [];
+  let signalRetryScheduled!: () => void;
+  const retryScheduled = new Promise<void>((resolve) => {
+    signalRetryScheduled = resolve;
+  });
+  session.subscribe((event: any) => {
+    events.push(event);
+    if (event.type === "auto_retry_start") signalRetryScheduled();
+    if (event.type === "agent_settled") {
+      settledSnapshots.push({
+        isStreaming: session.isStreaming,
+        isIdle: session.isIdle,
+        isRetrying: session.isRetrying,
+        ...queueSnapshot(session),
+      });
+    }
+  });
+
+  const firstRun = session.prompt(scenario.firstPrompt);
+  await retryScheduled;
+  for (let attempt = 0; attempt < 100 && !session.isRetrying; attempt++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  if (!session.isRetrying) throw new Error("retry cancellation workflow did not enter retry sleep");
+  const beforeAbortRetry = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isRetrying: session.isRetrying,
+    ...queueSnapshot(session),
+  };
+  session.abortRetry();
+  session.abortRetry();
+  await firstRun;
+  const firstPromptReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isRetrying: session.isRetrying,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+  await session.prompt(scenario.secondPrompt);
+  const secondPromptReturn = {
+    isStreaming: session.isStreaming,
+    isIdle: session.isIdle,
+    isRetrying: session.isRetrying,
+    settledEventCount: settledSnapshots.length,
+    ...queueSnapshot(session),
+  };
+  if (faux.state.callCount !== 2 || streamOptions.length !== 2) {
+    throw new Error(`retry cancellation provider calls ${faux.state.callCount}/${streamOptions.length}, want 2/2`);
+  }
+  if (settledSnapshots.length !== 2) {
+    throw new Error(`retry cancellation settled events ${settledSnapshots.length}, want 2`);
+  }
+
+  const entries = sessionManager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const sessionFile = session.sessionFile;
+  if (!sessionFile) throw new Error("persistent retry cancellation AgentSession did not publish a session file");
+  const fileLines = readFileSync(sessionFile, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+  const header = fileLines[0];
+  const fileEntries = fileLines.slice(1);
+  const stats = session.getSessionStats();
+  const finalState = {
+    isStreaming: session.isStreaming,
+    pendingMessageCount: session.pendingMessageCount,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    activeTools: session.getActiveToolNames(),
+    systemPrompt: normalizePathText(session.systemPrompt, scenarioRoot, cwd),
+    messages: session.messages.map(normalizeMessage),
+    stats: normalizeStats(stats),
+  };
+  session.dispose();
+
+  const reopened = sessionModule.SessionManager.open(sessionFile, sessionDir);
+  const reopenedContext = reopened.buildSessionContext();
+  const reopenedEntries = reopened.getEntries();
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: { beforeAbortRetry, firstPromptReturn, secondPromptReturn, settledSnapshots },
     providerInputs: faux.state.contexts.map((context: any, index: number) =>
       normalizeProviderInput(model, context, streamOptions[index], scenarioRoot, cwd, scenario.sessionId)),
     events: events.map((event) => normalizeEvent(event, ids)),
@@ -2506,6 +2996,26 @@ async function main(): Promise<void> {
       modelTestModule,
       harnessModule,
     );
+    const modelControlScenario = await runModelControlScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+    );
+    const retryAbortScenario = await runRetryAbortScenario(
+      root,
+      sdkModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      utilityModule,
+      modelTestModule,
+      harnessModule,
+    );
     const manualCompactionScenario = await runManualCompactionScenario(
       root,
       sdkModule,
@@ -2595,6 +3105,8 @@ async function main(): Promise<void> {
       },
       queueAbortScenario,
       retryScenario,
+      modelControlScenario,
+      retryAbortScenario,
       manualCompactionScenario,
       overflowCompactionScenario,
       turnSnapshotScenario,
@@ -2605,7 +3117,11 @@ async function main(): Promise<void> {
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } finally {
     Math.random = originalRandom;
-    rmSync(root, { recursive: true, force: true });
+    if (process.env.PI_KEEP_ORACLE_TMP === "1") {
+      process.stderr.write(`kept oracle temporary directory ${root}\n`);
+    } else {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 }
 

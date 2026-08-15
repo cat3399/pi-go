@@ -97,6 +97,62 @@
       "outputTokens": 3
     }
   },
+  "modelControlScenario": {
+    "name": "model_thinking_queue_controls",
+    "sessionId": "session-agent-model-control-parity",
+    "systemPrompt": "You are the deterministic model control parity oracle.",
+    "initialThinkingLevel": "minimal",
+    "clampRequest": "low",
+    "models": [
+      {
+        "id": "faux-reasoning",
+        "name": "Faux Reasoning",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "low": null,
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      {
+        "id": "faux-plain",
+        "name": "Faux Plain",
+        "reasoning": false
+      },
+      {
+        "id": "faux-scoped",
+        "name": "Faux Scoped",
+        "reasoning": true
+      }
+    ],
+    "scopedThinkingLevel": "low",
+    "steeringMode": "all",
+    "followUpMode": "one-at-a-time",
+    "prompt": "use the final model and thinking selection",
+    "response": {
+      "text": "model controls applied",
+      "inputTokens": 4,
+      "outputTokens": 2
+    }
+  },
+  "retryAbortScenario": {
+    "name": "abort_retry_sleep_and_reuse_session",
+    "sessionId": "session-agent-retry-abort-parity",
+    "systemPrompt": "You are the deterministic retry cancellation parity oracle.",
+    "firstPrompt": "cancel only the retry delay",
+    "secondPrompt": "the session remains usable",
+    "maxRetries": 2,
+    "baseDelayMs": 60000,
+    "failure": {
+      "message": "overloaded_error",
+      "httpStatus": 429
+    },
+    "response": {
+      "text": "completed after retry cancellation",
+      "inputTokens": 5,
+      "outputTokens": 3
+    }
+  },
   "manualCompactionScenario": {
     "name": "manual_compaction_reopen",
     "sessionId": "session-agent-manual-compaction-parity",

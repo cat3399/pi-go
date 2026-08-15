@@ -176,6 +176,7 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentContinueDrainsAssistantTailQueuesByModeAndPriority}
       - {kind: upstream_oracle, path: internal/agent/upstream_queue_abort_oracle_test.go, symbol: TestUpstreamAgentSessionQueueAbortOracle}
+      - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
     intentionalGoDifference: Queue delivery staging is explicit so cancellation and UI queue snapshots remain race-free.
     remainingDifference: SetSteeringMode and SetFollowUpMode are not exposed through Application/protocol commands.
 
@@ -260,7 +261,7 @@ capabilities:
 
   - id: agent_session.abort_retry
     category: agent_session
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: abortRetry
@@ -269,9 +270,10 @@ capabilities:
       symbol: func (s *AgentSession) AbortRetry
     surfaceExposure: {application: partial, jsonl: deferred, http: deferred}
     evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionAbortRetryOracle}
       - {kind: go_test, path: internal/agent/runtime_controls_test.go, symbol: TestAbortRetryCancelsOnlySleepAndEmitsExactCleanup}
     intentionalGoDifference: Only the retry-delay child context is cancelled; the owning run context remains valid.
-    remainingDifference: A frozen upstream oracle and Application command are not yet present.
+    remainingDifference: The transport-neutral core behavior is verified; an Application command is not yet present.
 
   - id: agent_session.manual_compaction
     category: agent_session
@@ -304,9 +306,9 @@ capabilities:
     intentionalGoDifference: Compaction cancellation is an owned child context rather than AbortController state.
     remainingDifference: Threshold compaction does not yet have its own frozen upstream workflow.
 
-  - id: agent_session.model_set_cycle_and_availability
+  - id: agent_session.model_set_and_scoped_cycle
     category: agent_session
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: cycleModel
@@ -315,14 +317,30 @@ capabilities:
       symbol: func (s *AgentSession) CycleModel
     surfaceExposure: {application: partial, jsonl: deferred, http: partial}
     evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
       - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionCycleHookSourceAndSettingsFailureAreAtomic}
-      - {kind: go_test, path: internal/agent/model_management_internal_test.go, symbol: TestScopedAvailabilityChecksConcurrentlyPreserveOrderAndFirstError}
     intentionalGoDifference: Model/settings publication exposes definite-failure versus commit-unknown outcomes.
-    remainingDifference: CycleModel and AvailableModels lack a frozen upstream oracle and direct Application commands.
+    remainingDifference: Core set/scoped-cycle behavior is verified; direct Application commands remain absent.
+
+  - id: agent_session.dynamic_available_models
+    category: agent_session
+    status: source_aligned
+    upstream:
+      path: packages/coding-agent/src/core/agent-session.ts
+      symbol: _cycleAvailableModel
+    go:
+      path: internal/agent/model_management.go
+      symbol: func (s *AgentSession) AvailableModels
+    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    evidence:
+      - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionUnscopedCycleRefreshesAvailableModelsAndResolverFailureIsClean}
+      - {kind: go_test, path: internal/agent/model_management_internal_test.go, symbol: TestScopedAvailabilityChecksConcurrentlyPreserveOrderAndFirstError}
+    intentionalGoDifference: Availability resolution is transport-neutral and returns explicit callback errors.
+    remainingDifference: Ambient-auth-independent production oracle coverage and direct Application commands are still absent.
 
   - id: agent_session.thinking_selection_cycle_and_clamp
     category: agent_session
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: cycleThinkingLevel
@@ -331,9 +349,10 @@ capabilities:
       symbol: func (s *AgentSession) CycleThinkingLevel
     surfaceExposure: {application: partial, jsonl: deferred, http: partial}
     evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
       - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionThinkingLevelsClampAndCycle}
     intentionalGoDifference: Supported levels are model-owned immutable metadata.
-    remainingDifference: Cycle and available-level queries lack a frozen upstream oracle and Application commands.
+    remainingDifference: Core cycle/clamp/available-level behavior is verified; direct Application commands remain absent.
 
   - id: agent_session.tool_registry_active_tools_and_reload
     category: agent_session

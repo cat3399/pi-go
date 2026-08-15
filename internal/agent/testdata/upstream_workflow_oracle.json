@@ -4445,6 +4445,2018 @@
       }
     }
   },
+  "modelControlScenario": {
+    "name": "model_thinking_queue_controls",
+    "input": {
+      "name": "model_thinking_queue_controls",
+      "sessionId": "session-agent-model-control-parity",
+      "systemPrompt": "You are the deterministic model control parity oracle.",
+      "initialThinkingLevel": "minimal",
+      "clampRequest": "low",
+      "models": [
+        {
+          "id": "faux-reasoning",
+          "name": "Faux Reasoning",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "low": null,
+            "xhigh": "xhigh",
+            "max": null
+          }
+        },
+        {
+          "id": "faux-plain",
+          "name": "Faux Plain",
+          "reasoning": false
+        },
+        {
+          "id": "faux-scoped",
+          "name": "Faux Scoped",
+          "reasoning": true
+        }
+      ],
+      "scopedThinkingLevel": "low",
+      "steeringMode": "all",
+      "followUpMode": "one-at-a-time",
+      "prompt": "use the final model and thinking selection",
+      "response": {
+        "text": "model controls applied",
+        "inputTokens": 4,
+        "outputTokens": 2
+      }
+    },
+    "actions": {
+      "initial": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "thinkingLevel": "minimal",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "afterClamp": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "thinkingLevel": "medium",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "thinkingCycle": "high",
+      "afterThinkingCycle": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "thinkingLevel": "high",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "scopedPlain": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-plain"
+        },
+        "thinkingLevel": "off",
+        "isScoped": true
+      },
+      "afterScopedPlain": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-plain"
+        },
+        "thinkingLevel": "off",
+        "availableThinkingLevels": [
+          "off"
+        ],
+        "supportsThinking": false,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "plainThinkingCycle": null,
+      "scopedReasoning": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-scoped"
+        },
+        "thinkingLevel": "low",
+        "isScoped": true
+      },
+      "afterScopedReasoning": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-scoped"
+        },
+        "thinkingLevel": "low",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "afterDirectSet": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "thinkingLevel": "medium",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "one-at-a-time",
+        "followUpMode": "all",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "afterQueueModes": {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "thinkingLevel": "medium",
+        "availableThinkingLevels": [
+          "off",
+          "minimal",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "supportsThinking": true,
+        "steeringMode": "all",
+        "followUpMode": "one-at-a-time",
+        "scopedModels": [
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-reasoning"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-plain"
+            },
+            "thinkingLevel": null
+          },
+          {
+            "model": {
+              "provider": "faux",
+              "api": "anthropic-messages",
+              "id": "faux-scoped"
+            },
+            "thinkingLevel": "low"
+          }
+        ]
+      },
+      "settings": {
+        "defaultProvider": "faux",
+        "defaultModel": "faux-reasoning",
+        "defaultThinkingLevel": "medium",
+        "steeringMode": "all",
+        "followUpMode": "one-at-a-time"
+      },
+      "promptReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "controlActions": [
+        "thinking_level_select:minimal->medium",
+        "thinking_level_select:medium->high",
+        "thinking_level_select:high->off",
+        "model_select:faux-reasoning->faux-plain:cycle",
+        "thinking_level_select:off->low",
+        "model_select:faux-plain->faux-scoped:cycle",
+        "thinking_level_select:low->medium",
+        "model_select:faux-scoped->faux-reasoning:set"
+      ]
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-reasoning"
+        },
+        "systemPrompt": "You are the deterministic model control parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "use the final model and thinking selection"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-model-control-parity",
+          "reasoning": "medium",
+          "transport": "sse"
+        }
+      }
+    ],
+    "events": [
+      {
+        "type": "thinking_level_changed",
+        "level": "medium"
+      },
+      {
+        "type": "thinking_level_changed",
+        "level": "high"
+      },
+      {
+        "type": "thinking_level_changed",
+        "level": "off"
+      },
+      {
+        "type": "thinking_level_changed",
+        "level": "low"
+      },
+      {
+        "type": "thinking_level_changed",
+        "level": "medium"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "use the final model and thinking selection"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "mod"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "el "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "con"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "tro"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ls "
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "app"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "lie"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "d"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "model controls applied"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "model controls applied"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-reasoning",
+          "usage": {
+            "input": 4,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-reasoning"
+      },
+      "thinkingLevel": "medium",
+      "activeTools": [],
+      "systemPrompt": "You are the deterministic model control parity oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "use the final model and thinking selection"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "model controls applied"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-reasoning",
+          "usage": {
+            "input": 4,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-model-control-parity",
+        "userMessages": 1,
+        "assistantMessages": 1,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 2,
+        "tokens": {
+          "input": 4,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 6
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 6,
+          "contextWindow": 128000,
+          "percent": 0.0046875
+        }
+      }
+    },
+    "session": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-model-control-parity",
+        "cwd": "<cwd>"
+      },
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "minimal"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "thinkingLevel": "medium"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "provider": "faux",
+          "modelId": "faux-plain"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "provider": "faux",
+          "modelId": "faux-scoped"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "thinkingLevel": "low"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "thinkingLevel": "medium"
+        },
+        {
+          "type": "message",
+          "id": "entry-11",
+          "parentId": "entry-10",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "use the final model and thinking selection"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-12",
+          "parentId": "entry-11",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "model controls applied"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-reasoning",
+            "usage": {
+              "input": 4,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 6,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "minimal"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "thinkingLevel": "medium"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "thinkingLevel": "high"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "provider": "faux",
+          "modelId": "faux-plain"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-7",
+          "parentId": "entry-6",
+          "provider": "faux",
+          "modelId": "faux-scoped"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-8",
+          "parentId": "entry-7",
+          "thinkingLevel": "low"
+        },
+        {
+          "type": "model_change",
+          "id": "entry-9",
+          "parentId": "entry-8",
+          "provider": "faux",
+          "modelId": "faux-reasoning"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-10",
+          "parentId": "entry-9",
+          "thinkingLevel": "medium"
+        },
+        {
+          "type": "message",
+          "id": "entry-11",
+          "parentId": "entry-10",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "use the final model and thinking selection"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-12",
+          "parentId": "entry-11",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "model controls applied"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-reasoning",
+            "usage": {
+              "input": 4,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 6,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-model-control-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-reasoning"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "minimal"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "thinkingLevel": "medium"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "thinkingLevel": "high"
+          },
+          {
+            "type": "model_change",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "provider": "faux",
+            "modelId": "faux-plain"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "model_change",
+            "id": "entry-7",
+            "parentId": "entry-6",
+            "provider": "faux",
+            "modelId": "faux-scoped"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-8",
+            "parentId": "entry-7",
+            "thinkingLevel": "low"
+          },
+          {
+            "type": "model_change",
+            "id": "entry-9",
+            "parentId": "entry-8",
+            "provider": "faux",
+            "modelId": "faux-reasoning"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-10",
+            "parentId": "entry-9",
+            "thinkingLevel": "medium"
+          },
+          {
+            "type": "message",
+            "id": "entry-11",
+            "parentId": "entry-10",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "use the final model and thinking selection"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-12",
+            "parentId": "entry-11",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "model controls applied"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-reasoning",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "use the final model and thinking selection"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "model controls applied"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-reasoning",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-reasoning"
+          },
+          "thinkingLevel": "medium"
+        }
+      }
+    }
+  },
+  "retryAbortScenario": {
+    "name": "abort_retry_sleep_and_reuse_session",
+    "input": {
+      "name": "abort_retry_sleep_and_reuse_session",
+      "sessionId": "session-agent-retry-abort-parity",
+      "systemPrompt": "You are the deterministic retry cancellation parity oracle.",
+      "firstPrompt": "cancel only the retry delay",
+      "secondPrompt": "the session remains usable",
+      "maxRetries": 2,
+      "baseDelayMs": 60000,
+      "failure": {
+        "message": "overloaded_error",
+        "httpStatus": 429
+      },
+      "response": {
+        "text": "completed after retry cancellation",
+        "inputTokens": 5,
+        "outputTokens": 3
+      }
+    },
+    "actions": {
+      "beforeAbortRetry": {
+        "isStreaming": true,
+        "isIdle": false,
+        "isRetrying": true,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "firstPromptReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "isRetrying": false,
+        "settledEventCount": 1,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "secondPromptReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "isRetrying": false,
+        "settledEventCount": 2,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "settledSnapshots": [
+        {
+          "isStreaming": false,
+          "isIdle": true,
+          "isRetrying": false,
+          "steering": [],
+          "followUp": [],
+          "pendingMessageCount": 0
+        },
+        {
+          "isStreaming": false,
+          "isIdle": true,
+          "isRetrying": false,
+          "steering": [],
+          "followUp": [],
+          "pendingMessageCount": 0
+        }
+      ]
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic retry cancellation parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "cancel only the retry delay"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-retry-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic retry cancellation parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "cancel only the retry delay"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "the session remains usable"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-retry-abort-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      }
+    ],
+    "events": [
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "cancel only the retry delay"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": ""
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": ""
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "error",
+          "errorMessage": "overloaded_error"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": true
+      },
+      {
+        "type": "auto_retry_start",
+        "attempt": 1,
+        "maxAttempts": 2,
+        "delayMs": 60000,
+        "errorMessage": "overloaded_error"
+      },
+      {
+        "type": "auto_retry_end",
+        "success": false,
+        "attempt": 1,
+        "finalError": "Retry cancelled"
+      },
+      {
+        "type": "agent_settled"
+      },
+      {
+        "type": "agent_start"
+      },
+      {
+        "type": "turn_start"
+      },
+      {
+        "type": "message_start",
+        "role": "user"
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "the session remains usable"
+            }
+          ]
+        }
+      },
+      {
+        "type": "message_start",
+        "role": "assistant"
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_start",
+          "contentIndex": 0
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "com"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ple"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ted"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " af"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "ter"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " re"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "try"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": " ca"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "nce"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "lla"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "tio"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_delta",
+          "contentIndex": 0,
+          "delta": "n"
+        }
+      },
+      {
+        "type": "message_update",
+        "role": "assistant",
+        "providerEvent": {
+          "type": "text_end",
+          "contentIndex": 0,
+          "content": "completed after retry cancellation"
+        }
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "completed after retry cancellation"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      },
+      {
+        "type": "turn_end",
+        "messageRole": "assistant",
+        "toolResultRoles": []
+      },
+      {
+        "type": "agent_end",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ],
+        "willRetry": false
+      },
+      {
+        "type": "agent_settled"
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-1"
+      },
+      "thinkingLevel": "off",
+      "activeTools": [],
+      "systemPrompt": "You are the deterministic retry cancellation parity oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "cancel only the retry delay"
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "the session remains usable"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "completed after retry cancellation"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 5,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 8,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "session-agent-retry-abort-parity",
+        "userMessages": 2,
+        "assistantMessages": 2,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 4,
+        "tokens": {
+          "input": 5,
+          "output": 3,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 8
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 8,
+          "contextWindow": 128000,
+          "percent": 0.00625
+        }
+      }
+    },
+    "session": {
+      "header": {
+        "type": "session",
+        "version": 3,
+        "id": "session-agent-retry-abort-parity",
+        "cwd": "<cwd>"
+      },
+      "entries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "cancel only the retry delay"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": ""
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "error",
+            "errorMessage": "overloaded_error"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "the session remains usable"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "completed after retry cancellation"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "fileEntries": [
+        {
+          "type": "model_change",
+          "id": "entry-1",
+          "parentId": null,
+          "provider": "faux",
+          "modelId": "faux-1"
+        },
+        {
+          "type": "thinking_level_change",
+          "id": "entry-2",
+          "parentId": "entry-1",
+          "thinkingLevel": "off"
+        },
+        {
+          "type": "message",
+          "id": "entry-3",
+          "parentId": "entry-2",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "cancel only the retry delay"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-4",
+          "parentId": "entry-3",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": ""
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "error",
+            "errorMessage": "overloaded_error"
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-5",
+          "parentId": "entry-4",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "the session remains usable"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message",
+          "id": "entry-6",
+          "parentId": "entry-5",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "completed after retry cancellation"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 5,
+              "output": 3,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 8,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          }
+        }
+      ],
+      "reopened": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-retry-abort-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "cancel only the retry delay"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "error",
+              "errorMessage": "overloaded_error"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "the session remains usable"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "completed after retry cancellation"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "cancel only the retry delay"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": ""
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "error",
+              "errorMessage": "overloaded_error"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "the session remains usable"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "completed after retry cancellation"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 5,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 8,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    }
+  },
   "manualCompactionScenario": {
     "name": "manual_compaction_reopen",
     "input": {
