@@ -67,6 +67,10 @@ func TestPlanInputMapsCoreCommandsWithoutLosingArguments(t *testing.T) {
 			value, ok := command.(application.CompactCommand)
 			return ok && value.CustomInstructions == "retain decisions"
 		}},
+		{"/copy", func(command application.Command) bool {
+			_, ok := command.(application.GetLastAssistantTextCommand)
+			return ok
+		}},
 	}
 	for _, test := range tests {
 		action, err := planInput(test.input, application.State{}, false)

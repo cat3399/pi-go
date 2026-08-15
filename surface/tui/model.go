@@ -55,6 +55,7 @@ type Model struct {
 	renderer     *contentRenderer
 	composer     composerModel
 	slashPalette slashPaletteModel
+	setClipboard func(string) tea.Cmd
 
 	width  int
 	height int
@@ -86,7 +87,7 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 		theme: theme, sessionID: snapshot.SessionID, state: state, revision: snapshot.Revision,
 		sessionGeneration: 1,
 		transcript:        newTranscriptModel(), renderer: newContentRenderer(theme),
-		composer: newComposerModel(theme), width: 80, height: 24,
+		composer: newComposerModel(theme), setClipboard: tea.SetClipboard, width: 80, height: 24,
 		liveItems: make(map[string]contentItem),
 	}
 	model.transcript.SetItems(contentItemsFromSnapshot(snapshot))
@@ -575,7 +576,11 @@ func (m *Model) View() tea.View {
 	parts = append(parts, composer, m.renderStateLine(width))
 	view := tea.NewView(strings.Join(parts, "\n"))
 	view.AltScreen = m.mode == ScreenFull
-	view.MouseMode = tea.MouseModeCellMotion
+	// Leave the mouse to the terminal so users can select arbitrary visible
+	// output and copy it with their terminal's normal shortcut. Bubble Tea's
+	// cell-motion mode captures drag events even though this surface only used
+	// mouse input for scrolling.
+	view.MouseMode = tea.MouseModeNone
 	view.ReportFocus = true
 	view.WindowTitle = "pi-go"
 	view.KeyboardEnhancements.ReportAlternateKeys = true
@@ -612,6 +617,7 @@ func (m *Model) renderHelp(width, height int) string {
 		"/thinking <level>  switch reasoning level",
 		"/compact [text]    compact context",
 		"/reload            reload resources",
+		"/copy              copy the last assistant reply",
 		"/tools             show tool state",
 		"!cmd / !!cmd       bash in/out of model context",
 	}
@@ -648,6 +654,8 @@ func commandPendingText(command application.Command) string {
 		return "Compacting…"
 	case application.CommandReload:
 		return "Reloading…"
+	case application.CommandGetLastAssistantText:
+		return "Copying last assistant reply…"
 	default:
 		return strings.ReplaceAll(string(command.Type()), "_", " ") + "…"
 	}

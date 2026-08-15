@@ -392,6 +392,7 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 	refreshState := false
 	refreshSnapshot := false
 	refreshCommands := false
+	commands := make([]tea.Cmd, 0, 4)
 	switch result := message.result.(type) {
 	case application.PromptStartedResult:
 		m.state.IsPromptRunning = true
@@ -442,6 +443,15 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 			result.Stats.TotalMessages, result.Stats.ToolCalls, result.Stats.Tokens.Total, result.Stats.Cost,
 		))
 		m.setStatus("Session stats loaded", statusSuccess)
+	case application.GetLastAssistantTextResult:
+		if result.Text == nil || strings.TrimSpace(*result.Text) == "" {
+			m.setStatus("No assistant reply to copy", statusWarning)
+		} else if m.setClipboard == nil {
+			m.setStatus("Clipboard is unavailable", statusError)
+		} else {
+			commands = append(commands, m.setClipboard(*result.Text))
+			m.setStatus("Copied last assistant reply", statusSuccess)
+		}
 	case application.GetToolsResult:
 		lines := make([]string, 0, len(result.Tools))
 		for _, tool := range result.Tools {
@@ -464,7 +474,6 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		refreshState = true
 	}
 	m.syncComposerState()
-	commands := make([]tea.Cmd, 0, 3)
 	if refreshSnapshot {
 		commands = append(commands, m.requestSnapshot())
 	} else if refreshState {

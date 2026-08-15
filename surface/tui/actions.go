@@ -104,6 +104,8 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 			return inputAction{kind: inputActionDispatch, command: application.SetThinkingLevelCommand{Level: level}}, nil
 		case "stats":
 			return inputAction{kind: inputActionDispatch, command: application.GetSessionStatsCommand{}}, nil
+		case "copy":
+			return inputAction{kind: inputActionDispatch, command: application.GetLastAssistantTextCommand{}}, nil
 		case "tools":
 			return inputAction{kind: inputActionDispatch, command: application.GetToolsCommand{}}, nil
 		}

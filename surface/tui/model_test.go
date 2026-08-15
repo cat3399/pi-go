@@ -141,6 +141,46 @@ func TestModelRendersSafeSmallTerminalFallbackWithAttachment(t *testing.T) {
 	}
 }
 
+func TestModelLeavesMouseSelectionToTerminal(t *testing.T) {
+	model := newModelForTest(t)
+	view := model.View()
+	if view.MouseMode != tea.MouseModeNone {
+		t.Fatalf("mouse mode = %v, want terminal-owned selection", view.MouseMode)
+	}
+}
+
+func TestModelCopiesLastAssistantReplyThroughTerminalClipboard(t *testing.T) {
+	model := newModelForTest(t)
+	copied := ""
+	model.setClipboard = func(value string) tea.Cmd {
+		copied = value
+		return func() tea.Msg { return nil }
+	}
+	text := "answer with\nmultiple lines"
+	commands := model.handleCommandFinished(commandFinishedMsg{
+		sessionID: model.sessionID, sessionGeneration: model.sessionGeneration, request: 1,
+		command: application.GetLastAssistantTextCommand{},
+		result:  application.GetLastAssistantTextResult{Text: &text},
+	})
+	if copied != text || len(commands) != 1 || commands[0] == nil {
+		t.Fatalf("clipboard write = %q, commands=%#v", copied, commands)
+	}
+	if model.status.level != statusSuccess || model.status.text != "Copied last assistant reply" {
+		t.Fatalf("copy status = %#v", model.status)
+	}
+}
+
+func TestModelReportsMissingAssistantReplyToCopy(t *testing.T) {
+	model := newModelForTest(t)
+	commands := model.handleCommandFinished(commandFinishedMsg{
+		sessionID: model.sessionID, sessionGeneration: model.sessionGeneration, request: 1,
+		command: application.GetLastAssistantTextCommand{}, result: application.GetLastAssistantTextResult{},
+	})
+	if len(commands) != 0 || model.status.level != statusWarning || model.status.text != "No assistant reply to copy" {
+		t.Fatalf("missing-copy result commands=%#v status=%#v", commands, model.status)
+	}
+}
+
 func TestAutoScreenModeUsesInlineForNonTerminalOutput(t *testing.T) {
 	if got := resolveScreenMode(ScreenAuto, &bytes.Buffer{}, []string{"TERM=xterm-256color"}); got != ScreenInline {
 		t.Fatalf("buffer auto mode = %q, want inline", got)

@@ -37,6 +37,7 @@ func builtinSlashCommands() []slashCommand {
 		{name: "reload", description: "Reload resources and dynamic configuration", source: "builtin"},
 		{name: "name", description: "Set the session display name", argumentHint: "<name>", source: "builtin"},
 		{name: "stats", description: "Show session statistics", source: "builtin"},
+		{name: "copy", description: "Copy the last assistant reply", source: "builtin"},
 		{name: "tools", description: "Show available tool state", source: "builtin"},
 		{name: "quit", description: "Exit pi-go", source: "builtin"},
 	}
