@@ -40,6 +40,7 @@ type upstreamWorkflowCorpus struct {
 	RetryScenario      upstreamRetryScenario              `json:"retryScenario"`
 	ModelControl       upstreamModelControlScenario       `json:"modelControlScenario"`
 	RetryAbort         upstreamRetryAbortScenario         `json:"retryAbortScenario"`
+	RuntimeReplacement upstreamRuntimeReplacementScenario `json:"runtimeReplacementScenario"`
 	ManualCompaction   upstreamManualCompactionScenario   `json:"manualCompactionScenario"`
 	OverflowCompaction upstreamOverflowCompactionScenario `json:"overflowCompactionScenario"`
 	TurnSnapshot       upstreamTurnSnapshotScenario       `json:"turnSnapshotScenario"`

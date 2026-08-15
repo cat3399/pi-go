@@ -153,6 +153,33 @@
       "outputTokens": 3
     }
   },
+  "runtimeReplacementScenario": {
+    "name": "runtime_reload_new_switch_import_dispose",
+    "sourceSessionId": "session-agent-runtime-replacement-parity",
+    "systemPrompt": "You are the deterministic Runtime replacement parity oracle.",
+    "initialPrompt": "interrupt this source response during replacement",
+    "newPrompt": "write the replacement session",
+    "resumePrompt": "continue the original source session",
+    "importPrompt": "continue the imported replacement session",
+    "abortError": "scripted provider request aborted",
+    "responses": [
+      {
+        "text": "new session completed",
+        "inputTokens": 4,
+        "outputTokens": 2
+      },
+      {
+        "text": "source session resumed",
+        "inputTokens": 6,
+        "outputTokens": 3
+      },
+      {
+        "text": "imported session continued",
+        "inputTokens": 7,
+        "outputTokens": 3
+      }
+    ]
+  },
   "manualCompactionScenario": {
     "name": "manual_compaction_reopen",
     "sessionId": "session-agent-manual-compaction-parity",

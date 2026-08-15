@@ -5,10 +5,11 @@
 `createAgentSession()` path. The generator uses a deterministic stream and tool
 only as test inputs; it does not enter pi-go production assembly.
 
-The oracle currently contains eleven production workflows: rich/tool/multi-turn/
+The oracle currently contains twelve production workflows: rich/tool/multi-turn/
 reopen, mixed-mode queue/clear/abort/settled, retry/Retry-After recovery,
 model/thinking/queue controls, retry-delay cancellation and session reuse, manual
-compaction, overflow compaction/continue, and the in-flight model/thinking/
+compaction, overflow compaction/continue, Runtime reload/new/resume/import/
+dispose with active-response settlement, and the in-flight model/thinking/
 active-tools snapshot plus resource reload workflow, as well as tree navigation
 and Runtime fork replacement, malformed-line/orphan session resume and
 continuation, and skill/template request assembly with dynamic image blocking,

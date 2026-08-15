@@ -434,7 +434,7 @@ capabilities:
 
   - id: agent_session.shutdown_and_late_event_barrier
     category: agent_session
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/coding-agent/src/core/agent-session-runtime.ts
       symbol: teardownCurrent
@@ -443,10 +443,11 @@ capabilities:
       symbol: func (s *AgentSession) Shutdown
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_runtime_replacement_oracle_test.go, symbol: TestUpstreamAgentSessionRuntimeReplacementOracle}
       - {kind: go_test, path: internal/agent/lifecycle_alignment_test.go, symbol: TestAgentSessionShutdownPreventsSettledPromptAndIsIdempotent}
       - {kind: go_test, path: internal/agent/lifecycle_alignment_test.go, symbol: TestAgentSessionConcurrentCloseSharesOneShutdownAttempt}
     intentionalGoDifference: Explicit wait groups and generation identities replace promise disposal ordering.
-    remainingDifference: A frozen upstream replacement-during-active-run workflow is not yet present.
+    remainingDifference: none
 
   - id: session_manager.v3_jsonl_unknown_and_legacy_compatibility
     category: session_manager
@@ -514,7 +515,7 @@ capabilities:
 
   - id: runtime.switch_new_fork_import_dispose
     category: runtime
-    status: source_aligned
+    status: oracle_verified
     upstream:
       path: packages/coding-agent/src/core/agent-session-runtime.ts
       symbol: class AgentSessionRuntime
@@ -523,10 +524,11 @@ capabilities:
       symbol: type Runtime struct
     surfaceExposure: {application: partial, jsonl: partial, http: partial}
     evidence:
+      - {kind: upstream_oracle, path: internal/agent/upstream_runtime_replacement_oracle_test.go, symbol: TestUpstreamAgentSessionRuntimeReplacementOracle}
       - {kind: upstream_oracle, path: internal/agent/upstream_tree_fork_oracle_test.go, symbol: TestUpstreamTreeNavigationRuntimeForkOracle}
       - {kind: go_test, path: internal/runtime/runtime_test.go, symbol: TestRuntimeSwitchCwdValidationImportAndFactoryFailureOwnership}
     intentionalGoDifference: Replacement is serialized by an operation mutex and resource ownership is explicit.
-    remainingDifference: New, switch, and import have unit/integration coverage but no frozen upstream replacement oracle; single-session JSONL does not expose them.
+    remainingDifference: Core reload/new/switch/fork/import/dispose behavior is verified; the single-session JSONL Surface does not expose every replacement operation.
 
   - id: tools.seven_builtin_coding_tools
     category: tools_resources

@@ -81,6 +81,17 @@ type Corpus = {
     failure: { message: string; httpStatus: number };
     response: { text: string; inputTokens: number; outputTokens: number };
   };
+  runtimeReplacementScenario: {
+    name: string;
+    sourceSessionId: string;
+    systemPrompt: string;
+    initialPrompt: string;
+    newPrompt: string;
+    resumePrompt: string;
+    importPrompt: string;
+    abortError: string;
+    responses: Array<{ text: string; inputTokens: number; outputTokens: number }>;
+  };
   manualCompactionScenario: {
     name: string;
     sessionId: string;
@@ -1338,6 +1349,436 @@ async function runRetryAbortScenario(
           thinkingLevel: reopenedContext.thinkingLevel,
         },
       },
+    },
+  };
+}
+
+function runtimeReplacementSnapshot(runtimeHost: any, owner: string): Record<string, unknown> {
+  const session = runtimeHost.session;
+  return {
+    owner,
+    sessionFile: session.sessionFile,
+    sessionId: session.sessionId,
+    cwd: runtimeHost.cwd,
+    model: { provider: session.model.provider, api: session.model.api, id: session.model.id },
+    thinkingLevel: session.thinkingLevel,
+    messageRoles: session.messages.map((message: any) => message.role),
+  };
+}
+
+function normalizeRuntimeReplacementAction(
+  action: Record<string, unknown>,
+  fileLabels: Map<string, string>,
+  root: string,
+  cwd: string,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(action)) {
+    if ((key === "sessionFile" || key === "targetSessionFile" || key === "previousSessionFile") && typeof value === "string") {
+      normalized[key] = fileLabels.get(value) ?? normalizePathText(value, root, cwd);
+    } else {
+      normalized[key] = value;
+    }
+  }
+  return normalized;
+}
+
+function normalizeRuntimeReplacementSnapshot(
+  snapshot: Record<string, unknown>,
+  fileLabels: Map<string, string>,
+  sourceSessionId: string,
+  root: string,
+  cwd: string,
+): Record<string, unknown> {
+  const normalized = normalizeRuntimeReplacementAction(snapshot, fileLabels, root, cwd);
+  normalized.cwd = normalizePathText(String(snapshot.cwd), root, cwd);
+  normalized.sessionId = snapshot.sessionId === sourceSessionId ? sourceSessionId : "<replacement-session-id>";
+  return normalized;
+}
+
+function normalizeRuntimeReplacementHeader(
+  header: any,
+  sourceSessionId: string,
+  root: string,
+  cwd: string,
+): Record<string, unknown> {
+  const normalized = normalizeHeader(header, root, cwd);
+  if (normalized.id !== sourceSessionId) normalized.id = "<replacement-session-id>";
+  return normalized;
+}
+
+function normalizeRuntimeReplacementProjection(
+  manager: any,
+  fileData: string,
+  sourceSessionId: string,
+  root: string,
+  cwd: string,
+): Record<string, unknown> {
+  const entries = manager.getEntries();
+  const ids: EntryIDMap = new Map(entries.map((entry: any, index: number) => [entry.id, `entry-${index + 1}`]));
+  const lines = fileData.trimEnd().split("\n").map((line) => JSON.parse(line));
+  const context = manager.buildSessionContext();
+  return {
+    header: normalizeRuntimeReplacementHeader(manager.getHeader(), sourceSessionId, root, cwd),
+    entries: entries.map((entry: any) => normalizeEntry(entry, ids)),
+    fileEntries: lines.slice(1).map((entry: any) => normalizeEntry(entry, ids)),
+    context: {
+      messages: context.messages.map(normalizeMessage),
+      model: context.model,
+      thinkingLevel: context.thinkingLevel,
+    },
+  };
+}
+
+async function runRuntimeReplacementScenario(
+  root: string,
+  runtimeModule: any,
+  sessionModule: any,
+  settingsModule: any,
+  authModule: any,
+  modelTestModule: any,
+  harnessModule: any,
+  eventStreamModule: any,
+): Promise<Record<string, unknown>> {
+  const scenario = corpus.runtimeReplacementScenario;
+  if (scenario.responses.length !== 3) {
+    throw new Error("runtime replacement workflow requires new, resumed, and imported responses");
+  }
+  const scenarioRoot = join(root, "runtime-replacement");
+  const cwd = join(scenarioRoot, "project");
+  const agentDir = join(scenarioRoot, "agent");
+  const sessionDir = join(scenarioRoot, "sessions");
+  const externalDir = join(scenarioRoot, "external");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionDir, { recursive: true });
+  mkdirSync(externalDir, { recursive: true });
+
+  const normal = harnessModule.createFauxStreamFn(scenario.responses.map((response) => ({
+    text: response.text,
+    stopReason: "stop",
+    usage: {
+      input: response.inputTokens,
+      output: response.outputTokens,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: response.inputTokens + response.outputTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  })));
+  const providerModels: any[] = [];
+  const providerContexts: any[] = [];
+  const streamOptions: any[] = [];
+  let signalFirstCallStarted!: () => void;
+  const firstCallStarted = new Promise<void>((resolve) => {
+    signalFirstCallStarted = resolve;
+  });
+  const streamSimple = (streamModel: any, context: any, options: any) => {
+    const callIndex = providerContexts.length;
+    providerModels.push(streamModel);
+    providerContexts.push(context);
+    streamOptions.push(options);
+    if (callIndex !== 0) return normal.streamFn(streamModel, context, options);
+
+    const stream = eventStreamModule.createAssistantMessageEventStream();
+    let finished = false;
+    const abort = () => {
+      if (finished) return;
+      finished = true;
+      stream.push({
+        type: "error",
+        reason: "aborted",
+        error: {
+          role: "assistant",
+          content: [],
+          api: streamModel.api,
+          provider: streamModel.provider,
+          model: streamModel.id,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "aborted",
+          errorMessage: scenario.abortError,
+          timestamp: Date.now(),
+        },
+      });
+    };
+    if (options?.signal?.aborted) abort();
+    else options?.signal?.addEventListener("abort", abort, { once: true });
+    signalFirstCallStarted();
+    return stream;
+  };
+
+  const model = harnessModule.fauxModel;
+  const authStorage = authModule.AuthStorage.inMemory();
+  await authStorage.modify(model.provider, async () => ({ type: "api_key", key: "faux-key" }));
+  const modelRegistry = await modelTestModule.createInMemoryModelRegistry(authStorage);
+  modelRegistry.registerProvider(model.provider, {
+    baseUrl: model.baseUrl,
+    apiKey: "faux-key",
+    api: model.api,
+    streamSimple,
+    models: [{
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      input: model.input,
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      baseUrl: model.baseUrl,
+    }],
+  });
+  const settingsManager = settingsModule.SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false, provider: { maxRetries: 0 } },
+    transport: "sse",
+  });
+
+  const lifecycle: Array<Record<string, unknown>> = [];
+  const hostActions: Array<Record<string, unknown>> = [];
+  const owners = new WeakMap<object, string>();
+  const generations = ["source", "new", "source-resume", "import"];
+  let factoryCalls = 0;
+  const createRuntime = async ({ cwd: runtimeCwd, sessionManager, sessionStartEvent }: any) => {
+    const owner = generations[factoryCalls] ?? `generation-${factoryCalls}`;
+    factoryCalls++;
+    const sessionFile = sessionManager.getSessionFile();
+    const factoryAction: Record<string, unknown> = {
+      type: "factory",
+      owner,
+      reason: sessionStartEvent?.reason ?? "startup",
+    };
+    if (sessionFile !== undefined) factoryAction.sessionFile = sessionFile;
+    if (sessionStartEvent?.previousSessionFile !== undefined) {
+      factoryAction.previousSessionFile = sessionStartEvent.previousSessionFile;
+    }
+    hostActions.push(factoryAction);
+    const extensionFactory = (pi: any) => {
+      pi.on("session_before_switch", (event: any) => {
+        const action: Record<string, unknown> = { type: "session_before_switch", owner, reason: event.reason };
+        if (event.targetSessionFile !== undefined) action.targetSessionFile = event.targetSessionFile;
+        lifecycle.push(action);
+      });
+      pi.on("session_shutdown", (event: any) => {
+        const action: Record<string, unknown> = { type: "session_shutdown", owner, reason: event.reason };
+        if (event.targetSessionFile !== undefined) action.targetSessionFile = event.targetSessionFile;
+        lifecycle.push(action);
+      });
+      pi.on("session_start", (event: any) => {
+        const action: Record<string, unknown> = { type: "session_start", owner, reason: event.reason };
+        if (event.previousSessionFile !== undefined) action.previousSessionFile = event.previousSessionFile;
+        lifecycle.push(action);
+      });
+    };
+    const services = await runtimeModule.createAgentSessionServices({
+      cwd: runtimeCwd,
+      agentDir,
+      modelRuntime: modelTestModule.getModelRuntime(modelRegistry),
+      settingsManager,
+      resourceLoaderOptions: {
+        extensionFactories: [extensionFactory],
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: scenario.systemPrompt,
+      },
+    });
+    const created = await runtimeModule.createAgentSessionFromServices({
+      services,
+      sessionManager,
+      sessionStartEvent,
+      model,
+      thinkingLevel: "off",
+      tools: [],
+      customTools: [],
+    });
+    owners.set(created.session, owner);
+    return { ...created, services, diagnostics: services.diagnostics };
+  };
+
+  const sourceManager = sessionModule.SessionManager.create(cwd, sessionDir, { id: scenario.sourceSessionId });
+  const runtimeHost = await runtimeModule.createAgentSessionRuntime(createRuntime, {
+    cwd,
+    agentDir,
+    sessionManager: sourceManager,
+  });
+  await runtimeHost.session.bindExtensions({ shutdownHandler: () => {} });
+  const sourceSession = runtimeHost.session;
+  const sourceFile = sourceSession.sessionFile;
+  if (!sourceFile) throw new Error("runtime replacement source has no session file");
+
+  await sourceSession.reload({
+    beforeSessionStart: async () => {
+      hostActions.push({ type: "rebind", owner: "source", reason: "reload", sessionFile: sourceFile });
+    },
+  });
+  runtimeHost.setBeforeSessionInvalidate(() => {
+    const current = runtimeHost.session;
+    hostActions.push({
+      type: "invalidate",
+      owner: owners.get(current) ?? "unknown",
+      sessionFile: current.sessionFile,
+    });
+  });
+  runtimeHost.setRebindSession(async (replacement: any) => {
+    await replacement.bindExtensions({ shutdownHandler: () => {} });
+    hostActions.push({
+      type: "rebind",
+      owner: owners.get(replacement) ?? "unknown",
+      reason: "replacement",
+      sessionFile: replacement.sessionFile,
+    });
+  });
+
+  const initialRun = sourceSession.prompt(scenario.initialPrompt);
+  await firstCallStarted;
+  const newResult = await runtimeHost.newSession({
+    withSession: async () => {
+      hostActions.push({ type: "with_session", owner: "new" });
+    },
+  });
+  await initialRun;
+  const sourceRunReturn = {
+    isStreaming: sourceSession.isStreaming,
+    isIdle: sourceSession.isIdle,
+    ...queueSnapshot(sourceSession),
+  };
+  const afterNew = runtimeReplacementSnapshot(runtimeHost, "new");
+  await runtimeHost.session.prompt(scenario.newPrompt);
+  const newFile = runtimeHost.session.sessionFile;
+  if (!newFile) throw new Error("runtime replacement new session has no session file");
+  const newData = readFileSync(newFile, "utf8");
+  const externalImportFile = join(externalDir, "runtime-import.jsonl");
+  writeFileSync(externalImportFile, newData, "utf8");
+
+  const switchResult = await runtimeHost.switchSession(sourceFile, {
+    withSession: async () => {
+      hostActions.push({ type: "with_session", owner: "source-resume" });
+    },
+  });
+  const afterSwitch = runtimeReplacementSnapshot(runtimeHost, "source-resume");
+  await runtimeHost.session.prompt(scenario.resumePrompt);
+
+  const importResult = await runtimeHost.importFromJsonl(externalImportFile);
+  const afterImport = runtimeReplacementSnapshot(runtimeHost, "import");
+  await runtimeHost.session.prompt(scenario.importPrompt);
+  const importFile = runtimeHost.session.sessionFile;
+  if (!importFile) throw new Error("runtime replacement imported session has no session file");
+  const importData = readFileSync(importFile, "utf8");
+  const finalStats = runtimeHost.session.getSessionStats();
+  const finalState = {
+    isStreaming: runtimeHost.session.isStreaming,
+    pendingMessageCount: runtimeHost.session.pendingMessageCount,
+    model: {
+      provider: runtimeHost.session.model.provider,
+      api: runtimeHost.session.model.api,
+      id: runtimeHost.session.model.id,
+    },
+    thinkingLevel: runtimeHost.session.thinkingLevel,
+    activeTools: runtimeHost.session.getActiveToolNames(),
+    systemPrompt: normalizePathText(runtimeHost.session.systemPrompt, scenarioRoot, cwd),
+    messages: runtimeHost.session.messages.map(normalizeMessage),
+    stats: normalizeStats(finalStats),
+  };
+  await runtimeHost.dispose();
+
+  if (providerContexts.length !== 4 || providerModels.length !== 4 || streamOptions.length !== 4 || normal.state.callCount !== 3) {
+    throw new Error(
+      `runtime replacement provider calls ${providerContexts.length}/${providerModels.length}/${streamOptions.length}/${normal.state.callCount}, want 4/4/4/3`,
+    );
+  }
+  if (factoryCalls !== 4) throw new Error(`runtime replacement factory calls ${factoryCalls}, want 4`);
+
+  const fileLabels = new Map<string, string>([
+    [sourceFile, "<source-session-file>"],
+    [newFile, "<new-session-file>"],
+    [importFile, "<import-session-file>"],
+    [externalImportFile, "<external-import-file>"],
+  ]);
+  const sourceData = readFileSync(sourceFile, "utf8");
+  const sourceReopened = sessionModule.SessionManager.open(sourceFile, sessionDir);
+  const newReopened = sessionModule.SessionManager.open(newFile, sessionDir);
+  const importReopened = sessionModule.SessionManager.open(importFile, sessionDir);
+  const normalizedStats = normalizeStats(finalStats);
+  normalizedStats.sessionId = "<replacement-session-id>";
+  finalState.stats = normalizedStats;
+  const normalizeAction = (action: Record<string, unknown>) =>
+    normalizeRuntimeReplacementAction(action, fileLabels, scenarioRoot, cwd);
+  return {
+    name: scenario.name,
+    input: scenario,
+    actions: {
+      sourceRunReturn,
+      newResult,
+      switchResult,
+      importResult,
+      afterNew: normalizeRuntimeReplacementSnapshot(afterNew, fileLabels, scenario.sourceSessionId, scenarioRoot, cwd),
+      afterSwitch: normalizeRuntimeReplacementSnapshot(
+        afterSwitch,
+        fileLabels,
+        scenario.sourceSessionId,
+        scenarioRoot,
+        cwd,
+      ),
+      afterImport: normalizeRuntimeReplacementSnapshot(
+        afterImport,
+        fileLabels,
+        scenario.sourceSessionId,
+        scenarioRoot,
+        cwd,
+      ),
+      lifecycle: lifecycle.map(normalizeAction),
+      hostActions: hostActions.map(normalizeAction),
+      files: {
+        source: "<source-session-file>",
+        created: "<new-session-file>",
+        imported: "<import-session-file>",
+        external: "<external-import-file>",
+        allDistinct: new Set([sourceFile, newFile, importFile, externalImportFile]).size === 4,
+        importStartsWithCreated: importData.startsWith(newData),
+      },
+    },
+    providerInputs: providerContexts.map((context: any, index: number) =>
+      normalizeProviderInput(
+        providerModels[index],
+        context,
+        streamOptions[index],
+        scenarioRoot,
+        cwd,
+        scenario.sourceSessionId,
+        "<replacement-session-id>",
+      )),
+    finalState,
+    sessions: {
+      source: normalizeRuntimeReplacementProjection(
+        sourceReopened,
+        sourceData,
+        scenario.sourceSessionId,
+        scenarioRoot,
+        cwd,
+      ),
+      created: normalizeRuntimeReplacementProjection(
+        newReopened,
+        newData,
+        scenario.sourceSessionId,
+        scenarioRoot,
+        cwd,
+      ),
+      imported: normalizeRuntimeReplacementProjection(
+        importReopened,
+        importData,
+        scenario.sourceSessionId,
+        scenarioRoot,
+        cwd,
+      ),
     },
   };
 }
@@ -3016,6 +3457,16 @@ async function main(): Promise<void> {
       modelTestModule,
       harnessModule,
     );
+    const runtimeReplacementScenario = await runRuntimeReplacementScenario(
+      root,
+      runtimeModule,
+      sessionModule,
+      settingsModule,
+      authModule,
+      modelTestModule,
+      harnessModule,
+      eventStreamModule,
+    );
     const manualCompactionScenario = await runManualCompactionScenario(
       root,
       sdkModule,
@@ -3107,6 +3558,7 @@ async function main(): Promise<void> {
       retryScenario,
       modelControlScenario,
       retryAbortScenario,
+      runtimeReplacementScenario,
       manualCompactionScenario,
       overflowCompactionScenario,
       turnSnapshotScenario,

@@ -6457,6 +6457,1312 @@
       }
     }
   },
+  "runtimeReplacementScenario": {
+    "name": "runtime_reload_new_switch_import_dispose",
+    "input": {
+      "name": "runtime_reload_new_switch_import_dispose",
+      "sourceSessionId": "session-agent-runtime-replacement-parity",
+      "systemPrompt": "You are the deterministic Runtime replacement parity oracle.",
+      "initialPrompt": "interrupt this source response during replacement",
+      "newPrompt": "write the replacement session",
+      "resumePrompt": "continue the original source session",
+      "importPrompt": "continue the imported replacement session",
+      "abortError": "scripted provider request aborted",
+      "responses": [
+        {
+          "text": "new session completed",
+          "inputTokens": 4,
+          "outputTokens": 2
+        },
+        {
+          "text": "source session resumed",
+          "inputTokens": 6,
+          "outputTokens": 3
+        },
+        {
+          "text": "imported session continued",
+          "inputTokens": 7,
+          "outputTokens": 3
+        }
+      ]
+    },
+    "actions": {
+      "sourceRunReturn": {
+        "isStreaming": false,
+        "isIdle": true,
+        "steering": [],
+        "followUp": [],
+        "pendingMessageCount": 0
+      },
+      "newResult": {
+        "cancelled": false
+      },
+      "switchResult": {
+        "cancelled": false
+      },
+      "importResult": {
+        "cancelled": false
+      },
+      "afterNew": {
+        "owner": "new",
+        "sessionFile": "<new-session-file>",
+        "sessionId": "<replacement-session-id>",
+        "cwd": "<cwd>",
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "thinkingLevel": "off",
+        "messageRoles": []
+      },
+      "afterSwitch": {
+        "owner": "source-resume",
+        "sessionFile": "<source-session-file>",
+        "sessionId": "session-agent-runtime-replacement-parity",
+        "cwd": "<cwd>",
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "thinkingLevel": "off",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ]
+      },
+      "afterImport": {
+        "owner": "import",
+        "sessionFile": "<import-session-file>",
+        "sessionId": "<replacement-session-id>",
+        "cwd": "<cwd>",
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "thinkingLevel": "off",
+        "messageRoles": [
+          "user",
+          "assistant"
+        ]
+      },
+      "lifecycle": [
+        {
+          "type": "session_start",
+          "owner": "source",
+          "reason": "startup"
+        },
+        {
+          "type": "session_shutdown",
+          "owner": "source",
+          "reason": "reload"
+        },
+        {
+          "type": "session_start",
+          "owner": "source",
+          "reason": "reload"
+        },
+        {
+          "type": "session_before_switch",
+          "owner": "source",
+          "reason": "new"
+        },
+        {
+          "type": "session_shutdown",
+          "owner": "source",
+          "reason": "new",
+          "targetSessionFile": "<new-session-file>"
+        },
+        {
+          "type": "session_start",
+          "owner": "new",
+          "reason": "new",
+          "previousSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "session_before_switch",
+          "owner": "new",
+          "reason": "resume",
+          "targetSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "session_shutdown",
+          "owner": "new",
+          "reason": "resume",
+          "targetSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "session_start",
+          "owner": "source-resume",
+          "reason": "resume",
+          "previousSessionFile": "<new-session-file>"
+        },
+        {
+          "type": "session_before_switch",
+          "owner": "source-resume",
+          "reason": "resume",
+          "targetSessionFile": "<import-session-file>"
+        },
+        {
+          "type": "session_shutdown",
+          "owner": "source-resume",
+          "reason": "resume",
+          "targetSessionFile": "<import-session-file>"
+        },
+        {
+          "type": "session_start",
+          "owner": "import",
+          "reason": "resume",
+          "previousSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "session_shutdown",
+          "owner": "import",
+          "reason": "quit"
+        }
+      ],
+      "hostActions": [
+        {
+          "type": "factory",
+          "owner": "source",
+          "reason": "startup",
+          "sessionFile": "<source-session-file>"
+        },
+        {
+          "type": "rebind",
+          "owner": "source",
+          "reason": "reload",
+          "sessionFile": "<source-session-file>"
+        },
+        {
+          "type": "invalidate",
+          "owner": "source",
+          "sessionFile": "<source-session-file>"
+        },
+        {
+          "type": "factory",
+          "owner": "new",
+          "reason": "new",
+          "sessionFile": "<new-session-file>",
+          "previousSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "rebind",
+          "owner": "new",
+          "reason": "replacement",
+          "sessionFile": "<new-session-file>"
+        },
+        {
+          "type": "with_session",
+          "owner": "new"
+        },
+        {
+          "type": "invalidate",
+          "owner": "new",
+          "sessionFile": "<new-session-file>"
+        },
+        {
+          "type": "factory",
+          "owner": "source-resume",
+          "reason": "resume",
+          "sessionFile": "<source-session-file>",
+          "previousSessionFile": "<new-session-file>"
+        },
+        {
+          "type": "rebind",
+          "owner": "source-resume",
+          "reason": "replacement",
+          "sessionFile": "<source-session-file>"
+        },
+        {
+          "type": "with_session",
+          "owner": "source-resume"
+        },
+        {
+          "type": "invalidate",
+          "owner": "source-resume",
+          "sessionFile": "<source-session-file>"
+        },
+        {
+          "type": "factory",
+          "owner": "import",
+          "reason": "resume",
+          "sessionFile": "<import-session-file>",
+          "previousSessionFile": "<source-session-file>"
+        },
+        {
+          "type": "rebind",
+          "owner": "import",
+          "reason": "replacement",
+          "sessionFile": "<import-session-file>"
+        },
+        {
+          "type": "invalidate",
+          "owner": "import",
+          "sessionFile": "<import-session-file>"
+        }
+      ],
+      "files": {
+        "source": "<source-session-file>",
+        "created": "<new-session-file>",
+        "imported": "<import-session-file>",
+        "external": "<external-import-file>",
+        "allDistinct": true,
+        "importStartsWithCreated": true
+      }
+    },
+    "providerInputs": [
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic Runtime replacement parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "interrupt this source response during replacement"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-runtime-replacement-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic Runtime replacement parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "write the replacement session"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "<replacement-session-id>",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic Runtime replacement parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "interrupt this source response during replacement"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 0,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "aborted",
+            "errorMessage": "scripted provider request aborted"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "continue the original source session"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "session-agent-runtime-replacement-parity",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      },
+      {
+        "model": {
+          "provider": "faux",
+          "api": "anthropic-messages",
+          "id": "faux-1"
+        },
+        "systemPrompt": "You are the deterministic Runtime replacement parity oracle.\nCurrent working directory: <cwd>",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "write the replacement session"
+              }
+            ]
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "new session completed"
+              }
+            ],
+            "api": "anthropic-messages",
+            "provider": "faux",
+            "model": "faux-1",
+            "usage": {
+              "input": 4,
+              "output": 2,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "totalTokens": 6,
+              "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "total": 0
+              }
+            },
+            "stopReason": "stop"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "continue the imported replacement session"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "stream": {
+          "sessionId": "<replacement-session-id>",
+          "reasoning": null,
+          "transport": "sse"
+        }
+      }
+    ],
+    "finalState": {
+      "isStreaming": false,
+      "pendingMessageCount": 0,
+      "model": {
+        "provider": "faux",
+        "api": "anthropic-messages",
+        "id": "faux-1"
+      },
+      "thinkingLevel": "off",
+      "activeTools": [],
+      "systemPrompt": "You are the deterministic Runtime replacement parity oracle.\nCurrent working directory: <cwd>",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "write the replacement session"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "new session completed"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 4,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "continue the imported replacement session"
+            }
+          ]
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "imported session continued"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "faux",
+          "model": "faux-1",
+          "usage": {
+            "input": 7,
+            "output": 3,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 10,
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0
+            }
+          },
+          "stopReason": "stop"
+        }
+      ],
+      "stats": {
+        "sessionFile": "<session-file>",
+        "sessionId": "<replacement-session-id>",
+        "userMessages": 2,
+        "assistantMessages": 2,
+        "toolCalls": 0,
+        "toolResults": 0,
+        "totalMessages": 4,
+        "tokens": {
+          "input": 11,
+          "output": 5,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 16
+        },
+        "cost": 0,
+        "contextUsage": {
+          "tokens": 10,
+          "contextWindow": 128000,
+          "percent": 0.0078125
+        }
+      }
+    },
+    "sessions": {
+      "source": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "session-agent-runtime-replacement-parity",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "interrupt this source response during replacement"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "aborted",
+              "errorMessage": "scripted provider request aborted"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the original source session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "source session resumed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 9,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "fileEntries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "interrupt this source response during replacement"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "aborted",
+              "errorMessage": "scripted provider request aborted"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the original source session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "source session resumed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 9,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "interrupt this source response during replacement"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 0,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "aborted",
+              "errorMessage": "scripted provider request aborted"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the original source session"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "source session resumed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 6,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 9,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      },
+      "created": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "<replacement-session-id>",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "fileEntries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      },
+      "imported": {
+        "header": {
+          "type": "session",
+          "version": 3,
+          "id": "<replacement-session-id>",
+          "cwd": "<cwd>"
+        },
+        "entries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the imported replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "imported session continued"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 7,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 10,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "fileEntries": [
+          {
+            "type": "model_change",
+            "id": "entry-1",
+            "parentId": null,
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          {
+            "type": "thinking_level_change",
+            "id": "entry-2",
+            "parentId": "entry-1",
+            "thinkingLevel": "off"
+          },
+          {
+            "type": "message",
+            "id": "entry-3",
+            "parentId": "entry-2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-4",
+            "parentId": "entry-3",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-5",
+            "parentId": "entry-4",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the imported replacement session"
+                }
+              ]
+            }
+          },
+          {
+            "type": "message",
+            "id": "entry-6",
+            "parentId": "entry-5",
+            "message": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "imported session continued"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 7,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 10,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          }
+        ],
+        "context": {
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "write the replacement session"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "new session completed"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 4,
+                "output": 2,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 6,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "continue the imported replacement session"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "imported session continued"
+                }
+              ],
+              "api": "anthropic-messages",
+              "provider": "faux",
+              "model": "faux-1",
+              "usage": {
+                "input": 7,
+                "output": 3,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "totalTokens": 10,
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "total": 0
+                }
+              },
+              "stopReason": "stop"
+            }
+          ],
+          "model": {
+            "provider": "faux",
+            "modelId": "faux-1"
+          },
+          "thinkingLevel": "off"
+        }
+      }
+    }
+  },
   "manualCompactionScenario": {
     "name": "manual_compaction_reopen",
     "input": {
