@@ -88,7 +88,9 @@ func (r *contentRenderer) renderToolExecution(call contentBlock, result []conten
 			preview, hidden := r.renderDiffPreview(diff, width, editToolPreviewLines)
 			lines = append(lines, preview...)
 			lines = appendToolHiddenNotice(lines, hidden, r.theme)
-			text = ""
+			if !r.toolsExpanded {
+				text = ""
+			}
 		}
 	}
 	if name == "read" && !failed && !r.toolsExpanded {

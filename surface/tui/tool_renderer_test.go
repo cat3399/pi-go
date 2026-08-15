@@ -86,6 +86,19 @@ func TestToolRendererSanitizesImageMetadataControls(t *testing.T) {
 	}
 }
 
+func TestExpandedEditKeepsDiffAndToolResultText(t *testing.T) {
+	renderer := newContentRenderer(DefaultTheme())
+	renderer.SetToolsExpanded(true)
+	item := toolContentItem("edit-call", "edit", `{"path":"a.go","edits":[]}`, "Successfully replaced 1 block in a.go.", false)
+	item.Blocks[1].ToolDetails = json.RawMessage(`{"diff":"@@ -1 +1 @@\n-old\n+new"}`)
+	view := StripTerminalSequences(strings.Join(renderer.Render(item, 100), "\n"))
+	for _, expected := range []string{"-old", "+new", "Successfully replaced 1 block"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("expanded edit omitted %q:\n%s", expected, view)
+		}
+	}
+}
+
 func TestMergeToolResultBlocksKeepsOneExecutionTransaction(t *testing.T) {
 	item := contentItem{
 		ID: "assistant", Revision: 1, Role: contentRoleAssistant,
