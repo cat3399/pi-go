@@ -371,19 +371,27 @@ func encodeToolDetails(value any) json.RawMessage {
 }
 
 func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //nolint:gocyclo
+	restoreResult := m.restoreQueueRequest != 0 && message.request == m.restoreQueueRequest
 	if message.sessionID != m.sessionID ||
 		message.sessionGeneration != m.sessionGeneration ||
-		message.request <= m.commandApplied {
+		(message.request <= m.commandApplied && !restoreResult) {
 		return nil
 	}
-	m.commandApplied = message.request
+	if message.request > m.commandApplied {
+		m.commandApplied = message.request
+	}
 	if message.err != nil {
-		m.composer.RestoreIfEmpty(message.draft)
+		if message.request == m.restoreQueueRequest {
+			m.restoreQueueRequest = 0
+		}
+		m.composer.RestoreDraftIfEmpty(message.draft, message.draftImages)
+		m.updateSlashPalette()
 		m.setStatus(message.err.Error(), statusError)
 		return []tea.Cmd{m.requestState()}
 	}
 	refreshState := false
 	refreshSnapshot := false
+	refreshCommands := false
 	switch result := message.result.(type) {
 	case application.PromptStartedResult:
 		m.state.IsPromptRunning = true
@@ -394,12 +402,24 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 	case application.GetStateResult:
 		m.state = result.State
 	case application.ClearQueueResult:
-		m.state.QueuedMessages = result.Queue
-		m.state.PendingMessageCount = len(result.Queue.SteeringMessages) + len(result.Queue.FollowUpMessages)
-		m.setStatus("Queue cleared", statusSuccess)
+		m.state.QueuedMessages = agent.QueueState{}
+		m.state.PendingMessageCount = 0
+		if message.request == m.restoreQueueRequest {
+			m.restoreQueueRequest = 0
+			restored, restoredImages, restoredCount := queueDraft(result.Queue)
+			current := strings.TrimSpace(m.composer.Value())
+			if current != "" {
+				restored = append(restored, current)
+			}
+			restoredImages = append(restoredImages, m.composer.Images()...)
+			m.composer.SetDraft(strings.Join(restored, "\n\n"), restoredImages)
+			m.setStatus(fmt.Sprintf("Restored %d queued messages", restoredCount), statusSuccess)
+		} else {
+			m.setStatus("Queue cleared", statusSuccess)
+		}
 	case application.ReloadResult:
 		m.setStatus("Resources reloaded", statusSuccess)
-		refreshSnapshot, refreshState = true, true
+		refreshSnapshot, refreshState, refreshCommands = true, true, true
 	case application.SetModelResult:
 		m.state.Model, m.state.HasModel = result.Model, true
 		m.setStatus("Model: "+result.Model.Provider()+"/"+result.Model.ID(), statusSuccess)
@@ -444,11 +464,14 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		refreshState = true
 	}
 	m.syncComposerState()
-	commands := make([]tea.Cmd, 0, 2)
+	commands := make([]tea.Cmd, 0, 3)
 	if refreshSnapshot {
 		commands = append(commands, m.requestSnapshot())
 	} else if refreshState {
 		commands = append(commands, m.requestState())
+	}
+	if refreshCommands {
+		commands = append(commands, m.requestCommands())
 	}
 	return commands
 }
@@ -468,4 +491,63 @@ func cloneString(value *string) *string {
 	}
 	copy := *value
 	return &copy
+}
+
+func compactNonEmptyStrings(values []string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func queueDraft(queue agent.QueueState) ([]string, []llm.ImageBlock, int) {
+	steeringText, steeringImages, steeringCount := queueGroupDraft(queue.SteeringMessages, queue.Steering)
+	followUpText, followUpImages, followUpCount := queueGroupDraft(queue.FollowUpMessages, queue.FollowUp)
+	return append(steeringText, followUpText...),
+		append(steeringImages, followUpImages...), steeringCount + followUpCount
+}
+
+func queueGroupDraft(messages []llm.ConversationMessage, fallback []string) ([]string, []llm.ImageBlock, int) {
+	count := max(len(messages), len(fallback))
+	texts := make([]string, 0, count)
+	var images []llm.ImageBlock
+	for index := range count {
+		var text string
+		var messageImages []llm.ImageBlock
+		if index < len(messages) {
+			text, messageImages = conversationMessageDraft(messages[index])
+		}
+		if strings.TrimSpace(text) == "" && len(messageImages) == 0 && index < len(fallback) {
+			text = fallback[index]
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			texts = append(texts, text)
+		}
+		images = append(images, messageImages...)
+	}
+	return texts, images, count
+}
+
+func conversationMessageDraft(message llm.ConversationMessage) (string, []llm.ImageBlock) {
+	var texts []string
+	var images []llm.ImageBlock
+	switch message := message.(type) {
+	case llm.UserTextMessage:
+		for _, block := range message.Content() {
+			texts = append(texts, block.Text())
+		}
+	case llm.UserContentMessage:
+		for _, block := range message.Content() {
+			switch block := block.(type) {
+			case llm.TextBlock:
+				texts = append(texts, block.Text())
+			case llm.ImageBlock:
+				images = append(images, block)
+			}
+		}
+	}
+	return strings.Join(compactNonEmptyStrings(texts), "\n"), images
 }

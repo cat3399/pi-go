@@ -7,6 +7,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -27,9 +28,18 @@ type inputAction struct {
 }
 
 func planInput(text string, state application.State, followUp bool) (inputAction, error) {
+	return planRichInput(text, nil, state, followUp)
+}
+
+func planRichInput(text string, images []llm.ImageBlock, state application.State, followUp bool) (inputAction, error) {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(images) == 0 {
 		return inputAction{}, errors.New("message is empty")
+	}
+	// A draft with attachments is always a prompt. Interpreting its text as a
+	// local slash or shell command would silently discard the attached content.
+	if len(images) != 0 {
+		return promptInputAction(text, images, state, followUp), nil
 	}
 	if strings.HasPrefix(text, "!!") {
 		command := strings.TrimSpace(strings.TrimPrefix(text, "!!"))
@@ -101,6 +111,10 @@ func planInput(text string, state application.State, followUp bool) (inputAction
 		// extension commands are resolved by the transport-neutral core.
 	}
 
+	return promptInputAction(text, nil, state, followUp), nil
+}
+
+func promptInputAction(text string, images []llm.ImageBlock, state application.State, followUp bool) inputAction {
 	behavior := agent.StreamingBehavior("")
 	if state.IsStreaming || state.IsPromptRunning || state.IsCompacting {
 		behavior = agent.StreamingSteer
@@ -109,8 +123,9 @@ func planInput(text string, state application.State, followUp bool) (inputAction
 		}
 	}
 	return inputAction{kind: inputActionDispatch, command: application.PromptCommand{
-		Message: text, StreamingBehavior: behavior, Source: agent.InputInteractive,
-	}}, nil
+		Message: text, Images: append([]llm.ImageBlock(nil), images...),
+		StreamingBehavior: behavior, Source: agent.InputInteractive,
+	}}
 }
 
 func splitSlashCommand(value string) (name, argument string, ok bool) {

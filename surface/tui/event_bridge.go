@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/llm"
 )
 
 type subscriptionReadyMsg struct {
@@ -23,6 +24,16 @@ type applicationEventMsg struct {
 type reconnectEventsMsg struct{ generation uint64 }
 
 type retrySnapshotMsg struct{ sessionGeneration uint64 }
+
+type statusExpiryMsg struct{ generation uint64 }
+
+type commandsLoadedMsg struct {
+	sessionID         string
+	sessionGeneration uint64
+	request           uint64
+	commands          []application.SlashCommandInfo
+	err               error
+}
 
 type stateLoadedMsg struct {
 	sessionID         string
@@ -48,6 +59,7 @@ type commandFinishedMsg struct {
 	command           application.Command
 	result            application.CommandResult
 	draft             string
+	draftImages       []llm.ImageBlock
 	err               error
 }
 
@@ -88,6 +100,12 @@ func retrySnapshotCmd(sessionGeneration uint64) tea.Cmd {
 	})
 }
 
+func expireStatusCmd(generation uint64) tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return statusExpiryMsg{generation: generation}
+	})
+}
+
 func loadStateCmd(api application.API, sessionID string, sessionGeneration, request uint64) tea.Cmd {
 	return func() tea.Msg {
 		state, active, err := api.LiveState(sessionID)
@@ -108,6 +126,21 @@ func loadSnapshotCmd(api application.API, sessionID string, sessionGeneration, r
 	}
 }
 
+func loadCommandsCmd(ctx context.Context, api application.API, sessionID string, sessionGeneration, request uint64) tea.Cmd {
+	return func() tea.Msg {
+		result, err := api.Dispatch(ctx, sessionID, application.GetCommandsCommand{})
+		message := commandsLoadedMsg{
+			sessionID: sessionID, sessionGeneration: sessionGeneration, request: request, err: err,
+		}
+		if commands, ok := result.(application.GetCommandsResult); ok {
+			message.commands = append([]application.SlashCommandInfo(nil), commands.Commands...)
+		} else if err == nil {
+			message.err = application.ErrInvalidCommand
+		}
+		return message
+	}
+}
+
 func dispatchCommandCmd(
 	ctx context.Context,
 	api application.API,
@@ -115,12 +148,14 @@ func dispatchCommandCmd(
 	sessionGeneration, request uint64,
 	command application.Command,
 	draft string,
+	draftImages []llm.ImageBlock,
 ) tea.Cmd {
 	return func() tea.Msg {
 		result, err := api.Dispatch(ctx, sessionID, command)
 		return commandFinishedMsg{
 			sessionID: sessionID, sessionGeneration: sessionGeneration, request: request,
-			command: command, result: result, draft: draft, err: err,
+			command: command, result: result, draft: draft,
+			draftImages: append([]llm.ImageBlock(nil), draftImages...), err: err,
 		}
 	}
 }

@@ -22,10 +22,14 @@ type modelTestAPI struct{ application.API }
 func (modelTestAPI) DefaultCWD() string { return "/workspace" }
 
 func newModelForTest(t *testing.T) *Model {
+	return newModelWithAPIForTest(t, modelTestAPI{})
+}
+
+func newModelWithAPIForTest(t *testing.T, api application.API) *Model {
 	t.Helper()
 	state := application.State{SessionID: "session-1", CWD: "/workspace", Phase: agent.PhaseIdle}
 	model, err := newModel(context.Background(), Options{
-		Application: modelTestAPI{}, SessionID: "session-1", ScreenMode: ScreenFull,
+		Application: api, SessionID: "session-1", ScreenMode: ScreenFull,
 	}, application.SessionSnapshot{
 		Revision: 7, SessionID: "session-1", Info: application.SessionInfo{ID: "session-1", CWD: "/workspace"},
 		LiveState: &state,
@@ -35,6 +39,16 @@ func newModelForTest(t *testing.T) *Model {
 	}
 	_ = model.composer.Init()
 	return model
+}
+
+type dispatchRecordingAPI struct {
+	modelTestAPI
+	command application.Command
+}
+
+func (a *dispatchRecordingAPI) Dispatch(_ context.Context, _ string, command application.Command) (application.CommandResult, error) {
+	a.command = command
+	return application.PromptStartedResult{OperationID: 1}, nil
 }
 
 func TestModelComposerDistinguishesSubmitAndNewline(t *testing.T) {
@@ -54,6 +68,37 @@ func TestModelComposerDistinguishesSubmitAndNewline(t *testing.T) {
 	}
 	if value := model.composer.Value(); value != "" {
 		t.Fatalf("composer was not reset after submit: %q", value)
+	}
+	if len(model.composer.history) != 1 || model.composer.history[0] != "a\nb" {
+		t.Fatalf("composer history = %#v", model.composer.history)
+	}
+}
+
+func TestModelSubmitPreservesComposerImages(t *testing.T) {
+	image, err := llm.NewImageDataBlock("image/png", []byte{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &dispatchRecordingAPI{}
+	model := newModelWithAPIForTest(t, api)
+	model.composer.SetDraft("/help", []llm.ImageBlock{image})
+	command := model.submit(false)
+	if command == nil {
+		t.Fatal("rich draft did not produce a dispatch command")
+	}
+	message, ok := command().(commandFinishedMsg)
+	if !ok || message.err != nil {
+		t.Fatalf("dispatch message = %#v", message)
+	}
+	prompt, ok := api.command.(application.PromptCommand)
+	if !ok {
+		t.Fatalf("rich slash draft dispatched %T, want PromptCommand", api.command)
+	}
+	if prompt.Message != "/help" || len(prompt.Images) != 1 || string(prompt.Images[0].Data()) != string(image.Data()) {
+		t.Fatalf("prompt = %#v", prompt)
+	}
+	if !model.composer.Empty() {
+		t.Fatalf("composer retained submitted draft: %q / %#v", model.composer.Value(), model.composer.Images())
 	}
 }
 
@@ -76,6 +121,23 @@ func TestModelRendersSafeSmallTerminalFallback(t *testing.T) {
 		if model.composer.width != size.width {
 			t.Fatalf("composer width = %d, want %d", model.composer.width, size.width)
 		}
+	}
+}
+
+func TestModelRendersSafeSmallTerminalFallbackWithAttachment(t *testing.T) {
+	image, err := llm.NewImageDataBlock("image/png", []byte{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newModelForTest(t)
+	model.composer.SetDraft("", []llm.ImageBlock{image})
+	_, _ = model.Update(tea.WindowSizeMsg{Width: 40, Height: 5})
+	view := model.View()
+	if rows := strings.Count(view.Content, "\n") + 1; rows != 5 {
+		t.Fatalf("attachment fallback rows = %d, want 5: %q", rows, view.Content)
+	}
+	if view.Cursor != nil {
+		t.Fatal("attachment fallback exposed an off-screen cursor")
 	}
 }
 
@@ -257,6 +319,38 @@ func TestModelToolLifecycleUsesOneStableVirtualItem(t *testing.T) {
 	}
 	if model.transcript.Len() != 1 {
 		t.Fatalf("transcript length = %d, want one stable tool item", model.transcript.Len())
+	}
+}
+
+func TestModelRendersTextWhileThinkingBlockRemainsOpen(t *testing.T) {
+	collector := &llm.StreamCollector{}
+	provenance := llm.AssistantProvenance{Provider: "fixture", API: "fixture", Model: "fixture"}
+	start, err := llm.NewStartEvent(provenance, time.Now().UTC().Truncate(time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinkingStart, _ := llm.NewThinkingStartEvent(0)
+	thinkingDelta, _ := llm.NewThinkingDeltaEvent(0, "still reasoning")
+	textStart, _ := llm.NewTextStartEvent(1)
+	textDelta, _ := llm.NewTextDeltaEvent(1, "visible before stream end")
+	for _, event := range []llm.StreamEvent{start, thinkingStart, thinkingDelta, textStart, textDelta} {
+		if err := collector.Accept(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := collector.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := agentmsg.NewAssistantPartial(agentmsg.AssistantPartialSpec{Snapshot: snapshot, Event: textDelta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := newModelForTest(t)
+	model.applyAgentEvent(agent.MessageUpdateEvent{RunID: 1, Turn: 1, Message: partial})
+	view := StripTerminalSequences(model.transcript.View(80, 12, model.renderer))
+	if !strings.Contains(view, "still reasoning") || !strings.Contains(view, "visible before stream end") {
+		t.Fatalf("overlapping stream view:\n%s", view)
 	}
 }
 

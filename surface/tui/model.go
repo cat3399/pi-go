@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/llm"
 )
 
 type statusLevel uint8
@@ -44,21 +44,26 @@ type Model struct {
 	snapshotNeeded         bool
 	commandRequest         uint64
 	commandApplied         uint64
+	restoreQueueRequest    uint64
+	commandsRequest        uint64
 	openRequest            uint64
 
 	subscription *application.EventSubscription
 	closed       bool
 
-	transcript transcriptModel
-	renderer   *contentRenderer
-	composer   composerModel
+	transcript   transcriptModel
+	renderer     *contentRenderer
+	composer     composerModel
+	slashPalette slashPaletteModel
 
 	width  int
 	height int
 
-	status      modelStatus
-	helpVisible bool
-	localID     uint64
+	status              modelStatus
+	statusGeneration    uint64
+	statusExpiryPending bool
+	helpVisible         bool
+	localID             uint64
 
 	liveItems       map[string]contentItem
 	liveAssistantID string
@@ -86,12 +91,13 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 	}
 	model.transcript.SetItems(contentItemsFromSnapshot(snapshot))
 	model.composer.SetWidth(model.width)
+	model.slashPalette.SetCommands(mergeSlashCommands(nil))
 	model.syncComposerState()
 	return model, nil
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.composer.Init(), m.startSubscription())
+	return tea.Batch(m.composer.Init(), m.startSubscription(), m.requestCommands())
 }
 
 func (m *Model) Close() {
@@ -102,17 +108,22 @@ func (m *Model) Close() {
 	m.closeSubscription()
 }
 
-func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 	if m == nil {
 		return m, tea.Quit
 	}
+	defer func() {
+		if expiry := m.takeStatusExpiry(); expiry != nil {
+			command = tea.Batch(command, expiry)
+		}
+	}()
 	var commands []tea.Cmd
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width = max(1, message.Width)
 		m.height = max(1, message.Height)
 		m.composer.SetWidth(m.width)
-		m.composer.SetMaxHeight(max(1, m.height-6))
+		m.composer.SetMaxHeight(max(1, m.height-4))
 		return m, nil
 	case tea.KeyPressMsg:
 		if handled, command := m.handleKey(message); handled {
@@ -153,6 +164,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.requestSnapshot()
+	case statusExpiryMsg:
+		if message.generation == m.statusGeneration {
+			m.setStatus("", statusInfo)
+		}
+		return m, nil
 	case stateLoadedMsg:
 		if message.sessionID != m.sessionID ||
 			message.sessionGeneration != m.sessionGeneration ||
@@ -169,6 +185,14 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotLoadedMsg:
 		commands = append(commands, m.handleSnapshot(message)...)
 		return m, tea.Batch(commands...)
+	case commandsLoadedMsg:
+		if message.sessionID == m.sessionID &&
+			message.sessionGeneration == m.sessionGeneration &&
+			message.request == m.commandsRequest && message.err == nil {
+			m.slashPalette.SetCommands(mergeSlashCommands(message.commands))
+			m.updateSlashPalette()
+		}
+		return m, nil
 	case commandFinishedMsg:
 		commands = append(commands, m.handleCommandFinished(message)...)
 		return m, tea.Batch(commands...)
@@ -180,18 +204,41 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if command := m.composer.Update(message); command != nil {
 		commands = append(commands, command)
 	}
+	m.updateSlashPalette()
 	return m, tea.Batch(commands...)
 }
 
 func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 	keyName := message.String()
+	if m.slashPalette.Visible() {
+		switch keyName {
+		case "up":
+			m.slashPalette.Move(-1)
+			return true, nil
+		case "down":
+			m.slashPalette.Move(1)
+			return true, nil
+		case "tab", "enter":
+			if value, ok := m.slashPalette.Accept(); ok {
+				m.composer.SetDraft(value, nil)
+				return true, nil
+			}
+		case "esc":
+			m.slashPalette.Dismiss()
+			return true, nil
+		}
+	}
 	switch keyName {
-	case "ctrl+g":
-		m.helpVisible = !m.helpVisible
-		return true, nil
+	case "up", "down":
+		if m.composer.NavigateHistory(keyName) {
+			m.updateSlashPalette()
+			return true, nil
+		}
 	case "ctrl+o":
 		m.renderer.SetToolsExpanded(!m.renderer.toolsExpanded)
 		return true, nil
+	case "alt+up":
+		return true, m.restoreQueuedMessages()
 	case "pgup", "ctrl+up":
 		m.transcript.ScrollUp(max(1, m.transcript.lastHeight-2))
 		return true, nil
@@ -213,21 +260,23 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 		if m.busy() {
 			return true, m.abort()
 		}
-		if strings.TrimSpace(m.composer.Value()) != "" {
+		if !m.composer.Empty() {
 			m.composer.Reset()
+			m.updateSlashPalette()
 			return true, nil
 		}
 	case "ctrl+c":
 		if m.busy() {
 			return true, m.abort()
 		}
-		if strings.TrimSpace(m.composer.Value()) != "" {
+		if !m.composer.Empty() {
 			m.composer.Reset()
+			m.updateSlashPalette()
 			return true, nil
 		}
 		return true, tea.Quit
 	case "ctrl+d":
-		if strings.TrimSpace(m.composer.Value()) == "" {
+		if m.composer.Empty() {
 			return true, tea.Quit
 		}
 	}
@@ -235,8 +284,10 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 }
 
 func (m *Model) submit(followUp bool) tea.Cmd {
+	defer m.updateSlashPalette()
 	draft := strings.TrimSpace(m.composer.Value())
-	action, err := planInput(draft, m.state, followUp)
+	draftImages := m.composer.Images()
+	action, err := planRichInput(draft, draftImages, m.state, followUp)
 	if err != nil {
 		m.setStatus(err.Error(), statusWarning)
 		return nil
@@ -258,9 +309,15 @@ func (m *Model) submit(followUp bool) tea.Cmd {
 		m.setStatus("Opening session "+action.sessionID+"…", statusInfo)
 		return m.openSession(action.sessionID)
 	case inputActionDispatch:
+		switch action.command.(type) {
+		case application.PromptCommand, application.BashCommand:
+			if len(draftImages) == 0 {
+				m.composer.AddToHistory(draft)
+			}
+		}
 		m.composer.Reset()
 		m.setStatus(commandPendingText(action.command), statusInfo)
-		return m.dispatchCommand(action.command, draft)
+		return m.dispatchCommand(action.command, draft, draftImages)
 	default:
 		m.setStatus("Unsupported input action", statusError)
 		return nil
@@ -275,7 +332,24 @@ func (m *Model) abort() tea.Cmd {
 		command = application.AbortCompactionCommand{}
 	}
 	m.setStatus("Aborting…", statusWarning)
-	return m.dispatchCommand(command, "")
+	return m.dispatchCommand(command, "", nil)
+}
+
+func (m *Model) restoreQueuedMessages() tea.Cmd {
+	if m.restoreQueueRequest != 0 {
+		m.setStatus("Queue restore is already in progress", statusWarning)
+		return nil
+	}
+	if m.state.PendingMessageCount == 0 {
+		m.setStatus("No queued messages to restore", statusWarning)
+		return nil
+	}
+	command := m.dispatchCommand(
+		application.ClearQueueCommand{}, m.composer.Value(), m.composer.Images(),
+	)
+	m.restoreQueueRequest = m.commandRequest
+	m.setStatus("Restoring queued messages…", statusInfo)
+	return command
 }
 
 func (m *Model) startSubscription() tea.Cmd {
@@ -310,10 +384,20 @@ func (m *Model) requestSnapshot() tea.Cmd {
 	return loadSnapshotCmd(m.api, m.sessionID, m.sessionGeneration, m.projectionGeneration)
 }
 
-func (m *Model) dispatchCommand(command application.Command, draft string) tea.Cmd {
+func (m *Model) requestCommands() tea.Cmd {
+	// Dynamic commands are session/resource scoped. Drop the previous set
+	// before loading so a removed command cannot be accepted in the gap.
+	m.slashPalette.SetCommands(mergeSlashCommands(nil))
+	m.updateSlashPalette()
+	m.commandsRequest++
+	return loadCommandsCmd(m.ctx, m.api, m.sessionID, m.sessionGeneration, m.commandsRequest)
+}
+
+func (m *Model) dispatchCommand(command application.Command, draft string, draftImages []llm.ImageBlock) tea.Cmd {
 	m.commandRequest++
 	return dispatchCommandCmd(
-		m.ctx, m.api, m.sessionID, m.sessionGeneration, m.commandRequest, command, draft,
+		m.ctx, m.api, m.sessionID, m.sessionGeneration, m.commandRequest,
+		command, draft, draftImages,
 	)
 }
 
@@ -333,10 +417,32 @@ func (m *Model) busy() bool {
 
 func (m *Model) syncComposerState() {
 	m.composer.SetBusy(m.busy())
+	m.updateSlashPalette()
+}
+
+func (m *Model) updateSlashPalette() {
+	if m.composer.HasImages() {
+		m.slashPalette.Hide(m.composer.Value())
+		return
+	}
+	m.slashPalette.Update(m.composer.Value())
 }
 
 func (m *Model) setStatus(text string, level statusLevel) {
+	m.statusGeneration++
+	m.statusExpiryPending = false
 	m.status = modelStatus{text: strings.TrimSpace(text), level: level}
+	if m.status.text != "" && !m.busy() && level != statusError {
+		m.statusExpiryPending = true
+	}
+}
+
+func (m *Model) takeStatusExpiry() tea.Cmd {
+	if m == nil || !m.statusExpiryPending {
+		return nil
+	}
+	m.statusExpiryPending = false
+	return expireStatusCmd(m.statusGeneration)
 }
 
 func (m *Model) handleSubscription(message subscriptionReadyMsg) []tea.Cmd {
@@ -435,12 +541,12 @@ func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
 	m.liveAssistantID = ""
 	m.syncComposerState()
 	m.setStatus("Opened session "+shortID(m.sessionID), statusSuccess)
-	return []tea.Cmd{m.startSubscription()}
+	return []tea.Cmd{m.startSubscription(), m.requestCommands()}
 }
 
 func (m *Model) View() tea.View {
 	width, height := max(1, m.width), max(1, m.height)
-	if width < 20 || height < 6 {
+	if width < 20 || height < 5 || (m.composer.HasImages() && height < 6) {
 		content := Truncate("pi-go: terminal too small", width, "…", false)
 		if height > 1 {
 			content += strings.Repeat("\n", height-1)
@@ -450,26 +556,23 @@ func (m *Model) View() tea.View {
 		view.WindowTitle = "pi-go"
 		return view
 	}
-	headerLines := m.renderHeader(width)
-	footerLines := 1
-	statusLines := 1
-	if height < 8 {
-		headerLines = headerLines[:1]
-		footerLines = 0
-	}
 	composer := m.composer.View()
 	composerHeight := lipgloss.Height(composer)
-	transcriptHeight := max(1, height-len(headerLines)-statusLines-footerLines-composerHeight)
+	dockBudget := max(0, height-composerHeight-2)
+	paletteLines := m.renderSlashPalette(width, min(5, dockBudget))
+	dockBudget -= len(paletteLines)
+	maxQueueLines := max(0, min(3, dockBudget))
+	queueLines := m.renderQueueDock(width, maxQueueLines)
+	transcriptHeight := max(1, height-len(queueLines)-len(paletteLines)-composerHeight-1)
 
 	transcript := m.transcript.View(width, transcriptHeight, m.renderer)
 	if m.helpVisible {
 		transcript = m.renderHelp(width, transcriptHeight)
 	}
-	parts := append([]string(nil), headerLines...)
-	parts = append(parts, transcript, m.renderStatus(width), composer)
-	if footerLines != 0 {
-		parts = append(parts, m.renderFooter(width))
-	}
+	parts := []string{transcript}
+	parts = append(parts, queueLines...)
+	parts = append(parts, paletteLines...)
+	parts = append(parts, composer, m.renderStateLine(width))
 	view := tea.NewView(strings.Join(parts, "\n"))
 	view.AltScreen = m.mode == ScreenFull
 	view.MouseMode = tea.MouseModeCellMotion
@@ -480,72 +583,11 @@ func (m *Model) View() tea.View {
 	if !m.helpVisible {
 		cursor := m.composer.Cursor()
 		if cursor != nil {
-			cursor.Position.Y += len(headerLines) + transcriptHeight + statusLines
+			cursor.Position.Y += transcriptHeight + len(queueLines) + len(paletteLines)
 			view.Cursor = cursor
 		}
 	}
 	return view
-}
-
-func (m *Model) renderHeader(width int) []string {
-	name := "pi-go"
-	if m.version != "" {
-		name += " " + m.version
-	}
-	sessionName := shortID(m.sessionID)
-	if m.state.SessionName != nil && strings.TrimSpace(*m.state.SessionName) != "" {
-		sessionName = strings.TrimSpace(*m.state.SessionName)
-	}
-	model := "no model"
-	if m.state.HasModel {
-		model = m.state.Model.Provider() + "/" + m.state.Model.ID()
-	}
-	left := lipgloss.NewStyle().Bold(true).Foreground(m.theme.color(m.theme.Primary)).Render("π " + name)
-	line := left + m.theme.mutedStyle().Render("  "+sessionName+"  "+model+"  thinking:"+string(m.state.ThinkingLevel))
-	cwd := m.state.CWD
-	if cwd == "" {
-		cwd = m.api.DefaultCWD()
-	}
-	project := filepath.Base(cwd)
-	if project == "." || project == string(filepath.Separator) {
-		project = cwd
-	}
-	second := m.theme.subtleStyle().Render(project + "  " + cwd)
-	return []string{Truncate(line, width, "…", true), Truncate(second, width, "…", true)}
-}
-
-func (m *Model) renderStatus(width int) string {
-	text := m.status.text
-	level := m.status.level
-	if text == "" {
-		phase := m.state.Phase.String()
-		text = phase
-		if m.state.PendingMessageCount > 0 {
-			text += fmt.Sprintf(" · queued %d", m.state.PendingMessageCount)
-		}
-		if m.state.ContextUsage != nil && m.state.ContextUsage.Percent != nil {
-			text += fmt.Sprintf(" · context %.1f%%", *m.state.ContextUsage.Percent)
-		}
-		if !m.transcript.Following() {
-			text += " · scrolled"
-		}
-		level = statusInfo
-	}
-	color := m.theme.Muted
-	switch level {
-	case statusSuccess:
-		color = m.theme.Success
-	case statusWarning:
-		color = m.theme.Warning
-	case statusError:
-		color = m.theme.Danger
-	}
-	return Truncate(lipgloss.NewStyle().Foreground(m.theme.color(color)).Render(" "+text), width, "…", true)
-}
-
-func (m *Model) renderFooter(width int) string {
-	text := " Enter send  Shift+Enter newline  Alt+Enter follow-up  Esc abort  PgUp/PgDn scroll  Ctrl+G help  Ctrl+D quit "
-	return Truncate(m.theme.subtleStyle().Render(text), width, "", true)
 }
 
 func (m *Model) renderHelp(width, height int) string {
@@ -559,8 +601,11 @@ func (m *Model) renderHelp(width, height int) string {
 		"PgUp / PgDn        scroll conversation",
 		"Ctrl+End           follow live output",
 		"Ctrl+O             collapse / expand tool output",
+		"Up / Down          browse prompt history at editor edges",
+		"Alt+Up             restore queued messages",
 		"Ctrl+D             quit when editor is empty",
 		"",
+		"/help /hotkeys     show this page",
 		"/new               create a session",
 		"/resume <id>       open a session",
 		"/model p/id        switch model",
