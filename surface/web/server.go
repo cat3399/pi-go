@@ -21,6 +21,7 @@ type Options struct {
 	Assets       fs.FS
 	Application  application.API
 	AllowedHosts []string
+	Password     string
 }
 
 type Server struct {
@@ -31,6 +32,10 @@ func New(options Options) (*Server, error) {
 	if options.Application == nil {
 		return nil, errors.New("Web surface application API is required")
 	}
+	auth, err := newAuthManager(options.Password)
+	if err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"status": "ok", "version": options.Version})
@@ -38,6 +43,7 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/capabilities", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"capabilities": Capabilities()})
 	})
+	auth.registerRoutes(mux)
 	registerAPIRoutes(mux, options.Application)
 	mux.HandleFunc("/api/v1/", unsupportedAPI)
 	mux.HandleFunc("/api/", unsupportedAPI)
@@ -46,7 +52,10 @@ func New(options Options) (*Server, error) {
 	} else {
 		mux.Handle("/", staticHandler(options.Assets))
 	}
-	return &Server{handler: protectAPIRequests(mux, options.AllowedHosts)}, nil
+	handler := auth.middleware(mux)
+	handler = protectAPIRequests(handler, options.AllowedHosts, auth.required)
+	handler = allowAuthenticatedCrossOrigin(handler, auth.required)
+	return &Server{handler: handler}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -72,7 +81,7 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
-func protectAPIRequests(next http.Handler, allowedHosts []string) http.Handler {
+func protectAPIRequests(next http.Handler, allowedHosts []string, allowCrossSite bool) http.Handler {
 	configured := make(map[string]struct{}, len(allowedHosts))
 	for _, value := range allowedHosts {
 		if hostname, ok := hostnameFromAuthority(value); ok {
@@ -86,8 +95,27 @@ func protectAPIRequests(next http.Handler, allowedHosts []string) http.Handler {
 				_, configuredHost := configured[hostname]
 				allowed = hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") || net.ParseIP(hostname) != nil || configuredHost
 			}
-			if !allowed || strings.EqualFold(strings.TrimSpace(request.Header.Get("Sec-Fetch-Site")), "cross-site") {
+			crossSite := strings.EqualFold(strings.TrimSpace(request.Header.Get("Sec-Fetch-Site")), "cross-site")
+			if !allowed || crossSite && !allowCrossSite {
 				writeJSON(writer, http.StatusForbidden, map[string]any{"error": "Untrusted API request"})
+				return
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func allowAuthenticatedCrossOrigin(next http.Handler, enabled bool) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		origin := strings.TrimSpace(request.Header.Get("Origin"))
+		if enabled && origin != "" && !strings.ContainsAny(origin, "\r\n") {
+			writer.Header().Set("Access-Control-Allow-Origin", origin)
+			writer.Header().Set("Access-Control-Allow-Credentials", "true")
+			writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Pi-Go-Token")
+			writer.Header().Add("Vary", "Origin")
+			if request.Method == http.MethodOptions && strings.HasPrefix(request.URL.Path, "/api/") {
+				writer.WriteHeader(http.StatusNoContent)
 				return
 			}
 		}

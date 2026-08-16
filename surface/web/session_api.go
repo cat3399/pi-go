@@ -10,11 +10,12 @@ import (
 	"strings"
 
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
 func handleSessionDelete(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		if err := api.DeleteSession(request.Context(), request.PathValue("id")); err != nil {
+		if err := surfacewire.DeleteSession(request.Context(), api, request.PathValue("id")); err != nil {
 			writeApplicationError(writer, err)
 			return
 		}

@@ -42,3 +42,16 @@ func TestWebHelpDoesNotRequireEmbeddedAssets(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }
+
+func TestRemoteWebListenRequiresPassword(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:30141", "[::]:30141", "192.168.1.10:30141", ":30141"} {
+		if !requiresWebPassword(address) {
+			t.Errorf("requiresWebPassword(%q) = false", address)
+		}
+	}
+	for _, address := range []string{"127.0.0.1:30141", "[::1]:30141", "localhost:30141"} {
+		if requiresWebPassword(address) {
+			t.Errorf("requiresWebPassword(%q) = true", address)
+		}
+	}
+}

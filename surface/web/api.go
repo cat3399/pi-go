@@ -14,10 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
 	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
-	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
 const maxAPIRequestBytes = 64 << 20
@@ -123,57 +122,21 @@ func handleCreateSession(api application.API) http.HandlerFunc {
 			writeRequestBodyError(writer, err)
 			return
 		}
-		var input struct {
-			CWD           string                  `json:"cwd"`
-			Provider      string                  `json:"provider"`
-			ModelID       string                  `json:"modelId"`
-			ToolNames     *[]string               `json:"toolNames"`
-			ThinkingLevel *provider.ThinkingLevel `json:"thinkingLevel"`
-		}
+		var input surfacewire.CreateSessionRequest
 		if err := json.Unmarshal(body, &input); err != nil {
 			writeAPIError(writer, http.StatusBadRequest, fmt.Errorf("invalid JSON: %w", err))
 			return
 		}
-		input.CWD = strings.TrimSpace(input.CWD)
-		input.Provider = strings.TrimSpace(input.Provider)
-		input.ModelID = strings.TrimSpace(input.ModelID)
-		if input.CWD == "" {
-			writeAPIError(writer, http.StatusBadRequest, errors.New("cwd is required"))
-			return
-		}
-		input.CWD, err = normalizeUserCWD(input.CWD)
+		result, err := surfacewire.CreateSession(request.Context(), api, input)
 		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
-			return
-		}
-		if (input.Provider == "") != (input.ModelID == "") {
-			writeAPIError(writer, http.StatusBadRequest, errors.New("provider and modelId must be provided together"))
-			return
-		}
-		if input.ToolNames != nil && *input.ToolNames == nil {
-			writeAPIError(writer, http.StatusBadRequest, errors.New("toolNames must be an array of strings"))
-			return
-		}
-		if input.ThinkingLevel != nil && !input.ThinkingLevel.Valid() {
-			writeAPIError(writer, http.StatusBadRequest, fmt.Errorf("invalid thinking level: %s", *input.ThinkingLevel))
-			return
-		}
-		toolNames := []string(nil)
-		if input.ToolNames != nil {
-			toolNames = append(toolNames, (*input.ToolNames)...)
-		}
-		state, err := api.NewSession(request.Context(), application.NewSessionOptions{
-			CWD: input.CWD, Provider: input.Provider, ModelID: input.ModelID,
-			ToolNames: toolNames, HasToolNames: input.ToolNames != nil, ThinkingLevel: input.ThinkingLevel,
-		})
-		if err != nil {
+			if errors.Is(err, surfacewire.ErrInvalidRequest) {
+				writeAPIError(writer, http.StatusBadRequest, err)
+				return
+			}
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(writer, http.StatusCreated, map[string]any{
-			"sessionId": state.SessionID, "revision": api.CurrentRevision(),
-			"model": stateModel(state), "thinkingLevel": state.ThinkingLevel,
-		})
+		writeJSON(writer, http.StatusCreated, result)
 	}
 }
 
@@ -184,25 +147,16 @@ func handleSessionCommand(api application.API) http.HandlerFunc {
 			writeRequestBodyError(writer, err)
 			return
 		}
-		command, err := protocolv1.DecodeCommand(body, agent.InputInteractive)
+		result, err := surfacewire.DispatchJSON(request.Context(), api, request.PathValue("id"), body, "interactive")
 		if err != nil {
-			writeAPIError(writer, http.StatusBadRequest, err)
-			return
-		}
-		result, err := api.Dispatch(request.Context(), request.PathValue("id"), command)
-		if err != nil {
+			if errors.Is(err, surfacewire.ErrInvalidRequest) {
+				writeAPIError(writer, http.StatusBadRequest, err)
+				return
+			}
 			writeApplicationError(writer, err)
 			return
 		}
-		data, present, err := protocolv1.EncodeResult(result)
-		if err != nil {
-			writeAPIError(writer, http.StatusInternalServerError, err)
-			return
-		}
-		if !present {
-			data = nil
-		}
-		writeJSON(writer, http.StatusOK, map[string]any{"data": data})
+		writeJSON(writer, http.StatusOK, result)
 	}
 }
 
@@ -281,11 +235,13 @@ func handleApplicationEvents(api application.API) http.HandlerFunc {
 }
 
 func writeApplicationSSE(writer io.Writer, event application.Event) error {
-	encoded, err := protocolv1.EncodeEvent(event)
+	envelope, err := surfacewire.EncodeEvent(event)
 	if err != nil {
-		encoded = map[string]any{"type": "protocol_error", "errorMessage": err.Error()}
+		envelope = surfacewire.EventEnvelope{
+			Sequence: event.Sequence, SessionID: event.SessionID,
+			Event: map[string]any{"type": "protocol_error", "errorMessage": err.Error()},
+		}
 	}
-	envelope := map[string]any{"sequence": event.Sequence, "sessionId": event.SessionID, "event": encoded}
 	return writeSSE(writer, event.Sequence, envelope)
 }
 
@@ -319,17 +275,12 @@ func writeSSE(writer io.Writer, sequence uint64, value any) error {
 
 func handleApplicationSnapshot(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, _ *http.Request) {
-		// Capture the cursor before reading state. Events published while the
-		// snapshot is assembled will then be replayed instead of being skipped.
-		revision := api.CurrentRevision()
-		sessions, err := listSessions(api)
+		snapshot, err := surfacewire.Snapshot(api)
 		if err != nil {
 			writeAPIError(writer, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{
-			"revision": revision, "sessions": sessions, "runningSessionIds": api.RunningIDs(),
-		})
+		writeJSON(writer, http.StatusOK, snapshot)
 	}
 }
 
@@ -350,7 +301,7 @@ func handleSessionView(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
 		view, err := sessionView(api,
-			request.PathValue("id"), "", query.Has("deferThinking"), query.Has("deferMedia"),
+			request.PathValue("id"), query.Get("leafId"), query.Has("deferThinking"), query.Has("deferMedia"),
 		)
 		if err != nil {
 			writeApplicationError(writer, err)
@@ -417,7 +368,7 @@ func handleSessionRename(api application.API) http.HandlerFunc {
 			return
 		}
 		id := request.PathValue("id")
-		if err := api.RenameSession(request.Context(), id, name); err != nil {
+		if err := surfacewire.RenameSession(request.Context(), api, id, name); err != nil {
 			writeApplicationError(writer, err)
 			return
 		}
@@ -447,7 +398,7 @@ func handleHome(writer http.ResponseWriter, _ *http.Request) {
 
 func handleDirectoryBrowse(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		result, err := api.BrowseDirectories(request.Context(), request.URL.Query().Get("path"))
+		result, err := surfacewire.BrowseDirectories(request.Context(), api, request.URL.Query().Get("path"))
 		if err != nil {
 			switch {
 			case errors.Is(err, application.ErrDirectoryNotFound):
@@ -459,30 +410,12 @@ func handleDirectoryBrowse(api application.API) http.HandlerFunc {
 			}
 			return
 		}
-		response := map[string]any{
-			"path": result.Path, "parentPath": result.ParentPath, "directories": result.Directories,
-		}
-		if result.Drives != nil {
-			response["drives"] = result.Drives
-		}
-		writeJSON(writer, http.StatusOK, response)
+		writeJSON(writer, http.StatusOK, result)
 	}
 }
 
 func normalizeUserCWD(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "~" || strings.HasPrefix(value, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		if value == "~" {
-			value = home
-		} else {
-			value = filepath.Join(home, value[2:])
-		}
-	}
-	return application.ValidateCWD(value)
+	return surfacewire.NormalizeUserCWD(value)
 }
 
 func handleCWDValidation(writer http.ResponseWriter, request *http.Request) {

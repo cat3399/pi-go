@@ -26,6 +26,7 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	cwd := flags.String("cwd", "", "default working directory")
 	agentDir := flags.String("agent-dir", "", "pi agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)")
 	docsDir := flags.String("docs-dir", "", "pi documentation directory")
+	password := flags.String("password", os.Getenv("PI_GO_WEB_PASSWORD"), "remote access password (or PI_GO_WEB_PASSWORD)")
 	apiOnly := flags.Bool("api-only", false, "serve only the Go API (for the frontend development server)")
 	assetsDir := flags.String("assets-dir", "", "serve browser assets from a directory instead of the embedded production export")
 	var extraAllowedHosts []string
@@ -45,6 +46,10 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	if flags.NArg() != 0 {
 		_, _ = fmt.Fprintln(stderr, "pi-go web: unexpected positional arguments")
+		return 2
+	}
+	if requiresWebPassword(*listen) && strings.TrimSpace(*password) == "" {
+		_, _ = fmt.Fprintln(stderr, "pi-go web: a password is required when listening beyond loopback")
 		return 2
 	}
 
@@ -72,6 +77,7 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	allowedHosts := append([]string{allowedHost}, extraAllowedHosts...)
 	surface, err := websurface.New(websurface.Options{
 		Version: version, Assets: assets, Application: service, AllowedHosts: allowedHosts,
+		Password: *password,
 	})
 	if err != nil {
 		_ = service.Close(context.Background())
@@ -106,6 +112,19 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func requiresWebPassword(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return true
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
 }
 
 func resolveWebAssets(apiOnly bool, directory string) (fs.FS, error) {
