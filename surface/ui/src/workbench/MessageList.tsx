@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Search, Terminal } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { messageText, visibleMessage } from "./message";
@@ -80,9 +80,9 @@ function toolPresentation(name: string, input: Record<string, unknown>, complete
     case "ls":
       return { icon: BookOpen, verb: complete ? "已读取目录" : "正在读取目录", target: inputString(input, "path") || ".", card: "目录" };
     case "bash":
-      return { icon: Terminal, verb: complete ? "已运行" : "正在运行", target: inputString(input, "command"), card: "Shell" };
+      return { icon: SquareTerminal, verb: complete ? "已运行" : "正在运行", target: inputString(input, "command"), card: "Shell" };
     default:
-      return { icon: Terminal, verb: complete ? "已调用" : "正在调用", target: name, card: name };
+      return { icon: SquareTerminal, verb: complete ? "已调用" : "正在调用", target: name, card: name };
   }
 }
 
@@ -107,6 +107,35 @@ function EditPreview({ input }: { input: Record<string, unknown> }) {
   );
 }
 
+function ToolDataSection(props: {
+  kind: "input" | "output";
+  value: string;
+  children: ReactNode;
+}) {
+  const [copied, setCopied] = useState(false);
+  const label = props.kind === "input" ? "输入" : "输出";
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(props.value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className={`pi-tool-section is-${props.kind}`}>
+      <div className="pi-tool-section-content">{props.children}</div>
+      <button
+        className="pi-tool-section-copy"
+        type="button"
+        aria-label={copied ? `${label}已复制` : `复制${label}`}
+        onClick={() => void copy()}
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+    </div>
+  );
+}
+
 function ToolCall({
   block,
   result,
@@ -117,7 +146,6 @@ function ToolCall({
   streaming: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
   const name = toolCallName(block);
   const input = toolInputRecord(block);
   const output = resultText(result);
@@ -125,44 +153,40 @@ function ToolCall({
   const complete = Boolean(result);
   const presentation = toolPresentation(name, input, complete);
   const Icon = presentation.icon;
-  const copyValue = output || (name === "bash" ? inputString(input, "command") : JSON.stringify(input, null, 2));
-
-  const copy = async () => {
-    if (!copyValue) return;
-    await navigator.clipboard.writeText(copyValue);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
-  };
+  const serializedInput = JSON.stringify(input, null, 2);
+  const command = inputString(input, "command");
+  const inputCopyValue = name === "bash" ? command : serializedInput;
+  const hasEditPreview = (name === "edit" || name === "write")
+    && Array.isArray(input.edits)
+    && input.edits.length > 0;
 
   return (
     <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`}>
       <button className="pi-tool-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
         <Icon size={15} />
         <span>{failed ? "调用失败" : presentation.verb}</span>
-        {presentation.target && <code title={presentation.target}>{presentation.target}</code>}
+        {presentation.target && <code>{presentation.target}</code>}
         <ChevronRight className="pi-disclosure" size={14} />
       </button>
       {expanded && (
         <div className="pi-tool-body">
           <div className="pi-tool-card-header">
             <span>{presentation.card}</span>
-            {copyValue && (
-              <button type="button" aria-label={copied ? "已复制" : "复制"} title={copied ? "已复制" : "复制"} onClick={() => void copy()}>
-                {copied ? <Check size={14} /> : <Copy size={14} />}
-              </button>
-            )}
+            <span className="pi-tool-card-status">
+              {result && !failed && <Check size={12} />}
+              {streaming && !result ? "运行中" : failed ? "失败" : result ? "成功" : "等待"}
+            </span>
           </div>
-          {(name === "edit" || name === "write") && <EditPreview input={input} />}
-          {name !== "edit" && name !== "write" && (
-            <pre className="pi-tool-input">{name === "bash" ? `$ ${inputString(input, "command")}` : JSON.stringify(input, null, 2)}</pre>
-          )}
+          <ToolDataSection kind="input" value={inputCopyValue}>
+            {hasEditPreview
+              ? <EditPreview input={input} />
+              : <pre className="pi-tool-input">{name === "bash" ? `$ ${command}` : serializedInput}</pre>}
+          </ToolDataSection>
           {output && (
-            <pre className="pi-tool-output">{output}</pre>
+            <ToolDataSection kind="output" value={output}>
+              <pre className="pi-tool-output">{output}</pre>
+            </ToolDataSection>
           )}
-          <div className="pi-tool-status">
-            {result && <Check size={13} />}
-            {streaming && !result ? "运行中" : failed ? "失败" : result ? "成功" : "等待"}
-          </div>
         </div>
       )}
     </div>
@@ -193,7 +217,7 @@ function ProcessGroup(props: {
     read: complete ? "已读取文件" : "正在读取文件",
     search: complete ? "已搜索文件" : "正在搜索文件",
   };
-  const icons = { bash: Terminal, edit: FilePenLine, read: BookOpen, search: Search };
+  const icons = { bash: SquareTerminal, edit: FilePenLine, read: BookOpen, search: Search };
   const Icon = icons[props.kind];
 
   return (

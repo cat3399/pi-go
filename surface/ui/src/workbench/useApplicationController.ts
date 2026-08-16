@@ -253,8 +253,10 @@ export function useApplicationController(client: ApplicationClient): Application
         }));
         void refreshSnapshot();
         if (activeSessionRef.current) {
-          void loadSession(activeSessionRef.current);
-          if (sessionStatsOpenRef.current) void loadSessionStats(activeSessionRef.current);
+          void Promise.allSettled([
+            loadSession(activeSessionRef.current),
+            loadSessionStats(activeSessionRef.current),
+          ]);
         }
         break;
       case "queue_update":
@@ -426,6 +428,7 @@ export function useApplicationController(client: ApplicationClient): Application
           loadModels(view.info.cwd),
           loadTools(sessionId),
           loadSlashCommands(sessionId),
+          loadSessionStats(sessionId),
         ]);
         const failure = capabilities.find((result) => result.status === "rejected");
         if (failure?.status === "rejected" && activeSessionRef.current === sessionId) {
@@ -435,7 +438,7 @@ export function useApplicationController(client: ApplicationClient): Application
     } catch (sessionError) {
       if (activeSessionRef.current === sessionId) setError(errorMessage(sessionError));
     }
-  }, [loadModels, loadSession, loadSlashCommands, loadTools]);
+  }, [loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
   const beginNewSession = useCallback(() => {
     const nextCwd = sessionView?.info.cwd || newSessionCwd || snapshot?.defaultCwd || "";
@@ -822,18 +825,20 @@ export function useApplicationController(client: ApplicationClient): Application
         targetId: entryId,
       });
       if (result?.cancelled) return;
-      await loadSession(sessionID, generationRef.current, entryId);
+      await Promise.all([
+        loadSession(sessionID, generationRef.current, entryId),
+        loadSessionStats(sessionID),
+      ]);
     } catch (navigateError) {
       setError(errorMessage(navigateError));
       throw navigateError;
     }
-  }, [client, loadSession, runtimeState?.isBashRunning]);
+  }, [client, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
 
   const openSessionStats = useCallback(async () => {
     const sessionID = activeSessionRef.current;
     if (!sessionID) return;
     setError("");
-    setSessionStats(null);
     sessionStatsOpenRef.current = true;
     setSessionStatsOpen(true);
     try {

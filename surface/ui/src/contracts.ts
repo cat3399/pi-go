@@ -60,6 +60,12 @@ export interface QueuedMessages {
   followUp: string[];
 }
 
+export interface ContextUsage {
+  percent: number | null;
+  contextWindow: number;
+  tokens: number | null;
+}
+
 export interface SessionRuntimeState {
   sessionId?: string;
   cwd?: string;
@@ -72,6 +78,7 @@ export interface SessionRuntimeState {
   retryAttempt?: number;
   retryWaiting?: boolean;
   queuedMessages?: QueuedMessages;
+  contextUsage?: ContextUsage | null;
   model?: {
     id: string;
     name?: string;
@@ -183,11 +190,7 @@ export interface SessionStatsInfo {
     total: number;
   };
   cost: number;
-  contextUsage?: {
-    percent: number | null;
-    contextWindow: number;
-    tokens: number | null;
-  };
+  contextUsage?: ContextUsage;
 }
 
 export interface EventObserver {

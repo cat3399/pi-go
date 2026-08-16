@@ -1,10 +1,12 @@
 import { KeyboardEvent, useEffect, useRef, useState } from "react";
 import { ArrowUp, Plus, Square, X } from "lucide-react";
 import type {
+  ContextUsage,
   ImageAttachment,
   ModelsView,
   SelectedModel,
 } from "../contracts";
+import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
 import { SelectMenu } from "../primitives/SelectMenu";
 import type { SendBehavior } from "./useApplicationController";
 
@@ -14,6 +16,7 @@ interface ComposerProps {
   models: ModelsView | null;
   model: SelectedModel | null;
   thinkingLevel: string;
+  contextUsage: ContextUsage | null;
   busy: boolean;
   onSend(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   onAbort(): Promise<void>;
@@ -183,6 +186,7 @@ export function Composer(props: ComposerProps) {
             </button>
           </div>
           <div className="pi-composer-meta">
+            <ContextUsageIndicator usage={props.contextUsage} />
             <SelectMenu
               ariaLabel="模型"
               value={selectedModelKey}

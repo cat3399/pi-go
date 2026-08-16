@@ -263,12 +263,8 @@ export function Sidebar(props: SidebarProps) {
         aria-label="关闭侧栏"
         onClick={props.onClose}
       />
-      <aside className={`pi-sidebar ${props.open ? "is-open" : ""}`} aria-label="会话">
-        <div className="pi-sidebar-titlebar">
-          <button type="button" aria-label="收起侧栏" onClick={props.onClose}>
-            <span aria-hidden="true" />
-          </button>
-        </div>
+      <aside id="pi-workbench-sidebar" className={`pi-sidebar ${props.open ? "is-open" : ""}`} aria-label="会话">
+        <div className="pi-sidebar-titlebar" />
         <header className="pi-sidebar-header">
           <span className="pi-wordmark">pi</span>
           <button className="pi-sidebar-mobile-close" type="button" aria-label="关闭侧栏" onClick={props.onClose}>

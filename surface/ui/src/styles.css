@@ -26,6 +26,7 @@
   --pi-sidebar-width: 275px;
   --pi-sidebar-titlebar-height: 38px;
   --pi-topbar-height: 46px;
+  --pi-content-max-width: 800px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -85,6 +86,7 @@ textarea {
 }
 
 .pi-workbench {
+  position: relative;
   width: 100%;
   height: 100%;
   background: var(--pi-bg);
@@ -118,7 +120,10 @@ textarea {
   border-right: 1px solid var(--pi-border);
   background: var(--pi-panel);
   transform: translateX(-100%);
-  transition: transform 180ms ease;
+  transition:
+    width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
 }
 
 .pi-sidebar.is-open {
@@ -186,7 +191,8 @@ textarea {
 
 .pi-session-list {
   min-height: 0;
-  padding-bottom: 12px;
+  margin-right: -10px;
+  padding: 0 10px 12px 0;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -195,9 +201,11 @@ textarea {
   position: relative;
   display: flex;
   justify-content: space-between;
-  color: var(--pi-text-secondary);
+  height: 31px;
   min-height: 31px;
+  color: var(--pi-text-secondary);
   padding: 5px 9px 5px 32px;
+  transform: none;
 }
 
 .pi-session-item > span:first-child {
@@ -223,17 +231,31 @@ textarea {
 }
 
 .pi-session-actions {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: 3px;
   display: flex;
-  flex: 0 0 auto;
   gap: 2px;
+  padding-left: 10px;
+  background: linear-gradient(to right, transparent, var(--pi-panel) 10px);
+  transform: translateY(-50%);
+}
+
+.pi-session-item.is-active .pi-session-actions {
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--pi-text) 8%, var(--pi-panel)) 10px
+  );
 }
 
 .pi-session-actions button,
 .pi-session-confirm button {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
   border-radius: var(--pi-radius-sm);
@@ -250,6 +272,7 @@ textarea {
 .pi-session-confirm {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
+  height: 31px;
   color: var(--pi-error);
 }
 
@@ -260,7 +283,7 @@ textarea {
 
 .pi-session-renaming input {
   width: 100%;
-  height: 28px;
+  height: 25px;
   padding: 4px 7px;
   border: 1px solid var(--pi-border-heavy);
   border-radius: var(--pi-radius-sm);
@@ -286,10 +309,64 @@ textarea {
   background: rgba(26, 28, 31, 0.08);
 }
 
+.pi-sidebar-toggle {
+  position: fixed;
+  z-index: 32;
+  top: 4px;
+  left: 87px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+  --wails-draggable: no-drag;
+}
+
+.pi-sidebar-toggle:hover {
+  background: var(--pi-hover);
+  color: var(--pi-text);
+}
+
+.pi-sidebar-resizer {
+  position: fixed;
+  z-index: 31;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--pi-sidebar-width) - 1px);
+  width: 5px;
+  outline: 0;
+  cursor: col-resize;
+  touch-action: none;
+  transition: left 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  --wails-draggable: no-drag;
+}
+
+.pi-workbench.is-resizing,
+.pi-workbench.is-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.pi-workbench.is-resizing .pi-sidebar,
+.pi-workbench.is-resizing .pi-main,
+.pi-workbench.is-resizing .pi-sidebar-resizer {
+  transition: none;
+}
+
+.pi-workbench.is-web .pi-sidebar-toggle {
+  left: 10px;
+}
+
 .pi-main {
   width: 100%;
   height: 100%;
-  transition: padding-left 180ms ease;
+  transition: padding-left 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .pi-main.has-sidebar {
@@ -347,11 +424,10 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 
 .pi-transcript-inner {
-  width: min(736px, calc(100% - 48px));
+  width: min(var(--pi-content-max-width), calc(100% - 48px));
   margin: 0 auto;
   padding: 34px 0 170px;
 }
@@ -572,15 +648,15 @@ textarea {
   right: 0;
   bottom: 0;
   left: 0;
-  width: min(736px, calc(100% - 48px));
+  width: min(var(--pi-content-max-width), calc(100% - 48px));
   margin: 0 auto;
-  padding: 18px 0 20px;
+  padding: 18px 0 15px;
   background: linear-gradient(to bottom, transparent, var(--pi-bg) 26%);
 }
 
 .pi-composer-wrap.is-centered {
   position: static;
-  width: min(736px, calc(100% - 48px));
+  width: min(var(--pi-content-max-width), calc(100% - 48px));
   padding: 0;
   background: transparent;
 }
@@ -1180,39 +1256,46 @@ textarea {
 }
 
 * {
-  scrollbar-color: color-mix(in srgb, var(--pi-text) 20%, transparent) transparent;
+  scrollbar-color: transparent transparent;
   scrollbar-width: thin;
 }
 
+*:hover {
+  scrollbar-color: color-mix(in srgb, var(--pi-text) 18%, transparent) transparent;
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
+  border: 0;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-track {
+  border: 0;
   background: transparent;
+  box-shadow: none;
 }
 
 ::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--pi-text) 18%, transparent);
-  background-clip: padding-box;
+  background: transparent;
+  box-shadow: none;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pi-text) 16%, transparent);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--pi-text) 28%, transparent);
-  background-clip: padding-box;
+  background: color-mix(in srgb, var(--pi-text) 24%, transparent);
 }
 
+::-webkit-scrollbar-button,
 ::-webkit-scrollbar-corner {
+  width: 0;
+  height: 0;
   background: transparent;
-}
-
-@media (min-width: 800px) {
-  .pi-sidebar {
-    transition: transform 180ms ease;
-  }
 }
 
 @media (max-width: 799px) {
@@ -1236,6 +1319,16 @@ textarea {
     background: transparent;
   }
 
+  .pi-sidebar-toggle {
+    top: 8px;
+    left: 8px;
+  }
+
+  .pi-sidebar-toggle.is-sidebar,
+  .pi-sidebar-resizer {
+    display: none;
+  }
+
   .pi-main.has-sidebar {
     padding-left: 0;
   }
@@ -1243,6 +1336,11 @@ textarea {
   .pi-topbar {
     grid-template-columns: 64px minmax(0, 1fr) 64px;
     padding: 0 8px;
+  }
+
+  .pi-main:not(.has-sidebar) .pi-topbar-heading,
+  .pi-workbench.is-web .pi-main:not(.has-sidebar) .pi-topbar-heading {
+    padding-left: 34px;
   }
 
   .pi-topbar-actions .pi-icon-button:first-child {
@@ -1294,6 +1392,8 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .pi-sidebar,
   .pi-main,
+  .pi-topbar-heading,
+  .pi-sidebar-resizer,
   .pi-settings-backdrop,
   .pi-settings-drawer {
     transition: none;
@@ -1307,51 +1407,17 @@ textarea {
 /* Screenshot baseline: shared desktop/web Workbench shell. */
 
 .pi-sidebar-titlebar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
   height: var(--pi-sidebar-titlebar-height);
   margin: 0 -10px;
-  padding: 0 0 0 87px;
   --wails-draggable: drag;
-}
-
-.pi-sidebar-titlebar button {
-  position: relative;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  --wails-draggable: no-drag;
-}
-
-.pi-sidebar-titlebar button:hover {
-  background: var(--pi-hover);
-}
-
-.pi-sidebar-titlebar button::before {
-  content: "";
-  position: absolute;
-  inset: 7px 6px;
-  border: 1.5px solid var(--pi-text-secondary);
-  border-radius: 4px;
-}
-
-.pi-sidebar-titlebar button::after {
-  content: "";
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 12px;
-  width: 1.5px;
-  background: var(--pi-text-secondary);
 }
 
 .pi-workbench.is-web .pi-sidebar-titlebar {
   display: none;
+}
+
+.pi-workbench.is-web .pi-sidebar-header {
+  padding-left: 42px;
 }
 
 .pi-sidebar-section-title {
@@ -1517,8 +1583,18 @@ textarea {
   align-items: center;
   gap: 9px;
   min-width: 0;
-  height: 100%;
+  align-self: flex-start;
+  height: var(--pi-sidebar-titlebar-height);
+  transition: padding-left 180ms cubic-bezier(0.22, 1, 0.36, 1);
   --wails-draggable: drag;
+}
+
+.pi-main:not(.has-sidebar) .pi-topbar-heading {
+  padding-left: 106px;
+}
+
+.pi-workbench.is-web .pi-main:not(.has-sidebar) .pi-topbar-heading {
+  padding-left: 26px;
 }
 
 .pi-topbar-heading > svg,
@@ -1899,10 +1975,11 @@ textarea {
 }
 
 .pi-thinking-summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 3px;
-  width: 100%;
+  width: fit-content;
+  max-width: 100%;
   min-height: 26px;
   padding: 0;
   border: 0;
@@ -1932,17 +2009,15 @@ textarea {
 
 .pi-process-summary,
 .pi-tool-summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: flex-start;
   gap: 6px;
+  width: fit-content;
+  max-width: 100%;
   min-height: 28px;
   padding: 2px 1px;
   font-size: 14px;
-}
-
-.pi-process-summary {
-  width: auto;
 }
 
 .pi-process-steps {
@@ -1959,6 +2034,7 @@ textarea {
   margin: 0;
 }
 
+.pi-tool-summary > svg,
 .pi-tool-summary > span {
   flex: 0 0 auto;
 }
@@ -1976,7 +2052,14 @@ textarea {
 }
 
 .pi-tool-summary > .pi-disclosure {
-  margin-left: auto;
+  margin-left: 0;
+  opacity: 0;
+  transition: opacity 100ms ease, transform 120ms ease;
+}
+
+.pi-tool-summary:hover > .pi-disclosure,
+.pi-tool-summary:focus-visible > .pi-disclosure {
+  opacity: 1;
 }
 
 .pi-tool-body {
@@ -1992,61 +2075,86 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 34px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--pi-border);
-  color: var(--pi-text-secondary);
-  font-size: 13px;
-}
-
-.pi-tool-card-header button {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
+  min-height: 21px;
+  padding: 5px 9px 1px;
   color: var(--pi-text-tertiary);
-  cursor: pointer;
+  font-size: 11px;
+  line-height: 15px;
 }
 
-.pi-tool-card-header button:hover {
+.pi-tool-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--pi-text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-tool.is-error .pi-tool-card-status {
+  color: var(--pi-error);
+}
+
+.pi-tool-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 23px;
+  align-items: start;
+  gap: 2px;
+  margin: 1px 4px 2px;
+  padding: 2px 3px 2px 5px;
+  border-radius: 6px;
+  transition: background-color 100ms ease;
+}
+
+.pi-tool-section:hover,
+.pi-tool-section:focus-within {
   background: var(--pi-hover);
+}
+
+.pi-tool-section-content {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pi-tool-input,
 .pi-tool-output {
   max-height: 340px;
   margin: 0;
-  padding: 10px;
+  padding: 4px 1px;
   overflow: auto;
   background: transparent;
   color: var(--pi-text-secondary);
   font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-.pi-tool-output {
-  padding-top: 0;
-  border-top: 0;
-}
-
-.pi-tool-status {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  min-height: 28px;
-  padding: 4px 10px;
-  border-top: 1px solid var(--pi-border);
+.pi-tool-section-copy {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--pi-text-tertiary);
-  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease, background-color 100ms ease, color 100ms ease;
 }
 
-.pi-tool.is-error .pi-tool-status {
-  color: var(--pi-error);
+.pi-tool-section:hover > .pi-tool-section-copy,
+.pi-tool-section:focus-within > .pi-tool-section-copy {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.pi-tool-section-copy:hover {
+  background: var(--pi-selected);
+  color: var(--pi-text-secondary);
 }
 
 .pi-edit-preview pre {
@@ -2056,6 +2164,10 @@ textarea {
   border-left: 3px solid transparent;
   font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap;
+}
+
+.pi-tool-section .pi-edit-preview pre {
+  padding-right: 10px;
 }
 
 .pi-edit-preview .is-removed {
@@ -2174,6 +2286,102 @@ textarea {
 .pi-composer-meta {
   flex-wrap: nowrap;
   gap: 4px;
+}
+
+.pi-context-ring {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 18px;
+  height: 30px;
+  border-radius: 7px;
+  color: var(--pi-text-secondary);
+  cursor: default;
+}
+
+.pi-context-ring:focus {
+  outline: 0;
+}
+
+.pi-context-ring:focus-visible {
+  background: var(--pi-hover);
+  box-shadow: inset 0 0 0 1px var(--pi-border);
+}
+
+.pi-context-ring svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+
+.pi-context-ring circle {
+  fill: none;
+  stroke-width: 1.7;
+}
+
+.pi-context-ring-track {
+  stroke: color-mix(in srgb, var(--pi-text) 13%, transparent);
+}
+
+.pi-context-ring-value {
+  stroke: color-mix(in srgb, var(--pi-text) 60%, transparent);
+  stroke-linecap: round;
+  transition: stroke-dasharray 180ms ease;
+}
+
+.pi-context-tooltip {
+  position: fixed;
+  z-index: 210;
+  width: max-content;
+  min-width: 202px;
+  max-width: calc(100vw - 16px);
+  padding: 8px 10px;
+  border: 1px solid var(--pi-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--pi-bg) 97%, transparent);
+  box-shadow: rgba(0, 0, 0, 0.13) 0 10px 28px;
+  color: var(--pi-text-secondary);
+  pointer-events: none;
+  transform: translateX(-50%);
+  backdrop-filter: blur(16px) saturate(1.1);
+  animation: pi-context-tooltip-enter 100ms ease-out;
+}
+
+.pi-context-tooltip > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.pi-context-tooltip strong {
+  color: var(--pi-text);
+  font-weight: 580;
+  font-variant-numeric: tabular-nums;
+}
+
+.pi-context-tooltip small {
+  display: block;
+  margin-top: 2px;
+  color: var(--pi-text-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pi-context-tooltip-enter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 2px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
 }
 
 .pi-select-trigger {
@@ -2590,7 +2798,8 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pi-select-popover {
+  .pi-select-popover,
+  .pi-context-tooltip {
     animation: none;
   }
 }

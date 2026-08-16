@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { Folder, PanelLeft, Settings } from "lucide-react";
 import type { ApplicationClient } from "../contracts";
 import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
@@ -8,6 +8,11 @@ import { MessageList } from "./MessageList";
 import { SettingsDrawer } from "./SettingsDrawer";
 import { Sidebar } from "./Sidebar";
 import { useApplicationController } from "./useApplicationController";
+import {
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  useResizableSidebar,
+} from "./useResizableSidebar";
 
 export interface PiWorkbenchProps {
   localClient: ApplicationClient;
@@ -48,6 +53,11 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 800);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const controller = useApplicationController(client);
+  const sidebar = useResizableSidebar();
+  const workbenchStyle = {
+    "--pi-sidebar-width": `${sidebar.width}px`,
+  } as CSSProperties;
+  const workbenchClass = `pi-workbench is-${hostKind} ${sidebar.resizing ? "is-resizing" : ""}`;
 
   useEffect(() => () => client.close(), [client]);
   useEffect(() => {
@@ -106,7 +116,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
 
   if (controller.status === "auth") {
     return (
-      <div className={`pi-workbench is-${hostKind}`}>
+      <div className={workbenchClass} style={workbenchStyle}>
         <AuthGate
           title="请输入访问密码。"
           error={controller.error}
@@ -120,7 +130,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
 
   if (controller.status === "connecting") {
     return (
-      <div className={`pi-workbench is-${hostKind}`}>
+      <div className={workbenchClass} style={workbenchStyle}>
         <main className="pi-entry" aria-live="polite">
           <section className="pi-entry-panel">
             <h1>pi</h1>
@@ -133,7 +143,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
 
   if (controller.status === "error" && !controller.snapshot) {
     return (
-      <div className={`pi-workbench is-${hostKind}`}>
+      <div className={workbenchClass} style={workbenchStyle}>
         <main className="pi-entry" aria-live="polite">
           <button className="pi-floating-settings" type="button" aria-label="打开设置" onClick={() => setSettingsOpen(true)}>
             <Settings size={17} />
@@ -151,7 +161,17 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   }
 
   return (
-    <div className={`pi-workbench is-${hostKind}`}>
+    <div className={workbenchClass} style={workbenchStyle}>
+      <button
+        className={`pi-sidebar-toggle ${sidebarOpen ? "is-sidebar" : "is-main"}`}
+        type="button"
+        aria-label={sidebarOpen ? "收起侧栏" : "展开侧栏"}
+        aria-controls="pi-workbench-sidebar"
+        aria-expanded={sidebarOpen}
+        onClick={() => setSidebarOpen((open) => !open)}
+      >
+        <PanelLeft size={18} strokeWidth={1.8} />
+      </button>
       <Sidebar
         open={sidebarOpen}
         sessions={sessions}
@@ -170,14 +190,23 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         onDelete={controller.deleteSession}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+      {sidebarOpen && (
+        <div
+          {...sidebar.separatorProps}
+          className="pi-sidebar-resizer"
+          role="separator"
+          tabIndex={0}
+          aria-label="调整侧栏宽度"
+          aria-controls="pi-workbench-sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuenow={sidebar.width}
+        />
+      )}
       <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""}`}>
         <header className="pi-topbar">
           <div className="pi-topbar-heading">
-            {!sidebarOpen && (
-              <button className="pi-icon-button" type="button" aria-label="展开侧栏" onClick={() => setSidebarOpen(true)}>
-                <PanelLeft size={18} />
-              </button>
-            )}
             <Folder size={18} />
             <div className="pi-topbar-title" title={title}>{title}</div>
           </div>
@@ -199,6 +228,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
             models={controller.models}
             model={controller.selectedModel}
             thinkingLevel={controller.thinkingLevel}
+            contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
             busy={controller.busy}
             onSend={controller.send}
             onAbort={controller.abort}
