@@ -25,12 +25,17 @@ func (m *Model) applyApplicationEvent(event application.Event) []tea.Cmd {
 	case application.AgentSessionEvent:
 		return m.applyAgentEvent(value.Event)
 	case application.OperationEvent:
+		commands := make([]tea.Cmd, 0, 2)
 		if value.Status == application.OperationFailed {
 			m.setStatus(value.Error, statusError)
 		} else {
 			m.setStatus("", statusInfo)
+			if command := m.refreshSelectorForOperation(value.Command); command != nil {
+				commands = append(commands, command)
+			}
 		}
-		return []tea.Cmd{m.requestState()}
+		commands = append(commands, m.requestState())
+		return commands
 	case application.SessionCatalogEvent:
 		if value.Change == application.SessionUpdated {
 			return []tea.Cmd{m.requestState()}
@@ -45,6 +50,7 @@ func (m *Model) applyAgentEvent(event agent.SessionEvent) []tea.Cmd { //nolint:g
 	}
 	refreshState := false
 	refreshSnapshot := false
+	var selectorRefresh tea.Cmd
 	switch value := event.(type) {
 	case agent.AgentStartEvent:
 		m.state.IsPromptRunning = true
@@ -80,7 +86,9 @@ func (m *Model) applyAgentEvent(event agent.SessionEvent) []tea.Cmd { //nolint:g
 		m.state.PendingMessageCount = len(value.SteeringMessages) + len(value.FollowUpMessages)
 		m.setStatus(fmt.Sprintf("Queued messages: %d", m.state.PendingMessageCount), statusInfo)
 	case agent.ThinkingLevelChangedEvent:
+		previous := m.state
 		m.state.ThinkingLevel = value.Level
+		selectorRefresh = m.refreshSelectorForStateChange(previous, m.state)
 		m.setStatus("Thinking level: "+string(value.Level), statusSuccess)
 	case agent.CompactionStartEvent:
 		m.state.IsCompacting = true
@@ -135,7 +143,10 @@ func (m *Model) applyAgentEvent(event agent.SessionEvent) []tea.Cmd { //nolint:g
 		refreshSnapshot, refreshState = true, true
 	}
 	m.syncComposerState()
-	commands := make([]tea.Cmd, 0, 2)
+	commands := make([]tea.Cmd, 0, 3)
+	if selectorRefresh != nil {
+		commands = append(commands, selectorRefresh)
+	}
 	if refreshSnapshot {
 		commands = append(commands, m.requestSnapshot())
 	} else if refreshState {
@@ -384,6 +395,12 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		if message.request == m.restoreQueueRequest {
 			m.restoreQueueRequest = 0
 		}
+		if _, modelSelection := message.command.(application.SetModelCommand); modelSelection && m.selector == nil {
+			name, query, slash := splitSlashCommand(strings.TrimSpace(message.draft))
+			if slash && name == "model" && query != "" {
+				return []tea.Cmd{m.openModelSelector(query)}
+			}
+		}
 		m.composer.RestoreDraftIfEmpty(message.draft, message.draftImages)
 		m.updateSlashPalette()
 		m.setStatus(message.err.Error(), statusError)
@@ -419,12 +436,21 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 			m.setStatus("Queue cleared", statusSuccess)
 		}
 	case application.ReloadResult:
+		if command := m.closeSelectorForCommand(application.CommandReload); command != nil {
+			commands = append(commands, command)
+		}
 		m.setStatus("Resources reloaded", statusSuccess)
 		refreshSnapshot, refreshState, refreshCommands = true, true, true
 	case application.SetModelResult:
+		if command := m.closeSelectorForCommand(application.CommandSetModel); command != nil {
+			commands = append(commands, command)
+		}
 		m.state.Model, m.state.HasModel = result.Model, true
 		m.setStatus("Model: "+result.Model.Provider()+"/"+result.Model.ID(), statusSuccess)
 	case application.SetThinkingLevelResult:
+		if command := m.closeSelectorForCommand(application.CommandSetThinkingLevel); command != nil {
+			commands = append(commands, command)
+		}
 		if command, ok := message.command.(application.SetThinkingLevelCommand); ok {
 			m.state.ThinkingLevel = command.Level
 		}
@@ -463,6 +489,12 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		}
 		m.appendLocalNotice("Tools", strings.Join(lines, "\n"))
 		m.setStatus("Tool state loaded", statusSuccess)
+	case application.SetToolsResult:
+		if command := m.closeSelectorForCommand(application.CommandSetTools); command != nil {
+			commands = append(commands, command)
+		}
+		m.setStatus("Tools updated", statusSuccess)
+		refreshState = true
 	case application.BashResult:
 		m.state.IsBashRunning = false
 		m.setStatus("Bash completed", statusSuccess)

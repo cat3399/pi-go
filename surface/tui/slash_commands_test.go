@@ -64,7 +64,7 @@ func TestModelRendersSlashPaletteAboveComposer(t *testing.T) {
 	model.composer.SetDraft("/thi", nil)
 	model.slashPalette.Update(model.composer.Value())
 	view := StripTerminalSequences(model.View().Content)
-	if !strings.Contains(view, "/thinking <level>") || !strings.Contains(view, "reasoning level") {
+	if !strings.Contains(view, "/thinking [level]") || !strings.Contains(view, "reasoning level") {
 		t.Fatalf("slash palette view:\n%s", view)
 	}
 	if rows := strings.Count(model.View().Content, "\n") + 1; rows != model.height {

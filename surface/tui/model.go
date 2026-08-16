@@ -51,11 +51,14 @@ type Model struct {
 	subscription *application.EventSubscription
 	closed       bool
 
-	transcript   transcriptModel
-	renderer     *contentRenderer
-	composer     composerModel
-	slashPalette slashPaletteModel
-	setClipboard func(string) tea.Cmd
+	transcript         transcriptModel
+	renderer           *contentRenderer
+	composer           composerModel
+	slashPalette       slashPaletteModel
+	setClipboard       func(string) tea.Cmd
+	selector           *selectorModel
+	selectorCancel     context.CancelFunc
+	selectorGeneration uint64
 
 	width  int
 	height int
@@ -106,6 +109,10 @@ func (m *Model) Close() {
 		return
 	}
 	m.closed = true
+	if m.selectorCancel != nil {
+		m.selectorCancel()
+		m.selectorCancel = nil
+	}
 	m.closeSubscription()
 }
 
@@ -127,6 +134,9 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		m.composer.SetMaxHeight(max(1, m.height-4))
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.selector != nil {
+			return m, m.handleSelectorKey(message)
+		}
 		if handled, command := m.handleKey(message); handled {
 			return m, command
 		}
@@ -179,8 +189,7 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		if message.err != nil {
 			m.setStatus("State refresh failed: "+message.err.Error(), statusError)
 		} else if message.active {
-			m.state = message.state
-			m.syncComposerState()
+			return m, m.replaceState(message.state)
 		}
 		return m, nil
 	case snapshotLoadedMsg:
@@ -194,6 +203,8 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 			m.updateSlashPalette()
 		}
 		return m, nil
+	case selectorLoadedMsg:
+		return m, m.handleSelectorLoaded(message)
 	case commandFinishedMsg:
 		commands = append(commands, m.handleCommandFinished(message)...)
 		return m, tea.Batch(commands...)
@@ -202,6 +213,9 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		return m, tea.Batch(commands...)
 	}
 
+	if m.selector != nil {
+		return m, m.selector.Update(message)
+	}
 	if command := m.composer.Update(message); command != nil {
 		commands = append(commands, command)
 	}
@@ -230,6 +244,8 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 	}
 	switch keyName {
+	case "ctrl+l":
+		return true, m.openModelSelector("")
 	case "up", "down":
 		if m.composer.NavigateHistory(keyName) {
 			m.updateSlashPalette()
@@ -309,6 +325,18 @@ func (m *Model) submit(followUp bool) tea.Cmd {
 		m.composer.Reset()
 		m.setStatus("Opening session "+action.sessionID+"…", statusInfo)
 		return m.openSession(action.sessionID)
+	case inputActionModelSelector:
+		m.composer.Reset()
+		return m.openModelSelector(action.query)
+	case inputActionSessionSelector:
+		m.composer.Reset()
+		return m.openSessionSelector("")
+	case inputActionThinkingSelector:
+		m.composer.Reset()
+		return m.openThinkingSelector()
+	case inputActionToolsSelector:
+		m.composer.Reset()
+		return m.openToolsSelector()
 	case inputActionDispatch:
 		switch action.command.(type) {
 		case application.PromptCommand, application.BashCommand:
@@ -421,6 +449,13 @@ func (m *Model) syncComposerState() {
 	m.updateSlashPalette()
 }
 
+func (m *Model) replaceState(state application.State) tea.Cmd {
+	previous := m.state
+	m.state = state
+	m.syncComposerState()
+	return m.refreshSelectorForStateChange(previous, m.state)
+}
+
 func (m *Model) updateSlashPalette() {
 	if m.composer.HasImages() {
 		m.slashPalette.Hide(m.composer.Value())
@@ -508,12 +543,18 @@ func (m *Model) handleSnapshot(message snapshotLoadedMsg) []tea.Cmd {
 	m.liveAssistantID = ""
 	m.snapshotNeeded = false
 	m.snapshotInFlight = 0
+	var selectorRefresh tea.Cmd
 	if message.snapshot.LiveState != nil {
-		m.state = *message.snapshot.LiveState
+		selectorRefresh = m.replaceState(*message.snapshot.LiveState)
+	} else {
+		m.syncComposerState()
 	}
 	m.revision = message.snapshot.Revision
-	m.syncComposerState()
-	return []tea.Cmd{m.startSubscription()}
+	commands := []tea.Cmd{m.startSubscription()}
+	if selectorRefresh != nil {
+		commands = append(commands, selectorRefresh)
+	}
+	return commands
 }
 
 func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
@@ -527,6 +568,10 @@ func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
 	if message.state.SessionID == "" || message.snapshot.SessionID != message.state.SessionID {
 		m.setStatus("Opened session returned an inconsistent snapshot", statusError)
 		return nil
+	}
+	commands := make([]tea.Cmd, 0, 3)
+	if m.selector != nil {
+		commands = append(commands, m.closeSelector())
 	}
 	m.closeSubscription()
 	m.sessionGeneration++
@@ -542,12 +587,13 @@ func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
 	m.liveAssistantID = ""
 	m.syncComposerState()
 	m.setStatus("Opened session "+shortID(m.sessionID), statusSuccess)
-	return []tea.Cmd{m.startSubscription(), m.requestCommands()}
+	commands = append(commands, m.startSubscription(), m.requestCommands())
+	return commands
 }
 
 func (m *Model) View() tea.View {
 	width, height := max(1, m.width), max(1, m.height)
-	if width < 20 || height < 5 || (m.composer.HasImages() && height < 6) {
+	if width < 20 || height < 5 || (m.selector == nil && m.composer.HasImages() && height < 6) {
 		content := Truncate("pi-go: terminal too small", width, "…", false)
 		if height > 1 {
 			content += strings.Repeat("\n", height-1)
@@ -556,6 +602,9 @@ func (m *Model) View() tea.View {
 		view.AltScreen = m.mode == ScreenFull
 		view.WindowTitle = "pi-go"
 		return view
+	}
+	if m.selector != nil {
+		return m.renderSelectorView(width, height)
 	}
 	composer := m.composer.View()
 	composerHeight := lipgloss.Height(composer)
@@ -606,19 +655,20 @@ func (m *Model) renderHelp(width, height int) string {
 		"PgUp / PgDn        scroll conversation",
 		"Ctrl+End           follow live output",
 		"Ctrl+O             collapse / expand tool output",
+		"Ctrl+L             open model selector",
 		"Up / Down          browse prompt history at editor edges",
 		"Alt+Up             restore queued messages",
 		"Ctrl+D             quit when editor is empty",
 		"",
 		"/help /hotkeys     show this page",
 		"/new               create a session",
-		"/resume <id>       open a session",
-		"/model p/id        switch model",
-		"/thinking <level>  switch reasoning level",
+		"/resume [id]       select or open a session",
+		"/model [p/id]      select or switch model",
+		"/thinking [level]  select reasoning level",
 		"/compact [text]    compact context",
 		"/reload            reload resources",
 		"/copy              copy the last assistant reply",
-		"/tools             show tool state",
+		"/tools             configure active tools",
 		"!cmd / !!cmd       bash in/out of model context",
 	}
 	result := make([]string, 0, height)

@@ -19,12 +19,17 @@ const (
 	inputActionHelp
 	inputActionNewSession
 	inputActionOpenSession
+	inputActionModelSelector
+	inputActionSessionSelector
+	inputActionThinkingSelector
+	inputActionToolsSelector
 )
 
 type inputAction struct {
 	kind      inputActionKind
 	command   application.Command
 	sessionID string
+	query     string
 }
 
 func planInput(text string, state application.State, followUp bool) (inputAction, error) {
@@ -72,7 +77,7 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 			return inputAction{kind: inputActionNewSession}, nil
 		case "resume":
 			if argument == "" {
-				return inputAction{}, errors.New("usage: /resume <session-id>")
+				return inputAction{kind: inputActionSessionSelector}, nil
 			}
 			return inputAction{kind: inputActionOpenSession, sessionID: argument}, nil
 		case "abort":
@@ -89,14 +94,17 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 			}
 			return inputAction{kind: inputActionDispatch, command: application.SetSessionNameCommand{Name: argument}}, nil
 		case "model":
-			providerID, modelID, ok := strings.Cut(argument, "/")
-			if !ok || strings.TrimSpace(providerID) == "" || strings.TrimSpace(modelID) == "" {
-				return inputAction{}, errors.New("usage: /model <provider>/<model-id>")
+			providerID, modelID, exact := strings.Cut(argument, "/")
+			if exact && strings.TrimSpace(providerID) != "" && strings.TrimSpace(modelID) != "" {
+				return inputAction{kind: inputActionDispatch, command: application.SetModelCommand{
+					Provider: strings.TrimSpace(providerID), ModelID: strings.TrimSpace(modelID),
+				}}, nil
 			}
-			return inputAction{kind: inputActionDispatch, command: application.SetModelCommand{
-				Provider: strings.TrimSpace(providerID), ModelID: strings.TrimSpace(modelID),
-			}}, nil
+			return inputAction{kind: inputActionModelSelector, query: argument}, nil
 		case "thinking":
+			if argument == "" {
+				return inputAction{kind: inputActionThinkingSelector}, nil
+			}
 			level := provider.ThinkingLevel(strings.TrimSpace(argument))
 			if !level.Valid() {
 				return inputAction{}, fmt.Errorf("invalid thinking level %q", argument)
@@ -107,7 +115,10 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 		case "copy":
 			return inputAction{kind: inputActionDispatch, command: application.GetLastAssistantTextCommand{}}, nil
 		case "tools":
-			return inputAction{kind: inputActionDispatch, command: application.GetToolsCommand{}}, nil
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /tools")
+			}
+			return inputAction{kind: inputActionToolsSelector}, nil
 		}
 		// Unknown slash commands remain prompts: templates, skills, and future
 		// extension commands are resolved by the transport-neutral core.

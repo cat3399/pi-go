@@ -63,6 +63,19 @@ func (m *composerModel) Init() tea.Cmd {
 	return m.input.Focus()
 }
 
+func (m *composerModel) Focus() tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	return m.input.Focus()
+}
+
+func (m *composerModel) Blur() {
+	if m != nil {
+		m.input.Blur()
+	}
+}
+
 func (m *composerModel) Update(message tea.Msg) tea.Cmd {
 	if m == nil {
 		return nil

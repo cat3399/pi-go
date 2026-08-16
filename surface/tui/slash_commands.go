@@ -28,9 +28,9 @@ func builtinSlashCommands() []slashCommand {
 	return []slashCommand{
 		{name: "help", description: "Show commands and keyboard shortcuts", source: "builtin"},
 		{name: "new", description: "Start a new session", source: "builtin"},
-		{name: "resume", description: "Open another session", argumentHint: "<session-id>", source: "builtin"},
-		{name: "model", description: "Switch the active model", argumentHint: "<provider/model>", source: "builtin"},
-		{name: "thinking", description: "Set the reasoning level", argumentHint: "<level>", source: "builtin"},
+		{name: "resume", description: "Open the session selector", argumentHint: "[session-id]", source: "builtin"},
+		{name: "model", description: "Open the model selector", argumentHint: "[provider/model or search]", source: "builtin"},
+		{name: "thinking", description: "Choose the reasoning level", argumentHint: "[level]", source: "builtin"},
 		{name: "compact", description: "Compact the current context", argumentHint: "[instructions]", source: "builtin"},
 		{name: "abort", description: "Abort the active operation", source: "builtin"},
 		{name: "clear-queue", description: "Clear queued steering and follow-up messages", source: "builtin"},
@@ -38,7 +38,7 @@ func builtinSlashCommands() []slashCommand {
 		{name: "name", description: "Set the session display name", argumentHint: "<name>", source: "builtin"},
 		{name: "stats", description: "Show session statistics", source: "builtin"},
 		{name: "copy", description: "Copy the last assistant reply", source: "builtin"},
-		{name: "tools", description: "Show available tool state", source: "builtin"},
+		{name: "tools", description: "Configure available tools", source: "builtin"},
 		{name: "quit", description: "Exit pi-go", source: "builtin"},
 	}
 }

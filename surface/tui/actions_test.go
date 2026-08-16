@@ -44,6 +44,28 @@ func TestPlanInputKeepsSurfaceActionsOutOfCoreCommands(t *testing.T) {
 	if err != nil || newSession.kind != inputActionNewSession || newSession.command != nil {
 		t.Fatalf("new = %#v, err=%v", newSession, err)
 	}
+	resumeSelector, err := planInput("/resume", application.State{}, false)
+	if err != nil || resumeSelector.kind != inputActionSessionSelector {
+		t.Fatalf("resume selector = %#v, err=%v", resumeSelector, err)
+	}
+	modelSelector, err := planInput("/model deepseek-v4", application.State{}, false)
+	if err != nil || modelSelector.kind != inputActionModelSelector || modelSelector.query != "deepseek-v4" {
+		t.Fatalf("model selector = %#v, err=%v", modelSelector, err)
+	}
+	exactModel, err := planInput("/model openrouter/anthropic/claude-sonnet", application.State{}, false)
+	setModel, ok := exactModel.command.(application.SetModelCommand)
+	if err != nil || exactModel.kind != inputActionDispatch || !ok ||
+		setModel.Provider != "openrouter" || setModel.ModelID != "anthropic/claude-sonnet" {
+		t.Fatalf("exact model = %#v, err=%v", exactModel, err)
+	}
+	thinkingSelector, err := planInput("/thinking", application.State{}, false)
+	if err != nil || thinkingSelector.kind != inputActionThinkingSelector {
+		t.Fatalf("thinking selector = %#v, err=%v", thinkingSelector, err)
+	}
+	toolsSelector, err := planInput("/tools", application.State{}, false)
+	if err != nil || toolsSelector.kind != inputActionToolsSelector {
+		t.Fatalf("tools selector = %#v, err=%v", toolsSelector, err)
+	}
 }
 
 func TestPlanInputMapsCoreCommandsWithoutLosingArguments(t *testing.T) {
@@ -54,10 +76,6 @@ func TestPlanInputMapsCoreCommandsWithoutLosingArguments(t *testing.T) {
 		{"!! printf hi", func(command application.Command) bool {
 			value, ok := command.(application.BashCommand)
 			return ok && value.Command == "printf hi" && value.ExcludeFromContext
-		}},
-		{"/model deepseek/deepseek-v4-flash", func(command application.Command) bool {
-			value, ok := command.(application.SetModelCommand)
-			return ok && value.Provider == "deepseek" && value.ModelID == "deepseek-v4-flash"
 		}},
 		{"/thinking high", func(command application.Command) bool {
 			value, ok := command.(application.SetThinkingLevelCommand)

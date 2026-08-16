@@ -35,6 +35,17 @@ type commandsLoadedMsg struct {
 	err               error
 }
 
+type selectorLoadedMsg struct {
+	kind               selectorKind
+	selectorGeneration uint64
+	sessionID          string
+	sessionGeneration  uint64
+	models             application.ModelsSnapshot
+	sessions           []application.SessionInfo
+	tools              []application.ToolInfo
+	err                error
+}
+
 type stateLoadedMsg struct {
 	sessionID         string
 	sessionGeneration uint64
@@ -134,6 +145,69 @@ func loadCommandsCmd(ctx context.Context, api application.API, sessionID string,
 		}
 		if commands, ok := result.(application.GetCommandsResult); ok {
 			message.commands = append([]application.SlashCommandInfo(nil), commands.Commands...)
+		} else if err == nil {
+			message.err = application.ErrInvalidCommand
+		}
+		return message
+	}
+}
+
+func loadModelSelectorCmd(
+	ctx context.Context,
+	api application.API,
+	cwd, sessionID string,
+	sessionGeneration, selectorGeneration uint64,
+	kind selectorKind,
+) tea.Cmd {
+	return func() tea.Msg {
+		models, err := api.ListModels(ctx, cwd)
+		return selectorLoadedMsg{
+			kind: kind, selectorGeneration: selectorGeneration,
+			sessionID: sessionID, sessionGeneration: sessionGeneration,
+			models: models, err: err,
+		}
+	}
+}
+
+func loadSessionSelectorCmd(
+	ctx context.Context,
+	api application.API,
+	sessionID string,
+	sessionGeneration, selectorGeneration uint64,
+) tea.Cmd {
+	return func() tea.Msg {
+		if err := context.Cause(ctx); err != nil {
+			return selectorLoadedMsg{
+				kind: selectorSessions, selectorGeneration: selectorGeneration,
+				sessionID: sessionID, sessionGeneration: sessionGeneration, err: err,
+			}
+		}
+		sessions, err := api.ListSessions()
+		if err == nil {
+			err = context.Cause(ctx)
+		}
+		return selectorLoadedMsg{
+			kind: selectorSessions, selectorGeneration: selectorGeneration,
+			sessionID: sessionID, sessionGeneration: sessionGeneration,
+			sessions: append([]application.SessionInfo(nil), sessions...), err: err,
+		}
+	}
+}
+
+func loadToolSelectorCmd(
+	ctx context.Context,
+	api application.API,
+	sessionID string,
+	sessionGeneration, selectorGeneration uint64,
+) tea.Cmd {
+	return func() tea.Msg {
+		result, err := api.Dispatch(ctx, sessionID, application.GetToolsCommand{})
+		message := selectorLoadedMsg{
+			kind: selectorTools, selectorGeneration: selectorGeneration,
+			sessionID: sessionID, sessionGeneration: sessionGeneration, err: err,
+		}
+		if tools, ok := result.(application.GetToolsResult); ok {
+			message.tools = append([]application.ToolInfo(nil), tools.Tools...)
 		} else if err == nil {
 			message.err = application.ErrInvalidCommand
 		}
