@@ -1277,6 +1277,7 @@ textarea {
 }
 
 ::-webkit-scrollbar-thumb {
+  border: 0;
   border-radius: 999px;
   background: transparent;
   box-shadow: none;
@@ -2142,45 +2143,64 @@ textarea {
 }
 
 .pi-tool-section {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 23px;
-  align-items: start;
-  gap: 2px;
+  --pi-tool-section-surface: transparent;
+  position: relative;
   margin: 1px 4px 2px;
-  padding: 2px 3px 2px 5px;
+  padding: 2px 2px 2px 5px;
   border-radius: 6px;
+  background: var(--pi-tool-section-surface);
   transition: background-color 100ms ease;
 }
 
 .pi-tool-section:hover,
 .pi-tool-section:focus-within {
-  background: var(--pi-hover);
+  --pi-tool-section-surface: color-mix(in srgb, var(--pi-text) 5.5%, #f7f7f7);
 }
 
 .pi-tool-section-content {
   min-width: 0;
-  overflow: hidden;
 }
 
 .pi-tool-input,
 .pi-tool-output {
   max-height: 340px;
   margin: 0;
-  padding: 4px 1px;
+  padding: 4px 36px 4px 1px;
   overflow: auto;
-  background: transparent;
+  border: 0;
+  outline: 0;
+  background: var(--pi-tool-section-surface);
   color: var(--pi-text-secondary);
   font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
+  scrollbar-color: transparent var(--pi-tool-section-surface);
   white-space: pre-wrap;
 }
 
+.pi-tool-input:hover,
+.pi-tool-output:hover {
+  scrollbar-color: color-mix(in srgb, var(--pi-text) 18%, transparent) var(--pi-tool-section-surface);
+}
+
+.pi-tool-input::-webkit-scrollbar,
+.pi-tool-output::-webkit-scrollbar,
+.pi-tool-input::-webkit-scrollbar-track,
+.pi-tool-output::-webkit-scrollbar-track {
+  border: 0;
+  outline: 0;
+  background: var(--pi-tool-section-surface);
+  box-shadow: none;
+}
+
 .pi-tool-section-copy {
+  position: absolute;
+  z-index: 1;
+  top: 3px;
+  right: 11px;
   display: grid;
   place-items: center;
   width: 23px;
   height: 23px;
-  margin-top: 1px;
   padding: 0;
   border: 0;
   border-radius: 6px;
