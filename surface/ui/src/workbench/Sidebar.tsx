@@ -1,6 +1,7 @@
 import { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Folder, FolderOpen, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { SessionInfo } from "../contracts";
+import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 
 interface SidebarProps {
   open: boolean;
@@ -239,6 +240,7 @@ function ProjectSessions(props: {
 export function Sidebar(props: SidebarProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
+  const sessionListRef = useRef<HTMLElement>(null);
   const projects = useMemo(() => {
     const groups = new Map<string, SessionInfo[]>();
     for (const session of props.sessions) {
@@ -291,21 +293,24 @@ export function Sidebar(props: SidebarProps) {
           <SquarePen size={16} />
           <span>新会话</span>
         </button>
-        <nav className="pi-session-list">
-          {projects.length > 0 && <div className="pi-sidebar-section-title">项目</div>}
-          {projects.map((project) => (
-            <ProjectSessions
-              key={project.root}
-              project={project}
-              activeSessionId={props.activeSessionId}
-              runningSessionIds={runningSessionIds}
-              onNewSession={props.onNewSession}
-              onSelect={props.onSelect}
-              onRename={props.onRename}
-              onDelete={props.onDelete}
-            />
-          ))}
-        </nav>
+        <div className="pi-session-scroll pi-overlay-scroll-host">
+          <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
+            {projects.length > 0 && <div className="pi-sidebar-section-title">项目</div>}
+            {projects.map((project) => (
+              <ProjectSessions
+                key={project.root}
+                project={project}
+                activeSessionId={props.activeSessionId}
+                runningSessionIds={runningSessionIds}
+                onNewSession={props.onNewSession}
+                onSelect={props.onSelect}
+                onRename={props.onRename}
+                onDelete={props.onDelete}
+              />
+            ))}
+          </nav>
+          <OverlayScrollbar viewportRef={sessionListRef} />
+        </div>
         <div className="pi-sidebar-profile" ref={profileRef}>
           {profileOpen && (
             <div className="pi-profile-menu">

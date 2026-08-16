@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
+import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
 
 interface MessageListProps {
@@ -113,6 +114,7 @@ function ToolDataSection(props: {
   children: ReactNode;
 }) {
   const [copied, setCopied] = useState(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const label = props.kind === "input" ? "输入" : "输出";
 
   const copy = async () => {
@@ -122,8 +124,8 @@ function ToolDataSection(props: {
   };
 
   return (
-    <div className={`pi-tool-section is-${props.kind}`}>
-      <div className="pi-tool-section-content">{props.children}</div>
+    <div className={`pi-tool-section pi-overlay-scroll-host is-${props.kind}`}>
+      <div ref={viewportRef} className="pi-tool-section-content pi-overlay-scroll-viewport">{props.children}</div>
       <button
         className="pi-tool-section-copy"
         type="button"
@@ -132,6 +134,7 @@ function ToolDataSection(props: {
       >
         {copied ? <Check size={13} /> : <Copy size={13} />}
       </button>
+      <OverlayScrollbar viewportRef={viewportRef} />
     </div>
   );
 }
@@ -594,6 +597,7 @@ function Turn(props: {
 }
 
 export function MessageList({ messages, entryIds, streamingMessage, busy, onFork }: MessageListProps) {
+  const transcriptRef = useRef<HTMLDivElement>(null);
   const toolResults = useMemo(() => {
     const values = new Map<string, AgentMessage>();
     for (const message of messages) {
@@ -622,39 +626,42 @@ export function MessageList({ messages, entryIds, streamingMessage, busy, onFork
   const activeTurnIndex = turns.length - 1;
 
   return (
-    <div className="pi-transcript" aria-live="polite">
-      <div className="pi-transcript-inner">
-        {leading.map(({ message, entryId }, index) => (
-          <Message
-            key={String(message.id ?? `leading-${message.role}-${index}`)}
-            message={message}
-            toolResults={toolResults}
-            entryId={entryId}
-            onFork={onFork}
-          />
-        ))}
-        {turns.map((turn, index) => (
-          <Turn
-            key={String(turn.anchor.message.id ?? `turn-${index}`)}
-            turn={turn}
-            toolResults={toolResults}
-            streamingMessage={index === activeTurnIndex ? streamingMessage : null}
-            busy={index === activeTurnIndex && busy}
-            active={index === activeTurnIndex}
-            onFork={onFork}
-          />
-        ))}
-        {turns.length === 0 && streamingMessage && (
-          <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
-        )}
-        {turns.length === 0 && busy && !streamingMessage && (
-          <div className="pi-working" role="status">
-            <span />
-            <span />
-            <span />
-          </div>
-        )}
+    <div className="pi-transcript-scroll pi-overlay-scroll-host">
+      <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite">
+        <div className="pi-transcript-inner">
+          {leading.map(({ message, entryId }, index) => (
+            <Message
+              key={String(message.id ?? `leading-${message.role}-${index}`)}
+              message={message}
+              toolResults={toolResults}
+              entryId={entryId}
+              onFork={onFork}
+            />
+          ))}
+          {turns.map((turn, index) => (
+            <Turn
+              key={String(turn.anchor.message.id ?? `turn-${index}`)}
+              turn={turn}
+              toolResults={toolResults}
+              streamingMessage={index === activeTurnIndex ? streamingMessage : null}
+              busy={index === activeTurnIndex && busy}
+              active={index === activeTurnIndex}
+              onFork={onFork}
+            />
+          ))}
+          {turns.length === 0 && streamingMessage && (
+            <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
+          )}
+          {turns.length === 0 && busy && !streamingMessage && (
+            <div className="pi-working" role="status">
+              <span />
+              <span />
+              <span />
+            </div>
+          )}
+        </div>
       </div>
+      <OverlayScrollbar viewportRef={transcriptRef} />
     </div>
   );
 }

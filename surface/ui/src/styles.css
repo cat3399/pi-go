@@ -188,9 +188,19 @@ textarea {
   background: var(--pi-hover);
 }
 
-.pi-session-list {
+.pi-session-scroll {
+  position: relative;
+  width: calc(100% + 10px);
+  min-width: 0;
   min-height: 0;
   margin-right: -10px;
+  overflow: hidden;
+}
+
+.pi-session-list {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
   padding: 0 10px 12px 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -419,8 +429,20 @@ textarea {
   place-items: center;
 }
 
-.pi-transcript {
+.pi-transcript-scroll {
+  position: relative;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+.pi-transcript {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -1298,6 +1320,72 @@ textarea {
   background: transparent;
 }
 
+.pi-overlay-scroll-host {
+  position: relative;
+  min-width: 0;
+}
+
+.pi-overlay-scroll-viewport {
+  scrollbar-color: transparent transparent !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none;
+}
+
+.pi-overlay-scroll-viewport::-webkit-scrollbar,
+.pi-overlay-scroll-viewport::-webkit-scrollbar-track,
+.pi-overlay-scroll-viewport::-webkit-scrollbar-thumb {
+  display: none;
+  width: 0;
+  height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pi-overlay-scrollbar {
+  position: absolute;
+  z-index: 6;
+  top: 4px;
+  right: 1px;
+  bottom: 4px;
+  width: 7px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.pi-overlay-scrollbar.is-scrollable {
+  pointer-events: auto;
+}
+
+.pi-overlay-scrollbar-thumb {
+  position: absolute;
+  top: 0;
+  right: 1px;
+  width: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pi-text) 18%, transparent);
+  opacity: 0;
+  transform-origin: top;
+  transition: opacity 100ms ease, background-color 100ms ease;
+  will-change: height, transform;
+}
+
+.pi-overlay-scroll-host:hover > .pi-overlay-scrollbar .pi-overlay-scrollbar-thumb,
+.pi-overlay-scroll-host:focus-within > .pi-overlay-scrollbar .pi-overlay-scrollbar-thumb,
+.pi-overlay-scrollbar.is-active .pi-overlay-scrollbar-thumb,
+.pi-overlay-scrollbar:hover .pi-overlay-scrollbar-thumb {
+  opacity: 1;
+}
+
+.pi-overlay-scrollbar:hover .pi-overlay-scrollbar-thumb {
+  background: color-mix(in srgb, var(--pi-text) 26%, transparent);
+}
+
 @media (max-width: 799px) {
   .pi-sidebar {
     width: min(310px, 86vw);
@@ -2159,42 +2247,30 @@ textarea {
 
 .pi-tool-section-content {
   min-width: 0;
+  max-height: 340px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  background: var(--pi-tool-section-surface);
 }
 
 .pi-tool-input,
 .pi-tool-output {
-  max-height: 340px;
   margin: 0;
   padding: 4px 36px 4px 1px;
-  overflow: auto;
   border: 0;
   outline: 0;
-  background: var(--pi-tool-section-surface);
+  background: transparent;
   color: var(--pi-text-secondary);
   font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
-  scrollbar-color: transparent var(--pi-tool-section-surface);
   white-space: pre-wrap;
-}
-
-.pi-tool-input:hover,
-.pi-tool-output:hover {
-  scrollbar-color: color-mix(in srgb, var(--pi-text) 18%, transparent) var(--pi-tool-section-surface);
-}
-
-.pi-tool-input::-webkit-scrollbar,
-.pi-tool-output::-webkit-scrollbar,
-.pi-tool-input::-webkit-scrollbar-track,
-.pi-tool-output::-webkit-scrollbar-track {
-  border: 0;
-  outline: 0;
-  background: var(--pi-tool-section-surface);
-  box-shadow: none;
 }
 
 .pi-tool-section-copy {
   position: absolute;
-  z-index: 1;
+  z-index: 2;
   top: 3px;
   right: 11px;
   display: grid;
