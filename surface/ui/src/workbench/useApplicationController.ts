@@ -48,7 +48,7 @@ export interface ApplicationController {
   busy: boolean;
   login(password: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
-  beginNewSession(): void;
+  beginNewSession(cwd?: string): void;
   send(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   abort(): Promise<void>;
   clearQueue(): Promise<string[]>;
@@ -440,8 +440,8 @@ export function useApplicationController(client: ApplicationClient): Application
     }
   }, [loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
-  const beginNewSession = useCallback(() => {
-    const nextCwd = sessionView?.info.cwd || newSessionCwd || snapshot?.defaultCwd || "";
+  const beginNewSession = useCallback((cwd?: string) => {
+    const nextCwd = cwd?.trim() || sessionView?.info.cwd || newSessionCwd || snapshot?.defaultCwd || "";
     activeSessionRef.current = null;
     newSessionModelOverriddenRef.current = false;
     newSessionThinkingOverriddenRef.current = false;

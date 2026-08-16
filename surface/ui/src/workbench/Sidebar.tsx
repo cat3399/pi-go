@@ -1,5 +1,5 @@
 import { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Folder, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { Check, Folder, FolderOpen, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { SessionInfo } from "../contracts";
 
 interface SidebarProps {
@@ -8,7 +8,7 @@ interface SidebarProps {
   runningSessionIds: string[];
   activeSessionId: string | null;
   onClose(): void;
-  onNewSession(): void;
+  onNewSession(cwd?: string): void;
   onSelect(sessionId: string): void;
   onRename(sessionId: string, name: string): Promise<void>;
   onDelete(sessionId: string): Promise<void>;
@@ -183,6 +183,7 @@ function ProjectSessions(props: {
   project: ProjectGroup;
   activeSessionId: string | null;
   runningSessionIds: Set<string>;
+  onNewSession(cwd: string): void;
   onSelect(sessionId: string): void;
   onRename(sessionId: string, name: string): Promise<void>;
   onDelete(sessionId: string): Promise<void>;
@@ -196,11 +197,26 @@ function ProjectSessions(props: {
 
   return (
     <div className={`pi-project ${open ? "is-open" : ""}`}>
-      <button className="pi-project-row" type="button" title={props.project.root} onClick={() => setOpen((value) => !value)}>
-        <Folder size={16} />
-        <span>{props.project.name}</span>
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-      </button>
+      <div className="pi-project-row">
+        <button
+          className="pi-project-toggle"
+          type="button"
+          title={props.project.root}
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? <FolderOpen size={16} /> : <Folder size={16} />}
+          <span>{props.project.name}</span>
+        </button>
+        <button
+          className="pi-project-new-session"
+          type="button"
+          aria-label={`在 ${props.project.name} 中新建对话`}
+          onClick={() => props.onNewSession(props.project.root)}
+        >
+          <SquarePen size={15} />
+        </button>
+      </div>
       {open && (
         <div className="pi-project-sessions">
           {props.project.sessions.map((session) => (
@@ -271,7 +287,7 @@ export function Sidebar(props: SidebarProps) {
             <X size={18} />
           </button>
         </header>
-        <button className="pi-new-session" type="button" onClick={props.onNewSession}>
+        <button className="pi-new-session" type="button" onClick={() => props.onNewSession()}>
           <SquarePen size={16} />
           <span>新会话</span>
         </button>
@@ -283,6 +299,7 @@ export function Sidebar(props: SidebarProps) {
               project={project}
               activeSessionId={props.activeSessionId}
               runningSessionIds={runningSessionIds}
+              onNewSession={props.onNewSession}
               onSelect={props.onSelect}
               onRename={props.onRename}
               onDelete={props.onDelete}

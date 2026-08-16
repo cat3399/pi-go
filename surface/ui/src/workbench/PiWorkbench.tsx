@@ -178,8 +178,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
         activeSessionId={controller.activeSessionId}
         onClose={() => setSidebarOpen(false)}
-        onNewSession={() => {
-          controller.beginNewSession();
+        onNewSession={(cwd) => {
+          controller.beginNewSession(cwd);
           closeMobileSidebar();
         }}
         onSelect={(sessionId) => {
