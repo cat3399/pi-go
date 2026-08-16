@@ -1,0 +1,214 @@
+import { useEffect, useMemo, useState } from "react";
+import { Folder, PanelLeft, Settings } from "lucide-react";
+import type { ApplicationClient } from "../contracts";
+import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
+import { AuthGate } from "./AuthGate";
+import { Composer } from "./Composer";
+import { MessageList } from "./MessageList";
+import { SettingsDrawer } from "./SettingsDrawer";
+import { Sidebar } from "./Sidebar";
+import { useApplicationController } from "./useApplicationController";
+
+export interface PiWorkbenchProps {
+  localClient: ApplicationClient;
+  localAvailable: boolean;
+  localError?: string;
+  defaultRemoteEndpoint?: string;
+  version: string;
+  hostKind?: "desktop" | "web";
+}
+
+function savedRemoteEndpoint(): string {
+  try {
+    return localStorage.getItem("pi.remote.endpoint") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function activeTitle(
+  sessionId: string | null,
+  sessions: { id: string; name?: string; firstMessage: string }[],
+): string {
+  if (!sessionId) return "新会话";
+  const session = sessions.find((value) => value.id === sessionId);
+  return session?.name?.trim() || session?.firstMessage?.trim() || "会话";
+}
+
+export function PiWorkbench(props: PiWorkbenchProps) {
+  const hostKind = props.hostKind ?? "desktop";
+  const initialRemote = props.defaultRemoteEndpoint?.trim() || savedRemoteEndpoint();
+  const [remoteEndpoint, setRemoteEndpoint] = useState(initialRemote);
+  const [client, setClient] = useState<ApplicationClient>(() => {
+    if (props.defaultRemoteEndpoint) return new HTTPApplicationClient(props.defaultRemoteEndpoint);
+    if (props.localAvailable) return props.localClient;
+    if (initialRemote) return new HTTPApplicationClient(initialRemote);
+    return props.localClient;
+  });
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 800);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const controller = useApplicationController(client);
+
+  useEffect(() => () => client.close(), [client]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSettingsOpen(false);
+        if (window.innerWidth < 800) setSidebarOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const sessions = controller.snapshot?.sessions ?? [];
+  const title = useMemo(
+    () => activeTitle(controller.activeSessionId, sessions),
+    [controller.activeSessionId, sessions],
+  );
+  const empty = controller.messages.length === 0 && !controller.streamingMessage;
+
+  const closeMobileSidebar = () => {
+    if (window.innerWidth < 800) setSidebarOpen(false);
+  };
+
+  const useLocal = () => {
+    if (!props.localAvailable) return;
+    setClient(props.localClient);
+    setSettingsOpen(false);
+  };
+
+  const useRemote = (endpoint: string) => {
+    const normalized = normalizeRemoteEndpoint(endpoint);
+    try {
+      localStorage.setItem("pi.remote.endpoint", normalized);
+    } catch {
+      // Storage is optional; the active connection still works.
+    }
+    setRemoteEndpoint(normalized);
+    setClient(new HTTPApplicationClient(normalized));
+    setSettingsOpen(false);
+  };
+
+  const settings = (
+    <SettingsDrawer
+      open={settingsOpen}
+      kind={client.kind}
+      endpoint={remoteEndpoint}
+      version={props.version}
+      localAvailable={props.localAvailable}
+      localError={props.localError}
+      onClose={() => setSettingsOpen(false)}
+      onUseLocal={useLocal}
+      onUseRemote={useRemote}
+    />
+  );
+
+  if (controller.status === "auth") {
+    return (
+      <div className={`pi-workbench is-${hostKind}`}>
+        <AuthGate
+          title="请输入访问密码。"
+          error={controller.error}
+          onLogin={controller.login}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
+        {settings}
+      </div>
+    );
+  }
+
+  if (controller.status === "connecting") {
+    return (
+      <div className={`pi-workbench is-${hostKind}`}>
+        <main className="pi-entry" aria-live="polite">
+          <section className="pi-entry-panel">
+            <h1>pi</h1>
+            <p className="pi-entry-status">正在连接 {client.kind === "local" ? "此设备" : client.endpoint}…</p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (controller.status === "error" && !controller.snapshot) {
+    return (
+      <div className={`pi-workbench is-${hostKind}`}>
+        <main className="pi-entry" aria-live="polite">
+          <button className="pi-floating-settings" type="button" aria-label="打开设置" onClick={() => setSettingsOpen(true)}>
+            <Settings size={17} />
+          </button>
+          <section className="pi-entry-panel">
+            <h1>pi</h1>
+            <p className="pi-entry-status">无法连接</p>
+            <p className="pi-entry-error">{controller.error}</p>
+            <button type="button" onClick={() => void controller.retry()}>重试</button>
+          </section>
+        </main>
+        {settings}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`pi-workbench is-${hostKind}`}>
+      <Sidebar
+        open={sidebarOpen}
+        sessions={sessions}
+        runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
+        activeSessionId={controller.activeSessionId}
+        onClose={() => setSidebarOpen(false)}
+        onNewSession={() => {
+          controller.beginNewSession();
+          closeMobileSidebar();
+        }}
+        onSelect={(sessionId) => {
+          void controller.selectSession(sessionId);
+          closeMobileSidebar();
+        }}
+        onRename={controller.renameSession}
+        onDelete={controller.deleteSession}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""}`}>
+        <header className="pi-topbar">
+          <div className="pi-topbar-heading">
+            {!sidebarOpen && (
+              <button className="pi-icon-button" type="button" aria-label="展开侧栏" onClick={() => setSidebarOpen(true)}>
+                <PanelLeft size={18} />
+              </button>
+            )}
+            <Folder size={18} />
+            <div className="pi-topbar-title" title={title}>{title}</div>
+          </div>
+        </header>
+
+        <section className={`pi-conversation ${empty ? "is-empty" : ""}`}>
+          {!empty && (
+            <MessageList
+              messages={controller.messages}
+              entryIds={controller.sessionView?.context.entryIds ?? []}
+              streamingMessage={controller.streamingMessage}
+              busy={controller.busy}
+              onFork={controller.fork}
+            />
+          )}
+          <Composer
+            centered={empty}
+            active={controller.activeSessionId !== null}
+            models={controller.models}
+            model={controller.selectedModel}
+            thinkingLevel={controller.thinkingLevel}
+            busy={controller.busy}
+            onSend={controller.send}
+            onAbort={controller.abort}
+            onModelChange={controller.setModel}
+            onThinkingLevelChange={controller.setThinkingLevel}
+          />
+          {controller.error && <div className="pi-inline-error" role="alert">{controller.error}</div>}
+        </section>
+      </main>
+      {settings}
+    </div>
+  );
+}

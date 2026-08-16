@@ -1,0 +1,26 @@
+{
+  "name": "@cat3399/pi-go-gui-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 9245",
+    "build:dev": "tsc --noEmit && vite build --minify false --mode development",
+    "build": "tsc --noEmit && vite build --mode production",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cat3399/pi-workbench": "file:../../ui",
+    "@wailsio/runtime": "3.0.0-beta.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  }
+}

@@ -13,6 +13,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@cat3399/pi-workbench": "file:../../ui",
     "@lobehub/icons": "^5.6.0",
     "katex": "^0.16.47",
     "mammoth": "^1.12.0",

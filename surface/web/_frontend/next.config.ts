@@ -13,6 +13,7 @@ const apiOrigin = (process.env.PI_GO_WEB_API_ORIGIN ?? "http://127.0.0.1:30142")
 const developmentProxyTimeoutMs = 24 * 60 * 60 * 1_000;
 
 const nextConfig: NextConfig = {
+  transpilePackages: ["@cat3399/pi-workbench"],
 	// Next's development rewrite otherwise gzip-buffers the long-lived SSE
 	// response, so browsers see an open connection but no application events.
 	compress: false,

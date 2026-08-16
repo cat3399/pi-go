@@ -12,18 +12,19 @@ Go 实现可以采用符合语言习惯的类型、并发和资源管理方式�
 - 完整对齐 pi 的 `AgentSessionRuntime → AgentSession → Agent → AgentLoop → SessionManager`
   生产语义，包括工具、队列、重试、压缩、取消、会话树、资源和扩展中立契约；
 - 以 Go Agent Core 作为唯一权威运行时，不在 Surface 或 transport 中复制 Agent 状态和策略；
-- 在同一核心之上提供 CLI、TUI、GUI 和 WebUI；
-- CLI、TUI 和原生 GUI 默认通过进程内 typed Go API 接入；
+- 在同一核心之上提供 CLI、TUI、独立打包的完整桌面 GUI 和 WebUI；
+- CLI、TUI 直接接入进程内 typed Go API；桌面 GUI 通过 Wails IPC 接入同一进程中的完整 Core；
 - 浏览器 WebUI 通过版本化 HTTP command/query/snapshot 与一条全局 SSE 接入；
+- 桌面 GUI 可在本地 Core 与远程 HTTP/SSE endpoint 之间切换，未来移动端复用远程 client；
 - stdin/stdout JSONL 只服务外部自动化、跨语言调用和协议测试；
 - Surface 可以独立演进交互和视觉实现，但不能改变或补偿 Agent Core 的产品语义。
 
 核心调用关系：
 
 ```text
-CLI / TUI / GUI ───────────────┐
-                               ├─ application.API
-Browser WebUI ─ HTTP + SSE ────┘        │
+CLI / TUI ─────────────────────┐
+GUI Workbench ─ Wails IPC ─────┼─ application.API
+Web/GUI remote ─ HTTP + SSE ───┘        │
                                         ▼
                              application.Service
                                         │
@@ -43,6 +44,7 @@ External automation ─ JSONL protocol → ApplicationSession
 
 - Go 1.25 或更高版本；
 - WebUI 开发和构建需要 Node.js 22.19 或更高版本；
+- GUI 构建额外需要 Node.js、Wails 所需的平台原生工具链，以及 `surface/gui` 独立 Go module；
 - 只构建 Go Core、CLI 或 JSONL RPC 时不需要 Node.js。
 
 ## 构建
@@ -83,11 +85,31 @@ go build -o bin/pi-go ./cmd/pi-go
 ./bin/pi-go web --api-only --listen 127.0.0.1:30142 --cwd /path/to/project
 ```
 
-通过自定义主机名访问时显式放行对应 Host（可重复指定）：
+对局域网或公网地址监听时必须设置基础访问密码；通过自定义主机名访问时同时显式放行
+对应 Host（可重复指定）：
 
 ```sh
-./bin/pi-go web --listen 0.0.0.0:30141 --allowed-host pi.local --cwd /path/to/project
+PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
+  --listen 0.0.0.0:30141 --allowed-host pi.local --cwd /path/to/project
 ```
+
+开发阶段不强制 VPN 或 TLS；loopback 监听可不设密码。远程部署的网络加固策略在后续阶段
+单独确定。
+
+## 桌面 GUI（独立构建）
+
+GUI 不属于默认 `pi-go` 产物。它独立编译为 `pi-go-gui`，但二进制内部包含完整的
+pi-go Agent Core，并可切换为控制远程 pi-go：
+
+```sh
+make gui-setup
+make gui-check
+make gui-build
+./surface/gui/bin/pi-go-gui
+```
+
+GUI 的共享可读前端源码位于 `surface/ui`，Wails 宿主位于 `surface/gui`。当前是首个
+纵向切片；现有完整 WebUI 在共享 Workbench 覆盖全部能力前不会被替换。
 
 ## WebUI 开发
 

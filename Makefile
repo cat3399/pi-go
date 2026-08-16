@@ -1,4 +1,4 @@
-.PHONY: web-setup web-dev web-api-dev web-check web-build web-run test-core test-surface test-all
+.PHONY: web-setup web-dev web-api-dev web-check web-build web-run gui-setup gui-check gui-build gui-dev test-core test-surface test-all
 
 WEB_ARGS ?=
 
@@ -19,6 +19,20 @@ web-build:
 
 web-run:
 	./scripts/webui.sh run $(WEB_ARGS)
+
+# GUI is an opt-in product build. None of these targets participate in the
+# default pi-go build or test graph.
+gui-setup:
+	$(MAKE) -C surface/gui setup
+
+gui-check:
+	$(MAKE) -C surface/gui check
+
+gui-build:
+	$(MAKE) -C surface/gui build
+
+gui-dev:
+	$(MAKE) -C surface/gui dev
 
 test-core:
 	go test ./internal/... ./cmd/pi-go

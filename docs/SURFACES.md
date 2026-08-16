@@ -1,19 +1,20 @@
 # Surface 架构
 
-## 一个核心，三种接入方式
+## 一个核心，两个产品入口
 
 pi-go 只有一套 Agent/Application Core。GUI、TUI、WebUI、CLI 和自动化协议不复制
-Runtime、AgentSession、Agent 或 SessionManager 的状态与策略。
+Runtime、AgentSession、Agent 或 SessionManager 的状态与策略。桌面 GUI 是完整产品，
+不是远程页面的套壳；它由独立的 composition root 构建，但在进程内装配同一套 Go 核心。
 
 ```mermaid
 flowchart LR
-    CLI["CLI"] --> API["application.API"]
-    TUI["TUI"] --> API
-    GUI["Native GUI"] --> API
-    Browser["Browser WebUI"] --> HTTP["HTTP /api/v1"]
-    Browser --> SSE["One global SSE stream"]
-    HTTP --> Web["surface/web adapter"]
-    SSE --> Web
+    CLI["CLI / TUI"] --> API["application.API"]
+    Workbench["surface/ui Workbench"] --> LocalClient["Wails local client"]
+    Workbench --> RemoteClient["HTTP/SSE remote client"]
+    LocalClient --> GUIBridge["pi-go-gui bridge"]
+    GUIBridge --> API
+    RemoteClient --> Web["surface/web adapter"]
+    ExistingWeb["Existing full WebUI"] --> Web
     Web --> API
     RPC["JSONL automation"] --> Protocol["protocol/v1 adapter"]
     Protocol --> Session["ApplicationSession"]
@@ -26,12 +27,15 @@ flowchart LR
 |---|---|---|
 | CLI | 同进程 Go 调用 | 无需序列化，也不引入服务生命周期 |
 | TUI | 同进程 Go 调用 | 终端只是呈现层，直接消费 typed API 和事件 |
-| 原生 GUI | 同进程 Go 调用；多进程壳才使用本地 IPC | GUI 不应被迫依赖 HTTP |
+| 桌面 GUI | Wails IPC → 同进程 Go Core | 独立产物内嵌完整 Agent 能力，不依赖 HTTP 才能本地工作 |
+| 桌面 GUI（远程模式） | HTTP command/query/snapshot + 全局 SSE | 与 WebUI 共用远程协议，不启动第二套 Agent |
 | 浏览器 WebUI | HTTP command/query/snapshot + 一条全局 SSE | 浏览器天然需要网络边界 |
+| 移动端（规划） | 同一 Workbench + 平台宿主适配 + HTTP/SSE | 移动端只展示和控制远程 Core |
 | 外部自动化/测试 | stdin/stdout JSONL | 适合脚本、跨语言和协议验收 |
 
-因此不存在产品内部的 `pi attach http://...` 模式。以后若要支持远程客户端，那是显式的
-remote/server 部署能力，不是 TUI、GUI 与 Agent Core 的默认耦合方式。
+本地和远程是 Workbench 的两种 `ApplicationClient`，不是两套页面。桌面端可以在设置中
+从内嵌 Core 切到另一台 pi-go 的 HTTP/SSE endpoint；WebUI 和未来移动端只提供远程 client。
+平台差异保留在宿主、窗口、导航和输入适配层，不追求零代码覆盖所有平台。
 
 ## 统一 Application API
 
@@ -70,9 +74,25 @@ SSE 使用 `id: <revision>` 和 `Last-Event-ID`。Service 保留有限历史；�
 前端的 application client 在整个页面中只维护一条 EventSource，并按 `sessionId` 分发给聊天、
 侧栏等消费者。React hook 不再各自创建服务器连接，也不通过轮询维护第二套运行状态。
 
+非 loopback 监听必须配置 `--password` 或 `PI_GO_WEB_PASSWORD`。开发阶段不强制 VPN
+或 TLS；认证只提供基础访问边界。loopback 开发仍可无密码运行，避免本机调试产生额外步骤。
+
+## 共享 Workbench 与迁移原则
+
+`surface/ui` 是可读的 React/TypeScript 源码包，包含统一的工作区布局、展示状态和两种
+`ApplicationClient`。它不持有 Agent 策略。GUI 前端只是 Wails 宿主适配器；未来 WebUI
+和移动宿主也消费同一包。
+
+现有 `surface/web/_frontend` 的功能已经完整，因此不会为了尽快统一样式而直接替换。
+迁移按能力清单逐项完成；只有 Workbench 覆盖原能力并通过 Web 和 GUI 两侧验收后，才切换
+WebUI 入口。迁移期间允许新 GUI 能力不完整，但不以兼容旧页面为由污染共享协议或复制核心逻辑。
+
+视觉实现只复用有清晰许可证、可维护的源代码。OpenCodex 的已编译 renderer、提取产物和
+混淆 bundle 不进入仓库；已复用的源文件和许可证在各 surface 的 notice 中记录。
+
 ## 构建与入口
 
-所有运行形态由一个二进制提供：
+默认产品由 `cmd/pi-go` 构建，完全不链接 Wails、GUI 前端或 GUI 静态资源：
 
 ```sh
 pi-go run [agent options]
@@ -80,9 +100,18 @@ pi-go web [--listen ...]
 pi-go rpc [rpc options]
 ```
 
-`cmd/pi-go` 是唯一 composition root。`pi_go_webui` build tag 只决定是否把静态 Web export 嵌入
+`pi_go_webui` build tag 只决定是否把静态 Web export 嵌入
 同一个二进制，不切分 Application/Agent 逻辑。开发态由 Next 提供 HMR，并将 `/api/v1/*`
 代理到 `pi-go web --api-only`；生产态只需 Go 二进制，不启动 Next 或 JSONL 子进程。
 
-TUI 与 GUI 实现应直接接收 `application.API`。若原生 GUI 采用多进程壳，
-只在壳与 Go backend 之间增加本地 IPC adapter，command/query/event 语义仍与进程内 API 相同。
+`surface/gui` 是独立 Go module 和第二个 composition root，只在显式执行下列命令时构建：
+
+```sh
+make gui-setup
+make gui-check
+make gui-build
+```
+
+输出为 `surface/gui/bin/pi-go-gui`。这个二进制链接完整 Core、Wails bridge 和 Workbench
+静态资源。根目录的默认 `go build ./cmd/pi-go`、`go test ./...` 和 `test-all` 不遍历
+GUI module，也不会因为 GUI 引入 CGO、Node 或平台 SDK。
