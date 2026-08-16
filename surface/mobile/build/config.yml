@@ -1,0 +1,10 @@
+version: "3"
+
+info:
+  companyName: cat3399
+  productName: pi
+  productIdentifier: com.cat3399.pigo
+  description: pi-go remote mobile client
+  copyright: Copyright cat3399
+  comments: Android-first remote client for pi-go
+  version: 0.1.0

@@ -14,4 +14,11 @@
 /surface/web/_frontend/out/
 /surface/web/_frontend/*.tsbuildinfo
 /surface/gui/example/
+/surface/mobile/build/android/.gradle/
+/surface/mobile/build/android/app/build/
+/surface/mobile/build/android/app/src/main/jniLibs/
+/surface/mobile/build/android/build/
+/surface/mobile/build/android/gen/
+/surface/mobile/build/android/overlay.json
+/surface/mobile/build/android/local.properties
 .claude

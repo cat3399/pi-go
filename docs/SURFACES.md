@@ -30,11 +30,11 @@ flowchart LR
 | 桌面 GUI | Wails IPC → 同进程 Go Core | 独立产物内嵌完整 Agent 能力，不依赖 HTTP 才能本地工作 |
 | 桌面 GUI（远程模式） | HTTP command/query/snapshot + 全局 SSE | 与 WebUI 共用远程协议，不启动第二套 Agent |
 | 浏览器 WebUI | HTTP command/query/snapshot + 一条全局 SSE | 浏览器天然需要网络边界 |
-| 移动端（规划） | 同一 Workbench + 平台宿主适配 + HTTP/SSE | 移动端只展示和控制远程 Core |
+| Android 移动端 | 同一 Workbench + Wails 移动宿主 + HTTP/SSE | 独立构建，只展示和控制远程 Core |
 | 外部自动化/测试 | stdin/stdout JSONL | 适合脚本、跨语言和协议验收 |
 
 本地和远程是 Workbench 的两种 `ApplicationClient`，不是两套页面。桌面端可以在设置中
-从内嵌 Core 切到另一台 pi-go 的 HTTP/SSE endpoint；WebUI 和未来移动端只提供远程 client。
+从内嵌 Core 切到另一台 pi-go 的 HTTP/SSE endpoint；WebUI 和移动端只提供远程 client。
 平台差异保留在宿主、窗口、导航和输入适配层，不追求零代码覆盖所有平台。
 
 ## 统一 Application API
@@ -115,3 +115,18 @@ make gui-build
 输出为 `surface/gui/bin/pi-go-gui`。这个二进制链接完整 Core、Wails bridge 和 Workbench
 静态资源。根目录的默认 `go build ./cmd/pi-go`、`go test ./...` 和 `test-all` 不遍历
 GUI module，也不会因为 GUI 引入 CGO、Node 或平台 SDK。
+
+`surface/mobile` 是另一个独立 Go module。当前只构建 Android arm64，最低 API 26；其 Go
+宿主只实现 HTTP/HTTPS 请求和可重连 SSE，不依赖根 module，也不链接 Agent Core。移动端构建
+同样只通过显式命令进入：
+
+```sh
+make mobile-setup
+make mobile-doctor
+make mobile-check
+make mobile-build
+make mobile-run
+```
+
+Android 开发默认面向开启 USB 调试的真机，不要求安装模拟器或系统镜像。iOS 保留为未来同一
+移动产品的第二个平台，本阶段不生成或维护 iOS 工程。

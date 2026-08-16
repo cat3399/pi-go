@@ -9,6 +9,7 @@ interface SettingsDrawerProps {
   version: string;
   localAvailable: boolean;
   localError?: string;
+  hostKind: "desktop" | "web" | "mobile";
   onClose(): void;
   onUseLocal(): void;
   onUseRemote(endpoint: string): void;
@@ -71,31 +72,33 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
             <section className="pi-settings-content-section">
               <h2>Agent Core</h2>
               <div className="pi-settings-card">
-                <button
-                  className={`pi-connection-row ${props.kind === "local" ? "is-selected" : ""}`}
-                  type="button"
-                  disabled={!props.localAvailable}
-                  onClick={props.onUseLocal}
-                >
-                  <span className="pi-settings-item-icon"><Settings size={17} /></span>
-                  <span>
-                    <strong>此设备</strong>
-                    <small>使用桌面端内嵌的完整 pi-go Agent Core</small>
-                  </span>
-                  <span className="pi-selection-dot" aria-hidden="true" />
-                </button>
-                {props.localError && <p className="pi-settings-error">{props.localError}</p>}
-                <form className="pi-remote-form" onSubmit={connectRemote}>
+                {props.hostKind !== "mobile" && (
+                  <button
+                    className={`pi-connection-row ${props.kind === "local" ? "is-selected" : ""}`}
+                    type="button"
+                    disabled={!props.localAvailable}
+                    onClick={props.onUseLocal}
+                  >
+                    <span className="pi-settings-item-icon"><Settings size={17} /></span>
+                    <span>
+                      <strong>此设备</strong>
+                      <small>使用桌面端内嵌的完整 pi-go Agent Core</small>
+                    </span>
+                    <span className="pi-selection-dot" aria-hidden="true" />
+                  </button>
+                )}
+                {props.hostKind !== "mobile" && props.localError && <p className="pi-settings-error">{props.localError}</p>}
+                <form className={`pi-remote-form ${props.hostKind === "mobile" ? "is-remote-only" : ""}`} onSubmit={connectRemote}>
                   <div>
-                    <label htmlFor="pi-remote-endpoint">远程桌面端</label>
-                    <p>连接另一台 pi-go 桌面端，与 WebUI 使用同一套远程协议。</p>
+                    <label htmlFor="pi-remote-endpoint">{props.hostKind === "mobile" ? "Agent Core 地址" : "远程桌面端"}</label>
+                    <p>{props.hostKind === "mobile" ? "连接运行 pi-go Web API 的设备。" : "连接另一台 pi-go 桌面端，与 WebUI 使用同一套远程协议。"}</p>
                   </div>
                   <div className="pi-remote-controls">
                     <input
                       id="pi-remote-endpoint"
                       type="url"
                       inputMode="url"
-                      placeholder="http://192.168.1.10:30141"
+                      placeholder={props.hostKind === "mobile" ? "https://pi.example.com" : "http://192.168.1.10:30141"}
                       value={endpoint}
                       onChange={(event) => setEndpoint(event.target.value)}
                     />
@@ -114,8 +117,8 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
               <div className="pi-settings-card">
                 <div className="pi-settings-about-row">
                   <span>
-                    <strong>pi GUI</strong>
-                    <small>内嵌完整 pi-go Agent Core 的独立桌面端</small>
+                    <strong>{props.hostKind === "mobile" ? "pi Mobile" : "pi GUI"}</strong>
+                    <small>{props.hostKind === "mobile" ? "连接远程 pi-go Agent Core 的移动端" : "内嵌完整 pi-go Agent Core 的独立桌面端"}</small>
                   </span>
                   <code>{props.version}</code>
                 </div>

@@ -1,0 +1,112 @@
+version: "3"
+
+vars:
+  MIN_SDK: "26"
+  SDK_ROOT:
+    sh: 'printf "%s" "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"'
+  ADB:
+    sh: 'command -v adb || printf "%s/platform-tools/adb" "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"'
+
+tasks:
+  doctor:
+    internal: true
+    preconditions:
+      - sh: '[ -n "{{.SDK_ROOT}}" ] && [ -d "{{.SDK_ROOT}}/platforms/android-35" ]'
+        msg: ANDROID_HOME must point to an SDK containing Android API 35
+      - sh: '[ -d "{{.SDK_ROOT}}/build-tools/35.0.0" ]'
+        msg: Android Build Tools 35.0.0 are required
+      - sh: '[ -d "{{.SDK_ROOT}}/ndk/26.3.11579264" ]'
+        msg: Android NDK 26.3.11579264 is required
+      - sh: command -v java >/dev/null 2>&1
+        msg: JDK 21 is required
+      - sh: command -v wails3 >/dev/null 2>&1
+        msg: wails3 v3.0.0-beta.8 is required
+    cmds:
+      - true
+
+  frontend:
+    internal: true
+    sources:
+      - frontend/index.html
+      - frontend/package.json
+      - frontend/package-lock.json
+      - frontend/tsconfig.json
+      - frontend/vite.config.ts
+      - frontend/src/**/*
+      - ../ui/src/**/*
+    generates:
+      - frontend/dist/**/*
+    cmds:
+      - npm --prefix ../ui run check
+      - npm --prefix frontend run build
+
+  overlay:
+    internal: true
+    sources:
+      - build/config.yml
+      - "*.go"
+    generates:
+      - build/android/overlay.json
+      - build/android/gen/main_android.gen.go
+    cmds:
+      - wails3 android overlay:gen -out build/android/overlay.json -config build/config.yml
+
+  go:shared:
+    internal: true
+    deps: [doctor, frontend, overlay]
+    cmds:
+      - |
+        sdk_root="{{.SDK_ROOT}}"
+        ndk_root="${ANDROID_NDK_HOME:-$sdk_root/ndk/26.3.11579264}"
+        toolchain="$ndk_root/toolchains/llvm/prebuilt/darwin-x86_64"
+        if [ ! -d "$toolchain" ]; then
+          toolchain="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64"
+        fi
+        if [ ! -d "$toolchain" ]; then
+          echo "Android NDK toolchain not found under $ndk_root"
+          exit 1
+        fi
+        export CC="$toolchain/bin/aarch64-linux-android{{.MIN_SDK}}-clang"
+        export CXX="$toolchain/bin/aarch64-linux-android{{.MIN_SDK}}-clang++"
+        export CGO_ENABLED=1
+        export GOOS=android
+        export GOARCH=arm64
+        mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
+        go build -buildmode=c-shared -overlay build/android/overlay.json \
+          -tags android,debug -buildvcs=false -gcflags=all="-l" \
+          -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so .
+
+  apk:
+    summary: Build a debug arm64 APK without installing an emulator
+    deps: [go:shared]
+    cmds:
+      - |
+        cd build/android
+        chmod +x ./gradlew
+        ./gradlew assembleDebug
+      - mkdir -p {{.BIN_DIR}}
+      - cp build/android/app/build/outputs/apk/debug/app-debug.apk {{.BIN_DIR}}/{{.APP_NAME}}.apk
+      - echo "APK created at {{.BIN_DIR}}/{{.APP_NAME}}.apk"
+
+  device:list:
+    summary: List connected physical Android devices
+    deps: [doctor]
+    cmds:
+      - '"{{.ADB}}" devices -l'
+
+  run:device:
+    summary: Build, install, and launch on a connected physical Android device
+    deps: [apk]
+    cmds:
+      - |
+        device_id="${DEVICE_ID:-}"
+        if [ -z "$device_id" ]; then
+          device_id=$("{{.ADB}}" devices | awk 'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { print $1; exit }')
+        fi
+        if [ -z "$device_id" ]; then
+          echo "No connected physical Android device was found."
+          echo "Enable USB debugging, or set DEVICE_ID to a device listed by adb devices."
+          exit 1
+        fi
+        "{{.ADB}}" -s "$device_id" install -r "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        "{{.ADB}}" -s "$device_id" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity

@@ -17,6 +17,33 @@ type ErrorBody = {
   retryAfterMs?: number;
 };
 
+export interface RemoteRequestInit {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  body?: string;
+}
+
+export interface RemoteTransportResponse {
+  status: number;
+  body: string;
+  retryAfterMs?: number;
+}
+
+export interface RemoteApplicationTransport {
+  request(
+    endpoint: string,
+    path: string,
+    token: string,
+    init?: RemoteRequestInit,
+  ): Promise<RemoteTransportResponse>;
+  subscribe(
+    endpoint: string,
+    token: string,
+    after: number,
+    observer: EventObserver,
+  ): EventSubscription;
+  close(): void;
+}
+
 export class ApplicationRequestError extends Error {
   constructor(
     message: string,
@@ -34,6 +61,9 @@ export function normalizeRemoteEndpoint(value: string): string {
   const url = new URL(input);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("远程地址必须使用 http 或 https");
+  }
+  if (url.username || url.password) {
+    throw new Error("远程地址不能包含用户名或密码");
   }
   url.pathname = url.pathname.replace(/\/+$/, "");
   url.search = "";
@@ -54,20 +84,23 @@ async function sha256Hex(value: string): Promise<string> {
     .join("");
 }
 
-export class HTTPApplicationClient implements ApplicationClient {
+export class RemoteApplicationClient implements ApplicationClient {
   readonly kind = "remote" as const;
   readonly endpoint: string;
 
-  private token = "";
-  private readonly sources = new Set<EventSource>();
+  private token: string;
 
-  constructor(endpoint: string, token = "") {
+  constructor(
+    endpoint: string,
+    private readonly transport: RemoteApplicationTransport,
+    token = "",
+  ) {
     this.endpoint = normalizeRemoteEndpoint(endpoint);
     this.token = token;
   }
 
   async authStatus(): Promise<AuthState> {
-    return this.request<AuthState>("/api/v1/auth/status", { method: "GET" });
+    return this.request<AuthState>("/api/v1/auth/status");
   }
 
   async login(password: string): Promise<void> {
@@ -75,7 +108,6 @@ export class HTTPApplicationClient implements ApplicationClient {
       "/api/v1/auth/login",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ passwordHash: await sha256Hex(password) }),
       },
     );
@@ -94,7 +126,6 @@ export class HTTPApplicationClient implements ApplicationClient {
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult> {
     return this.request("/api/v1/sessions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     });
   }
@@ -112,7 +143,6 @@ export class HTTPApplicationClient implements ApplicationClient {
   async renameSession(sessionId: string, name: string): Promise<void> {
     await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
   }
@@ -128,7 +158,6 @@ export class HTTPApplicationClient implements ApplicationClient {
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/commands`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(command),
       },
     );
@@ -136,6 +165,78 @@ export class HTTPApplicationClient implements ApplicationClient {
   }
 
   subscribe(after: number, observer: EventObserver): EventSubscription {
+    return this.transport.subscribe(this.endpoint, this.token, after, observer);
+  }
+
+  close(): void {
+    this.transport.close();
+  }
+
+  private async request<T>(
+    path: string,
+    init: RemoteRequestInit = {},
+  ): Promise<T> {
+    const response = await this.transport.request(
+      this.endpoint,
+      path,
+      this.token,
+      init,
+    );
+    let body: (T & ErrorBody) | null = null;
+    if (response.body.trim()) {
+      try {
+        body = JSON.parse(response.body) as T & ErrorBody;
+      } catch {
+        if (response.status >= 200 && response.status < 300) {
+          throw new Error("远程返回了无效 JSON");
+        }
+      }
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new ApplicationRequestError(
+        body?.error || `HTTP ${response.status}`,
+        response.status,
+        body?.retryAfterMs ?? response.retryAfterMs ?? 0,
+      );
+    }
+    if (body === null) throw new Error("远程返回了无效 JSON");
+    return body;
+  }
+}
+
+class BrowserRemoteTransport implements RemoteApplicationTransport {
+  private readonly sources = new Set<EventSource>();
+
+  async request(
+    endpoint: string,
+    path: string,
+    token: string,
+    init: RemoteRequestInit = {},
+  ): Promise<RemoteTransportResponse> {
+    const headers = new Headers({ Accept: "application/json" });
+    if (init.body !== undefined) headers.set("Content-Type", "application/json");
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(new URL(path, endpoint), {
+      method: init.method ?? "GET",
+      body: init.body,
+      headers,
+      cache: "no-store",
+      credentials: "include",
+    });
+    const retryAfterSeconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+    return {
+      status: response.status,
+      body: await response.text(),
+      retryAfterMs: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : undefined,
+    };
+  }
+
+  subscribe(
+    endpoint: string,
+    token: string,
+    after: number,
+    observer: EventObserver,
+  ): EventSubscription {
     let closed = false;
     let source: EventSource | null = null;
     let resolveReady: () => void = () => undefined;
@@ -146,41 +247,15 @@ export class HTTPApplicationClient implements ApplicationClient {
     });
 
     try {
-      const url = new URL("/api/v1/events", this.endpoint);
+      const url = new URL("/api/v1/events", endpoint);
       url.searchParams.set("after", String(after));
-      if (this.token) url.searchParams.set("token", this.token);
+      if (token) url.searchParams.set("token", token);
       source = new EventSource(url, { withCredentials: true });
       this.sources.add(source);
       source.onopen = () => resolveReady();
       source.onmessage = (message) => {
         if (closed) return;
-        let value: unknown;
-        try {
-          value = JSON.parse(message.data);
-        } catch {
-          return;
-        }
-        if (!value || typeof value !== "object") return;
-        const object = value as Record<string, unknown>;
-        if (object.type === "connected") {
-          resolveReady();
-          return;
-        }
-        if (object.type === "reset_required") {
-          observer.onReset(
-            typeof object.revision === "number" ? object.revision : 0,
-            "远程事件游标已过期",
-          );
-          return;
-        }
-        if (
-          typeof object.sequence === "number"
-          && typeof object.sessionId === "string"
-          && object.event
-          && typeof object.event === "object"
-        ) {
-          observer.onEvent(object as unknown as ApplicationEventEnvelope);
-        }
+        applyEventData(message.data, observer, resolveReady);
       };
       source.onerror = () => {
         if (!closed && source?.readyState === EventSource.CLOSED) {
@@ -208,29 +283,44 @@ export class HTTPApplicationClient implements ApplicationClient {
     for (const source of this.sources) source.close();
     this.sources.clear();
   }
+}
 
-  private async request<T>(
-    path: string,
-    init: RequestInit = {},
-  ): Promise<T> {
-    const headers = new Headers(init.headers);
-    headers.set("Accept", "application/json");
-    if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
-    const response = await fetch(new URL(path, this.endpoint), {
-      ...init,
-      headers,
-      cache: "no-store",
-      credentials: "include",
-    });
-    const body = await response.json().catch(() => null) as (T & ErrorBody) | null;
-    if (!response.ok) {
-      throw new ApplicationRequestError(
-        body?.error || `HTTP ${response.status}`,
-        response.status,
-        body?.retryAfterMs ?? 0,
-      );
-    }
-    if (body === null) throw new Error("远程返回了无效 JSON");
-    return body;
+export function applyEventData(
+  data: string,
+  observer: EventObserver,
+  onConnected: () => void = () => undefined,
+): void {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const object = value as Record<string, unknown>;
+  if (object.type === "connected") {
+    onConnected();
+    return;
+  }
+  if (object.type === "reset_required") {
+    observer.onReset(
+      typeof object.revision === "number" ? object.revision : 0,
+      "远程事件游标已过期",
+    );
+    return;
+  }
+  if (
+    typeof object.sequence === "number"
+    && typeof object.sessionId === "string"
+    && object.event
+    && typeof object.event === "object"
+  ) {
+    observer.onEvent(object as unknown as ApplicationEventEnvelope);
+  }
+}
+
+export class HTTPApplicationClient extends RemoteApplicationClient {
+  constructor(endpoint: string, token = "") {
+    super(endpoint, new BrowserRemoteTransport(), token);
   }
 }

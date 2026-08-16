@@ -1,0 +1,44 @@
+version: "3"
+
+vars:
+  APP_NAME: pi-go-mobile
+  APP_ID: com.cat3399.pigo
+  BIN_DIR: bin
+
+includes:
+  android: ./build/android/Taskfile.yml
+
+tasks:
+  setup:
+    summary: Install the shared Workbench and Android host dependencies
+    cmds:
+      - npm --prefix ../ui ci
+      - npm --prefix frontend ci
+      - go mod tidy
+
+  check:
+    summary: Check shared UI, mobile frontend, and the Go remote bridge
+    cmds:
+      - npm --prefix ../ui run check
+      - npm --prefix frontend run check
+      - CGO_ENABLED=0 go test -tags server ./...
+
+  build:
+    summary: Build a debug APK for a physical Android device
+    cmds:
+      - task: android:apk
+
+  run:
+    summary: Build, install, and launch on a connected physical Android device
+    cmds:
+      - task: android:run:device
+
+  device:list:
+    summary: List connected Android devices
+    cmds:
+      - task: android:device:list
+
+  doctor:
+    summary: Verify the minimal Android build toolchain
+    cmds:
+      - go run ./build/android/scripts/deps

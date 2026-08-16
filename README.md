@@ -12,10 +12,11 @@ Go 实现可以采用符合语言习惯的类型、并发和资源管理方式�
 - 完整对齐 pi 的 `AgentSessionRuntime → AgentSession → Agent → AgentLoop → SessionManager`
   生产语义，包括工具、队列、重试、压缩、取消、会话树、资源和扩展中立契约；
 - 以 Go Agent Core 作为唯一权威运行时，不在 Surface 或 transport 中复制 Agent 状态和策略；
-- 在同一核心之上提供 CLI、TUI、独立打包的完整桌面 GUI 和 WebUI；
+- 在同一核心之上提供 CLI、TUI、独立打包的完整桌面 GUI、远程移动端和 WebUI；
 - CLI、TUI 直接接入进程内 typed Go API；桌面 GUI 通过 Wails IPC 接入同一进程中的完整 Core；
 - 浏览器 WebUI 通过版本化 HTTP command/query/snapshot 与一条全局 SSE 接入；
-- 桌面 GUI 可在本地 Core 与远程 HTTP/SSE endpoint 之间切换，未来移动端复用远程 client；
+- 桌面 GUI 可在本地 Core 与远程 HTTP/SSE endpoint 之间切换，移动端复用同一远程协议；
+- Android 移动端作为独立的远程产品构建，不链接 Agent Core，并复用同一 Workbench 与远程协议；
 - stdin/stdout JSONL 只服务外部自动化、跨语言调用和协议测试；
 - Surface 可以独立演进交互和视觉实现，但不能改变或补偿 Agent Core 的产品语义。
 
@@ -45,6 +46,7 @@ External automation ─ JSONL protocol → ApplicationSession
 - Go 1.25 或更高版本；
 - WebUI 开发和构建需要 Node.js 22.19 或更高版本；
 - GUI 构建额外需要 Node.js、Wails 所需的平台原生工具链，以及 `surface/gui` 独立 Go module；
+- Android 移动端构建需要 JDK 21、Android API/Build Tools 35、Platform Tools、NDK 26.3 和 `surface/mobile` 独立 Go module；
 - 只构建 Go Core、CLI 或 JSONL RPC 时不需要 Node.js。
 
 ## 构建
@@ -110,6 +112,28 @@ make gui-build
 
 GUI 的共享可读前端源码位于 `surface/ui`，Wails 宿主位于 `surface/gui`。当前是首个
 纵向切片；现有完整 WebUI 在共享 Workbench 覆盖全部能力前不会被替换。
+
+## Android 移动端（独立构建）
+
+移动端不属于默认 `pi-go` 或桌面 GUI 产物。当前 Android-first 实现最低支持 API 26，
+只连接远程 pi-go Core，不在手机内链接 Agent Runtime：
+
+```sh
+make mobile-setup
+make mobile-doctor
+make mobile-check
+make mobile-build
+```
+
+连接启用 USB 调试的 arm64 Android 真机后，可以直接安装并启动：
+
+```sh
+make mobile-device-list
+make mobile-run
+```
+
+当前不需要模拟器或系统镜像。HTTP 与 HTTPS endpoint 均由移动宿主的 Go transport 支持；
+详细说明见 [`surface/mobile/README.md`](surface/mobile/README.md)。
 
 ## WebUI 开发
 

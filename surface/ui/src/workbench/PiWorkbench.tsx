@@ -15,13 +15,33 @@ import {
 } from "./useResizableSidebar";
 
 export interface PiWorkbenchProps {
-  localClient: ApplicationClient;
+  localClient?: ApplicationClient;
   localAvailable: boolean;
   localError?: string;
   defaultRemoteEndpoint?: string;
   version: string;
-  hostKind?: "desktop" | "web";
+  hostKind?: "desktop" | "web" | "mobile";
+  createRemoteClient?(endpoint: string): ApplicationClient;
 }
+
+const unavailableClient: ApplicationClient = {
+  kind: "remote",
+  endpoint: "",
+  async authStatus() { throw new Error("请先配置远程地址"); },
+  async login() { throw new Error("请先配置远程地址"); },
+  async snapshot() { throw new Error("请先配置远程地址"); },
+  async sessionView() { throw new Error("请先配置远程地址"); },
+  async createSession() { throw new Error("请先配置远程地址"); },
+  async models() { throw new Error("请先配置远程地址"); },
+  async browseDirectories() { throw new Error("请先配置远程地址"); },
+  async renameSession() { throw new Error("请先配置远程地址"); },
+  async deleteSession() { throw new Error("请先配置远程地址"); },
+  async dispatch<T = unknown>(): Promise<T> { throw new Error("请先配置远程地址"); },
+  subscribe() {
+    return { ready: Promise.reject(new Error("请先配置远程地址")), close() {} };
+  },
+  close() {},
+};
 
 function savedRemoteEndpoint(): string {
   try {
@@ -43,15 +63,16 @@ function activeTitle(
 export function PiWorkbench(props: PiWorkbenchProps) {
   const hostKind = props.hostKind ?? "desktop";
   const initialRemote = props.defaultRemoteEndpoint?.trim() || savedRemoteEndpoint();
+  const createRemoteClient = props.createRemoteClient ?? ((endpoint: string) => new HTTPApplicationClient(endpoint));
   const [remoteEndpoint, setRemoteEndpoint] = useState(initialRemote);
   const [client, setClient] = useState<ApplicationClient>(() => {
-    if (props.defaultRemoteEndpoint) return new HTTPApplicationClient(props.defaultRemoteEndpoint);
-    if (props.localAvailable) return props.localClient;
-    if (initialRemote) return new HTTPApplicationClient(initialRemote);
-    return props.localClient;
+    if (props.defaultRemoteEndpoint) return createRemoteClient(props.defaultRemoteEndpoint);
+    if (props.localAvailable && props.localClient) return props.localClient;
+    if (initialRemote) return createRemoteClient(initialRemote);
+    return unavailableClient;
   });
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 800);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
   const controller = useApplicationController(client);
   const sidebar = useResizableSidebar();
   const workbenchStyle = {
@@ -83,7 +104,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   };
 
   const useLocal = () => {
-    if (!props.localAvailable) return;
+    if (!props.localAvailable || !props.localClient) return;
     setClient(props.localClient);
     setSettingsOpen(false);
   };
@@ -96,7 +117,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       // Storage is optional; the active connection still works.
     }
     setRemoteEndpoint(normalized);
-    setClient(new HTTPApplicationClient(normalized));
+    setClient(createRemoteClient(normalized));
     setSettingsOpen(false);
   };
 
@@ -108,6 +129,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       version={props.version}
       localAvailable={props.localAvailable}
       localError={props.localError}
+      hostKind={hostKind}
       onClose={() => setSettingsOpen(false)}
       onUseLocal={useLocal}
       onUseRemote={useRemote}
@@ -137,6 +159,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
             <p className="pi-entry-status">正在连接 {client.kind === "local" ? "此设备" : client.endpoint}…</p>
           </section>
         </main>
+        {settings}
       </div>
     );
   }

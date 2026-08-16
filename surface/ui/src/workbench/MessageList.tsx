@@ -13,6 +13,27 @@ interface MessageListProps {
   onFork(entryId: string): Promise<void>;
 }
 
+async function writeClipboardText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Older Android WebViews may expose the API but reject the write.
+    }
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("当前环境不支持剪贴板写入");
+}
+
 function contentBlocks(message: AgentMessage): MessageContentBlock[] {
   return Array.isArray(message.content) ? message.content : [];
 }
@@ -118,7 +139,7 @@ function ToolDataSection(props: {
   const label = props.kind === "input" ? "输入" : "输出";
 
   const copy = async () => {
-    await navigator.clipboard.writeText(props.value);
+    await writeClipboardText(props.value);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };
@@ -288,6 +309,15 @@ function Message({
   process?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  const [userCopyVisible, setUserCopyVisible] = useState(false);
+  const copyHideTimerRef = useRef<number | null>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (copyHideTimerRef.current !== null) window.clearTimeout(copyHideTimerRef.current);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+  }, []);
+
   if (!visibleMessage(message)) return null;
   const blocks = contentBlocks(message);
   const text = messageText(message);
@@ -343,13 +373,53 @@ function Message({
 
   const copy = async () => {
     if (!text) return;
-    await navigator.clipboard.writeText(text);
+    await writeClipboardText(text);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopied(false);
+    }, 1500);
   };
 
+  const clearCopyHideTimer = () => {
+    if (copyHideTimerRef.current === null) return;
+    window.clearTimeout(copyHideTimerRef.current);
+    copyHideTimerRef.current = null;
+  };
+
+  const showUserCopy = () => {
+    clearCopyHideTimer();
+    setUserCopyVisible(true);
+  };
+
+  const hideUserCopyAfter = (delay: number) => {
+    clearCopyHideTimer();
+    copyHideTimerRef.current = window.setTimeout(() => {
+      copyHideTimerRef.current = null;
+      setUserCopyVisible(false);
+    }, delay);
+  };
+
+  const userCopyAvailable = message.role === "user" && !streaming && Boolean(text);
+
   return (
-    <article className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""}`}>
+    <article
+      className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userCopyVisible ? "is-copy-visible" : ""}`}
+      onPointerEnter={(event) => {
+        if (userCopyAvailable && event.pointerType === "mouse") showUserCopy();
+      }}
+      onPointerLeave={(event) => {
+        if (userCopyAvailable && event.pointerType === "mouse") hideUserCopyAfter(420);
+      }}
+      onClick={(event) => {
+        if (!userCopyAvailable) return;
+        const target = event.target;
+        if (target instanceof Element && target.closest("button, a")) return;
+        showUserCopy();
+        hideUserCopyAfter(3200);
+      }}
+    >
       {message.role === "bashExecution" && typeof message.command === "string" && (
         <div className="pi-bash-command">$ {message.command}</div>
       )}
@@ -363,6 +433,23 @@ function Message({
         <div className="pi-message-error">
           {typeof message.errorMessage === "string" ? message.errorMessage : "模型返回错误"}
         </div>
+      )}
+      {userCopyAvailable && (
+        <button
+          className="pi-user-message-copy"
+          type="button"
+          aria-label={copied ? "消息已复制" : "复制消息"}
+          title={copied ? "已复制" : "复制消息"}
+          onPointerEnter={showUserCopy}
+          onPointerLeave={() => hideUserCopyAfter(420)}
+          onClick={(event) => {
+            event.stopPropagation();
+            event.currentTarget.blur();
+            void copy().catch(() => undefined).finally(() => hideUserCopyAfter(1200));
+          }}
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
       )}
       {message.role === "assistant" && !process && !streaming && (text || entryId || messageTimestamp(message) !== null) && (
         <div className="pi-message-actions">
