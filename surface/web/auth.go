@@ -1,14 +1,14 @@
 package web
 
 import (
-	"crypto/rand"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -20,7 +20,9 @@ import (
 const (
 	authCookieName     = "pi_go_auth"
 	passwordHashPrefix = "sha256-v1:"
-	defaultAuthTTL     = 12 * time.Hour
+	authTokenVersion   = "v1"
+	authTokenPurpose   = "pi-go-web-auth-v1\x00"
+	defaultAuthTTL     = 365 * 24 * time.Hour
 	maxLoginBodyBytes  = 8 << 10
 )
 
@@ -29,10 +31,8 @@ type authManager struct {
 	passwordDigest [sha256.Size]byte
 	ttl            time.Duration
 	now            func() time.Time
-	random         io.Reader
 
 	mu       sync.Mutex
-	tokens   map[[sha256.Size]byte]time.Time
 	attempts map[string]loginAttempt
 }
 
@@ -56,8 +56,7 @@ type authStatusResponse struct {
 
 func newAuthManager(password string) (*authManager, error) {
 	manager := &authManager{
-		ttl: defaultAuthTTL, now: time.Now, random: rand.Reader,
-		tokens:   make(map[[sha256.Size]byte]time.Time),
+		ttl: defaultAuthTTL, now: time.Now,
 		attempts: make(map[string]loginAttempt),
 	}
 	password = strings.TrimSpace(password)
@@ -163,21 +162,13 @@ func (a *authManager) handleLogin(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	a.recordSuccess(client)
-	token, expiresAt, err := a.issue()
-	if err != nil {
-		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "Unable to create login session"})
-		return
-	}
+	token, expiresAt := a.issue()
 	setAuthCookie(writer, request, token, expiresAt)
 	response := a.statusResponse(true, token, expiresAt)
 	writeJSON(writer, http.StatusOK, response)
 }
 
 func (a *authManager) handleLogout(writer http.ResponseWriter, request *http.Request) {
-	token := authTokenFromRequest(request)
-	if token != "" {
-		a.revoke(token)
-	}
 	clearAuthCookie(writer, request)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
@@ -194,19 +185,14 @@ func (a *authManager) statusResponse(authenticated bool, token string, expiresAt
 	return response
 }
 
-func (a *authManager) issue() (string, time.Time, error) {
-	raw := make([]byte, 32)
-	if _, err := io.ReadFull(a.random, raw); err != nil {
-		return "", time.Time{}, err
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	digest := sha256.Sum256([]byte(token))
-	expiresAt := a.now().Add(a.ttl)
-	a.mu.Lock()
-	a.pruneLocked(a.now())
-	a.tokens[digest] = expiresAt
-	a.mu.Unlock()
-	return token, expiresAt, nil
+func (a *authManager) issue() (string, time.Time) {
+	expiresAt := a.now().Add(a.ttl).Truncate(time.Second)
+	var expiry [8]byte
+	binary.BigEndian.PutUint64(expiry[:], uint64(expiresAt.Unix()))
+	signature := a.sign(expiry[:])
+	token := authTokenVersion + "." + base64.RawURLEncoding.EncodeToString(expiry[:]) + "." +
+		base64.RawURLEncoding.EncodeToString(signature)
+	return token, expiresAt
 }
 
 func (a *authManager) validate(token string) (time.Time, bool) {
@@ -216,25 +202,27 @@ func (a *authManager) validate(token string) (time.Time, bool) {
 	if token == "" {
 		return time.Time{}, false
 	}
-	now := a.now()
-	digest := sha256.Sum256([]byte(token))
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	expiresAt, ok := a.tokens[digest]
-	if !ok || !expiresAt.After(now) {
-		delete(a.tokens, digest)
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] != authTokenVersion {
 		return time.Time{}, false
 	}
-	expiresAt = now.Add(a.ttl)
-	a.tokens[digest] = expiresAt
+	expiry, expiryErr := base64.RawURLEncoding.DecodeString(parts[1])
+	signature, signatureErr := base64.RawURLEncoding.DecodeString(parts[2])
+	if expiryErr != nil || signatureErr != nil || len(expiry) != 8 || len(signature) != sha256.Size {
+		return time.Time{}, false
+	}
+	expiresAt := time.Unix(int64(binary.BigEndian.Uint64(expiry)), 0)
+	if !expiresAt.After(a.now()) || subtle.ConstantTimeCompare(signature, a.sign(expiry)) != 1 {
+		return time.Time{}, false
+	}
 	return expiresAt, true
 }
 
-func (a *authManager) revoke(token string) {
-	digest := sha256.Sum256([]byte(token))
-	a.mu.Lock()
-	delete(a.tokens, digest)
-	a.mu.Unlock()
+func (a *authManager) sign(expiry []byte) []byte {
+	mac := hmac.New(sha256.New, a.passwordDigest[:])
+	_, _ = mac.Write([]byte(authTokenPurpose))
+	_, _ = mac.Write(expiry)
+	return mac.Sum(nil)
 }
 
 func (a *authManager) retryAfter(client string) time.Duration {
@@ -285,14 +273,6 @@ func (a *authManager) recordSuccess(client string) {
 	a.mu.Lock()
 	delete(a.attempts, client)
 	a.mu.Unlock()
-}
-
-func (a *authManager) pruneLocked(now time.Time) {
-	for digest, expiresAt := range a.tokens {
-		if !expiresAt.After(now) {
-			delete(a.tokens, digest)
-		}
-	}
 }
 
 func writeLoginLimited(writer http.ResponseWriter, retry time.Duration) {

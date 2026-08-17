@@ -1,7 +1,6 @@
 package web
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -85,24 +84,48 @@ func TestPasswordAuthRejectsWrongPasswordThenBacksOff(t *testing.T) {
 	}
 }
 
-func TestPasswordAuthLogoutRevokesToken(t *testing.T) {
+func TestPasswordAuthTokenSurvivesRestartAndPasswordChangeInvalidatesIt(t *testing.T) {
 	manager, err := newAuthManager("secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager.random = bytes.NewReader(bytes.Repeat([]byte{7}, 32))
 	now := time.Date(2026, time.August, 16, 10, 0, 0, 0, time.UTC)
 	manager.now = func() time.Time { return now }
-	token, _, err := manager.issue()
+	token, _ := manager.issue()
+
+	restarted, err := newAuthManager("secret")
 	if err != nil {
 		t.Fatal(err)
 	}
+	restarted.now = func() time.Time { return now }
+	if _, ok := restarted.validate(token); !ok {
+		t.Fatal("token did not survive an auth manager restart")
+	}
+
+	changed, err := newAuthManager("different")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed.now = func() time.Time { return now }
+	if _, ok := changed.validate(token); ok {
+		t.Fatal("old token remained valid after password change")
+	}
+}
+
+func TestPasswordAuthTokenExpiresAfterOneYear(t *testing.T) {
+	manager, err := newAuthManager("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 10, 0, 0, 0, time.UTC)
+	manager.now = func() time.Time { return now }
+	token, expiresAt := manager.issue()
 	if _, ok := manager.validate(token); !ok {
 		t.Fatal("issued token did not validate")
 	}
-	manager.revoke(token)
+	manager.now = func() time.Time { return expiresAt }
 	if _, ok := manager.validate(token); ok {
-		t.Fatal("revoked token still validates")
+		t.Fatal("expired token still validates")
 	}
 }
 
