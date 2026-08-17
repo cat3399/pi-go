@@ -146,6 +146,7 @@ type Service struct {
 	allowedRoots        map[string]struct{}
 	fileIndexMu         sync.Mutex
 	fileIndexCache      map[string]fileIndexCacheEntry
+	sessionCatalog      *session.Catalog
 	skillHTTP           HTTPDoer
 	skillsAPI           string
 	githubAPI           string
@@ -198,6 +199,10 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if githubAPI == "" {
 		githubAPI = "https://api.github.com"
 	}
+	sessionCatalog, err := session.NewCatalog(paths.AgentDir)
+	if err != nil {
+		return nil, fmt.Errorf("open session catalog: %w", err)
+	}
 	serviceCtx, cancel := context.WithCancel(ctx)
 	s := &Service{
 		ctx: serviceCtx, cancel: cancel, production: cloneProductionConfig(options.Production),
@@ -206,6 +211,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		skillHTTP: skillHTTP, skillsAPI: skillsAPI, githubAPI: githubAPI,
 		allowedRoots:   make(map[string]struct{}),
 		fileIndexCache: make(map[string]fileIndexCacheEntry),
+		sessionCatalog: sessionCatalog,
 		sessions:       make(map[string]*managedSession), opening: make(map[string]*openCall),
 		events: newEventStream(defaultEventHistoryCapacity), reaperDone: make(chan struct{}),
 	}
@@ -466,16 +472,12 @@ func (s *Service) openExisting(ctx context.Context, id string) (*managedSession,
 }
 
 func (s *Service) findSession(id string) (session.SessionInfo, bool, error) {
-	values, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
+	values, err := s.discoveredSessions()
 	if err != nil {
 		return session.SessionInfo{}, false, err
 	}
-	for _, value := range values {
-		if value.ID == id {
-			return value, true, nil
-		}
-	}
-	return session.SessionInfo{}, false, nil
+	value, found := findDiscoveredSession(values, id)
+	return value, found, nil
 }
 
 func (s *Service) Dispatch(ctx context.Context, id string, command Command) (CommandResult, error) {
@@ -689,6 +691,9 @@ func (s *Service) Close(ctx context.Context) error {
 		if err := managed.dispose(ctx); err != nil {
 			closeErr = errors.Join(closeErr, err)
 		}
+	}
+	if err := s.sessionCatalog.Close(); err != nil {
+		closeErr = errors.Join(closeErr, err)
 	}
 	s.events.close()
 	return closeErr

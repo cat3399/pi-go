@@ -43,23 +43,17 @@ type SessionSnapshot struct {
 }
 
 func (s *Service) ListSessions() ([]SessionInfo, error) {
-	discovered, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
+	discovered, err := s.discoveredSessions()
 	if err != nil {
 		return nil, err
 	}
-	pathIDs := make(map[string]string, len(discovered))
-	for _, info := range discovered {
-		pathIDs[cleanPathKey(info.Path)] = info.ID
-	}
+	pathIDs := discoveredSessionPathIDs(discovered)
 	byID := make(map[string]SessionInfo, len(discovered))
 	for _, info := range discovered {
 		byID[info.ID] = discoveredSessionInfo(info, pathIDs)
 	}
 	for _, managed := range s.activeSessions() {
 		managedID, _, _ := managed.identity()
-		if _, exists := byID[managedID]; exists {
-			continue
-		}
 		manager := managed.manager()
 		if manager == nil {
 			continue
@@ -74,6 +68,30 @@ func (s *Service) ListSessions() ([]SessionInfo, error) {
 		return result[left].Modified.After(result[right].Modified)
 	})
 	return result, nil
+}
+
+func (s *Service) discoveredSessions() ([]session.SessionInfo, error) {
+	if s == nil || s.sessionCatalog == nil {
+		return nil, errors.New("session catalog is unavailable")
+	}
+	return s.sessionCatalog.ListAll()
+}
+
+func discoveredSessionPathIDs(values []session.SessionInfo) map[string]string {
+	result := make(map[string]string, len(values))
+	for _, info := range values {
+		result[cleanPathKey(info.Path)] = info.ID
+	}
+	return result
+}
+
+func findDiscoveredSession(values []session.SessionInfo, id string) (session.SessionInfo, bool) {
+	for _, info := range values {
+		if info.ID == id {
+			return info, true
+		}
+	}
+	return session.SessionInfo{}, false
 }
 
 func discoveredSessionInfo(info session.SessionInfo, pathIDs map[string]string) SessionInfo {
@@ -257,41 +275,25 @@ func (s *Service) RenameSession(ctx context.Context, id, name string) error {
 }
 
 func (s *Service) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, SessionInfo, bool, error) {
+	discovered, err := s.discoveredSessions()
+	if err != nil {
+		return nil, nil, SessionInfo{}, false, err
+	}
+	pathIDs := discoveredSessionPathIDs(discovered)
 	if managed, ok := s.active(id); ok {
 		manager := managed.manager()
 		if manager == nil {
 			return nil, nil, SessionInfo{}, false, errors.New("active session manager is unavailable")
 		}
-		infos, err := s.ListSessions()
-		if err != nil {
-			return nil, nil, SessionInfo{}, false, err
-		}
-		for _, info := range infos {
-			if info.ID == id {
-				return manager, managed, info, false, nil
-			}
-		}
-		return manager, managed, activeSessionInfo(manager, managed, nil), false, nil
+		return manager, managed, activeSessionInfo(manager, managed, pathIDs), false, nil
 	}
-	info, found, err := s.findSession(id)
-	if err != nil {
-		return nil, nil, SessionInfo{}, false, err
-	}
+	info, found := findDiscoveredSession(discovered, id)
 	if !found {
 		return nil, nil, SessionInfo{}, false, os.ErrNotExist
 	}
 	manager, err := session.OpenSessionManager(info.Path, filepath.Dir(info.Path), "")
 	if err != nil {
 		return nil, nil, SessionInfo{}, false, err
-	}
-	all, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
-	if err != nil {
-		_ = manager.Close()
-		return nil, nil, SessionInfo{}, false, err
-	}
-	pathIDs := make(map[string]string, len(all))
-	for _, item := range all {
-		pathIDs[cleanPathKey(item.Path)] = item.ID
 	}
 	return manager, nil, discoveredSessionInfo(info, pathIDs), true, nil
 }

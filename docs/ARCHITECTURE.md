@@ -126,6 +126,13 @@ Application Service 在 ApplicationSession 之上提供多会话发现、打开�
 snapshot，以及跨会话的全局 revision/cursor event stream。Transport adapter 只进行 framing、
 字段投影和连接管理。
 
+多会话发现使用进程内 catalog，并在本机缓存目录保存带版本的可重建 JSON 快照。JSONL session
+文件始终是唯一 durable 事实源；catalog 只保存文件 size/mtime 指纹和列表投影，每次查询都会轻量
+校验目录，并且只重解析新增或变化的文件。快照通过同目录临时文件、文件同步和原子替换发布；写入
+失败只损失下次启动加速，不影响当前查询。catalog 不保存 canonical entries/tree，缺失、损坏、
+版本升级或多进程覆盖产生的陈旧快照都能从 JSONL 增量修复。这个边界允许以后增加游标分页、cwd
+筛选或替换内部索引后端，而不建立第二套会话状态，也不要求 Surface 维护索引一致性。
+
 ### Surface 与 Application Service
 
 CLI、TUI、WebUI 和 GUI 是 Application API 的独立 surface adapter：

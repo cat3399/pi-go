@@ -284,8 +284,26 @@ func listSessionsFromDir(dir string, progress SessionListProgress, offset, total
 // directory order while progress follows completion order and is serialized
 // so callers never need to make their callback concurrency-safe.
 func buildSessionInfos(files []string, progress SessionListProgress, offset, total int) []SessionInfo {
+	results, valid := buildSessionInfoResults(files, progress, offset, total, buildSessionInfo)
+	values := make([]SessionInfo, 0, len(files))
+	for index := range results {
+		if valid[index] {
+			values = append(values, results[index])
+		}
+	}
+	return values
+}
+
+type sessionInfoLoader func(string) (SessionInfo, bool)
+
+func buildSessionInfoResults(
+	files []string,
+	progress SessionListProgress,
+	offset, total int,
+	load sessionInfoLoader,
+) ([]SessionInfo, []bool) {
 	if len(files) == 0 {
-		return []SessionInfo{}
+		return []SessionInfo{}, []bool{}
 	}
 	if total == 0 {
 		total = len(files)
@@ -302,7 +320,7 @@ func buildSessionInfos(files []string, progress SessionListProgress, offset, tot
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				results[index], valid[index] = buildSessionInfo(files[index])
+				results[index], valid[index] = load(files[index])
 				progressMu.Lock()
 				loaded++
 				if progress != nil {
@@ -317,16 +335,21 @@ func buildSessionInfos(files []string, progress SessionListProgress, offset, tot
 	}
 	close(jobs)
 	workers.Wait()
-	values := make([]SessionInfo, 0, len(files))
-	for index := range results {
-		if valid[index] {
-			values = append(values, results[index])
-		}
-	}
-	return values
+	return results, valid
 }
 
 func buildSessionInfo(path string) (SessionInfo, bool) {
+	return buildSessionInfoProjection(path, true)
+}
+
+// buildSessionCatalogInfo omits the aggregate search text that pi's compatible
+// discovery API exposes but application surfaces do not consume. The catalog
+// still reads every record needed to derive activity and message counts.
+func buildSessionCatalogInfo(path string) (SessionInfo, bool) {
+	return buildSessionInfoProjection(path, false)
+}
+
+func buildSessionInfoProjection(path string, collectAllMessages bool) (SessionInfo, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return SessionInfo{}, false
@@ -337,7 +360,10 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 		return SessionInfo{}, false
 	}
 	result := SessionInfo{Path: path, FirstMessage: "(no messages)"}
-	allMessages := make([]string, 0)
+	var allMessages []string
+	if collectAllMessages {
+		allMessages = make([]string, 0)
+	}
 	var lastActivity time.Time
 	reader := bufio.NewReaderSize(file, 64*1024)
 	headerFound := false
@@ -401,7 +427,8 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 			return SessionInfo{}, false
 		}
 		result.MessageCount++
-		text, role, activity, hasContent := sessionInfoMessage(object)
+		needText := collectAllMessages || result.FirstMessage == "(no messages)"
+		text, role, activity, hasContent := sessionInfoMessage(object, needText)
 		if role != "user" && role != "assistant" {
 			continue
 		}
@@ -409,7 +436,9 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 			lastActivity = activity
 		}
 		if text != "" {
-			allMessages = append(allMessages, text)
+			if collectAllMessages {
+				allMessages = append(allMessages, text)
+			}
 			if result.FirstMessage == "(no messages)" && role == "user" {
 				result.FirstMessage = text
 			}
@@ -424,7 +453,9 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 	if !headerFound || result.ID == "" {
 		return SessionInfo{}, false
 	}
-	result.AllMessagesText = strings.Join(allMessages, " ")
+	if collectAllMessages {
+		result.AllMessagesText = strings.Join(allMessages, " ")
+	}
 	if !lastActivity.IsZero() {
 		result.Modified = lastActivity
 	} else if !result.Created.IsZero() {
@@ -435,7 +466,7 @@ func buildSessionInfo(path string) (SessionInfo, bool) {
 	return result, true
 }
 
-func sessionInfoMessage(entry map[string]json.RawMessage) (text, role string, activity time.Time, hasContent bool) {
+func sessionInfoMessage(entry map[string]json.RawMessage, includeText bool) (text, role string, activity time.Time, hasContent bool) {
 	var message map[string]json.RawMessage
 	if json.Unmarshal(entry["message"], &message) != nil {
 		return "", "", time.Time{}, false
@@ -449,6 +480,9 @@ func sessionInfoMessage(entry map[string]json.RawMessage) (text, role string, ac
 		var timestamp string
 		_ = json.Unmarshal(entry["timestamp"], &timestamp)
 		activity, _ = time.Parse(time.RFC3339, timestamp)
+	}
+	if !includeText {
+		return "", role, activity, hasContent
 	}
 	var stringContent string
 	if json.Unmarshal(message["content"], &stringContent) == nil {

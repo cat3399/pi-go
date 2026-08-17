@@ -116,7 +116,7 @@ func (s *Service) DeleteSession(ctx context.Context, id string) error {
 	if id == "" {
 		return errors.New("session id is required")
 	}
-	discovered, err := session.ListAllSessionsInAgentDir(s.paths.AgentDir, nil)
+	discovered, err := s.discoveredSessions()
 	if err != nil {
 		return err
 	}
