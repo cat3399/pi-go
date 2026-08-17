@@ -57,9 +57,9 @@ Go 核心必须对外提供与原版一致的完整 Agent 能力和可观察语�
 和 event；HTTP JSON、SSE、终端事件或 GUI IPC 等传输编码留在对应 Surface。只有出现两个真实
 消费者后才提取共享 wire protocol，禁止为了预想复用提前建立最低公分母交互抽象。
 
-Web 日常开发使用 `make web-dev`（或其无 Make 等价入口 `./scripts/webui.sh dev`），由 Next HMR
-代理 API-only Go 并自动重载 Go 服务，不执行生产静态构建。`make web-build` 与 `make web-run`
-必须保持分离；生产二进制嵌入静态导出，运行时不依赖 Node。
+Web 日常开发使用 `make dev SURFACE=web`，由 Next HMR 代理 API-only Go 并自动重载 Go 服务，
+不执行生产静态构建。`make build SURFACE=web` 与 `make run SURFACE=web` 保持分离；生产二进制
+嵌入静态导出，运行时不依赖 Node。
 
 ## 移植范围与原则
 

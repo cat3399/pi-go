@@ -104,16 +104,16 @@ pi-go rpc [rpc options]
 同一个二进制，不切分 Application/Agent 逻辑。开发态由 Next 提供 HMR，并将 `/api/v1/*`
 代理到 `pi-go web --api-only`；生产态只需 Go 二进制，不启动 Next 或 JSONL 子进程。
 
-`surface/gui` 是独立 Go module 和第二个 composition root，只在显式执行下列命令时构建：
+`surface/gui` 是独立 Go module 和第二个 composition root，通过统一 Surface 构建入口生成：
 
 ```sh
-make gui-setup
-make gui-check
-make gui-build
+make setup SURFACE=gui
+make check SURFACE=gui
+make build SURFACE=gui
 ```
 
-输出为 `surface/gui/bin/pi-go-gui`。这个二进制链接完整 Core、Wails bridge 和 Workbench
-静态资源。根目录的默认 `go build ./cmd/pi-go`、`go test ./...` 和 `test-all` 不遍历
+输出为 `bin/pi-go-gui`。这个二进制链接完整 Core、Wails bridge 和 Workbench静态资源。
+`SURFACE=terminal` 的构建和检查不遍历
 GUI module，也不会因为 GUI 引入 CGO、Node 或平台 SDK。
 
 `surface/mobile` 是另一个独立 Go module。当前只构建 Android arm64，最低 API 26；其 Go
@@ -121,11 +121,11 @@ GUI module，也不会因为 GUI 引入 CGO、Node 或平台 SDK。
 同样只通过显式命令进入：
 
 ```sh
-make mobile-setup
-make mobile-doctor
-make mobile-check
-make mobile-build
-make mobile-run
+make setup SURFACE=mobile
+make doctor SURFACE=mobile
+make check SURFACE=mobile
+make build SURFACE=mobile
+make dev SURFACE=mobile
 ```
 
 Android 开发默认面向开启 USB 调试的真机，不要求安装模拟器或系统镜像。iOS 保留为未来同一

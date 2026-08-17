@@ -10,15 +10,15 @@ build-time and development dependencies only.
 Run the normal workflow from the repository root:
 
 ```sh
-make web-setup
-make web-dev WEB_ARGS='--cwd /path/to/project'
-make web-check
-make web-build
-make web-run WEB_ARGS='--cwd /path/to/project'
+make setup SURFACE=web
+make dev SURFACE=web ARGS='--cwd /path/to/project'
+make check SURFACE=web
+make build SURFACE=web
+make run SURFACE=web ARGS='--cwd /path/to/project'
 ```
 
-The same operations are available through `./scripts/webui.sh` on systems without Make. The generated `out/`
-directory is ignored by Git. The leading underscore in `_frontend` keeps JavaScript dependencies outside Go's
-recursive package discovery while still allowing explicit `go:embed` of the static export.
+The generated `out/` directory is ignored by Git. The leading underscore in `_frontend` keeps JavaScript
+dependencies outside Go's recursive package discovery while still allowing explicit `go:embed` of the static
+export.
 
 See [`../../../docs/SURFACES.md`](../../../docs/SURFACES.md) for the transport and state-ownership contract.

@@ -1,5 +1,7 @@
 .PHONY: setup check doctor build run device-list
 
+BIN_DIR ?= bin
+
 setup:
 	task setup
 
@@ -10,10 +12,10 @@ doctor:
 	task doctor
 
 build:
-	task build
+	task build BIN_DIR="$(BIN_DIR)"
 
 run:
-	task run
+	task run BIN_DIR="$(BIN_DIR)"
 
 device-list:
 	task device:list

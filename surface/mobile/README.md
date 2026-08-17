@@ -5,7 +5,7 @@ reuses the readable React Workbench from `surface/ui`, but it does not import or
 link the pi-go Agent Core. Agent and session authority remain in the remote
 `pi-go web` process.
 
-The first supported target is Android:
+Android build requirements:
 
 - minimum Android version: Android 8.0 / API 26;
 - build and target SDK: API 35;
@@ -13,9 +13,7 @@ The first supported target is Android:
 - transport: HTTP or HTTPS request/response plus reconnecting SSE;
 - host: Wails v3 Android WebView with a small Go network bridge.
 
-iOS, camera capture, push notifications, deep links, and background reminders
-are intentionally outside this slice. No emulator or Android system image is
-required; the development path targets a physical device.
+No emulator or Android system image is required when deploying to a physical device.
 
 ## Toolchain
 
@@ -34,15 +32,15 @@ Required Android SDK packages are `platforms;android-35`,
 From the repository root:
 
 ```sh
-make mobile-setup
-make mobile-doctor
-make mobile-check
+make setup SURFACE=mobile
+make doctor SURFACE=mobile
+make check SURFACE=mobile
 ```
 
 Build a debug APK without installing it:
 
 ```sh
-make mobile-build
+make build SURFACE=mobile
 ```
 
 The APK is written to `surface/mobile/bin/pi-go-mobile.apk`.
@@ -52,14 +50,14 @@ The APK is written to `surface/mobile/bin/pi-go-mobile.apk`.
 Enable USB debugging, connect the device, and run:
 
 ```sh
-make mobile-device-list
-make mobile-run
+make devices SURFACE=mobile
+make dev SURFACE=mobile
 ```
 
 When multiple devices are connected, select one explicitly:
 
 ```sh
-DEVICE_ID=<adb-serial> make mobile-run
+DEVICE_ID=<adb-serial> make dev SURFACE=mobile
 ```
 
 ## Remote Core

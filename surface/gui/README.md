@@ -9,7 +9,7 @@ GUI 壳。它在同一个 `pi-go-gui` 进程内创建完整的 `application.Serv
 - `main.go`：桌面 composition root、窗口和静态资源；
 - `bridge.go`：本地 Core 的 query/command/event IPC adapter；
 - `frontend`：很薄的 Wails 宿主；
-- `../ui`：GUI、未来 WebUI 与移动宿主共享的 Workbench；
+- `../ui`：各图形宿主共享的 Workbench；
 - `../web`：远程 HTTP/SSE adapter 和密码认证。
 
 本 module 通过 `replace github.com/cat3399/pi-go => ../..` 链接本地 Core。根 module 不反向
@@ -18,20 +18,18 @@ GUI 壳。它在同一个 `pi-go-gui` 进程内创建完整的 `application.Serv
 ## 开发与构建
 
 ```sh
-make setup
-make check
-make check-native
-make dev
-make build
+make setup SURFACE=gui
+make check SURFACE=gui
+make dev SURFACE=gui
+make build SURFACE=gui
 ```
 
-`make check` 使用 Wails server build tag 做无窗口检查；`make check-native` 验证当前平台
-的原生 WebView 集成。 `make build` 生成 `bin/pi-go-gui`。macOS 原生产物需要 Xcode Command Line Tools；
+`make check SURFACE=gui` 使用 Wails server build tag 做无窗口检查。`make build SURFACE=gui`
+生成根目录下的 `bin/pi-go-gui`。macOS 原生产物需要 Xcode Command Line Tools；
 Windows 和 Linux 需要 Wails 对应的平台 WebView/编译工具链。
 
-当前共享 Workbench 已覆盖本地 Core 启动、会话管理、prompt 与流式事件、模型和思考等级、
-Markdown、图片附件、工具过程与详情、本地/远程切换和远程密码登录。尚未完成迁移或尚无
-视觉基准的入口可以暂时不展示；现有 WebUI 在能力和交互完成双侧验收前不会切换入口。
+共享 Workbench 覆盖本地 Core 启动、会话管理、prompt 与流式事件、模型和思考等级、
+Markdown、图片附件、工具过程与详情、本地/远程切换和远程密码登录。
 
 ## 源码复用
 

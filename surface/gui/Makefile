@@ -1,4 +1,6 @@
-.PHONY: setup check check-native frontend-build build dev
+.PHONY: setup check frontend-build build dev
+
+BIN_DIR ?= bin
 
 setup:
 	npm --prefix ../ui ci
@@ -9,16 +11,13 @@ check:
 	npm --prefix frontend run check
 	CGO_ENABLED=0 go test -tags server ./...
 
-check-native:
-	go test ./...
-
 frontend-build:
 	npm --prefix ../ui run check
 	npm --prefix frontend run build
 
 build: frontend-build
-	mkdir -p bin
-	go build -tags production -trimpath -o bin/pi-go-gui .
+	mkdir -p $(BIN_DIR)
+	go build -tags production -trimpath -o $(BIN_DIR)/pi-go-gui .
 
 dev:
 	npm --prefix frontend run build:dev

@@ -10,7 +10,8 @@ if [ ! -x "$frontend_dir/node_modules/.bin/next" ]; then
 fi
 
 npm --prefix "$frontend_dir" run build
-mkdir -p "$repo_dir/bin"
+output_dir=${OUTPUT_DIR:-"$repo_dir/bin"}
+mkdir -p "$output_dir"
 
 cd "$repo_dir"
-go build -tags pi_go_webui -o "$repo_dir/bin/pi-go" ./cmd/pi-go
+go build -trimpath -tags pi_go_webui -o "$output_dir/pi-go" ./cmd/pi-go

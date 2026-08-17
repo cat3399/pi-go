@@ -1,183 +1,72 @@
 # pi-go
 
-pi-go 的目标是使用 Go 忠实重写 [pi](https://github.com/cat3399/pi) 的完整 Agent Runtime。
-它不是一个只复刻交互思路的相似项目，也不会通过能力降级、静态替代或 TypeScript fallback
-来绕开原版语义。
+pi-go 是 [pi](https://github.com/cat3399/pi) Agent Runtime 的 Go 实现。项目以同一套 Go Core
+提供命令行、终端、Web、桌面和移动端入口，并保持会话、工具、模型调用和事件语义一致。
 
-Go 实现可以采用符合语言习惯的类型、并发和资源管理方式，但必须保留原版的能力边界、状态
-所有权、事件时序、持久化格式和可观察行为。
+## Surface
 
-## 长期目标
-
-- 完整对齐 pi 的 `AgentSessionRuntime → AgentSession → Agent → AgentLoop → SessionManager`
-  生产语义，包括工具、队列、重试、压缩、取消、会话树、资源和扩展中立契约；
-- 以 Go Agent Core 作为唯一权威运行时，不在 Surface 或 transport 中复制 Agent 状态和策略；
-- 在同一核心之上提供 CLI、TUI、独立打包的完整桌面 GUI、远程移动端和 WebUI；
-- CLI、TUI 直接接入进程内 typed Go API；桌面 GUI 通过 Wails IPC 接入同一进程中的完整 Core；
-- 浏览器 WebUI 通过版本化 HTTP command/query/snapshot 与一条全局 SSE 接入；
-- 桌面 GUI 可在本地 Core 与远程 HTTP/SSE endpoint 之间切换，移动端复用同一远程协议；
-- Android 移动端作为独立的远程产品构建，不链接 Agent Core，并复用同一 Workbench 与远程协议；
-- stdin/stdout JSONL 只服务外部自动化、跨语言调用和协议测试；
-- Surface 可以独立演进交互和视觉实现，但不能改变或补偿 Agent Core 的产品语义。
-
-核心调用关系：
-
-```text
-CLI / TUI ─────────────────────┐
-GUI Workbench ─ Wails IPC ─────┼─ application.API
-Web/GUI remote ─ HTTP + SSE ───┘        │
-                                        ▼
-                             application.Service
-                                        │
-                                        ▼
-                              ApplicationSession
-                                        │
-                                        ▼
-                    Runtime → AgentSession → Agent → AgentLoop
-
-External automation ─ JSONL protocol → ApplicationSession
-```
-
-更完整的状态所有权和 Surface 通信约定见
-[核心架构](docs/ARCHITECTURE.md) 与 [Surface 架构](docs/SURFACES.md)。
-
-## 环境要求
-
-- Go 1.25 或更高版本；
-- WebUI 开发和构建需要 Node.js 22.19 或更高版本；
-- GUI 构建额外需要 Node.js、Wails 所需的平台原生工具链，以及 `surface/gui` 独立 Go module；
-- Android 移动端构建需要 JDK 21、Android API/Build Tools 35、Platform Tools、NDK 26.3 和 `surface/mobile` 独立 Go module；
-- 只构建 Go Core、CLI 或 JSONL RPC 时不需要 Node.js。
+| Surface | 内容 | 产物 |
+|---|---|---|
+| `terminal` | CLI、TUI、RPC | `bin/pi-go` |
+| `web` | CLI、TUI、RPC、内嵌 Web UI | `bin/pi-go` |
+| `gui` | 内嵌完整 Core 的桌面应用 | `bin/pi-go-gui` |
+| `mobile` | 连接远程 Core 的 Android 应用 | `bin/pi-go-mobile.apk` |
 
 ## 构建
 
-构建不含静态 WebUI 的统一命令：
+所有 Surface 使用同一组 Make 命令：
 
 ```sh
-mkdir -p bin
-go build -o bin/pi-go ./cmd/pi-go
+make help
+make setup SURFACE=<surface>
+make check SURFACE=<surface>
+make build SURFACE=<surface>
+make dev SURFACE=<surface>
+make run SURFACE=<surface> ARGS='...'
 ```
 
-查看全部子命令：
+`SURFACE` 默认为 `terminal`：
 
 ```sh
-./bin/pi-go --help
-./bin/pi-go web --help
+make build
+make build SURFACE=web
+make build SURFACE=gui
+make build SURFACE=mobile
+```
+
+交叉编译带 Web UI 的 Linux AMD64 版本：
+
+```sh
+make setup SURFACE=web
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build SURFACE=web
+```
+
+移动端工具链和设备：
+
+```sh
+make doctor SURFACE=mobile
+make devices SURFACE=mobile
 ```
 
 ## 运行
 
-执行一次命令行 Agent 请求：
-
 ```sh
 ./bin/pi-go run -p "hello"
-./bin/pi-go run -p "hello" --provider <provider-id> --model <model-id>
-```
-
-启动 stdin/stdout JSONL 自动化接口：
-
-```sh
+./bin/pi-go tui
 ./bin/pi-go rpc --cwd /path/to/project
-./bin/pi-go rpc --cwd /path/to/project --session /path/to/session.jsonl
 ```
 
-启动不含静态页面的 Web API，适合前端开发或独立调试：
-
-```sh
-./bin/pi-go web --api-only --listen 127.0.0.1:30142 --cwd /path/to/project
-```
-
-对局域网或公网地址监听时必须设置基础访问密码；通过自定义主机名访问时同时显式放行
-对应 Host（可重复指定）：
+启动 Web 服务：
 
 ```sh
 PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
-  --listen 0.0.0.0:30141 --allowed-host pi.local --cwd /path/to/project
+  --listen 0.0.0.0:30141 \
+  --cwd /path/to/project
 ```
 
-开发阶段不强制 VPN 或 TLS；loopback 监听可不设密码。远程部署的网络加固策略在后续阶段
-单独确定。
+非 loopback 地址必须设置 `--password` 或 `PI_GO_WEB_PASSWORD`。
 
-## 桌面 GUI（独立构建）
+## 文档
 
-GUI 不属于默认 `pi-go` 产物。它独立编译为 `pi-go-gui`，但二进制内部包含完整的
-pi-go Agent Core，并可切换为控制远程 pi-go：
-
-```sh
-make gui-setup
-make gui-check
-make gui-build
-./surface/gui/bin/pi-go-gui
-```
-
-GUI 的共享可读前端源码位于 `surface/ui`，Wails 宿主位于 `surface/gui`。当前是首个
-纵向切片；现有完整 WebUI 在共享 Workbench 覆盖全部能力前不会被替换。
-
-## Android 移动端（独立构建）
-
-移动端不属于默认 `pi-go` 或桌面 GUI 产物。当前 Android-first 实现最低支持 API 26，
-只连接远程 pi-go Core，不在手机内链接 Agent Runtime：
-
-```sh
-make mobile-setup
-make mobile-doctor
-make mobile-check
-make mobile-build
-```
-
-连接启用 USB 调试的 arm64 Android 真机后，可以直接安装并启动：
-
-```sh
-make mobile-device-list
-make mobile-run
-```
-
-当前不需要模拟器或系统镜像。HTTP 与 HTTPS endpoint 均由移动宿主的 Go transport 支持；
-详细说明见 [`surface/mobile/README.md`](surface/mobile/README.md)。
-
-## WebUI 开发
-
-首次安装依赖：
-
-```sh
-make web-setup
-# 或：./scripts/webui.sh setup
-```
-
-启动 Next.js HMR 和自动重载的 Go API：
-
-```sh
-make web-dev WEB_ARGS='--cwd /path/to/project'
-# 或：./scripts/webui.sh dev --cwd /path/to/project
-```
-
-默认前端地址为 `http://127.0.0.1:30141`，Go API 监听 `127.0.0.1:30142`，前端将
-`/api/v1/*` 同源代理到 Go 进程。
-
-## WebUI 生产构建与运行
-
-```sh
-make web-build
-make web-run WEB_ARGS='--cwd /path/to/project'
-```
-
-等价脚本命令：
-
-```sh
-./scripts/webui.sh build
-./scripts/webui.sh run --cwd /path/to/project
-```
-
-生产构建会导出静态前端，并使用 `pi_go_webui` build tag 将资源嵌入 `bin/pi-go`。运行时
-不需要 Node.js 或 Next.js server。
-
-## 开发检查
-
-```sh
-gofmt -w <changed-go-files>
-go test ./...
-go test -race ./...
-go vet ./...
-make web-check
-git diff --check
-```
+- [核心架构](docs/ARCHITECTURE.md)
+- [Surface 架构](docs/SURFACES.md)

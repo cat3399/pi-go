@@ -11,9 +11,7 @@ Usage: ./scripts/webui.sh <command> [pi-go web options]
 Commands:
   setup     Install frontend dependencies once
   dev       Start Next HMR and the auto-reloading Go API
-  api-dev   Start only the auto-reloading Go API on 127.0.0.1:30142
   check     Run frontend type checking and linting
-  test      Run Go Web/TUI surface tests
   build     Build the static frontend into the unified pi-go binary
   run       Run the existing pi-go web command without rebuilding
 EOF
@@ -33,9 +31,6 @@ case "$command" in
 	dev)
 		exec "$repo_dir/scripts/dev-webui.sh" "$@"
 		;;
-	api-dev)
-		exec "$repo_dir/scripts/watch-web-api.sh" --listen 127.0.0.1:30142 "$@"
-		;;
 	check)
 		if [ "$#" -ne 0 ]; then
 			printf '%s\n' "webui check does not accept pi-go web options" >&2
@@ -43,14 +38,6 @@ case "$command" in
 		fi
 		npm --prefix "$frontend_dir" run typecheck
 		npm --prefix "$frontend_dir" run lint
-		;;
-	test)
-		if [ "$#" -ne 0 ]; then
-			printf '%s\n' "webui test does not accept pi-go web options" >&2
-			exit 2
-		fi
-		cd "$repo_dir"
-		go test ./surface/... ./cmd/pi-go
 		;;
 	build)
 		exec "$repo_dir/scripts/build-webui.sh" "$@"
