@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -82,6 +83,26 @@ func (s *selectorModel) SetTheme(theme Theme) {
 	}
 	s.theme = theme
 	applySelectorStyles(&s.input, theme)
+}
+
+func (s *selectorModel) SetKeybindings(bindings appKeybindings) {
+	if s == nil {
+		return
+	}
+	set := func(binding *key.Binding, action string) { binding.SetKeys(bindings.WidgetKeys(action)...) }
+	set(&s.input.KeyMap.CharacterBackward, keyEditorCursorLeft)
+	set(&s.input.KeyMap.CharacterForward, keyEditorCursorRight)
+	set(&s.input.KeyMap.WordBackward, keyEditorWordLeft)
+	set(&s.input.KeyMap.WordForward, keyEditorWordRight)
+	set(&s.input.KeyMap.LineStart, keyEditorLineStart)
+	set(&s.input.KeyMap.LineEnd, keyEditorLineEnd)
+	set(&s.input.KeyMap.DeleteCharacterBackward, keyEditorDeleteBackward)
+	set(&s.input.KeyMap.DeleteCharacterForward, keyEditorDeleteForward)
+	set(&s.input.KeyMap.DeleteWordBackward, keyEditorDeleteWordBack)
+	set(&s.input.KeyMap.DeleteWordForward, keyEditorDeleteWordFront)
+	set(&s.input.KeyMap.DeleteBeforeCursor, keyEditorDeleteLineStart)
+	set(&s.input.KeyMap.DeleteAfterCursor, keyEditorDeleteLineEnd)
+	set(&s.input.KeyMap.AcceptSuggestion, keyInputTab)
 }
 
 func applySelectorStyles(input *textinput.Model, theme Theme) {

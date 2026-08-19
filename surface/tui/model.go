@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -134,6 +135,7 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 		model.readClipboardImage = readSystemClipboardImage
 	}
 	model.renderer.SetImageProtocol(detectTerminalImageProtocol(options.Environment))
+	model.composer.SetKeybindings(keybindings)
 	model.transcript.SetItems(contentItemsFromSnapshot(snapshot))
 	model.composer.SetWidth(model.width)
 	model.slashPalette.SetCommands(mergeSlashCommands(nil))
@@ -403,55 +405,70 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 }
 
 func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
-	keyName := message.String()
+	matches := func(action string) bool { return m.keybindings.MatchesPress(action, message) }
 	if m.fileCompletion.Active() {
-		switch keyName {
-		case "up":
+		switch {
+		case matches(keySelectUp):
 			m.fileCompletion.Move(-1)
 			return true, nil
-		case "down":
+		case matches(keySelectDown):
 			m.fileCompletion.Move(1)
 			return true, nil
-		case "tab", "enter":
+		case matches(keyInputTab), matches(keySelectConfirm):
 			if _, ok := m.fileCompletion.Selected(); ok {
 				return true, m.acceptFileCompletion()
 			}
-		case "esc":
+		case matches(keySelectCancel):
 			m.fileCompletion.Dismiss()
 			return true, nil
 		}
 	}
 	if m.slashPalette.Visible() {
-		switch keyName {
-		case "up":
+		switch {
+		case matches(keySelectUp):
 			m.slashPalette.Move(-1)
 			return true, nil
-		case "down":
+		case matches(keySelectDown):
 			m.slashPalette.Move(1)
 			return true, nil
-		case "tab", "enter":
+		case matches(keyInputTab), matches(keySelectConfirm):
 			if value, ok := m.slashPalette.Accept(); ok {
 				m.composer.SetDraft(value, nil)
 				return true, nil
 			}
-		case "esc":
+		case matches(keySelectCancel):
 			m.slashPalette.Dismiss()
 			return true, nil
 		}
 	}
 	switch {
-	case m.keybindings.Matches(keyModelSelect, keyName):
+	case matches(keySuspend):
+		if runtime.GOOS == "windows" {
+			m.setStatus("Process suspension is not supported on Windows", statusWarning)
+			return true, nil
+		}
+		return true, tea.Suspend
+	case matches(keySessionNew):
+		m.setStatus("Creating a new session…", statusInfo)
+		return true, m.createSession()
+	case matches(keySessionResume):
+		return true, m.openSessionSelector("")
+	case matches(keySessionTree):
+		return true, m.openTreeSelector()
+	case matches(keySessionFork):
+		return true, m.openForkSelector()
+	case matches(keyModelSelect):
 		return true, m.openModelSelector("")
-	case m.keybindings.Matches(keyModelForward, keyName):
+	case matches(keyModelForward):
 		m.setStatus("Cycling model…", statusInfo)
 		return true, m.dispatchCommand(application.CycleModelCommand{Direction: agent.CycleForward}, "", nil)
-	case m.keybindings.Matches(keyModelBackward, keyName):
+	case matches(keyModelBackward):
 		m.setStatus("Cycling model backward…", statusInfo)
 		return true, m.dispatchCommand(application.CycleModelCommand{Direction: agent.CycleBackward}, "", nil)
-	case m.keybindings.Matches(keyThinkingCycle, keyName):
+	case matches(keyThinkingCycle):
 		m.setStatus("Cycling thinking level…", statusInfo)
 		return true, m.dispatchCommand(application.CycleThinkingLevelCommand{}, "", nil)
-	case m.keybindings.Matches(keyThinkingToggle, keyName):
+	case matches(keyThinkingToggle):
 		m.renderer.SetThinkingVisible(!m.renderer.thinkingVisible)
 		if m.renderer.thinkingVisible {
 			m.setStatus("Thinking content shown", statusSuccess)
@@ -459,10 +476,10 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			m.setStatus("Thinking content hidden", statusSuccess)
 		}
 		return true, nil
-	case m.keybindings.Matches(keyMessageCopy, keyName):
+	case matches(keyMessageCopy):
 		m.setStatus("Copying last assistant reply…", statusInfo)
 		return true, m.dispatchCommand(application.GetLastAssistantTextCommand{}, "", nil)
-	case m.keybindings.Matches(keyPasteImage, keyName):
+	case matches(keyPasteImage):
 		if m.clipboardInFlight {
 			m.setStatus("Reading clipboard image…", statusInfo)
 			return true, nil
@@ -470,7 +487,7 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 		m.clipboardInFlight = true
 		m.setStatus("Reading clipboard image…", statusInfo)
 		return true, readClipboardImageCmd(m.ctx, m.readClipboardImage)
-	case m.keybindings.Matches(keyExternalEditor, keyName):
+	case matches(keyExternalEditor):
 		command, path, err := prepareExternalEditor(
 			m.environment, m.state.CWD, m.composer.Value(),
 		)
@@ -484,39 +501,44 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 		return true, tea.ExecProcess(command, func(err error) tea.Msg {
 			return externalEditorFinishedMsg{path: path, err: err}
 		})
-	case keyName == "up" || keyName == "down":
-		if m.composer.NavigateHistory(keyName) {
+	case matches(keyEditorCursorUp):
+		if m.composer.NavigateHistory("up") {
 			m.updateSlashPalette()
 			return true, nil
 		}
-	case m.keybindings.Matches(keyToolsExpand, keyName):
+	case matches(keyEditorCursorDown):
+		if m.composer.NavigateHistory("down") {
+			m.updateSlashPalette()
+			return true, nil
+		}
+	case matches(keyToolsExpand):
 		m.renderer.SetToolsExpanded(!m.renderer.toolsExpanded)
 		return true, nil
-	case m.keybindings.Matches(keyMessageDequeue, keyName):
+	case matches(keyMessageDequeue):
 		return true, m.restoreQueuedMessages(false)
-	case m.keybindings.Matches(keyViewportPageUp, keyName):
+	case matches(keyViewportPageUp):
 		m.transcript.ScrollUp(max(1, m.transcript.lastHeight-2))
 		return true, nil
-	case m.keybindings.Matches(keyViewportPageDown, keyName):
+	case matches(keyViewportPageDown):
 		m.transcript.ScrollDown(max(1, m.transcript.lastHeight-2))
 		return true, nil
-	case m.keybindings.Matches(keyViewportTop, keyName):
+	case matches(keyViewportTop):
 		m.transcript.ScrollToTop()
 		return true, nil
-	case m.keybindings.Matches(keyViewportBottom, keyName):
+	case matches(keyViewportBottom):
 		m.transcript.ScrollToBottom()
 		return true, nil
-	case m.keybindings.Matches(keyViewportPrevious, keyName):
+	case matches(keyViewportPrevious):
 		m.transcript.ScrollToPreviousPrompt()
 		return true, nil
-	case m.keybindings.Matches(keyViewportNext, keyName):
+	case matches(keyViewportNext):
 		m.transcript.ScrollToNextPrompt()
 		return true, nil
-	case m.keybindings.Matches(keyInputSubmit, keyName):
+	case matches(keyInputSubmit):
 		return true, m.submit(false)
-	case m.keybindings.Matches(keyMessageFollowUp, keyName):
+	case matches(keyMessageFollowUp):
 		return true, m.submit(true)
-	case m.keybindings.Matches(keyInterrupt, keyName):
+	case matches(keyInterrupt):
 		if m.helpVisible {
 			m.helpVisible = false
 			return true, nil
@@ -536,7 +558,7 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			m.updateSlashPalette()
 			return true, nil
 		}
-	case m.keybindings.Matches(keyClear, keyName):
+	case matches(keyClear):
 		if m.busy() {
 			return true, m.abort()
 		}
@@ -546,10 +568,14 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		return true, tea.Quit
-	case m.keybindings.Matches(keyExit, keyName):
+	case matches(keyExit):
 		if m.composer.Empty() {
 			return true, tea.Quit
 		}
+	}
+	if m.composer.HandleEditingKey(message, m.keybindings) {
+		m.updateSlashPalette()
+		return true, nil
 	}
 	return false, nil
 }
@@ -987,27 +1013,38 @@ func (m *Model) View() tea.View {
 }
 
 func (m *Model) renderHelp(width, height int) string {
+	hint := func(action, description string) string {
+		return fmt.Sprintf("%-24s %s", m.keybindings.Hint(action), description)
+	}
 	lines := []string{
 		m.theme.titleStyle(contentRoleSystem, false).Render("pi-go TUI"),
 		"",
-		"Enter              send / steer while streaming",
-		"Alt+Enter          queue a follow-up",
-		"Shift+Enter        insert a newline",
-		"Esc                abort current operation",
-		"PgUp / PgDn        scroll conversation",
-		"Ctrl+Home / End    jump to top / follow live output",
-		"Ctrl+Shift+↑ / ↓   jump between user prompts",
-		"Ctrl+O             collapse / expand tool output",
-		"Ctrl+L             open model selector",
-		"Ctrl+P / Ctrl+Shift+P  cycle model forward / backward",
-		"Shift+Tab          cycle thinking level",
-		"Ctrl+T             hide / show thinking content",
-		"Ctrl+X             copy last assistant reply",
-		"Ctrl+V             attach image from clipboard",
-		"Ctrl+G             edit draft in external editor",
-		"Up / Down          browse prompt history at editor edges",
-		"Alt+Up             restore queued messages",
-		"Ctrl+D             quit when editor is empty",
+		hint(keyInputSubmit, "send / steer while streaming"),
+		hint(keyMessageFollowUp, "queue a follow-up"),
+		hint(keyInputNewLine, "insert a newline"),
+		hint(keyInterrupt, "abort current operation"),
+		hint(keyViewportPageUp, "scroll conversation upward"),
+		hint(keyViewportPageDown, "scroll conversation downward"),
+		hint(keyViewportTop, "jump to transcript start"),
+		hint(keyViewportBottom, "follow live output"),
+		hint(keyViewportPrevious, "jump to previous user prompt"),
+		hint(keyViewportNext, "jump to next user prompt"),
+		hint(keyToolsExpand, "collapse / expand tool output"),
+		hint(keyModelSelect, "open model selector"),
+		hint(keyModelForward, "cycle model forward"),
+		hint(keyModelBackward, "cycle model backward"),
+		hint(keyThinkingCycle, "cycle thinking level"),
+		hint(keyThinkingToggle, "hide / show thinking content"),
+		hint(keyMessageCopy, "copy last assistant reply"),
+		hint(keyPasteImage, "attach image from clipboard"),
+		hint(keyExternalEditor, "edit draft in external editor"),
+		hint(keyEditorUndo, "undo the last editor change"),
+		hint(keyEditorCursorUp, "browse prompt history at the top edge"),
+		hint(keyEditorCursorDown, "leave prompt history at the bottom edge"),
+		hint(keyMessageDequeue, "restore queued messages"),
+		hint(keyExit, "quit when editor is empty"),
+		"",
+		"Edit keybindings.json in the agent directory, then run /reload.",
 		"",
 		"/help /hotkeys     show this page",
 		"/new               create a session",

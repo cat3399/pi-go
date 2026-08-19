@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -23,6 +24,16 @@ type composerModel struct {
 	historyDraft    string
 	historyDraftRow int
 	historyDraftCol int
+	undo            []composerSnapshot
+	killRing        []string
+	lastEditAction  string
+	jumpDirection   int
+}
+
+type composerSnapshot struct {
+	value  string
+	cursor int
+	images []llm.ImageBlock
 }
 
 func newComposerModel(theme Theme) composerModel {
@@ -52,6 +63,30 @@ func (m *composerModel) SetTheme(theme Theme) {
 	}
 	m.theme = theme
 	applyComposerStyles(&m.input, theme)
+}
+
+func (m *composerModel) SetKeybindings(bindings appKeybindings) {
+	if m == nil {
+		return
+	}
+	set := func(binding *key.Binding, action string) { binding.SetKeys(bindings.WidgetKeys(action)...) }
+	set(&m.input.KeyMap.CharacterBackward, keyEditorCursorLeft)
+	set(&m.input.KeyMap.CharacterForward, keyEditorCursorRight)
+	set(&m.input.KeyMap.WordBackward, keyEditorWordLeft)
+	set(&m.input.KeyMap.WordForward, keyEditorWordRight)
+	set(&m.input.KeyMap.LinePrevious, keyEditorCursorUp)
+	set(&m.input.KeyMap.LineNext, keyEditorCursorDown)
+	set(&m.input.KeyMap.LineStart, keyEditorLineStart)
+	set(&m.input.KeyMap.LineEnd, keyEditorLineEnd)
+	set(&m.input.KeyMap.PageUp, keyEditorPageUp)
+	set(&m.input.KeyMap.PageDown, keyEditorPageDown)
+	set(&m.input.KeyMap.DeleteCharacterBackward, keyEditorDeleteBackward)
+	set(&m.input.KeyMap.DeleteCharacterForward, keyEditorDeleteForward)
+	set(&m.input.KeyMap.DeleteWordBackward, keyEditorDeleteWordBack)
+	set(&m.input.KeyMap.DeleteWordForward, keyEditorDeleteWordFront)
+	set(&m.input.KeyMap.DeleteBeforeCursor, keyEditorDeleteLineStart)
+	set(&m.input.KeyMap.DeleteAfterCursor, keyEditorDeleteLineEnd)
+	set(&m.input.KeyMap.InsertNewline, keyInputNewLine)
 }
 
 func applyComposerStyles(input *textarea.Model, theme Theme) {
@@ -95,13 +130,83 @@ func (m *composerModel) Update(message tea.Msg) tea.Cmd {
 	if m == nil {
 		return nil
 	}
-	before := m.input.Value()
+	before := m.snapshot()
 	updated, command := m.input.Update(message)
 	m.input = updated
-	if m.historyIndex >= 0 && m.input.Value() != before {
+	if m.input.Value() != before.value {
+		press, isPress := message.(tea.KeyPressMsg)
+		typed := ""
+		if isPress {
+			typed = press.Key().Text
+		}
+		if typed != "" {
+			if strings.IndexFunc(typed, unicode.IsSpace) >= 0 || m.lastEditAction != "type-word" {
+				m.pushUndo(before)
+			}
+			m.lastEditAction = "type-word"
+		} else {
+			m.pushUndo(before)
+			m.lastEditAction = ""
+		}
+	} else if _, isPress := message.(tea.KeyPressMsg); isPress {
+		m.lastEditAction = ""
+	}
+	if m.historyIndex >= 0 && m.input.Value() != before.value {
 		m.exitHistory()
 	}
 	return command
+}
+
+// HandleEditingKey implements the editor operations that Bubble's textarea
+// does not provide: undo, kill/yank, yank-pop, and one-character jumps.
+func (m *composerModel) HandleEditingKey(message tea.KeyPressMsg, bindings appKeybindings) bool {
+	if m == nil {
+		return false
+	}
+	if m.jumpDirection != 0 {
+		if bindings.MatchesPress(keyEditorJumpForward, message) || bindings.MatchesPress(keyEditorJumpBackward, message) {
+			m.jumpDirection = 0
+			return true
+		}
+		if text := message.Key().Text; text != "" {
+			target, _ := utf8FirstRune(text)
+			m.jumpToRune(target, m.jumpDirection)
+			m.jumpDirection = 0
+			return true
+		}
+		m.jumpDirection = 0
+	}
+	switch {
+	case bindings.MatchesPress(keyEditorUndo, message):
+		m.undoEdit()
+		return true
+	case bindings.MatchesPress(keyEditorYank, message):
+		m.yank()
+		return true
+	case bindings.MatchesPress(keyEditorYankPop, message):
+		m.yankPop()
+		return true
+	case bindings.MatchesPress(keyEditorDeleteLineStart, message):
+		m.killToLineStart()
+		return true
+	case bindings.MatchesPress(keyEditorDeleteLineEnd, message):
+		m.killToLineEnd()
+		return true
+	case bindings.MatchesPress(keyEditorDeleteWordBack, message):
+		m.killWordBackward()
+		return true
+	case bindings.MatchesPress(keyEditorDeleteWordFront, message):
+		m.killWordForward()
+		return true
+	case bindings.MatchesPress(keyEditorJumpForward, message):
+		m.jumpDirection = 1
+		return true
+	case bindings.MatchesPress(keyEditorJumpBackward, message):
+		m.jumpDirection = -1
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *composerModel) SetWidth(width int) {
@@ -178,29 +283,21 @@ func (m *composerModel) ReplaceRuneRange(start, end int, replacement string, cur
 	next = append(next, replacementRunes...)
 	next = append(next, value[end:]...)
 	cursorOffset = max(0, min(start+cursorOffset, len(next)))
-	m.input.SetValue(string(next))
-	m.input.MoveToBegin()
-	prefix := next[:cursorOffset]
-	row, column := 0, 0
-	for _, char := range prefix {
-		if char == '\n' {
-			row++
-			column = 0
-		} else {
-			column++
-		}
-	}
-	for range row {
-		m.input.CursorDown()
-	}
-	m.input.SetCursorColumn(column)
+	m.pushUndo(m.snapshot())
+	m.setValueAtOffset(string(next), cursorOffset)
+	m.lastEditAction = ""
 	m.exitHistory()
 }
 
 func (m *composerModel) Reset() {
 	if m != nil {
+		if m.input.Value() != "" || len(m.images) != 0 {
+			m.pushUndo(m.snapshot())
+		}
 		m.input.Reset()
 		m.images = nil
+		m.lastEditAction = ""
+		m.jumpDirection = 0
 		m.exitHistory()
 		m.applyMaxHeight()
 	}
@@ -210,8 +307,13 @@ func (m *composerModel) SetDraft(value string, images []llm.ImageBlock) {
 	if m == nil {
 		return
 	}
+	if m.input.Value() != value || len(m.images) != len(images) {
+		m.pushUndo(m.snapshot())
+	}
 	m.input.SetValue(value)
 	m.images = append([]llm.ImageBlock(nil), images...)
+	m.lastEditAction = ""
+	m.jumpDirection = 0
 	m.exitHistory()
 	m.applyMaxHeight()
 }
@@ -255,6 +357,7 @@ func (m *composerModel) NavigateHistory(keyName string) bool {
 		return false
 	}
 	lineInfo := m.input.LineInfo()
+	m.lastEditAction = ""
 	switch keyName {
 	case "up":
 		firstVisualLine := m.input.Line() == 0 && lineInfo.RowOffset == 0
@@ -302,6 +405,260 @@ func (m *composerModel) NavigateHistory(keyName string) bool {
 	default:
 		return false
 	}
+}
+
+func (m *composerModel) snapshot() composerSnapshot {
+	if m == nil {
+		return composerSnapshot{}
+	}
+	return composerSnapshot{
+		value: m.input.Value(), cursor: m.CursorOffset(), images: append([]llm.ImageBlock(nil), m.images...),
+	}
+}
+
+func (m *composerModel) pushUndo(snapshot composerSnapshot) {
+	if m == nil {
+		return
+	}
+	if len(m.undo) >= 100 {
+		copy(m.undo, m.undo[len(m.undo)-99:])
+		m.undo = m.undo[:99]
+	}
+	m.undo = append(m.undo, snapshot)
+}
+
+func (m *composerModel) undoEdit() {
+	if m == nil || len(m.undo) == 0 {
+		return
+	}
+	snapshot := m.undo[len(m.undo)-1]
+	m.undo = m.undo[:len(m.undo)-1]
+	m.images = append([]llm.ImageBlock(nil), snapshot.images...)
+	m.setValueAtOffset(snapshot.value, snapshot.cursor)
+	m.lastEditAction = ""
+	m.jumpDirection = 0
+	m.exitHistory()
+	m.applyMaxHeight()
+}
+
+func (m *composerModel) setValueAtOffset(value string, offset int) {
+	if m == nil {
+		return
+	}
+	runes := []rune(value)
+	offset = max(0, min(offset, len(runes)))
+	m.input.SetValue(value)
+	m.input.MoveToBegin()
+	row, column := 0, 0
+	for _, char := range runes[:offset] {
+		if char == '\n' {
+			row++
+			column = 0
+		} else {
+			column++
+		}
+	}
+	for range row {
+		m.input.CursorDown()
+	}
+	m.input.SetCursorColumn(column)
+}
+
+func (m *composerModel) killToLineStart() {
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	start := cursor
+	for start > 0 && runes[start-1] != '\n' {
+		start--
+	}
+	if start < cursor {
+		m.killRange(start, cursor, true)
+	} else if cursor > 0 {
+		m.killRange(cursor-1, cursor, true)
+	}
+}
+
+func (m *composerModel) killToLineEnd() {
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	end := cursor
+	for end < len(runes) && runes[end] != '\n' {
+		end++
+	}
+	if cursor < end {
+		m.killRange(cursor, end, false)
+	} else if end < len(runes) {
+		m.killRange(end, end+1, false)
+	}
+}
+
+func (m *composerModel) killWordBackward() {
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	lineStart := cursor
+	for lineStart > 0 && runes[lineStart-1] != '\n' {
+		lineStart--
+	}
+	if cursor == lineStart {
+		if cursor > 0 {
+			m.killRange(cursor-1, cursor, true)
+		}
+		return
+	}
+	start := cursor
+	for start > lineStart && unicode.IsSpace(runes[start-1]) {
+		start--
+	}
+	if start > lineStart {
+		class := editorRuneClass(runes[start-1])
+		for start > lineStart && editorRuneClass(runes[start-1]) == class {
+			start--
+		}
+	}
+	m.killRange(start, cursor, true)
+}
+
+func (m *composerModel) killWordForward() {
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	lineEnd := cursor
+	for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+		lineEnd++
+	}
+	if cursor == lineEnd {
+		if cursor < len(runes) {
+			m.killRange(cursor, cursor+1, false)
+		}
+		return
+	}
+	end := cursor
+	for end < lineEnd && unicode.IsSpace(runes[end]) {
+		end++
+	}
+	if end < lineEnd {
+		class := editorRuneClass(runes[end])
+		for end < lineEnd && editorRuneClass(runes[end]) == class {
+			end++
+		}
+	}
+	m.killRange(cursor, end, false)
+}
+
+func editorRuneClass(value rune) int {
+	switch {
+	case unicode.IsSpace(value):
+		return 0
+	case unicode.IsLetter(value) || unicode.IsDigit(value) || value == '_':
+		return 1
+	default:
+		return 2
+	}
+}
+
+func (m *composerModel) killRange(start, end int, prepend bool) {
+	if m == nil {
+		return
+	}
+	runes := []rune(m.Value())
+	start = max(0, min(start, len(runes)))
+	end = max(start, min(end, len(runes)))
+	if start == end {
+		return
+	}
+	deleted := string(runes[start:end])
+	m.pushUndo(m.snapshot())
+	if m.lastEditAction == "kill" && len(m.killRing) != 0 {
+		index := len(m.killRing) - 1
+		if prepend {
+			m.killRing[index] = deleted + m.killRing[index]
+		} else {
+			m.killRing[index] += deleted
+		}
+	} else {
+		m.killRing = append(m.killRing, deleted)
+		if len(m.killRing) > 60 {
+			m.killRing = append([]string(nil), m.killRing[len(m.killRing)-60:]...)
+		}
+	}
+	next := append(append([]rune(nil), runes[:start]...), runes[end:]...)
+	m.setValueAtOffset(string(next), start)
+	m.lastEditAction = "kill"
+	m.exitHistory()
+}
+
+func (m *composerModel) yank() {
+	if m == nil || len(m.killRing) == 0 {
+		return
+	}
+	m.insertYank(m.killRing[len(m.killRing)-1], true)
+}
+
+func (m *composerModel) insertYank(value string, recordUndo bool) {
+	if value == "" {
+		return
+	}
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	if recordUndo {
+		m.pushUndo(m.snapshot())
+	}
+	insert := []rune(value)
+	next := make([]rune, 0, len(runes)+len(insert))
+	next = append(next, runes[:cursor]...)
+	next = append(next, insert...)
+	next = append(next, runes[cursor:]...)
+	m.setValueAtOffset(string(next), cursor+len(insert))
+	m.lastEditAction = "yank"
+	m.exitHistory()
+}
+
+func (m *composerModel) yankPop() {
+	if m == nil || m.lastEditAction != "yank" || len(m.killRing) < 2 {
+		return
+	}
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	previous := []rune(m.killRing[len(m.killRing)-1])
+	start := cursor - len(previous)
+	if start < 0 || string(runes[start:cursor]) != string(previous) {
+		m.lastEditAction = ""
+		return
+	}
+	m.pushUndo(m.snapshot())
+	latest := m.killRing[len(m.killRing)-1]
+	copy(m.killRing[1:], m.killRing[:len(m.killRing)-1])
+	m.killRing[0] = latest
+	nextYank := []rune(m.killRing[len(m.killRing)-1])
+	next := make([]rune, 0, len(runes)-len(previous)+len(nextYank))
+	next = append(next, runes[:start]...)
+	next = append(next, nextYank...)
+	next = append(next, runes[cursor:]...)
+	m.setValueAtOffset(string(next), start+len(nextYank))
+	m.lastEditAction = "yank"
+}
+
+func (m *composerModel) jumpToRune(target rune, direction int) {
+	if m == nil || target == 0 {
+		return
+	}
+	runes, cursor := []rune(m.Value()), m.CursorOffset()
+	if direction > 0 {
+		for index := cursor + 1; index < len(runes); index++ {
+			if runes[index] == target {
+				m.setValueAtOffset(m.Value(), index)
+				break
+			}
+		}
+	} else {
+		for index := cursor - 1; index >= 0; index-- {
+			if runes[index] == target {
+				m.setValueAtOffset(m.Value(), index)
+				break
+			}
+		}
+	}
+	m.lastEditAction = ""
+}
+
+func utf8FirstRune(value string) (rune, bool) {
+	for _, char := range value {
+		return char, true
+	}
+	return 0, false
 }
 
 func (m *composerModel) setHistoryValue(value string, cursorAtStart bool) {

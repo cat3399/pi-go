@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -66,5 +67,40 @@ func TestInvalidKeybindingsReloadPreservesLastHealthyBindings(t *testing.T) {
 	}
 	if !model.keybindings.Matches(keyModelSelect, "alt+m") {
 		t.Fatal("invalid reload replaced last healthy keybindings")
+	}
+}
+
+func TestConfiguredEditorAndSelectorBindingsReachWidgets(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "keybindings.json"), []byte(`{
+  "tui.editor.cursorLeft": "alt+h",
+  "tui.select.down": "ctrl+n",
+  "app.model.select": "alt+m"
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model := newModelWithAPIForTest(t, keybindingTestAPI{dir: directory})
+	model.composer.SetDraft("ab", nil)
+	model.composer.input.MoveToEnd()
+	model.Update(tea.KeyPressMsg(tea.Key{Code: 'h', Mod: tea.ModAlt}))
+	if model.composer.CursorOffset() != 1 {
+		t.Fatalf("configured editor cursor = %d", model.composer.CursorOffset())
+	}
+
+	_ = model.openSettingsSelector()
+	if model.selector.selected != 0 {
+		t.Fatalf("initial selector index = %d", model.selector.selected)
+	}
+	model.handleSelectorKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	if model.selector.selected != 0 {
+		t.Fatal("overridden selector default remained active")
+	}
+	model.handleSelectorKey(tea.KeyPressMsg(tea.Key{Code: 'n', Mod: tea.ModCtrl}))
+	if model.selector.selected != 1 {
+		t.Fatalf("configured selector index = %d", model.selector.selected)
+	}
+	help := StripTerminalSequences(model.renderHelp(100, 80))
+	if !strings.Contains(help, "Alt+M") || model.keybindings.Hint(keySelectDown) != "Ctrl+N" {
+		t.Fatalf("help did not use effective bindings: %q", help)
 	}
 }

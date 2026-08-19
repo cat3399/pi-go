@@ -202,6 +202,7 @@ func (m *Model) activateSelector(
 	ctx, cancel := context.WithCancel(parent)
 	m.selectorCancel = cancel
 	m.selector = newSelectorModel(m.theme, kind, title, query, searchable, multi)
+	m.selector.SetKeybindings(m.keybindings)
 	m.composer.Blur()
 	m.slashPalette.Hide(m.composer.Value())
 	m.setStatus("", statusInfo)
@@ -412,8 +413,9 @@ func (m *Model) handleSelectorKey(message tea.KeyPressMsg) tea.Cmd {
 	if m.selector == nil {
 		return nil
 	}
-	switch message.String() {
-	case "esc", "ctrl+c":
+	matches := func(action string) bool { return m.keybindings.MatchesPress(action, message) }
+	switch {
+	case matches(keySelectCancel):
 		if m.selector.kind == selectorLoginOAuth {
 			m.cancelOAuthLogin()
 			focus := m.closeSelector()
@@ -421,59 +423,49 @@ func (m *Model) handleSelectorKey(message tea.KeyPressMsg) tea.Cmd {
 			return focus
 		}
 		return m.closeSelector()
-	case "up":
+	case matches(keySelectUp):
 		m.selector.Move(-1)
 		return nil
-	case "down":
+	case matches(keySelectDown):
 		m.selector.Move(1)
 		return nil
-	case "pgup":
+	case matches(keySelectPageUp):
 		m.selector.MovePage(-1, 8)
 		return nil
-	case "pgdown":
+	case matches(keySelectPageDown):
 		m.selector.MovePage(1, 8)
 		return nil
-	case "ctrl+r":
+	case matches(keySessionRename) && m.selector.kind == selectorSessions:
+		if selected, ok := m.selector.Selected(); ok {
+			return m.openSessionRename(selected.Key)
+		}
+		return nil
+	case message.Keystroke() == "ctrl+r" && m.selector.kind != selectorSessions:
 		return m.refreshSelector()
-	case "ctrl+n":
-		if m.selector.kind == selectorSessions {
-			m.sessionNamedOnly = !m.sessionNamedOnly
-			return m.refreshSelector()
-		}
-	case "ctrl+s":
-		if m.selector.kind == selectorSessions {
-			m.sessionSortMode = nextSessionSortMode(m.sessionSortMode)
-			return m.refreshSelector()
-		}
-	case "ctrl+p":
-		if m.selector.kind == selectorSessions {
-			m.sessionShowPath = !m.sessionShowPath
-			return m.refreshSelector()
-		}
-	case "ctrl+e":
-		if m.selector.kind == selectorSessions {
-			if selected, ok := m.selector.Selected(); ok {
-				return m.openSessionRename(selected.Key)
+	case matches(keySessionToggleNamed) && m.selector.kind == selectorSessions:
+		m.sessionNamedOnly = !m.sessionNamedOnly
+		return m.refreshSelector()
+	case matches(keySessionToggleSort) && m.selector.kind == selectorSessions:
+		m.sessionSortMode = nextSessionSortMode(m.sessionSortMode)
+		return m.refreshSelector()
+	case matches(keySessionTogglePath) && m.selector.kind == selectorSessions:
+		m.sessionShowPath = !m.sessionShowPath
+		return m.refreshSelector()
+	case matches(keySessionDelete) && m.selector.kind == selectorSessions:
+		if selected, ok := m.selector.Selected(); ok {
+			if selected.Current {
+				m.setStatus("Switch away before deleting the active session", statusWarning)
+				return nil
 			}
-			return nil
+			return m.openSessionDelete(selected.Key, selected.Title)
 		}
-	case "ctrl+d":
-		if m.selector.kind == selectorSessions {
-			if selected, ok := m.selector.Selected(); ok {
-				if selected.Current {
-					m.setStatus("Switch away before deleting the active session", statusWarning)
-					return nil
-				}
-				return m.openSessionDelete(selected.Key, selected.Title)
-			}
-			return nil
-		}
-	case " ", "space":
+		return nil
+	case message.String() == " " || message.Keystroke() == "space":
 		if m.selector.multi {
 			m.selector.ToggleSelected()
 			return nil
 		}
-	case "enter":
+	case matches(keySelectConfirm):
 		return m.applySelectorSelection()
 	}
 	return m.selector.Update(message)
