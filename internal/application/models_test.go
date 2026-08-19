@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -40,6 +41,49 @@ func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T)
 		if candidate.Provider != "deepseek" {
 			t.Fatalf("unconfigured provider leaked into available models: %#v", candidate)
 		}
+	}
+}
+
+func TestUIThemeSettingsPersistWithoutLosingUnknownFields(t *testing.T) {
+	cwd := t.TempDir()
+	agentDir := filepath.Join(t.TempDir(), "agent")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"theme":"dark","future":{"keep":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(ServiceOptions{
+		Production:    app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir, Environment: []string{}},
+		DisableReaper: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(context.Background()) })
+
+	settings, err := service.GetUISettings(context.Background(), cwd)
+	if err != nil || settings.Theme != "dark" {
+		t.Fatalf("initial settings = %#v, %v", settings, err)
+	}
+	settings, err = service.SetTheme(context.Background(), cwd, "light/dark")
+	if err != nil || settings.Theme != "light/dark" {
+		t.Fatalf("updated settings = %#v, %v", settings, err)
+	}
+	data, err := os.ReadFile(filepath.Join(agentDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var future map[string]bool
+	if err := json.Unmarshal(root["future"], &future); err != nil {
+		t.Fatal(err)
+	}
+	if string(root["theme"]) != `"light/dark"` || !future["keep"] {
+		t.Fatalf("settings.json = %s", data)
 	}
 }
 

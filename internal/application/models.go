@@ -46,6 +46,35 @@ type ModelsSnapshot struct {
 	Diagnostic         string
 }
 
+// UISettings is the surface-neutral subset of settings consumed directly by
+// interactive clients rather than the Agent runtime.
+type UISettings struct {
+	Theme string
+}
+
+func (s *Service) GetUISettings(ctx context.Context, cwd string) (UISettings, error) {
+	runtime, err := s.openModels(ctx, cwd)
+	if err != nil {
+		return UISettings{}, err
+	}
+	return UISettings{Theme: runtime.Snapshot().Settings.Theme}, nil
+}
+
+func (s *Service) SetTheme(ctx context.Context, cwd, theme string) (UISettings, error) {
+	runtime, err := s.openModels(ctx, cwd)
+	if err != nil {
+		return UISettings{}, err
+	}
+	theme = strings.TrimSpace(theme)
+	if err := runtime.SetGlobalSettings(normalizeContext(ctx), func(settings *modelcatalog.Settings) error {
+		settings.Theme = theme
+		return nil
+	}); err != nil {
+		return UISettings{}, err
+	}
+	return UISettings{Theme: runtime.Snapshot().Settings.Theme}, nil
+}
+
 type ProviderAuthInfo struct {
 	ID             string
 	Name           string

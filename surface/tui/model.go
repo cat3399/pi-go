@@ -34,6 +34,8 @@ type Model struct {
 	version       string
 	mode          ScreenMode
 	theme         Theme
+	themeSetting  string
+	themeAuto     bool
 	environment   []string
 	keybindings   appKeybindings
 	initialPrompt string
@@ -103,6 +105,14 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 	if theme.ID == "" {
 		theme = DefaultTheme()
 	}
+	themeSetting, err := ParseThemeSetting(options.ThemeSetting)
+	if err != nil || strings.TrimSpace(options.ThemeSetting) == "" {
+		if theme.IsLight {
+			themeSetting = ThemeLight
+		} else {
+			themeSetting = ThemeDark
+		}
+	}
 	state := application.State{SessionID: snapshot.SessionID, CWD: snapshot.Info.CWD}
 	if snapshot.LiveState != nil {
 		state = *snapshot.LiveState
@@ -110,7 +120,8 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 	keybindings, _ := loadAppKeybindings(options.Application.AgentDir())
 	model := &Model{
 		ctx: ctx, api: options.Application, version: options.Version, mode: options.ScreenMode,
-		theme: theme, sessionID: snapshot.SessionID, state: state, revision: snapshot.Revision,
+		theme: theme, themeSetting: themeSetting, themeAuto: themeSetting == ThemeAuto,
+		sessionID: snapshot.SessionID, state: state, revision: snapshot.Revision,
 		environment: append([]string(nil), options.Environment...), keybindings: keybindings,
 		initialPrompt:     strings.TrimSpace(options.InitialPrompt),
 		sessionGeneration: 1,
@@ -132,6 +143,9 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 
 func (m *Model) Init() tea.Cmd {
 	commands := []tea.Cmd{m.composer.Init(), m.startSubscription(), m.requestCommands()}
+	if m.themeAuto {
+		commands = append(commands, tea.RequestBackgroundColor)
+	}
 	if m.initialPrompt != "" {
 		m.composer.SetDraft(m.initialPrompt, nil)
 		m.initialPrompt = ""
@@ -173,6 +187,17 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		m.composer.SetWidth(m.width)
 		m.composer.SetMaxHeight(max(1, m.height-4))
 		return m, nil
+	case tea.BackgroundColorMsg:
+		if m.themeAuto && message.Color != nil {
+			if message.IsDark() {
+				m.applyTheme(DefaultTheme())
+			} else {
+				m.applyTheme(LightTheme())
+			}
+		}
+		return m, nil
+	case themeChangedMsg:
+		return m, m.applyThemeChanged(message)
 	case tea.KeyPressMsg:
 		if m.selector != nil {
 			return m, m.handleSelectorKey(message)

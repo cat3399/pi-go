@@ -40,6 +40,8 @@ type API interface {
 	OpenBashOutput(context.Context, string, string) (BashOutput, error)
 	RunningIDs() []string
 	ListModels(context.Context, string) (ModelsSnapshot, error)
+	GetUISettings(context.Context, string) (UISettings, error)
+	SetTheme(context.Context, string, string) (UISettings, error)
 	ListModelProviders(context.Context, string) ([]ProviderAuthInfo, error)
 	SetProviderAPIKey(context.Context, string, string) error
 	DeleteProviderCredential(context.Context, string, string) error

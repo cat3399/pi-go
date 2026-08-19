@@ -140,6 +140,7 @@ type Settings struct {
 	DefaultProvider           string
 	DefaultModel              string
 	DefaultThinkingLevel      provider.ThinkingLevel
+	Theme                     string
 	Transport                 provider.Transport
 	SteeringMode              string
 	FollowUpMode              string
@@ -728,6 +729,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	putString(root, "defaultProvider", current.DefaultProvider)
 	putString(root, "defaultModel", current.DefaultModel)
 	putString(root, "defaultThinkingLevel", string(current.DefaultThinkingLevel))
+	putString(root, "theme", current.Theme)
 	putString(root, "transport", string(current.Transport))
 	putString(root, "steeringMode", current.SteeringMode)
 	putString(root, "followUpMode", current.FollowUpMode)
@@ -1655,6 +1657,9 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	if s.DefaultModel, err = optionalString(root, "defaultModel", ""); err != nil {
 		return s, fmt.Errorf("%w: %s", ErrInvalidConfig, label)
 	}
+	if s.Theme, err = optionalString(root, "theme", ""); err != nil {
+		return s, Diagnostic{label, "theme", "must be a valid theme name"}
+	}
 	if raw, ok := root["defaultThinkingLevel"]; ok {
 		var value string
 		trimmed := bytes.TrimSpace(raw)
@@ -1798,6 +1803,9 @@ func validateSettings(s Settings, label string) error {
 	if s.DefaultThinkingLevel != "" && !s.DefaultThinkingLevel.Valid() {
 		return Diagnostic{label, "defaultThinkingLevel", "must be one of off, minimal, low, medium, high, xhigh, max"}
 	}
+	if s.Theme != "" && (!validValue(s.Theme) || strings.Count(s.Theme, "/") > 1) {
+		return Diagnostic{label, "theme", "must be a theme name or light/dark pair"}
+	}
 	if (s.transportPresent || s.Transport != "") && s.Transport != provider.TransportAuto && s.Transport != provider.TransportSSE &&
 		s.Transport != provider.TransportWebsocket && s.Transport != provider.TransportWebsocketCached {
 		return Diagnostic{label, "transport", "must be one of auto, sse, websocket, or websocket-cached"}
@@ -1905,6 +1913,9 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.DefaultThinkingLevel != "" {
 		out.DefaultThinkingLevel = override.DefaultThinkingLevel
+	}
+	if override.Theme != "" {
+		out.Theme = override.Theme
 	}
 	if override.transportPresent || override.Transport != "" {
 		out.Transport = override.Transport

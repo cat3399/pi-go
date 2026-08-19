@@ -51,6 +51,14 @@ func (r *contentRenderer) SetImageProtocol(protocol terminalImageProtocol) {
 	}
 }
 
+func (r *contentRenderer) SetTheme(theme Theme) {
+	if r == nil {
+		return
+	}
+	r.theme = theme
+	r.markdown = make(map[int]*glamour.TermRenderer)
+}
+
 func (r *contentRenderer) Render(item contentItem, width int) []string {
 	if width <= 0 {
 		return []string{""}
@@ -163,6 +171,9 @@ func (r *contentRenderer) renderMarkdown(text string, width int) []string {
 	renderer := r.markdown[width]
 	if renderer == nil {
 		style := glamourstyles.DarkStyle
+		if r.theme.IsLight {
+			style = glamourstyles.LightStyle
+		}
 		created, err := glamour.NewTermRenderer(
 			glamour.WithStandardStyle(style),
 			glamour.WithWordWrap(width),

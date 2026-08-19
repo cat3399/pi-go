@@ -69,7 +69,26 @@ func newSelectorModel(theme Theme, kind selectorKind, title, query string, searc
 	input.Placeholder = "type to filter"
 	input.SetVirtualCursor(false)
 	input.SetValue(query)
+	applySelectorStyles(&input, theme)
+	return &selectorModel{
+		kind: kind, title: title, searchable: searchable, multi: multi, theme: theme,
+		input: input, loading: true, selected: 0, autoSelectQuery: strings.TrimSpace(query),
+	}
+}
+
+func (s *selectorModel) SetTheme(theme Theme) {
+	if s == nil {
+		return
+	}
+	s.theme = theme
+	applySelectorStyles(&s.input, theme)
+}
+
+func applySelectorStyles(input *textinput.Model, theme Theme) {
 	styles := textinput.DefaultDarkStyles()
+	if theme.IsLight {
+		styles = textinput.DefaultLightStyles()
+	}
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(theme.color(theme.Foreground))
 	styles.Focused.Prompt = lipgloss.NewStyle().Bold(true).Foreground(theme.color(theme.Primary))
 	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(theme.color(theme.Subtle))
@@ -78,10 +97,6 @@ func newSelectorModel(theme Theme, kind selectorKind, title, query string, searc
 	styles.Cursor.Shape = tea.CursorBar
 	styles.Cursor.Blink = true
 	input.SetStyles(styles)
-	return &selectorModel{
-		kind: kind, title: title, searchable: searchable, multi: multi, theme: theme,
-		input: input, loading: true, selected: 0, autoSelectQuery: strings.TrimSpace(query),
-	}
 }
 
 func (s *selectorModel) Focus() tea.Cmd {

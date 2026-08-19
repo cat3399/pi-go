@@ -40,6 +40,7 @@ type Options struct {
 	Version            string
 	ScreenMode         ScreenMode
 	Theme              Theme
+	ThemeSetting       string
 	InitialPrompt      string
 	ReadClipboardImage func(context.Context) (llm.ImageBlock, error)
 
@@ -81,6 +82,32 @@ func Run(ctx context.Context, options Options) error {
 	snapshot, err := options.Application.SnapshotSession(options.SessionID, "")
 	if err != nil {
 		return fmt.Errorf("snapshot TUI session: %w", err)
+	}
+	if options.Theme.ID == "" {
+		explicitTheme := strings.TrimSpace(options.ThemeSetting) != ""
+		setting := options.ThemeSetting
+		if !explicitTheme {
+			cwd := strings.TrimSpace(snapshot.Info.CWD)
+			if cwd == "" {
+				cwd = options.Application.DefaultCWD()
+			}
+			uiSettings, settingsErr := options.Application.GetUISettings(ctx, cwd)
+			if settingsErr != nil {
+				return fmt.Errorf("load TUI settings: %w", settingsErr)
+			}
+			setting = uiSettings.Theme
+		}
+		normalized, themeErr := ParseThemeSetting(setting)
+		if themeErr != nil {
+			if explicitTheme {
+				return themeErr
+			}
+			// Custom upstream themes are not projected into the Go renderer yet.
+			// Keep the TUI usable with automatic built-in colors.
+			normalized = ThemeAuto
+		}
+		options.ThemeSetting = normalized
+		options.Theme = themeForSetting(normalized, options.Environment)
 	}
 	model, err := newModel(ctx, options, snapshot)
 	if err != nil {

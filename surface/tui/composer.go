@@ -40,7 +40,25 @@ func newComposerModel(theme Theme) composerModel {
 		key.WithHelp("shift+enter", "new line"),
 	)
 
+	applyComposerStyles(&input, theme)
+	input.SetWidth(76)
+	input.SetHeight(1)
+	return composerModel{input: input, theme: theme, width: 80, maxInputHeight: 8, historyIndex: -1}
+}
+
+func (m *composerModel) SetTheme(theme Theme) {
+	if m == nil {
+		return
+	}
+	m.theme = theme
+	applyComposerStyles(&m.input, theme)
+}
+
+func applyComposerStyles(input *textarea.Model, theme Theme) {
 	styles := textarea.DefaultDarkStyles()
+	if theme.IsLight {
+		styles = textarea.DefaultLightStyles()
+	}
 	styles.Focused.Base = lipgloss.NewStyle().Foreground(theme.color(theme.Foreground))
 	styles.Focused.Text = lipgloss.NewStyle().Foreground(theme.color(theme.Foreground))
 	styles.Focused.Prompt = lipgloss.NewStyle().Bold(true).Foreground(theme.color(theme.Primary))
@@ -51,9 +69,6 @@ func newComposerModel(theme Theme) composerModel {
 	styles.Cursor.Shape = tea.CursorBar
 	styles.Cursor.Blink = true
 	input.SetStyles(styles)
-	input.SetWidth(76)
-	input.SetHeight(1)
-	return composerModel{input: input, theme: theme, width: 80, maxInputHeight: 8, historyIndex: -1}
 }
 
 func (m *composerModel) Init() tea.Cmd {

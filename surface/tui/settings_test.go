@@ -13,7 +13,13 @@ import (
 
 type settingsRecordingAPI struct {
 	modelTestAPI
-	commands []application.Command
+	commands     []application.Command
+	themeSetting string
+}
+
+func (a *settingsRecordingAPI) SetTheme(_ context.Context, _, theme string) (application.UISettings, error) {
+	a.themeSetting = theme
+	return application.UISettings{Theme: theme}, nil
 }
 
 func (a *settingsRecordingAPI) Dispatch(_ context.Context, _ string, command application.Command) (application.CommandResult, error) {
@@ -41,7 +47,7 @@ func TestSettingsSelectorDispatchesRuntimeControls(t *testing.T) {
 	model.state.SteeringMode = agent.QueueOneAtATime
 
 	_ = model.openSettingsSelector()
-	if model.selector == nil || model.selector.kind != selectorSettings || len(model.selector.items) != 6 {
+	if model.selector == nil || model.selector.kind != selectorSettings || len(model.selector.items) != 7 {
 		t.Fatalf("settings selector = %#v", model.selector)
 	}
 	model.selector.SelectKey(settingAutoCompaction)
@@ -59,6 +65,24 @@ func TestSettingsSelectorDispatchesRuntimeControls(t *testing.T) {
 	model.Update(message)
 	if command, ok := api.commands[1].(application.SetSteeringModeCommand); !ok || command.Mode != agent.QueueAll {
 		t.Fatalf("steering command = %#v", api.commands[1])
+	}
+}
+
+func TestSettingsThemeChangePersistsAndRethemesLiveComponents(t *testing.T) {
+	api := &settingsRecordingAPI{}
+	model := newModelWithAPIForTest(t, api)
+	_ = model.openSettingsSelector()
+	model.selector.SelectKey(settingTheme)
+	command := model.applySelectorSelection()
+	if command == nil {
+		t.Fatal("theme selection did not dispatch")
+	}
+	model.Update(command())
+	if api.themeSetting != ThemeLight || model.themeSetting != ThemeLight || !model.theme.IsLight {
+		t.Fatalf("theme = persisted:%q setting:%q value:%#v", api.themeSetting, model.themeSetting, model.theme)
+	}
+	if model.composer.theme.ID != model.theme.ID || model.renderer.theme.ID != model.theme.ID || model.selector.theme.ID != model.theme.ID {
+		t.Fatal("live components retained the previous theme")
 	}
 }
 
