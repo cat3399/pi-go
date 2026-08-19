@@ -21,7 +21,7 @@ import {
   type ToolEntry,
   type ToolPreset,
 } from "../tool-presets";
-import { messageText, sameUserText } from "./message";
+import { messageText } from "./message";
 
 type ControllerStatus = "connecting" | "auth" | "ready" | "error";
 export type SendBehavior = "prompt" | "steer" | "follow_up";
@@ -45,6 +45,7 @@ export interface ApplicationController {
   sessionStats: SessionStatsInfo | null;
   sessionStatsOpen: boolean;
   messages: AgentMessage[];
+  pendingMessages: AgentMessage[];
   streamingMessage: AgentMessage | null;
   busy: boolean;
   login(password: string): Promise<void>;
@@ -79,6 +80,21 @@ function errorMessage(error: unknown): string {
 
 const emptyQueue: QueuedMessages = { steering: [], followUp: [] };
 
+interface PendingQueueMessage {
+  id: string;
+  sessionId: string;
+  text: string;
+  behavior: "steer" | "follow_up";
+  timestamp: number;
+  expectedOccurrence: number;
+}
+
+function userTextCount(messages: AgentMessage[], text: string): number {
+  return messages.reduce((count, message) => (
+    message.role === "user" && messageText(message) === text ? count + 1 : count
+  ), 0);
+}
+
 function defaultModel(models: ModelsView | null): SelectedModel | null {
   if (models?.defaultModel) return models.defaultModel;
   const first = models?.modelList[0];
@@ -108,10 +124,14 @@ export function useApplicationController(client: ApplicationClient): Application
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
   const [sessionStatsOpen, setSessionStatsOpen] = useState(false);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [pendingQueueMessages, setPendingQueueMessages] = useState<PendingQueueMessage[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<AgentMessage | null>(null);
   const [busy, setBusy] = useState(false);
 
   const activeSessionRef = useRef<string | null>(null);
+  const messagesRef = useRef<AgentMessage[]>([]);
+  const pendingQueueMessagesRef = useRef<PendingQueueMessage[]>([]);
+  const pendingQueueSequenceRef = useRef(0);
   const revisionRef = useRef(0);
   const subscriptionRef = useRef<EventSubscription | null>(null);
   const generationRef = useRef(0);
@@ -120,6 +140,28 @@ export function useApplicationController(client: ApplicationClient): Application
   const newSessionModelOverriddenRef = useRef(false);
   const newSessionThinkingOverriddenRef = useRef(false);
   const sessionStatsOpenRef = useRef(false);
+
+  messagesRef.current = messages;
+
+  const updatePendingQueueMessages = useCallback((
+    update: (current: PendingQueueMessage[]) => PendingQueueMessage[],
+  ) => {
+    const next = update(pendingQueueMessagesRef.current);
+    pendingQueueMessagesRef.current = next;
+    setPendingQueueMessages(next);
+  }, []);
+
+  const removeDeliveredPendingMessage = useCallback((sessionId: string, text: string, occurrence: number) => {
+    updatePendingQueueMessages((current) => {
+      const index = current.findIndex((message) => (
+        message.sessionId === sessionId
+        && message.text === text
+        && message.expectedOccurrence <= occurrence
+      ));
+      if (index < 0) return current;
+      return current.filter((_, candidateIndex) => candidateIndex !== index);
+    });
+  }, [updatePendingQueueMessages]);
 
   const loadModels = useCallback(async (cwd: string, generation = generationRef.current) => {
     const value = await client.models(cwd);
@@ -178,7 +220,13 @@ export function useApplicationController(client: ApplicationClient): Application
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return null;
     revisionRef.current = Math.max(revisionRef.current, view.revision);
     setSessionView(view);
-    setMessages(view.context.messages ?? []);
+    const loadedMessages = view.context.messages ?? [];
+    messagesRef.current = loadedMessages;
+    setMessages(loadedMessages);
+    updatePendingQueueMessages((current) => current.filter((message) => (
+      message.sessionId !== sessionId
+      || userTextCount(loadedMessages, message.text) < message.expectedOccurrence
+    )));
     setStreamingMessage(null);
     const state = view.state ?? null;
     setRuntimeState(state);
@@ -186,7 +234,7 @@ export function useApplicationController(client: ApplicationClient): Application
       state.isPromptRunning || state.isStreaming || state.isBashRunning || state.isCompacting
     )));
     return view;
-  }, [client]);
+  }, [client, updatePendingQueueMessages]);
 
   const refreshSnapshot = useCallback(async (generation = generationRef.current) => {
     const value = await client.snapshot();
@@ -237,12 +285,25 @@ export function useApplicationController(client: ApplicationClient): Application
         const completed = event.message;
         if (!completed || typeof completed !== "object") break;
         const message = completed as AgentMessage;
-        setMessages((current) => {
-          if (message.role === "user" && sameUserText(current[current.length - 1], messageText(message))) {
-            return current;
+        const currentMessages = messagesRef.current;
+        let nextMessages: AgentMessage[];
+        if (message.role === "user") {
+          const text = messageText(message);
+          const optimisticIndex = currentMessages.findIndex((candidate) => (
+            candidate.pendingPrompt === true && messageText(candidate) === text
+          ));
+          if (optimisticIndex >= 0) {
+            nextMessages = [...currentMessages];
+            nextMessages[optimisticIndex] = message;
+          } else {
+            nextMessages = [...currentMessages, message];
           }
-          return [...current, message];
-        });
+          removeDeliveredPendingMessage(envelope.sessionId, text, userTextCount(nextMessages, text));
+        } else {
+          nextMessages = [...currentMessages, message];
+        }
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
         setStreamingMessage(null);
         break;
       }
@@ -310,7 +371,7 @@ export function useApplicationController(client: ApplicationClient): Application
       default:
         break;
     }
-  }, [loadSession, loadSessionStats, refreshSnapshot]);
+  }, [loadSession, loadSessionStats, refreshSnapshot, removeDeliveredPendingMessage]);
 
   const subscribe = useCallback((after: number, generation: number) => {
     subscriptionRef.current?.close();
@@ -371,6 +432,9 @@ export function useApplicationController(client: ApplicationClient): Application
     setSessionStats(null);
     sessionStatsOpenRef.current = false;
     setSessionStatsOpen(false);
+    pendingQueueMessagesRef.current = [];
+    setPendingQueueMessages([]);
+    messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
     setBusy(false);
@@ -436,6 +500,7 @@ export function useApplicationController(client: ApplicationClient): Application
     setSessionStats(null);
     sessionStatsOpenRef.current = false;
     setSessionStatsOpen(false);
+    messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
     setError("");
@@ -480,6 +545,7 @@ export function useApplicationController(client: ApplicationClient): Application
     setNewSessionModel(model);
     setNewSessionThinkingLevel(defaultThinkingLevel(models, model));
     setToolPresetState("default");
+    messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
     setBusy(false);
@@ -605,6 +671,7 @@ export function useApplicationController(client: ApplicationClient): Application
     setError("");
     let sessionID = activeSessionRef.current;
     let createdSession = false;
+    let optimisticPromptID = "";
     try {
       if (!sessionID) {
         if (behavior !== "prompt") return;
@@ -637,6 +704,18 @@ export function useApplicationController(client: ApplicationClient): Application
 
       if (behavior === "steer" || behavior === "follow_up") {
         const queueKey = behavior === "steer" ? "steering" : "followUp";
+        const samePendingCount = pendingQueueMessagesRef.current.filter((message) => (
+          message.sessionId === sessionID && message.text === text
+        )).length;
+        const pendingMessage: PendingQueueMessage = {
+          id: `pending-${Date.now()}-${++pendingQueueSequenceRef.current}`,
+          sessionId: sessionID,
+          text,
+          behavior,
+          timestamp: Date.now(),
+          expectedOccurrence: userTextCount(messagesRef.current, text) + samePendingCount + 1,
+        };
+        updatePendingQueueMessages((current) => [...current, pendingMessage]);
         setRuntimeState((current) => ({
           ...current,
           queuedMessages: {
@@ -658,6 +737,7 @@ export function useApplicationController(client: ApplicationClient): Application
             } : {}),
           });
         } catch (queueError) {
+          updatePendingQueueMessages((current) => current.filter((message) => message.id !== pendingMessage.id));
           setRuntimeState((current) => {
             const values = [...(current?.queuedMessages?.[queueKey] ?? [])];
             const index = values.lastIndexOf(text);
@@ -724,7 +804,18 @@ export function useApplicationController(client: ApplicationClient): Application
         pendingSessionTitlesRef.current.set(sessionID, text);
         await refreshSnapshot();
       }
-      setMessages((current) => [...current, { role: "user", content: text, timestamp: Date.now() }]);
+      optimisticPromptID = `prompt-${Date.now()}-${++pendingQueueSequenceRef.current}`;
+      setMessages((current) => {
+        const next = [...current, {
+          id: optimisticPromptID,
+          role: "user",
+          content: text,
+          timestamp: Date.now(),
+          pendingPrompt: true,
+        }];
+        messagesRef.current = next;
+        return next;
+      });
       setBusy(true);
       setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
       await client.dispatch(sessionID, {
@@ -744,6 +835,13 @@ export function useApplicationController(client: ApplicationClient): Application
         });
       }
     } catch (sendError) {
+      if (optimisticPromptID) {
+        setMessages((current) => {
+          const next = current.filter((message) => message.id !== optimisticPromptID);
+          messagesRef.current = next;
+          return next;
+        });
+      }
       if (!busy) setBusy(false);
       setError(errorMessage(sendError));
       throw sendError;
@@ -760,6 +858,7 @@ export function useApplicationController(client: ApplicationClient): Application
     refreshSnapshot,
     snapshot,
     toolPreset,
+    updatePendingQueueMessages,
   ]);
 
   const abort = useCallback(async () => {
@@ -786,12 +885,25 @@ export function useApplicationController(client: ApplicationClient): Application
     try {
       const queue = await client.dispatch<QueuedMessages>(sessionID, { type: "clear_queue" });
       setRuntimeState((current) => ({ ...current, queuedMessages: emptyQueue }));
+      const recalled = [
+        ...(queue?.steering ?? []).map((text) => ({ behavior: "steer" as const, text })),
+        ...(queue?.followUp ?? []).map((text) => ({ behavior: "follow_up" as const, text })),
+      ];
+      updatePendingQueueMessages((current) => current.filter((message) => {
+        if (message.sessionId !== sessionID) return true;
+        const index = recalled.findIndex((candidate) => (
+          candidate.behavior === message.behavior && candidate.text === message.text
+        ));
+        if (index < 0) return true;
+        recalled.splice(index, 1);
+        return false;
+      }));
       return [...(queue?.steering ?? []), ...(queue?.followUp ?? [])];
     } catch (queueError) {
       setError(errorMessage(queueError));
       throw queueError;
     }
-  }, [client]);
+  }, [client, updatePendingQueueMessages]);
 
   const changeModel = useCallback(async (model: SelectedModel) => {
     setError("");
@@ -1018,6 +1130,17 @@ export function useApplicationController(client: ApplicationClient): Application
     ? runtimeState?.thinkingLevel ?? sessionView?.context.thinkingLevel ?? "off"
     : newSessionThinkingLevel;
   const queuedMessages = runtimeState?.queuedMessages ?? emptyQueue;
+  const pendingMessages: AgentMessage[] = activeSessionId
+    ? pendingQueueMessages
+        .filter((message) => message.sessionId === activeSessionId)
+        .map((message) => ({
+          id: message.id,
+          role: "user",
+          content: message.text,
+          timestamp: message.timestamp,
+          pending: true,
+        }))
+    : [];
 
   return {
     status,
@@ -1040,6 +1163,7 @@ export function useApplicationController(client: ApplicationClient): Application
     sessionStats,
     sessionStatsOpen,
     messages,
+    pendingMessages,
     streamingMessage,
     busy,
     login,

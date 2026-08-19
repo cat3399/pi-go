@@ -400,6 +400,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
             <MessageList
               sessionId={controller.activeSessionId}
               messages={controller.messages}
+              pendingMessages={controller.pendingMessages}
               entryIds={controller.sessionView?.context.entryIds ?? []}
               streamingMessage={controller.streamingMessage}
               busy={controller.busy}
@@ -419,13 +420,11 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               thinkingLevel={controller.thinkingLevel}
               contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
               busy={controller.busy}
-              queuedMessages={controller.queuedMessages}
               sessions={sessions}
               toolPreset={controller.toolPreset}
               slashCommands={controller.slashCommands}
               onSend={send}
               onAbort={controller.abort}
-              onClearQueue={controller.clearQueue}
               onModelChange={controller.setModel}
               onThinkingLevelChange={controller.setThinkingLevel}
             />

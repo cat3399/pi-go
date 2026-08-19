@@ -1,10 +1,9 @@
 import { forwardRef, KeyboardEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { ArrowUp, Clock3, CornerDownRight, LoaderCircle, Plus, RotateCcw, Square, X } from "lucide-react";
+import { ArrowUp, Clock3, CornerDownRight, LoaderCircle, Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
   ModelsView,
-  QueuedMessages,
   SelectedModel,
   SessionInfo,
   SlashCommandInfo,
@@ -31,13 +30,11 @@ interface ComposerProps {
   thinkingLevel: string;
   contextUsage: ContextUsage | null;
   busy: boolean;
-  queuedMessages: QueuedMessages;
   sessions: SessionInfo[];
   toolPreset: ToolPreset;
   slashCommands: SlashCommandInfo[];
   onSend(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   onAbort(): Promise<void>;
-  onClearQueue(): Promise<string[]>;
   onModelChange(model: SelectedModel): Promise<void>;
   onThinkingLevelChange(level: string): Promise<void>;
 }
@@ -156,8 +153,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     () => slashGroups.flatMap((group) => group.commands),
     [slashGroups],
   );
-  const queuedCount = props.queuedMessages.steering.length + props.queuedMessages.followUp.length;
-
   useEffect(() => {
     setSlashActiveIndex(0);
     setSlashDismissed(false);
@@ -280,13 +275,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     });
   };
 
-  const recallQueue = async () => {
-    const values = await props.onClearQueue();
-    if (values.length === 0) return;
-    setText((current) => `${values.join("\n\n")}${current ? `\n\n${current}` : ""}`);
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  };
-
   const addImages = async (files: File[]) => {
     if (props.busy) return;
     const accepted = files
@@ -324,25 +312,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   return (
     <div className={`pi-composer-wrap ${props.centered ? "is-centered" : ""}`}>
-      {queuedCount > 0 && (
-        <section className="pi-queue-panel" aria-label={`待处理消息 ${queuedCount} 条`}>
-          <header>
-            <span>待处理 · {queuedCount}</span>
-            <button type="button" onClick={() => void recallQueue()}>
-              <RotateCcw size={12} />
-              撤回到输入框
-            </button>
-          </header>
-          <div className="pi-queue-items">
-            {props.queuedMessages.steering.map((value, index) => (
-              <div key={`steer-${index}`} title={value}><span className="is-steer">插入</span><p>{value}</p></div>
-            ))}
-            {props.queuedMessages.followUp.map((value, index) => (
-              <div key={`follow-${index}`} title={value}><span>稍后</span><p>{value}</p></div>
-            ))}
-          </div>
-        </section>
-      )}
       {modelNotice && (
         <div className="pi-model-notice" role="alert">
           {modelNotice}
@@ -499,15 +468,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 >
                   <Square size={11} fill="currentColor" />
                 </button>
-                <button
-                  className="pi-send-button is-queue"
-                  type="button"
-                  aria-label={queueBehavior === "steer" ? "插入消息" : "稍后发送"}
-                  disabled={!text.trim() || images.length > 0 || submitting}
-                  onClick={() => void send(queueBehavior)}
-                >
-                  {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
-                </button>
+                {text.trim() && (
+                  <button
+                    className="pi-send-button is-queue"
+                    type="button"
+                    aria-label={queueBehavior === "steer" ? "插入消息" : "稍后发送"}
+                    disabled={images.length > 0 || submitting}
+                    onClick={() => void send(queueBehavior)}
+                  >
+                    {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
+                  </button>
+                )}
               </>
             ) : (
               <button

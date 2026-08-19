@@ -17,6 +17,7 @@ import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 interface MessageListProps {
   sessionId: string;
   messages: AgentMessage[];
+  pendingMessages: AgentMessage[];
   entryIds: string[];
   streamingMessage: AgentMessage | null;
   busy: boolean;
@@ -890,6 +891,7 @@ function Turn(props: {
 export function MessageList({
   sessionId,
   messages,
+  pendingMessages,
   entryIds,
   streamingMessage,
   busy,
@@ -1132,7 +1134,7 @@ export function MessageList({
     const transcript = transcriptRef.current;
     if (!transcript || !atBottomRef.current) return;
     transcript.scrollTop = transcript.scrollHeight;
-  }, [messages.length, streamingMessage, busy]);
+  }, [messages.length, pendingMessages.length, streamingMessage, busy]);
 
   useEffect(() => {
     if (!mobile || anchorsEnabled) return;
@@ -1229,6 +1231,14 @@ export function MessageList({
                 <span />
               </div>
             )}
+            {pendingMessages.map((message, index) => (
+              <Message
+                key={String(message.id ?? `pending-${index}`)}
+                message={message}
+                toolResults={toolResults}
+                onFork={onFork}
+              />
+            ))}
           </div>
         </div>
         <OverlayScrollbar viewportRef={transcriptRef} />
