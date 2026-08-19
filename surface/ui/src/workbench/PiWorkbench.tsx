@@ -1,13 +1,16 @@
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
-import { Folder, PanelLeft, Settings } from "lucide-react";
-import type { ApplicationClient } from "../contracts";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Folder, LoaderCircle, PanelLeft, Settings } from "lucide-react";
+import type { ApplicationClient, ImageAttachment } from "../contracts";
 import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
 import { AuthGate } from "./AuthGate";
-import { Composer } from "./Composer";
+import { Composer, type ComposerHandle } from "./Composer";
 import { MessageList } from "./MessageList";
+import { SessionPointPicker } from "./SessionPointPicker";
+import { SessionStatsPanel } from "./SessionStatsPanel";
 import { SettingsDrawer } from "./SettingsDrawer";
 import { Sidebar } from "./Sidebar";
-import { useApplicationController } from "./useApplicationController";
+import { useApplicationController, type SendBehavior } from "./useApplicationController";
+import { useMobilePanelGestures } from "./useMobilePanelGestures";
 import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -22,6 +25,7 @@ export interface PiWorkbenchProps {
   version: string;
   hostKind?: "desktop" | "web" | "mobile";
   createRemoteClient?(endpoint: string): ApplicationClient;
+  onEdgeGesturesEnabledChange?(enabled: boolean): void;
 }
 
 const unavailableClient: ApplicationClient = {
@@ -34,6 +38,7 @@ const unavailableClient: ApplicationClient = {
   async createSession() { throw new Error("请先配置远程地址"); },
   async models() { throw new Error("请先配置远程地址"); },
   async browseDirectories() { throw new Error("请先配置远程地址"); },
+  async listFiles() { throw new Error("请先配置远程地址"); },
   async renameSession() { throw new Error("请先配置远程地址"); },
   async deleteSession() { throw new Error("请先配置远程地址"); },
   async dispatch<T = unknown>(): Promise<T> { throw new Error("请先配置远程地址"); },
@@ -72,7 +77,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     return unavailableClient;
   });
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 800);
+  const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
+  const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
+  const composerRef = useRef<ComposerHandle>(null);
   const controller = useApplicationController(client);
   const sidebar = useResizableSidebar();
   const workbenchStyle = {
@@ -85,7 +93,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setSettingsOpen(false);
-        if (window.innerWidth < 800) setSidebarOpen(false);
+        setPointPicker(null);
+        if (window.innerWidth < 800) {
+          setSidebarOpen(false);
+        }
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -98,9 +109,30 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     [controller.activeSessionId, sessions],
   );
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
+  const mobile = hostKind === "mobile";
+  const edgeGesturesEnabled = mobile
+    && controller.status === "ready"
+    && !settingsOpen
+    && !sidebarOpen
+    && pointPicker === null
+    && !controller.sessionStatsOpen;
+  const listFiles = useCallback((path: string) => client.listFiles(path), [client]);
+  const gestures = useMobilePanelGestures({
+    enabled: edgeGesturesEnabled,
+    sidebarOpen,
+    setSidebarOpen,
+  });
+
+  useEffect(() => {
+    props.onEdgeGesturesEnabledChange?.(edgeGesturesEnabled);
+  }, [edgeGesturesEnabled, props.onEdgeGesturesEnabledChange]);
+
+  useEffect(() => () => {
+    props.onEdgeGesturesEnabledChange?.(false);
+  }, [props.onEdgeGesturesEnabledChange]);
 
   const closeMobileSidebar = () => {
-    if (window.innerWidth < 800) setSidebarOpen(false);
+    if (mobile || window.innerWidth < 800) setSidebarOpen(false);
   };
 
   const useLocal = () => {
@@ -120,6 +152,105 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     setClient(createRemoteClient(normalized));
     setSettingsOpen(false);
   };
+
+  const closePointPicker = useCallback(() => setPointPicker(null), []);
+  const send = useCallback(async (
+    text: string,
+    behavior?: SendBehavior,
+    images: ImageAttachment[] = [],
+  ) => {
+    const match = images.length === 0 ? text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/) : null;
+    const command = match?.[1]?.toLocaleLowerCase();
+    const argument = (match?.[2] ?? "").trim();
+
+    switch (command) {
+      case "help":
+      case "hotkeys":
+        composerRef.current?.setDraft("/");
+        return;
+      case "new":
+        controller.beginNewSession();
+        setSidebarOpen(false);
+        return;
+      case "resume":
+        if (argument) {
+          await controller.selectSession(argument);
+        } else {
+          setSidebarSection("sessions");
+          setSidebarOpen(true);
+        }
+        return;
+      case "tree":
+      case "fork":
+        if (controller.activeSessionId) setPointPicker(command);
+        return;
+      case "clone":
+        if (controller.activeSessionId) await controller.clone();
+        return;
+      case "model": {
+        if (!argument) {
+          composerRef.current?.setDraft("/model ");
+          return;
+        }
+        const separator = argument.indexOf("/");
+        const model = separator > 0
+          ? { provider: argument.slice(0, separator), modelId: argument.slice(separator + 1) }
+          : null;
+        if (!model || !controller.models?.modelList.some((item) => item.provider === model.provider && item.id === model.modelId)) {
+          composerRef.current?.setDraft("/model ");
+          return;
+        }
+        await controller.setModel(model);
+        return;
+      }
+      case "thinking":
+        if (!argument) {
+          composerRef.current?.setDraft("/thinking ");
+          return;
+        }
+        await controller.setThinkingLevel(argument);
+        return;
+      case "tools":
+        if (argument !== "none" && argument !== "default" && argument !== "full") {
+          composerRef.current?.setDraft("/tools ");
+          return;
+        }
+        await controller.setToolPreset(argument);
+        return;
+      case "settings":
+        setSettingsOpen(true);
+        return;
+      case "abort":
+        await controller.abort();
+        return;
+      case "clear-queue":
+      case "dequeue":
+        await controller.clearQueue();
+        return;
+      case "stats":
+      case "session":
+        await controller.openSessionStats();
+        return;
+      case "compact":
+        await controller.compact(argument);
+        return;
+      case "reload":
+        await controller.reload();
+        return;
+      case "name":
+        if (!argument) {
+          composerRef.current?.setDraft("/name ");
+          return;
+        }
+        if (controller.activeSessionId) await controller.renameSession(controller.activeSessionId, argument);
+        return;
+      case "copy":
+        await controller.copyLastAssistant();
+        return;
+      default:
+        await controller.send(text, behavior, images);
+    }
+  }, [controller]);
 
   const settings = (
     <SettingsDrawer
@@ -156,7 +287,22 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         <main className="pi-entry" aria-live="polite">
           <section className="pi-entry-panel">
             <h1>pi</h1>
-            <p className="pi-entry-status">正在连接 {client.kind === "local" ? "此设备" : client.endpoint}…</p>
+            <div className="pi-entry-connecting">
+              <LoaderCircle size={16} />
+              <p className="pi-entry-status">正在连接 {client.kind === "local" ? "此设备" : client.endpoint}…</p>
+            </div>
+            <div className="pi-entry-actions">
+              <button type="button" onClick={controller.cancelConnection}>停止连接</button>
+              <button
+                type="button"
+                onClick={() => {
+                  controller.cancelConnection();
+                  setSettingsOpen(true);
+                }}
+              >
+                {mobile ? "切换节点" : "连接设置"}
+              </button>
+            </div>
           </section>
         </main>
         {settings}
@@ -184,7 +330,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   }
 
   return (
-    <div className={workbenchClass} style={workbenchStyle}>
+    <div {...gestures} className={workbenchClass} style={workbenchStyle}>
+      {edgeGesturesEnabled && !sidebarOpen && <div className="pi-mobile-sidebar-edge" aria-hidden="true" />}
       <button
         className={`pi-sidebar-toggle ${sidebarOpen ? "is-sidebar" : "is-main"}`}
         type="button"
@@ -197,9 +344,17 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       </button>
       <Sidebar
         open={sidebarOpen}
+        section={sidebarSection}
         sessions={sessions}
         runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
         activeSessionId={controller.activeSessionId}
+        workingDirectory={controller.workingDirectory}
+        listFiles={listFiles}
+        onMentionFile={(value) => {
+          composerRef.current?.insertText(value);
+          closeMobileSidebar();
+        }}
+        onSectionChange={setSidebarSection}
         onClose={() => setSidebarOpen(false)}
         onNewSession={(cwd) => {
           controller.beginNewSession(cwd);
@@ -230,37 +385,68 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""}`}>
         <header className="pi-topbar">
           <div className="pi-topbar-heading">
-            <Folder size={18} />
+            {!mobile && <Folder size={18} />}
             <div className="pi-topbar-title" title={title}>{title}</div>
           </div>
         </header>
 
         <section className={`pi-conversation ${empty ? "is-empty" : ""}`}>
-          {!empty && (
+          {controller.sessionLoading ? (
+            <div className="pi-session-loading" role="status" aria-live="polite">
+              <LoaderCircle size={20} />
+              <span>正在加载会话…</span>
+            </div>
+          ) : !empty && controller.activeSessionId ? (
             <MessageList
+              sessionId={controller.activeSessionId}
               messages={controller.messages}
               entryIds={controller.sessionView?.context.entryIds ?? []}
               streamingMessage={controller.streamingMessage}
               busy={controller.busy}
+              mobile={mobile}
+              anchorsEnabled={!mobile || edgeGesturesEnabled}
               onFork={controller.fork}
             />
+          ) : null}
+          {!controller.sessionLoading && (
+            <Composer
+              ref={composerRef}
+              centered={empty}
+              active={controller.activeSessionId !== null}
+              mobile={mobile}
+              models={controller.models}
+              model={controller.selectedModel}
+              thinkingLevel={controller.thinkingLevel}
+              contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
+              busy={controller.busy}
+              queuedMessages={controller.queuedMessages}
+              sessions={sessions}
+              toolPreset={controller.toolPreset}
+              slashCommands={controller.slashCommands}
+              onSend={send}
+              onAbort={controller.abort}
+              onClearQueue={controller.clearQueue}
+              onModelChange={controller.setModel}
+              onThinkingLevelChange={controller.setThinkingLevel}
+            />
           )}
-          <Composer
-            centered={empty}
-            active={controller.activeSessionId !== null}
-            models={controller.models}
-            model={controller.selectedModel}
-            thinkingLevel={controller.thinkingLevel}
-            contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
-            busy={controller.busy}
-            onSend={controller.send}
-            onAbort={controller.abort}
-            onModelChange={controller.setModel}
-            onThinkingLevelChange={controller.setThinkingLevel}
-          />
           {controller.error && <div className="pi-inline-error" role="alert">{controller.error}</div>}
         </section>
       </main>
+      <SessionPointPicker
+        mode={pointPicker}
+        messages={controller.messages}
+        entryIds={controller.sessionView?.context.entryIds ?? []}
+        tree={controller.sessionView?.tree ?? []}
+        activeLeafId={controller.sessionView?.leafId ?? null}
+        onClose={closePointPicker}
+        onSelect={(entryId) => pointPicker === "fork" ? controller.forkBefore(entryId) : controller.navigateTree(entryId)}
+      />
+      <SessionStatsPanel
+        open={controller.sessionStatsOpen}
+        stats={controller.sessionStats}
+        onClose={controller.closeSessionStats}
+      />
       {settings}
     </div>
   );

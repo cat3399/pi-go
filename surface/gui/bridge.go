@@ -165,6 +165,14 @@ func (b *GUIBridge) BrowseDirectories(path string) (surfacewire.DirectoryView, e
 	return surfacewire.BrowseDirectories(b.context(), api, path)
 }
 
+func (b *GUIBridge) ListFiles(path string) (surfacewire.FileList, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.FileList{}, err
+	}
+	return surfacewire.ListFiles(b.context(), api, path)
+}
+
 func (b *GUIBridge) RenameSession(sessionID, name string) error {
 	api, err := b.localAPI()
 	if err != nil {

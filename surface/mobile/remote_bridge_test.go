@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type memoryCredentialStore struct {
@@ -78,6 +79,46 @@ func TestRemoteBridgeRequest(t *testing.T) {
 	}
 	if response.Status != http.StatusAccepted || response.Body != `{"data":null}` {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestRemoteBridgeRequestCanBeCancelled(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	bridge := NewRemoteBridge()
+	bridge.ctx = context.Background()
+	done := make(chan error, 1)
+	go func() {
+		_, err := bridge.RequestWithID(
+			"connection-probe",
+			http.MethodGet,
+			server.URL,
+			"/api/v1/auth/status",
+			"",
+			"",
+		)
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote request did not start")
+	}
+	bridge.CancelRequest("connection-probe")
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled remote request returned without an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled remote request did not return")
 	}
 }
 

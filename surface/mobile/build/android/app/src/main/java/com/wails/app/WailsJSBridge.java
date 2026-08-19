@@ -1,6 +1,11 @@
 package com.wails.app;
 
+import android.graphics.Rect;
+import android.os.Build;
 import android.util.Log;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.webkit.JavascriptInterface;
@@ -22,10 +27,15 @@ public class WailsJSBridge {
 
     private final WailsBridge bridge;
     private final WebView webView;
+    private boolean edgeGesturesEnabled;
 
     public WailsJSBridge(WailsBridge bridge, WebView webView) {
         this.bridge = bridge;
         this.webView = webView;
+        webView.addOnLayoutChangeListener((view, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (edgeGesturesEnabled) updateSystemGestureExclusion();
+        });
     }
 
     /**
@@ -113,6 +123,40 @@ public class WailsJSBridge {
     @JavascriptInterface
     public boolean isDebug() {
         return BuildConfig.DEBUG;
+    }
+
+    /**
+     * Give the app's two precision edge gestures priority over Android's Back
+     * gesture only while the conversation UI is active. Android caps each
+     * edge's exclusion at 200dp, so the regions stay centered and bounded.
+     */
+    @JavascriptInterface
+    public void setEdgeGesturesEnabled(boolean enabled) {
+        webView.post(() -> {
+            edgeGesturesEnabled = enabled;
+            updateSystemGestureExclusion();
+        });
+    }
+
+    private void updateSystemGestureExclusion() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+        if (!edgeGesturesEnabled) {
+            webView.setSystemGestureExclusionRects(Collections.emptyList());
+            return;
+        }
+        int width = webView.getWidth();
+        int height = webView.getHeight();
+        if (width <= 0 || height <= 0) return;
+
+        float density = webView.getResources().getDisplayMetrics().density;
+        int edgeWidth = Math.min(width / 2, Math.round(32f * density));
+        int exclusionHeight = Math.min(height, Math.round(200f * density));
+        int exclusionTop = Math.max(0, (height - exclusionHeight) / 2);
+        int exclusionBottom = Math.min(height, exclusionTop + exclusionHeight);
+        List<Rect> regions = new ArrayList<>(2);
+        regions.add(new Rect(0, exclusionTop, edgeWidth, exclusionBottom));
+        regions.add(new Rect(width - edgeWidth, exclusionTop, width, exclusionBottom));
+        webView.setSystemGestureExclusionRects(regions);
     }
 
     /**

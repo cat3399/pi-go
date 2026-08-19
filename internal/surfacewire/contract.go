@@ -75,6 +75,18 @@ type DirectoryView struct {
 	Drives      []DirectoryEntry `json:"drives,omitempty"`
 }
 
+type FileEntry struct {
+	Name     string `json:"name"`
+	IsDir    bool   `json:"isDir"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
+}
+
+type FileList struct {
+	Path    string      `json:"path"`
+	Entries []FileEntry `json:"entries"`
+}
+
 func BrowseDirectories(ctx context.Context, api application.API, requested string) (DirectoryView, error) {
 	if api == nil {
 		return DirectoryView{}, errors.New("application API is required")
@@ -95,6 +107,25 @@ func BrowseDirectories(ctx context.Context, api application.API, requested strin
 		for _, entry := range result.Drives {
 			view.Drives = append(view.Drives, DirectoryEntry{Name: entry.Name, Path: entry.Path})
 		}
+	}
+	return view, nil
+}
+
+func ListFiles(ctx context.Context, api application.API, requested string) (FileList, error) {
+	if api == nil {
+		return FileList{}, errors.New("application API is required")
+	}
+	result, err := api.ListFiles(ctx, requested)
+	if err != nil {
+		return FileList{}, err
+	}
+	view := FileList{
+		Path: result.Path, Entries: make([]FileEntry, 0, len(result.Entries)),
+	}
+	for _, entry := range result.Entries {
+		view.Entries = append(view.Entries, FileEntry{
+			Name: entry.Name, IsDir: entry.IsDir, Size: entry.Size, Modified: entry.Modified,
+		})
 	}
 	return view, nil
 }

@@ -1,27 +1,51 @@
-import { KeyboardEvent, useEffect, useRef, useState } from "react";
-import { ArrowUp, Plus, Square, X } from "lucide-react";
+import { forwardRef, KeyboardEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { ArrowUp, Clock3, CornerDownRight, LoaderCircle, Plus, RotateCcw, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
   ModelsView,
+  QueuedMessages,
   SelectedModel,
+  SessionInfo,
+  SlashCommandInfo,
 } from "../contracts";
 import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
 import { SelectMenu } from "../primitives/SelectMenu";
+import {
+  matchSlashCommands,
+  slashQuery,
+  SLASH_SOURCE_LABELS,
+  type SlashCommandPaletteItem,
+  type SlashCommandArgumentItem,
+  type SlashCommandPaletteSource,
+} from "./slash-commands";
+import type { ToolPreset } from "../tool-presets";
 import type { SendBehavior } from "./useApplicationController";
 
 interface ComposerProps {
   centered: boolean;
   active: boolean;
+  mobile: boolean;
   models: ModelsView | null;
   model: SelectedModel | null;
   thinkingLevel: string;
   contextUsage: ContextUsage | null;
   busy: boolean;
+  queuedMessages: QueuedMessages;
+  sessions: SessionInfo[];
+  toolPreset: ToolPreset;
+  slashCommands: SlashCommandInfo[];
   onSend(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   onAbort(): Promise<void>;
+  onClearQueue(): Promise<string[]>;
   onModelChange(model: SelectedModel): Promise<void>;
   onThinkingLevelChange(level: string): Promise<void>;
+}
+
+export interface ComposerHandle {
+  insertText(value: string): void;
+  setDraft(value: string): void;
+  focus(): void;
 }
 
 const MAX_ATTACHED_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -31,48 +55,22 @@ function thinkingLevelLabel(level: string): string {
   return level === "max" ? "最高" : level;
 }
 
-export function Composer(props: ComposerProps) {
+const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "prompt", "skill"];
+
+export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [queueBehavior, setQueueBehavior] = useState<Extract<SendBehavior, "steer" | "follow_up">>("steer");
+  const [submitting, setSubmitting] = useState(false);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashDismissed, setSlashDismissed] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const imagesRef = useRef(images);
+  const composingRef = useRef(false);
+  const compositionEndedAtRef = useRef(0);
   imagesRef.current = images;
-
-  useEffect(() => () => {
-    for (const image of imagesRef.current) {
-      if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
-    }
-  }, []);
-
-  useEffect(() => {
-    const element = textareaRef.current;
-    if (!element) return;
-    element.style.height = "0";
-    element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
-  }, [text]);
-
-  const send = async () => {
-    const value = text.trim();
-    if (!value) return;
-    setText("");
-    try {
-      await props.onSend(value, props.busy ? "steer" : "prompt", images);
-      for (const image of images) {
-        if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
-      }
-      setImages([]);
-    } catch {
-      setText(value);
-    }
-  };
-
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      void send();
-    }
-  };
 
   const selectedModelKey = props.model
     ? `${props.model.provider}\u0000${props.model.modelId}`
@@ -96,6 +94,198 @@ export function Composer(props: ComposerProps) {
     value: level,
     label: thinkingLevelLabel(level),
   }));
+
+  const query = useMemo(() => slashQuery(text), [text]);
+  const argumentCommands = useMemo<SlashCommandArgumentItem[]>(() => {
+    if (!query?.argumentMode) return [];
+    switch (query.command) {
+      case "model":
+        return (props.models?.modelList ?? []).map((model) => ({
+          name: `${model.provider}/${model.id}`,
+          description: model.name || model.id,
+          source: "argument",
+        }));
+      case "thinking":
+        return thinkingLevels.map((level) => ({
+          name: level,
+          description: thinkingLevelLabel(level),
+          source: "argument",
+        }));
+      case "resume":
+        return props.sessions.map((session) => ({
+          name: session.id,
+          description: session.name?.trim() || session.firstMessage?.trim() || session.cwd,
+          source: "argument",
+        }));
+      case "tools":
+        return [
+          { name: "default", description: "读取、终端、编辑与写入", source: "argument" as const },
+          { name: "full", description: "启用全部内置文件工具", source: "argument" as const },
+          { name: "none", description: "关闭内置工具", source: "argument" as const },
+        ]
+          .sort((left, right) => Number(right.name === props.toolPreset) - Number(left.name === props.toolPreset))
+          .map((item) => ({
+            ...item,
+            description: `${item.description}${item.name === props.toolPreset ? " · 当前" : ""}`,
+          }));
+      default:
+        return [];
+    }
+  }, [props.models?.modelList, props.sessions, props.toolPreset, query, thinkingLevels]);
+  const argumentCommand = query?.argumentMode
+    && (query.command === "model" || query.command === "thinking" || query.command === "resume" || query.command === "tools");
+  const slashCommands = useMemo(
+    () => query === null
+      ? []
+      : matchSlashCommands(
+          query.argumentMode ? argumentCommands : props.slashCommands,
+          query.query,
+          !query.argumentMode,
+        ),
+    [argumentCommands, props.slashCommands, query],
+  );
+  const slashMenuOpen = query !== null && !slashDismissed && (!query.argumentMode || argumentCommand);
+  const slashSources = query?.argumentMode ? ["argument" as const] : rootSlashSources;
+  const slashGroups = useMemo(() => slashSources
+    .map((source) => ({
+      source,
+      commands: slashCommands.filter((command) => command.source === source),
+    }))
+    .filter((group) => group.commands.length > 0), [slashCommands]);
+  const orderedSlashCommands = useMemo(
+    () => slashGroups.flatMap((group) => group.commands),
+    [slashGroups],
+  );
+  const queuedCount = props.queuedMessages.steering.length + props.queuedMessages.followUp.length;
+
+  useEffect(() => {
+    setSlashActiveIndex(0);
+    setSlashDismissed(false);
+  }, [query]);
+
+  useEffect(() => {
+    if (!slashMenuOpen) return;
+    slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest" });
+  }, [slashActiveIndex, slashMenuOpen]);
+
+  const insertText = (value: string) => {
+    const element = textareaRef.current;
+    const start = element?.selectionStart ?? text.length;
+    const end = element?.selectionEnd ?? start;
+    const before = text.slice(0, start);
+    const prefix = before && !/\s$/.test(before) && value && !/^\s/.test(value) ? " " : "";
+    const insertion = `${prefix}${value}`;
+    const next = `${before}${insertion}${text.slice(end)}`;
+    const cursor = start + insertion.length;
+    setText(next);
+    setSlashDismissed(false);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  useImperativeHandle(ref, () => ({
+    insertText,
+    setDraft(value) {
+      setText(value);
+      setSlashDismissed(false);
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+        textareaRef.current?.setSelectionRange(value.length, value.length);
+      });
+    },
+    focus() {
+      textareaRef.current?.focus();
+    },
+  }));
+
+  useEffect(() => () => {
+    for (const image of imagesRef.current) {
+      if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
+    }
+  }, []);
+
+  useEffect(() => {
+    const element = textareaRef.current;
+    if (!element) return;
+    element.style.height = "0";
+    element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
+  }, [text]);
+
+  const send = async (behavior?: SendBehavior) => {
+    const value = text.trim();
+    if (!value || submitting || (props.busy && images.length > 0)) return;
+    setSubmitting(true);
+    setText("");
+    try {
+      await props.onSend(value, behavior ?? (props.busy ? queueBehavior : "prompt"), images);
+      for (const image of images) {
+        if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
+      }
+      setImages([]);
+    } catch {
+      setText(value);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const composing = composingRef.current
+      || event.nativeEvent.isComposing
+      || event.keyCode === 229
+      || Date.now() - compositionEndedAtRef.current < 80;
+    if (composing) return;
+
+    if (slashMenuOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setSlashActiveIndex((index) => Math.min(orderedSlashCommands.length - 1, index + 1));
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setSlashActiveIndex((index) => Math.max(0, index - 1));
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSlashDismissed(true);
+        return;
+      }
+      const selected = orderedSlashCommands[slashActiveIndex];
+      if (selected && (event.key === "Tab" || (!props.mobile && event.key === "Enter" && !event.shiftKey))) {
+        event.preventDefault();
+        applySlashCommand(selected);
+        return;
+      }
+    }
+
+    if (!props.mobile && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+    }
+  };
+
+  const applySlashCommand = (command: SlashCommandPaletteItem | SlashCommandArgumentItem) => {
+    const value = query?.argumentMode ? `${query.prefix}${command.name}` : `/${command.name} `;
+    setText(value);
+    setSlashDismissed(Boolean(query?.argumentMode));
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(value.length, value.length);
+    });
+  };
+
+  const recallQueue = async () => {
+    const values = await props.onClearQueue();
+    if (values.length === 0) return;
+    setText((current) => `${values.join("\n\n")}${current ? `\n\n${current}` : ""}`);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
 
   const addImages = async (files: File[]) => {
     if (props.busy) return;
@@ -134,9 +324,64 @@ export function Composer(props: ComposerProps) {
 
   return (
     <div className={`pi-composer-wrap ${props.centered ? "is-centered" : ""}`}>
+      {queuedCount > 0 && (
+        <section className="pi-queue-panel" aria-label={`待处理消息 ${queuedCount} 条`}>
+          <header>
+            <span>待处理 · {queuedCount}</span>
+            <button type="button" onClick={() => void recallQueue()}>
+              <RotateCcw size={12} />
+              撤回到输入框
+            </button>
+          </header>
+          <div className="pi-queue-items">
+            {props.queuedMessages.steering.map((value, index) => (
+              <div key={`steer-${index}`} title={value}><span className="is-steer">插入</span><p>{value}</p></div>
+            ))}
+            {props.queuedMessages.followUp.map((value, index) => (
+              <div key={`follow-${index}`} title={value}><span>稍后</span><p>{value}</p></div>
+            ))}
+          </div>
+        </section>
+      )}
       {modelNotice && (
         <div className="pi-model-notice" role="alert">
           {modelNotice}
+        </div>
+      )}
+      {slashMenuOpen && (
+        <div className="pi-slash-menu" role="listbox" aria-label="斜杠命令">
+          {slashCommands.length === 0 ? (
+            <div className="pi-slash-empty">没有匹配的命令</div>
+          ) : slashGroups.map((group) => (
+            <section className="pi-slash-group" key={group.source}>
+              <h2>{SLASH_SOURCE_LABELS[group.source]}</h2>
+              {group.commands.map((command) => {
+                const index = orderedSlashCommands.indexOf(command);
+                return (
+                  <button
+                    key={`${command.source}:${command.name}`}
+                    ref={(element) => {
+                      slashItemRefs.current[index] = element;
+                    }}
+                    className={index === slashActiveIndex ? "is-active" : ""}
+                    type="button"
+                    role="option"
+                    aria-selected={index === slashActiveIndex}
+                    onPointerEnter={(event) => {
+                      if (event.pointerType === "mouse") setSlashActiveIndex(index);
+                    }}
+                    onClick={() => applySlashCommand(command)}
+                  >
+                    <code>
+                      {query?.argumentMode ? command.name : `/${command.name}`}
+                      {!query?.argumentMode && "argumentHint" in command && command.argumentHint ? ` ${command.argumentHint}` : ""}
+                    </code>
+                    <span>{command.description || "运行命令"}</span>
+                  </button>
+                );
+              })}
+            </section>
+          ))}
         </div>
       )}
       <div className="pi-composer">
@@ -168,10 +413,21 @@ export function Composer(props: ComposerProps) {
           ref={textareaRef}
           rows={1}
           value={text}
-          placeholder="随心输入"
+          placeholder={props.busy ? "插入当前运行，或切换为稍后处理" : props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行"}
           aria-label="消息"
-          onChange={(event) => setText(event.target.value)}
+          enterKeyHint={props.mobile ? "enter" : "send"}
+          onChange={(event) => {
+            setText(event.target.value);
+            setSlashDismissed(false);
+          }}
           onKeyDown={onKeyDown}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+            compositionEndedAtRef.current = Date.now();
+          }}
         />
         <div className="pi-composer-toolbar">
           <div className="pi-composer-left">
@@ -184,47 +440,84 @@ export function Composer(props: ComposerProps) {
             >
               <Plus size={18} />
             </button>
+            {props.busy && (
+              <div className="pi-queue-mode" role="group" aria-label="消息处理方式">
+                <button
+                  type="button"
+                  className={queueBehavior === "steer" ? "is-active" : ""}
+                  aria-pressed={queueBehavior === "steer"}
+                  onClick={() => setQueueBehavior("steer")}
+                >
+                  <CornerDownRight size={12} />
+                  插入
+                </button>
+                <button
+                  type="button"
+                  className={queueBehavior === "follow_up" ? "is-active" : ""}
+                  aria-pressed={queueBehavior === "follow_up"}
+                  onClick={() => setQueueBehavior("follow_up")}
+                >
+                  <Clock3 size={12} />
+                  稍后
+                </button>
+              </div>
+            )}
           </div>
           <div className="pi-composer-meta">
             <ContextUsageIndicator usage={props.contextUsage} />
-            <SelectMenu
-              ariaLabel="模型"
-              value={selectedModelKey}
-              options={modelOptions}
-              placeholder="未选择模型"
-              variant="model"
-              showChevron={false}
-              disabled={!props.models || props.models.modelList.length === 0}
-              onChange={(value) => {
-                const [provider, modelId] = value.split("\u0000");
-                if (provider && modelId) void props.onModelChange({ provider, modelId });
-              }}
-            />
-            <SelectMenu
-              ariaLabel="思考等级"
-              value={props.thinkingLevel}
-              options={thinkingOptions}
-              disabled={thinkingLevels.length === 0}
-              onChange={(value) => void props.onThinkingLevelChange(value)}
-            />
+            {!props.busy && (
+              <>
+                <SelectMenu
+                  ariaLabel="模型"
+                  value={selectedModelKey}
+                  options={modelOptions}
+                  placeholder="未选择模型"
+                  variant="model"
+                  showChevron={false}
+                  disabled={!props.models || props.models.modelList.length === 0}
+                  onChange={(value) => {
+                    const [provider, modelId] = value.split("\u0000");
+                    if (provider && modelId) void props.onModelChange({ provider, modelId });
+                  }}
+                />
+                <SelectMenu
+                  ariaLabel="思考等级"
+                  value={props.thinkingLevel}
+                  options={thinkingOptions}
+                  disabled={thinkingLevels.length === 0}
+                  onChange={(value) => void props.onThinkingLevelChange(value)}
+                />
+              </>
+            )}
             {props.busy ? (
-              <button
-                className="pi-stop-button"
-                type="button"
-                aria-label="停止"
-                onClick={() => void props.onAbort()}
-              >
-                <Square size={11} fill="currentColor" />
-              </button>
+              <>
+                <button
+                  className="pi-stop-button"
+                  type="button"
+                  aria-label="停止"
+                  onClick={() => void props.onAbort()}
+                >
+                  <Square size={11} fill="currentColor" />
+                </button>
+                <button
+                  className="pi-send-button is-queue"
+                  type="button"
+                  aria-label={queueBehavior === "steer" ? "插入消息" : "稍后发送"}
+                  disabled={!text.trim() || images.length > 0 || submitting}
+                  onClick={() => void send(queueBehavior)}
+                >
+                  {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
+                </button>
+              </>
             ) : (
               <button
                 className="pi-send-button"
                 type="button"
                 aria-label="发送"
-                disabled={!text.trim()}
+                disabled={!text.trim() || submitting}
                 onClick={() => void send()}
               >
-                <ArrowUp size={18} strokeWidth={2.1} />
+                {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
               </button>
             )}
           </div>
@@ -232,4 +525,4 @@ export function Composer(props: ComposerProps) {
       </div>
     </div>
   );
-}
+});

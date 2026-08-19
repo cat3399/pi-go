@@ -1,13 +1,19 @@
 import { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Folder, FolderOpen, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
-import type { SessionInfo } from "../contracts";
+import { Check, FileText, Folder, FolderOpen, MessageSquare, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
+import type { FileList, SessionInfo } from "../contracts";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
+import { FileTree } from "./FileTree";
 
 interface SidebarProps {
   open: boolean;
+  section: "sessions" | "files";
   sessions: SessionInfo[];
   runningSessionIds: string[];
   activeSessionId: string | null;
+  workingDirectory: string;
+  listFiles(path: string): Promise<FileList>;
+  onMentionFile(value: string): void;
+  onSectionChange(section: "sessions" | "files"): void;
   onClose(): void;
   onNewSession(cwd?: string): void;
   onSelect(sessionId: string): void;
@@ -239,6 +245,7 @@ function ProjectSessions(props: {
 
 export function Sidebar(props: SidebarProps) {
   const [profileOpen, setProfileOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
   const sessionListRef = useRef<HTMLElement>(null);
   const projects = useMemo(() => {
@@ -272,6 +279,18 @@ export function Sidebar(props: SidebarProps) {
     return () => document.removeEventListener("mousedown", close);
   }, [profileOpen]);
 
+  useEffect(() => {
+    if (!props.open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!sidebarRef.current?.closest(".pi-workbench.is-mobile") && window.innerWidth >= 800) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target && (sidebarRef.current?.contains(target) || target.closest(".pi-sidebar-toggle"))) return;
+      props.onClose();
+    };
+    document.addEventListener("pointerdown", closeOutside, true);
+    return () => document.removeEventListener("pointerdown", closeOutside, true);
+  }, [props.open, props.onClose]);
+
   return (
     <>
       <button
@@ -279,9 +298,15 @@ export function Sidebar(props: SidebarProps) {
         type="button"
         tabIndex={props.open ? 0 : -1}
         aria-label="关闭侧栏"
+        onPointerDown={props.onClose}
         onClick={props.onClose}
       />
-      <aside id="pi-workbench-sidebar" className={`pi-sidebar ${props.open ? "is-open" : ""}`} aria-label="会话">
+      <aside
+        ref={sidebarRef}
+        id="pi-workbench-sidebar"
+        className={`pi-sidebar ${props.open ? "is-open" : ""}`}
+        aria-label="会话"
+      >
         <div className="pi-sidebar-titlebar" />
         <header className="pi-sidebar-header">
           <span className="pi-wordmark">pi</span>
@@ -289,27 +314,61 @@ export function Sidebar(props: SidebarProps) {
             <X size={18} />
           </button>
         </header>
-        <button className="pi-new-session" type="button" onClick={() => props.onNewSession()}>
-          <SquarePen size={16} />
-          <span>新会话</span>
-        </button>
+        <div className="pi-sidebar-primary">
+          <button className="pi-new-session" type="button" onClick={() => props.onNewSession()}>
+            <SquarePen size={16} />
+            <span>新会话</span>
+          </button>
+          <div className="pi-sidebar-tabs" role="tablist" aria-label="侧栏内容">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={props.section === "sessions"}
+              className={props.section === "sessions" ? "is-active" : ""}
+              onClick={() => props.onSectionChange("sessions")}
+            >
+              <MessageSquare size={13} />
+              会话
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={props.section === "files"}
+              className={props.section === "files" ? "is-active" : ""}
+              onClick={() => props.onSectionChange("files")}
+            >
+              <FileText size={13} />
+              文件
+            </button>
+          </div>
+        </div>
         <div className="pi-session-scroll pi-overlay-scroll-host">
-          <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
-            {projects.length > 0 && <div className="pi-sidebar-section-title">项目</div>}
-            {projects.map((project) => (
-              <ProjectSessions
-                key={project.root}
-                project={project}
-                activeSessionId={props.activeSessionId}
-                runningSessionIds={runningSessionIds}
-                onNewSession={props.onNewSession}
-                onSelect={props.onSelect}
-                onRename={props.onRename}
-                onDelete={props.onDelete}
-              />
-            ))}
-          </nav>
-          <OverlayScrollbar viewportRef={sessionListRef} />
+          {props.section === "sessions" ? (
+            <>
+              <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
+                {projects.length > 0 && <div className="pi-sidebar-section-title">项目</div>}
+                {projects.map((project) => (
+                  <ProjectSessions
+                    key={project.root}
+                    project={project}
+                    activeSessionId={props.activeSessionId}
+                    runningSessionIds={runningSessionIds}
+                    onNewSession={props.onNewSession}
+                    onSelect={props.onSelect}
+                    onRename={props.onRename}
+                    onDelete={props.onDelete}
+                  />
+                ))}
+              </nav>
+              <OverlayScrollbar viewportRef={sessionListRef} />
+            </>
+          ) : (
+            <FileTree
+              cwd={props.workingDirectory}
+              listFiles={props.listFiles}
+              onMention={props.onMentionFile}
+            />
+          )}
         </div>
         <div className="pi-sidebar-profile" ref={profileRef}>
           {profileOpen && (

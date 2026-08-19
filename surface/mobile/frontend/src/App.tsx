@@ -8,6 +8,13 @@ function createRemoteClient(endpoint: string): ApplicationClient {
   return new RemoteApplicationClient(endpoint, new WailsRemoteTransport());
 }
 
+function setAndroidEdgeGesturesEnabled(enabled: boolean): void {
+  const bridge = (window as Window & {
+    wails?: { setEdgeGesturesEnabled?(value: boolean): void };
+  }).wails;
+  bridge?.setEdgeGesturesEnabled?.(enabled);
+}
+
 export default function App() {
   return (
     <PiWorkbench
@@ -15,6 +22,7 @@ export default function App() {
       version={version}
       hostKind="mobile"
       createRemoteClient={createRemoteClient}
+      onEdgeGesturesEnabledChange={setAndroidEdgeGesturesEnabled}
     />
   );
 }

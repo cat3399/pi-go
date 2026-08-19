@@ -1,17 +1,48 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
+import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 
 interface MessageListProps {
+  sessionId: string;
   messages: AgentMessage[];
   entryIds: string[];
   streamingMessage: AgentMessage | null;
   busy: boolean;
+  mobile: boolean;
+  anchorsEnabled: boolean;
   onFork(entryId: string): Promise<void>;
 }
+
+interface AnchorScrub {
+  index: number;
+}
+
+interface AnchorGesture {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  engaged: boolean;
+  selecting: boolean;
+  index: number;
+}
+
+const MOBILE_EDGE_SIZE = 44;
+const TOUCH_SLOP = 8;
+const ANCHOR_HIT_RADIUS = 24;
+const ANCHOR_PREVIEW_DWELL_MS = 160;
+const ANCHOR_PREVIEW_HALF_HEIGHT = 38;
 
 async function writeClipboardText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -83,11 +114,203 @@ function inputString(input: Record<string, unknown>, key: string): string {
   return typeof input[key] === "string" ? input[key] as string : "";
 }
 
+type FileChangeKind = "context" | "added" | "removed" | "separator";
+
+interface FileChangeLine {
+  kind: FileChangeKind;
+  oldLine?: number;
+  newLine?: number;
+  text: string;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function fileName(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
+  return normalized.split("/").pop() || path || "文件";
+}
+
+function contentLines(value: string): string[] {
+  if (!value) return [];
+  const lines = value.replace(/\r\n/g, "\n").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function parseUnifiedPatch(patch: string): FileChangeLine[] {
+  const rows: FileChangeLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+  let hunkCount = 0;
+
+  for (const line of patch.replace(/\r\n/g, "\n").split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      if (hunkCount > 0) rows.push({ kind: "separator", text: "…" });
+      hunkCount += 1;
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line === "\\ No newline at end of file" || line.length === 0) continue;
+    const marker = line[0];
+    const text = line.slice(1);
+    if (marker === "+") {
+      rows.push({ kind: "added", newLine, text });
+      newLine += 1;
+    } else if (marker === "-") {
+      rows.push({ kind: "removed", oldLine, text });
+      oldLine += 1;
+    } else if (marker === " ") {
+      rows.push({ kind: "context", oldLine, newLine, text });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+  return rows;
+}
+
+function parseDisplayDiff(diff: string): FileChangeLine[] {
+  const rows: FileChangeLine[] = [];
+  for (const line of diff.replace(/\r\n/g, "\n").split("\n")) {
+    if (/^\s*\.\.\.\s*$/.test(line)) {
+      rows.push({ kind: "separator", text: "…" });
+      continue;
+    }
+    const match = /^([ +\-])(\d+)\s?(.*)$/.exec(line);
+    if (!match) continue;
+    const lineNumber = Number(match[2]);
+    const text = match[3] ?? "";
+    if (match[1] === "+") rows.push({ kind: "added", newLine: lineNumber, text });
+    else if (match[1] === "-") rows.push({ kind: "removed", oldLine: lineNumber, text });
+    else rows.push({ kind: "context", oldLine: lineNumber, newLine: lineNumber, text });
+  }
+  return rows;
+}
+
+function editFallbackLines(input: Record<string, unknown>): FileChangeLine[] {
+  const edits = Array.isArray(input.edits) ? input.edits : [];
+  const rows: FileChangeLine[] = [];
+  edits.forEach((value, index) => {
+    const edit = recordValue(value);
+    if (!edit) return;
+    if (rows.length > 0) rows.push({ kind: "separator", text: "…" });
+    contentLines(inputString(edit, "oldText")).forEach((text) => rows.push({ kind: "removed", text }));
+    contentLines(inputString(edit, "newText")).forEach((text) => rows.push({ kind: "added", text }));
+  });
+  return rows;
+}
+
+function fileChangeLines(name: string, input: Record<string, unknown>, result?: AgentMessage): FileChangeLine[] {
+  if (name === "write") {
+    return contentLines(inputString(input, "content")).map((text, index) => ({
+      kind: "added",
+      newLine: index + 1,
+      text,
+    }));
+  }
+  const details = recordValue(result?.details);
+  const patch = details && typeof details.patch === "string" ? details.patch : "";
+  const parsed = patch ? parseUnifiedPatch(patch) : [];
+  if (parsed.length > 0) return parsed;
+  const diff = details && typeof details.diff === "string" ? details.diff : "";
+  const displayRows = diff ? parseDisplayDiff(diff) : [];
+  return displayRows.length > 0 ? displayRows : editFallbackLines(input);
+}
+
+function fileChangeCopyValue(name: string, input: Record<string, unknown>, result?: AgentMessage): string {
+  if (name === "write") return inputString(input, "content");
+  const details = recordValue(result?.details);
+  if (details && typeof details.patch === "string" && details.patch) return details.patch;
+  if (details && typeof details.diff === "string" && details.diff) return details.diff;
+  return (Array.isArray(input.edits) ? input.edits : []).flatMap((value) => {
+    const edit = recordValue(value);
+    if (!edit) return [];
+    return [inputString(edit, "oldText"), inputString(edit, "newText")].filter(Boolean);
+  }).join("\n");
+}
+
+function FileChangeCard({
+  name,
+  input,
+  result,
+  streaming,
+}: {
+  name: string;
+  input: Record<string, unknown>;
+  result?: AgentMessage;
+  streaming: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const path = inputString(input, "path");
+  const rows = fileChangeLines(name, input, result);
+  const additions = rows.filter((line) => line.kind === "added").length;
+  const removals = rows.filter((line) => line.kind === "removed").length;
+  const copyValue = fileChangeCopyValue(name, input, result);
+  const failed = result?.isError === true;
+
+  const copy = async () => {
+    await writeClipboardText(copyValue);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <section className={`pi-file-change ${failed ? "is-error" : ""}`}>
+      <header className="pi-file-change-header">
+        <span className="pi-file-change-name" title={path}>{fileName(path)}</span>
+        <span className="pi-file-change-stats" aria-label={`${additions} 行新增，${removals} 行删除`}>
+          <span className="is-added">+{additions}</span>
+          <span className="is-removed">-{removals}</span>
+        </span>
+        <span className="pi-file-change-status">
+          {result && !failed && <Check size={12} />}
+          {streaming && !result ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : result ? "成功" : "等待"}
+        </span>
+        <button
+          type="button"
+          className="pi-file-change-copy"
+          aria-label={copied ? "变更已复制" : "复制变更"}
+          title={copied ? "已复制" : "复制变更"}
+          disabled={!copyValue}
+          onClick={() => void copy()}
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </button>
+      </header>
+      <div className="pi-file-change-scroll pi-overlay-scroll-host">
+        <div ref={viewportRef} className="pi-file-change-lines pi-overlay-scroll-viewport">
+          {rows.length > 0 ? rows.map((line, index) => line.kind === "separator" ? (
+            <div className="pi-file-change-separator" key={`separator-${index}`}>{line.text}</div>
+          ) : (
+            <div className={`pi-file-change-line is-${line.kind}`} key={`${line.kind}-${index}`}>
+              <span className="pi-file-change-number">{line.kind === "removed" ? line.oldLine : line.newLine}</span>
+              <span className="pi-file-change-marker">{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : ""}</span>
+              <code>{line.text || " "}</code>
+            </div>
+          )) : (
+            <div className="pi-file-change-empty">{failed ? "文件变更失败" : "没有文本行变更"}</div>
+          )}
+        </div>
+        <OverlayScrollbar viewportRef={viewportRef} />
+      </div>
+    </section>
+  );
+}
+
 function toolPresentation(name: string, input: Record<string, unknown>, complete: boolean) {
   switch (name) {
     case "read":
       return { icon: BookOpen, verb: complete ? "已读取" : "正在读取", target: inputString(input, "path"), card: "文件" };
     case "write":
+      return { icon: FilePenLine, verb: complete ? "已写入" : "正在写入", target: inputString(input, "path"), card: "写入" };
     case "edit":
       return { icon: FilePenLine, verb: complete ? "已编辑" : "正在编辑", target: inputString(input, "path"), card: "编辑" };
     case "grep":
@@ -106,27 +329,6 @@ function toolPresentation(name: string, input: Record<string, unknown>, complete
     default:
       return { icon: SquareTerminal, verb: complete ? "已调用" : "正在调用", target: name, card: name };
   }
-}
-
-function EditPreview({ input }: { input: Record<string, unknown> }) {
-  const edits = Array.isArray(input.edits) ? input.edits : [];
-  if (edits.length === 0) return null;
-  return (
-    <div className="pi-edit-preview">
-      {edits.map((value, index) => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-        const edit = value as Record<string, unknown>;
-        const oldText = inputString(edit, "oldText");
-        const newText = inputString(edit, "newText");
-        return (
-          <div key={index}>
-            {oldText && <pre className="is-removed">{oldText}</pre>}
-            {newText && <pre className="is-added">{newText}</pre>}
-          </div>
-        );
-      })}
-    </div>
-  );
 }
 
 function ToolDataSection(props: {
@@ -169,8 +371,8 @@ function ToolCall({
   result?: AgentMessage;
   streaming: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const name = toolCallName(block);
+  const [expanded, setExpanded] = useState(() => name === "edit" || name === "write");
   const input = toolInputRecord(block);
   const output = resultText(result);
   const failed = result?.isError === true;
@@ -180,9 +382,7 @@ function ToolCall({
   const serializedInput = JSON.stringify(input, null, 2);
   const command = inputString(input, "command");
   const inputCopyValue = name === "bash" ? command : serializedInput;
-  const hasEditPreview = (name === "edit" || name === "write")
-    && Array.isArray(input.edits)
-    && input.edits.length > 0;
+  const hasFileChange = name === "edit" || name === "write";
 
   return (
     <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`}>
@@ -193,20 +393,24 @@ function ToolCall({
         <ChevronRight className="pi-disclosure" size={14} />
       </button>
       {expanded && (
-        <div className="pi-tool-body">
-          <div className="pi-tool-card-header">
-            <span>{presentation.card}</span>
-            <span className="pi-tool-card-status">
-              {result && !failed && <Check size={12} />}
-              {streaming && !result ? "运行中" : failed ? "失败" : result ? "成功" : "等待"}
-            </span>
-          </div>
-          <ToolDataSection kind="input" value={inputCopyValue}>
-            {hasEditPreview
-              ? <EditPreview input={input} />
-              : <pre className="pi-tool-input">{name === "bash" ? `$ ${command}` : serializedInput}</pre>}
-          </ToolDataSection>
-          {output && (
+        <div className={`pi-tool-body ${hasFileChange ? "is-file-change" : ""}`}>
+          {hasFileChange ? (
+            <FileChangeCard name={name} input={input} result={result} streaming={streaming} />
+          ) : (
+            <>
+              <div className="pi-tool-card-header">
+                <span>{presentation.card}</span>
+                <span className="pi-tool-card-status">
+                  {result && !failed && <Check size={12} />}
+                  {streaming && !result ? "运行中" : failed ? "失败" : result ? "成功" : "等待"}
+                </span>
+              </div>
+              <ToolDataSection kind="input" value={inputCopyValue}>
+                <pre className="pi-tool-input">{name === "bash" ? `$ ${command}` : serializedInput}</pre>
+              </ToolDataSection>
+            </>
+          )}
+          {output && (!hasFileChange || failed) && (
             <ToolDataSection kind="output" value={output}>
               <pre className="pi-tool-output">{output}</pre>
             </ToolDataSection>
@@ -683,8 +887,27 @@ function Turn(props: {
   );
 }
 
-export function MessageList({ messages, entryIds, streamingMessage, busy, onFork }: MessageListProps) {
+export function MessageList({
+  sessionId,
+  messages,
+  entryIds,
+  streamingMessage,
+  busy,
+  mobile,
+  anchorsEnabled,
+  onFork,
+}: MessageListProps) {
+  const stageRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const turnRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const messageAnchorsRef = useRef<MessageAnchorsHandle>(null);
+  const atBottomRef = useRef(true);
+  const anchorGestureRef = useRef<AnchorGesture | null>(null);
+  const anchorPreviewTimerRef = useRef<number | null>(null);
+  const anchorScrubIndexRef = useRef<number | null>(null);
+  const [activeAnchorIndex, setActiveAnchorIndex] = useState(0);
+  const [anchorOpen, setAnchorOpen] = useState(false);
+  const [anchorScrub, setAnchorScrub] = useState<AnchorScrub | null>(null);
   const toolResults = useMemo(() => {
     const values = new Map<string, AgentMessage>();
     for (const message of messages) {
@@ -711,44 +934,321 @@ export function MessageList({ messages, entryIds, streamingMessage, busy, onFork
     return { turns: nextTurns, leading: nextLeading };
   }, [entryIds, messages]);
   const activeTurnIndex = turns.length - 1;
+  const anchors = useMemo(() => turns.map((turn, index) => ({
+    id: turn.anchor.entryId || String(turn.anchor.message.id ?? `turn-${index}`),
+    label: messageText(turn.anchor.message).replace(/\s+/g, " ").trim(),
+  })), [turns]);
+
+  const syncActiveAnchor = () => {
+    const transcript = transcriptRef.current;
+    if (!transcript || turns.length === 0) return;
+    atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
+    const focus = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.28;
+    let nearest = 0;
+    let distance = Number.POSITIVE_INFINITY;
+    turnRefs.current.forEach((element, index) => {
+      if (!element) return;
+      const nextDistance = Math.abs(element.getBoundingClientRect().top - focus);
+      if (nextDistance < distance) {
+        distance = nextDistance;
+        nearest = index;
+      }
+    });
+    setActiveAnchorIndex(nearest);
+  };
+
+  const scrollToAnchor = (index: number) => {
+    const transcript = transcriptRef.current;
+    const target = turnRefs.current[index];
+    if (!transcript || !target) return;
+    const top = target.getBoundingClientRect().top
+      - transcript.getBoundingClientRect().top
+      + transcript.scrollTop
+      - 20;
+    setActiveAnchorIndex(index);
+    transcript.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  };
+
+  const anchorTrackMetrics = () => {
+    const track = document.querySelector<HTMLElement>("#pi-message-anchors .pi-anchor-track");
+    if (!track || anchors.length === 0) return null;
+    const bounds = track.getBoundingClientRect();
+    const innerTop = bounds.top + 8;
+    const innerHeight = Math.max(0, bounds.height - 16);
+    if (bounds.width <= 0 || innerHeight <= 0) return null;
+    return {
+      centerX: bounds.left + bounds.width / 2,
+      innerTop,
+      innerHeight,
+      slotHeight: innerHeight / anchors.length,
+    };
+  };
+
+  const anchorCenterY = (index: number): number | null => {
+    const metrics = anchorTrackMetrics();
+    if (!metrics || index < 0 || index >= anchors.length) return null;
+    return metrics.innerTop + (index + 0.5) * metrics.slotHeight;
+  };
+
+  const anchorIndexNear = (clientX: number, clientY: number): number | null => {
+    const metrics = anchorTrackMetrics();
+    if (!metrics) return null;
+    const estimated = Math.round((clientY - metrics.innerTop) / metrics.slotHeight - 0.5);
+    const index = Math.max(0, Math.min(anchors.length - 1, estimated));
+    const centerY = metrics.innerTop + (index + 0.5) * metrics.slotHeight;
+    return Math.hypot(clientX - metrics.centerX, clientY - centerY) <= ANCHOR_HIT_RADIUS
+      ? index
+      : null;
+  };
+
+  const clearAnchorPreviewTimer = () => {
+    if (anchorPreviewTimerRef.current === null) return;
+    window.clearTimeout(anchorPreviewTimerRef.current);
+    anchorPreviewTimerRef.current = null;
+  };
+
+  const hideAnchorPreview = () => {
+    clearAnchorPreviewTimer();
+    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
+    if (anchorScrubIndexRef.current === null) return;
+    anchorScrubIndexRef.current = null;
+    setAnchorScrub(null);
+  };
+
+  const scheduleAnchorPreview = (index: number) => {
+    clearAnchorPreviewTimer();
+    if (anchorScrubIndexRef.current !== null) {
+      anchorScrubIndexRef.current = null;
+      setAnchorScrub(null);
+    }
+    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
+    anchorPreviewTimerRef.current = window.setTimeout(() => {
+      anchorPreviewTimerRef.current = null;
+      const gesture = anchorGestureRef.current;
+      const stage = stageRef.current;
+      if (!stage || !gesture?.engaged || !gesture.selecting || gesture.index !== index) return;
+      const pointY = anchorCenterY(index);
+      if (pointY === null) return;
+      const stageBounds = stage.getBoundingClientRect();
+      const previewY = Math.max(
+        stageBounds.top + ANCHOR_PREVIEW_HALF_HEIGHT,
+        Math.min(stageBounds.bottom - ANCHOR_PREVIEW_HALF_HEIGHT, pointY),
+      );
+      stage.style.setProperty("--pi-anchor-scrub-y", `${previewY}px`);
+      anchorScrubIndexRef.current = index;
+      setAnchorScrub({ index });
+    }, ANCHOR_PREVIEW_DWELL_MS);
+  };
+
+  const onAnchorPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!mobile || !anchorsEnabled || anchors.length === 0 || event.pointerType !== "touch" || !event.isPrimary) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (
+      target?.closest("button, a, input, textarea, select, [data-swipe-ignore]")
+      && !target.closest("#pi-message-anchors")
+    ) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.right - event.clientX > MOBILE_EDGE_SIZE) return;
+    anchorGestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      engaged: false,
+      selecting: false,
+      index: activeAnchorIndex,
+    };
+  };
+
+  const onAnchorPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = anchorGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const dx = event.clientX - gesture.startX;
+    const dy = event.clientY - gesture.startY;
+    if (!gesture.engaged) {
+      if (Math.abs(dy) > TOUCH_SLOP && Math.abs(dy) > Math.abs(dx)) {
+        anchorGestureRef.current = null;
+        return;
+      }
+      if (dx > -TOUCH_SLOP || Math.abs(dx) < Math.abs(dy) * 1.1) return;
+      gesture.engaged = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setAnchorOpen(true);
+    }
+    event.preventDefault();
+    if (!gesture.selecting && Math.abs(dy) < TOUCH_SLOP) return;
+    const index = anchorIndexNear(event.clientX, event.clientY);
+    if (index === null) {
+      gesture.selecting = false;
+      gesture.index = -1;
+      messageAnchorsRef.current?.setGestureIndex(null);
+      hideAnchorPreview();
+      return;
+    }
+    const changed = !gesture.selecting || gesture.index !== index;
+    gesture.selecting = true;
+    gesture.index = index;
+    if (changed) {
+      messageAnchorsRef.current?.setGestureIndex(index);
+      scheduleAnchorPreview(index);
+    }
+  };
+
+  const finishAnchorGesture = (event: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    const gesture = anchorGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const selected = anchorIndexNear(event.clientX, event.clientY);
+    anchorGestureRef.current = null;
+    messageAnchorsRef.current?.setGestureIndex(null);
+    hideAnchorPreview();
+    if (!gesture.engaged) return;
+    setAnchorOpen(false);
+    if (cancelled || !gesture.selecting || selected === null) return;
+    scrollToAnchor(selected);
+  };
+
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    transcript.scrollTop = transcript.scrollHeight;
+    atBottomRef.current = true;
+    anchorGestureRef.current = null;
+    messageAnchorsRef.current?.setGestureIndex(null);
+    clearAnchorPreviewTimer();
+    anchorScrubIndexRef.current = null;
+    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
+    setAnchorOpen(false);
+    setAnchorScrub(null);
+    setActiveAnchorIndex(Math.max(0, turns.length - 1));
+    const frame = requestAnimationFrame(() => {
+      transcript.scrollTop = transcript.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [sessionId]);
+
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript || !atBottomRef.current) return;
+    transcript.scrollTop = transcript.scrollHeight;
+  }, [messages.length, streamingMessage, busy]);
+
+  useEffect(() => {
+    if (!mobile || anchorsEnabled) return;
+    anchorGestureRef.current = null;
+    messageAnchorsRef.current?.setGestureIndex(null);
+    setAnchorOpen(false);
+    hideAnchorPreview();
+  }, [anchorsEnabled, mobile]);
+
+  useEffect(() => {
+    if (!mobile || !anchorOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("#pi-message-anchors, .pi-mobile-anchor-edge")) return;
+      setAnchorOpen(false);
+      messageAnchorsRef.current?.setGestureIndex(null);
+      hideAnchorPreview();
+    };
+    document.addEventListener("pointerdown", dismiss, true);
+    return () => document.removeEventListener("pointerdown", dismiss, true);
+  }, [anchorOpen, mobile]);
+
+  useEffect(() => () => {
+    if (anchorPreviewTimerRef.current !== null) {
+      window.clearTimeout(anchorPreviewTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    const onScroll = () => syncActiveAnchor();
+    const onResize = () => {
+      if (atBottomRef.current) transcript.scrollTop = transcript.scrollHeight;
+      syncActiveAnchor();
+    };
+    transcript.addEventListener("scroll", onScroll, { passive: true });
+    const observer = new ResizeObserver(onResize);
+    observer.observe(transcript);
+    if (transcript.firstElementChild) observer.observe(transcript.firstElementChild);
+    onScroll();
+    return () => {
+      transcript.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, [turns.length]);
 
   return (
-    <div className="pi-transcript-scroll pi-overlay-scroll-host">
-      <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite">
-        <div className="pi-transcript-inner">
-          {leading.map(({ message, entryId }, index) => (
-            <Message
-              key={String(message.id ?? `leading-${message.role}-${index}`)}
-              message={message}
-              toolResults={toolResults}
-              entryId={entryId}
-              onFork={onFork}
-            />
-          ))}
-          {turns.map((turn, index) => (
-            <Turn
-              key={String(turn.anchor.message.id ?? `turn-${index}`)}
-              turn={turn}
-              toolResults={toolResults}
-              streamingMessage={index === activeTurnIndex ? streamingMessage : null}
-              busy={index === activeTurnIndex && busy}
-              active={index === activeTurnIndex}
-              onFork={onFork}
-            />
-          ))}
-          {turns.length === 0 && streamingMessage && (
-            <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
-          )}
-          {turns.length === 0 && busy && !streamingMessage && (
-            <div className="pi-working" role="status">
-              <span />
-              <span />
-              <span />
-            </div>
-          )}
+    <div
+      ref={stageRef}
+      className="pi-message-stage"
+      onPointerDownCapture={onAnchorPointerDown}
+      onPointerMoveCapture={onAnchorPointerMove}
+      onPointerUpCapture={(event) => finishAnchorGesture(event, false)}
+      onPointerCancelCapture={(event) => finishAnchorGesture(event, true)}
+    >
+      <div className="pi-transcript-scroll pi-overlay-scroll-host">
+        <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite">
+          <div className="pi-transcript-inner">
+            {leading.map(({ message, entryId }, index) => (
+              <Message
+                key={String(message.id ?? `leading-${message.role}-${index}`)}
+                message={message}
+                toolResults={toolResults}
+                entryId={entryId}
+                onFork={onFork}
+              />
+            ))}
+            {turns.map((turn, index) => (
+              <div
+                className="pi-turn-anchor"
+                key={String(turn.anchor.message.id ?? `turn-${index}`)}
+                ref={(element) => {
+                  turnRefs.current[index] = element;
+                }}
+              >
+                <Turn
+                  turn={turn}
+                  toolResults={toolResults}
+                  streamingMessage={index === activeTurnIndex ? streamingMessage : null}
+                  busy={index === activeTurnIndex && busy}
+                  active={index === activeTurnIndex}
+                  onFork={onFork}
+                />
+              </div>
+            ))}
+            {turns.length === 0 && streamingMessage && (
+              <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
+            )}
+            {turns.length === 0 && busy && !streamingMessage && (
+              <div className="pi-working" role="status">
+                <span />
+                <span />
+                <span />
+              </div>
+            )}
+          </div>
         </div>
+        <OverlayScrollbar viewportRef={transcriptRef} />
       </div>
-      <OverlayScrollbar viewportRef={transcriptRef} />
+      {mobile && anchorsEnabled && anchors.length > 0 && <div className="pi-mobile-anchor-edge" aria-hidden="true" />}
+      <MessageAnchors
+        ref={messageAnchorsRef}
+        items={anchors}
+        activeIndex={activeAnchorIndex}
+        mobile={mobile}
+        open={!mobile || (anchorsEnabled && anchorOpen)}
+        previewIndex={anchorScrub?.index ?? null}
+        onSelect={(index) => {
+          scrollToAnchor(index);
+          if (!mobile) return;
+          setAnchorOpen(false);
+          messageAnchorsRef.current?.setGestureIndex(null);
+          hideAnchorPreview();
+        }}
+      />
     </div>
   );
 }

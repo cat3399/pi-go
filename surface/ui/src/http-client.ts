@@ -8,6 +8,7 @@ import type {
   DirectoryView,
   EventObserver,
   EventSubscription,
+  FileList,
   ModelsView,
   SessionView,
 } from "./contracts";
@@ -69,6 +70,17 @@ export function normalizeRemoteEndpoint(value: string): string {
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function encodeFilePathForAPI(filePath: string): string {
+  const normalized = /^[a-zA-Z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\")
+    ? filePath.replace(/\\/g, "/")
+    : filePath;
+  return normalized
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -140,6 +152,10 @@ export class RemoteApplicationClient implements ApplicationClient {
     return this.request(`/api/v1/system/cwd/browse${query}`);
   }
 
+  listFiles(path: string): Promise<FileList> {
+    return this.request(`/api/v1/files/${encodeFilePathForAPI(path)}?type=list`);
+  }
+
   async renameSession(sessionId: string, name: string): Promise<void> {
     await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
@@ -206,6 +222,7 @@ export class RemoteApplicationClient implements ApplicationClient {
 
 class BrowserRemoteTransport implements RemoteApplicationTransport {
   private readonly sources = new Set<EventSource>();
+  private readonly requests = new Set<AbortController>();
 
   async request(
     endpoint: string,
@@ -213,22 +230,29 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
     token: string,
     init: RemoteRequestInit = {},
   ): Promise<RemoteTransportResponse> {
+    const controller = new AbortController();
+    this.requests.add(controller);
     const headers = new Headers({ Accept: "application/json" });
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
     if (token) headers.set("Authorization", `Bearer ${token}`);
-    const response = await fetch(new URL(path, endpoint), {
-      method: init.method ?? "GET",
-      body: init.body,
-      headers,
-      cache: "no-store",
-      credentials: "include",
-    });
-    const retryAfterSeconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
-    return {
-      status: response.status,
-      body: await response.text(),
-      retryAfterMs: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : undefined,
-    };
+    try {
+      const response = await fetch(new URL(path, endpoint), {
+        method: init.method ?? "GET",
+        body: init.body,
+        headers,
+        cache: "no-store",
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const retryAfterSeconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+      return {
+        status: response.status,
+        body: await response.text(),
+        retryAfterMs: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : undefined,
+      };
+    } finally {
+      this.requests.delete(controller);
+    }
   }
 
   subscribe(
@@ -280,6 +304,8 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
   }
 
   close(): void {
+    for (const controller of this.requests) controller.abort();
+    this.requests.clear();
     for (const source of this.sources) source.close();
     this.sources.clear();
   }

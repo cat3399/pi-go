@@ -55,6 +55,18 @@ export interface DirectoryView {
   drives?: DirectoryEntry[];
 }
 
+export interface FileEntry {
+  name: string;
+  isDir: boolean;
+  size: number;
+  modified: string;
+}
+
+export interface FileList {
+  path: string;
+  entries: FileEntry[];
+}
+
 export interface QueuedMessages {
   steering: string[];
   followUp: string[];
@@ -163,6 +175,7 @@ export type SlashCommandSource = "extension" | "prompt" | "skill";
 export interface SlashCommandInfo {
   name: string;
   description?: string;
+  argumentHint?: string;
   source: SlashCommandSource;
   sourceInfo?: {
     path: string;
@@ -213,6 +226,7 @@ export interface ApplicationClient {
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult>;
   models(cwd: string): Promise<ModelsView>;
   browseDirectories(path?: string): Promise<DirectoryView>;
+  listFiles(path: string): Promise<FileList>;
   renameSession(sessionId: string, name: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   dispatch<T = unknown>(sessionId: string, command: Record<string, unknown>): Promise<T>;

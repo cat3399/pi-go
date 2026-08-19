@@ -34,21 +34,31 @@ function call<T>(method: string, ...args: unknown[]): Promise<T> {
 
 export class WailsRemoteTransport implements RemoteApplicationTransport {
   private readonly subscriptions = new Set<() => void>();
+  private readonly requests = new Set<string>();
+  private readonly requestPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  private requestSequence = 0;
 
-  request(
+  async request(
     endpoint: string,
     path: string,
     token: string,
     init: RemoteRequestInit = {},
   ): Promise<RemoteTransportResponse> {
-    return call(
-      "Request",
-      init.method ?? "GET",
-      endpoint,
-      path,
-      token,
-      init.body ?? "",
-    );
+    const requestId = `${this.requestPrefix}-${++this.requestSequence}`;
+    this.requests.add(requestId);
+    try {
+      return await call(
+        "RequestWithID",
+        requestId,
+        init.method ?? "GET",
+        endpoint,
+        path,
+        token,
+        init.body ?? "",
+      );
+    } finally {
+      this.requests.delete(requestId);
+    }
   }
 
   subscribe(
@@ -114,6 +124,10 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
   }
 
   close(): void {
+    for (const requestId of this.requests) {
+      void call("CancelRequest", requestId);
+    }
+    this.requests.clear();
     for (const close of [...this.subscriptions]) close();
   }
 }

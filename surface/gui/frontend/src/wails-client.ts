@@ -9,6 +9,7 @@ import type {
   DirectoryView,
   EventObserver,
   EventSubscription,
+  FileList,
   ModelsView,
   SessionView,
 } from "@cat3399/pi-workbench";
@@ -82,6 +83,10 @@ export class WailsApplicationClient implements ApplicationClient {
 
   browseDirectories(path = ""): Promise<DirectoryView> {
     return call("BrowseDirectories", path);
+  }
+
+  listFiles(path: string): Promise<FileList> {
+    return call("ListFiles", path);
   }
 
   renameSession(sessionId: string, name: string): Promise<void> {

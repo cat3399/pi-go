@@ -49,6 +49,9 @@ type RemoteBridge struct {
 	requestClient *http.Client
 	streamClient  *http.Client
 	credentials   remoteCredentialStore
+	requestMu     sync.Mutex
+	requests      map[string]context.CancelFunc
+	cancelled     map[string]struct{}
 
 	mu         sync.RWMutex
 	ctx        context.Context
@@ -79,6 +82,8 @@ func NewRemoteBridge() *RemoteBridge {
 		requestClient:    &http.Client{Timeout: 60 * time.Second},
 		streamClient:     &http.Client{},
 		credentials:      newPlatformCredentialStore(),
+		requests:         make(map[string]context.CancelFunc),
+		cancelled:        make(map[string]struct{}),
 		streams:          make(map[uint64]*remoteEventStream),
 		credentialTokens: make(map[string]string),
 		credentialLoaded: make(map[string]bool),
@@ -94,6 +99,7 @@ func (b *RemoteBridge) ServiceStartup(ctx context.Context, _ wails.ServiceOption
 }
 
 func (b *RemoteBridge) ServiceShutdown() error {
+	b.cancelRequests()
 	b.mu.Lock()
 	streams := make([]*remoteEventStream, 0, len(b.streams))
 	for _, stream := range b.streams {
@@ -109,6 +115,20 @@ func (b *RemoteBridge) ServiceShutdown() error {
 }
 
 func (b *RemoteBridge) Request(method, endpoint, requestPath, token, body string) (RemoteResponse, error) {
+	return b.request("", method, endpoint, requestPath, token, body)
+}
+
+// RequestWithID gives the mobile frontend a cancellable request boundary. The
+// legacy Request method remains available for callers that do not need one.
+func (b *RemoteBridge) RequestWithID(requestID, method, endpoint, requestPath, token, body string) (RemoteResponse, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return RemoteResponse{}, errors.New("remote request ID is required")
+	}
+	return b.request(requestID, method, endpoint, requestPath, token, body)
+}
+
+func (b *RemoteBridge) request(requestID, method, endpoint, requestPath, token, body string) (RemoteResponse, error) {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	switch method {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -121,6 +141,24 @@ func (b *RemoteBridge) Request(method, endpoint, requestPath, token, body string
 	}
 	requestContext, cancel := context.WithTimeout(b.context(), 60*time.Second)
 	defer cancel()
+	if requestID != "" {
+		b.requestMu.Lock()
+		if _, cancelled := b.cancelled[requestID]; cancelled {
+			delete(b.cancelled, requestID)
+			b.requestMu.Unlock()
+			return RemoteResponse{}, fmt.Errorf("remote request cancelled: %w", context.Canceled)
+		}
+		if previous := b.requests[requestID]; previous != nil {
+			previous()
+		}
+		b.requests[requestID] = cancel
+		b.requestMu.Unlock()
+		defer func() {
+			b.requestMu.Lock()
+			delete(b.requests, requestID)
+			b.requestMu.Unlock()
+		}()
+	}
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
@@ -152,6 +190,37 @@ func (b *RemoteBridge) Request(method, endpoint, requestPath, token, body string
 	}
 	b.captureAuthentication(endpoint, requestPath, &result)
 	return result, nil
+}
+
+func (b *RemoteBridge) CancelRequest(requestID string) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return
+	}
+	b.requestMu.Lock()
+	cancel := b.requests[requestID]
+	delete(b.requests, requestID)
+	if cancel == nil {
+		b.cancelled[requestID] = struct{}{}
+	}
+	b.requestMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (b *RemoteBridge) cancelRequests() {
+	b.requestMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(b.requests))
+	for requestID, cancel := range b.requests {
+		cancels = append(cancels, cancel)
+		delete(b.requests, requestID)
+	}
+	clear(b.cancelled)
+	b.requestMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 func (b *RemoteBridge) OpenEventStream(endpoint, token string, after uint64) (RemoteStreamOpened, error) {

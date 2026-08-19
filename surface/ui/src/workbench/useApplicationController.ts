@@ -32,6 +32,7 @@ export interface ApplicationController {
   snapshot: ApplicationSnapshot | null;
   models: ModelsView | null;
   sessionView: SessionView | null;
+  sessionLoading: boolean;
   runtimeState: SessionRuntimeState | null;
   activeSessionId: string | null;
   workingDirectory: string;
@@ -57,13 +58,18 @@ export interface ApplicationController {
   setToolPreset(preset: ToolPreset): Promise<void>;
   browseDirectories(path?: string): Promise<DirectoryView>;
   setWorkingDirectory(path: string): Promise<void>;
-  compact(): Promise<void>;
+  compact(customInstructions?: string): Promise<void>;
+  reload(): Promise<void>;
+  copyLastAssistant(): Promise<void>;
   fork(entryId: string): Promise<void>;
+  forkBefore(entryId: string): Promise<void>;
+  clone(): Promise<void>;
   navigateTree(entryId: string): Promise<void>;
   openSessionStats(): Promise<void>;
   closeSessionStats(): void;
   renameSession(sessionId: string, name: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
+  cancelConnection(): void;
   retry(): Promise<void>;
 }
 
@@ -90,6 +96,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const [snapshot, setSnapshot] = useState<ApplicationSnapshot | null>(null);
   const [models, setModels] = useState<ModelsView | null>(null);
   const [sessionView, setSessionView] = useState<SessionView | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [newSessionCwd, setNewSessionCwd] = useState("");
@@ -352,6 +359,7 @@ export function useApplicationController(client: ApplicationClient): Application
     setSnapshot(null);
     setModels(null);
     setSessionView(null);
+    setSessionLoading(false);
     setRuntimeState(null);
     setActiveSessionId(null);
     setNewSessionCwd("");
@@ -397,6 +405,15 @@ export function useApplicationController(client: ApplicationClient): Application
     };
   }, [connect]);
 
+  const cancelConnection = useCallback(() => {
+    generationRef.current++;
+    subscriptionRef.current?.close();
+    subscriptionRef.current = null;
+    client.close();
+    setError("连接已停止");
+    setStatus("error");
+  }, [client]);
+
   const login = useCallback(async (password: string) => {
     setError("");
     try {
@@ -411,6 +428,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const selectSession = useCallback(async (sessionId: string) => {
     activeSessionRef.current = sessionId;
     setActiveSessionId(sessionId);
+    setSessionLoading(true);
     setSessionView(null);
     setRuntimeState(null);
     setSlashCommands([]);
@@ -424,6 +442,7 @@ export function useApplicationController(client: ApplicationClient): Application
     try {
       const view = await loadSession(sessionId);
       if (view) {
+        setSessionLoading(false);
         const capabilities = await Promise.allSettled([
           loadModels(view.info.cwd),
           loadTools(sessionId),
@@ -437,6 +456,8 @@ export function useApplicationController(client: ApplicationClient): Application
       }
     } catch (sessionError) {
       if (activeSessionRef.current === sessionId) setError(errorMessage(sessionError));
+    } finally {
+      if (activeSessionRef.current === sessionId) setSessionLoading(false);
     }
   }, [loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
@@ -446,6 +467,7 @@ export function useApplicationController(client: ApplicationClient): Application
     newSessionModelOverriddenRef.current = false;
     newSessionThinkingOverriddenRef.current = false;
     setActiveSessionId(null);
+    setSessionLoading(false);
     setSessionView(null);
     setRuntimeState(null);
     setSlashCommands([]);
@@ -502,6 +524,20 @@ export function useApplicationController(client: ApplicationClient): Application
       case "compact":
         await runCompact(sessionId, argument);
         return true;
+      case "abort": {
+        const type = runtimeState?.isBashRunning
+          ? "abort_bash"
+          : runtimeState?.isCompacting
+            ? "abort_compaction"
+            : "abort";
+        await client.dispatch(sessionId, { type });
+        return true;
+      }
+      case "clear-queue":
+      case "dequeue":
+        await client.dispatch(sessionId, { type: "clear_queue" });
+        setRuntimeState((current) => ({ ...current, queuedMessages: emptyQueue }));
+        return true;
       case "reload":
         await reloadSessionResources(sessionId);
         return true;
@@ -510,6 +546,7 @@ export function useApplicationController(client: ApplicationClient): Application
         await client.dispatch(sessionId, { type: "set_session_name", name: argument });
         await Promise.all([refreshSnapshot(), loadSession(sessionId)]);
         return true;
+      case "stats":
       case "session":
         setSessionStats(null);
         sessionStatsOpenRef.current = true;
@@ -525,10 +562,38 @@ export function useApplicationController(client: ApplicationClient): Application
         await navigator.clipboard.writeText(result.text);
         return true;
       }
+      case "model": {
+        const slash = argument.indexOf("/");
+        if (slash <= 0 || slash === argument.length - 1) throw new Error("用法：/model <提供商/模型>");
+        const provider = argument.slice(0, slash).trim();
+        const modelId = argument.slice(slash + 1).trim();
+        const available = models?.modelList.some((model) => model.provider === provider && model.id === modelId);
+        if (!available) throw new Error(`未找到模型：${provider}/${modelId}`);
+        await client.dispatch(sessionId, { type: "set_model", provider, modelId });
+        setRuntimeState((current) => ({
+          ...current,
+          model: { id: modelId, provider, name: models?.models[`${provider}:${modelId}`] },
+        }));
+        await loadSession(sessionId);
+        return true;
+      }
+      case "thinking":
+        if (!argument) throw new Error("用法：/thinking <等级>");
+        await client.dispatch(sessionId, { type: "set_thinking_level", level: argument });
+        setRuntimeState((current) => ({ ...current, thinkingLevel: argument }));
+        return true;
+      case "tools": {
+        if (argument !== "none" && argument !== "default" && argument !== "full") {
+          throw new Error("用法：/tools <none|default|full>");
+        }
+        await client.dispatch(sessionId, { type: "set_tools", toolNames: getToolNamesForPreset(argument) });
+        setToolPresetState(argument);
+        return true;
+      }
       default:
         return false;
     }
-  }, [client, loadSession, loadSessionStats, refreshSnapshot, reloadSessionResources, runCompact]);
+  }, [client, loadSession, loadSessionStats, models, refreshSnapshot, reloadSessionResources, runCompact, runtimeState?.isBashRunning, runtimeState?.isCompacting]);
 
   const send = useCallback(async (
     rawText: string,
@@ -571,17 +636,43 @@ export function useApplicationController(client: ApplicationClient): Application
       }
 
       if (behavior === "steer" || behavior === "follow_up") {
-        await client.dispatch(sessionID, {
-          type: behavior,
-          message: text,
-          ...(images.length ? {
-            images: images.map((image) => ({
-              type: "image",
-              data: image.data,
-              mimeType: image.mimeType,
-            })),
-          } : {}),
-        });
+        const queueKey = behavior === "steer" ? "steering" : "followUp";
+        setRuntimeState((current) => ({
+          ...current,
+          queuedMessages: {
+            steering: [...(current?.queuedMessages?.steering ?? [])],
+            followUp: [...(current?.queuedMessages?.followUp ?? [])],
+            [queueKey]: [...(current?.queuedMessages?.[queueKey] ?? []), text],
+          },
+        }));
+        try {
+          await client.dispatch(sessionID, {
+            type: behavior,
+            message: text,
+            ...(images.length ? {
+              images: images.map((image) => ({
+                type: "image",
+                data: image.data,
+                mimeType: image.mimeType,
+              })),
+            } : {}),
+          });
+        } catch (queueError) {
+          setRuntimeState((current) => {
+            const values = [...(current?.queuedMessages?.[queueKey] ?? [])];
+            const index = values.lastIndexOf(text);
+            if (index >= 0) values.splice(index, 1);
+            return {
+              ...current,
+              queuedMessages: {
+                steering: [...(current?.queuedMessages?.steering ?? [])],
+                followUp: [...(current?.queuedMessages?.followUp ?? [])],
+                [queueKey]: values,
+              },
+            };
+          });
+          throw queueError;
+        }
         return;
       }
 
@@ -781,19 +872,48 @@ export function useApplicationController(client: ApplicationClient): Application
     }
   }, [loadModels]);
 
-  const compact = useCallback(async () => {
+  const compact = useCallback(async (customInstructions?: string) => {
     const sessionID = activeSessionRef.current;
     if (!sessionID) return;
     setError("");
     try {
-      await runCompact(sessionID);
+      await runCompact(sessionID, customInstructions?.trim());
     } catch (compactError) {
       setError(errorMessage(compactError));
       throw compactError;
     }
   }, [runCompact]);
 
-  const fork = useCallback(async (entryId: string) => {
+  const reload = useCallback(async () => {
+    const sessionID = activeSessionRef.current;
+    if (!sessionID) return;
+    setError("");
+    try {
+      await reloadSessionResources(sessionID);
+    } catch (reloadError) {
+      setError(errorMessage(reloadError));
+      throw reloadError;
+    }
+  }, [reloadSessionResources]);
+
+  const copyLastAssistant = useCallback(async () => {
+    const sessionID = activeSessionRef.current;
+    if (!sessionID) return;
+    setError("");
+    try {
+      const result = await client.dispatch<{ text?: string | null }>(sessionID, {
+        type: "get_last_assistant_text",
+      });
+      if (!result?.text) throw new Error("还没有可复制的助手消息");
+      if (!navigator.clipboard?.writeText) throw new Error("当前环境不支持剪贴板写入");
+      await navigator.clipboard.writeText(result.text);
+    } catch (copyError) {
+      setError(errorMessage(copyError));
+      throw copyError;
+    }
+  }, [client]);
+
+  const forkAt = useCallback(async (entryId: string, position: "at" | "before") => {
     const sessionID = activeSessionRef.current;
     if (!sessionID || !entryId) return;
     setError("");
@@ -804,7 +924,7 @@ export function useApplicationController(client: ApplicationClient): Application
       }>(sessionID, {
         type: "fork",
         entryId,
-        position: "at",
+        position,
       });
       if (!result?.newSessionId || result.cancelled) return;
       await refreshSnapshot();
@@ -814,6 +934,15 @@ export function useApplicationController(client: ApplicationClient): Application
       throw forkError;
     }
   }, [client, refreshSnapshot, selectSession]);
+
+  const fork = useCallback((entryId: string) => forkAt(entryId, "at"), [forkAt]);
+  const forkBefore = useCallback((entryId: string) => forkAt(entryId, "before"), [forkAt]);
+
+  const clone = useCallback(async () => {
+    const leafId = sessionView?.leafId;
+    if (!leafId) throw new Error("当前会话还没有可克隆的位置");
+    await forkAt(leafId, "at");
+  }, [forkAt, sessionView?.leafId]);
 
   const navigateTree = useCallback(async (entryId: string) => {
     const sessionID = activeSessionRef.current;
@@ -896,6 +1025,7 @@ export function useApplicationController(client: ApplicationClient): Application
     snapshot,
     models,
     sessionView,
+    sessionLoading,
     runtimeState,
     activeSessionId,
     workingDirectory: activeSessionId
@@ -924,12 +1054,17 @@ export function useApplicationController(client: ApplicationClient): Application
     browseDirectories,
     setWorkingDirectory: changeWorkingDirectory,
     compact,
+    reload,
+    copyLastAssistant,
     fork,
+    forkBefore,
+    clone,
     navigateTree,
     openSessionStats,
     closeSessionStats,
     renameSession,
     deleteSession,
+    cancelConnection,
     retry: connect,
   };
 }
