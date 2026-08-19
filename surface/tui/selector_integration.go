@@ -950,11 +950,11 @@ func (m *Model) renderSelectorView(width, height int) tea.View {
 	selector := m.selector.View(width, selectorBudget)
 	selectorHeight := lipgloss.Height(selector)
 	transcriptHeight := max(1, height-selectorHeight-1)
-	transcript := m.transcript.View(width, transcriptHeight, m.renderer)
+	transcript := m.renderTranscript(width, transcriptHeight)
 	if m.helpVisible {
 		transcript = m.renderHelp(width, transcriptHeight)
 	}
-	view := tea.NewView(strings.Join([]string{transcript, selector, m.renderStateLine(width)}, "\n"))
+	view := tea.NewView(m.prepareScreen(strings.Join([]string{transcript, selector, m.renderStateLine(width)}, "\n")))
 	view.AltScreen = m.mode == ScreenFull
 	view.MouseMode = tea.MouseModeNone
 	if m.mode == ScreenFull {

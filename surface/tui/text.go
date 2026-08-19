@@ -27,6 +27,29 @@ type terminalToken struct {
 	control bool
 }
 
+type cellRange struct {
+	start int
+	end   int
+}
+
+func cellRangeAtColumn(s string, column int) (cellRange, bool) {
+	if column < 0 {
+		return cellRange{}, false
+	}
+	current := 0
+	for _, token := range tokenizeTerminal(s) {
+		if token.control {
+			continue
+		}
+		width := clusterWidth(token.text)
+		if width > 0 && column >= current && column < current+width {
+			return cellRange{start: current, end: current + width}, true
+		}
+		current += width
+	}
+	return cellRange{}, false
+}
+
 func tokenizeTerminal(s string) []terminalToken {
 	var out []terminalToken
 	for i := 0; i < len(s); {

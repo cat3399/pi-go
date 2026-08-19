@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 type transcriptRenderKey struct {
 	width    int
@@ -18,6 +21,17 @@ type transcriptPosition struct {
 	line int
 }
 
+type transcriptRow struct {
+	position transcriptPosition
+	text     string
+	valid    bool
+}
+
+type transcriptCell struct {
+	position transcriptPosition
+	column   int
+}
+
 // transcriptModel is a message-level virtual list. It renders only enough
 // cached items to fill the viewport and keeps a semantic item anchor while the
 // user is scrolled away from the live tail.
@@ -32,6 +46,7 @@ type transcriptModel struct {
 	lastWidth    int
 	lastHeight   int
 	lastRenderer itemRenderer
+	lastRows     []transcriptRow
 	hasLayout    bool
 }
 
@@ -206,6 +221,7 @@ func (m *transcriptModel) View(width, height int, renderer itemRenderer) string 
 	m.lastWidth, m.lastHeight, m.lastRenderer = width, height, renderer
 	if len(m.items) == 0 {
 		m.lastTop = transcriptPosition{}
+		m.lastRows = make([]transcriptRow, height)
 		m.hasLayout = true
 		return strings.Repeat("\n", max(0, height-1))
 	}
@@ -215,13 +231,24 @@ func (m *transcriptModel) View(width, height int, renderer itemRenderer) string 
 	} else {
 		lines, m.lastTop = m.viewAnchor(width, height, renderer)
 	}
-	m.hasLayout = true
-	if len(lines) < height {
-		lines = append(lines, make([]string, height-len(lines))...)
-	} else if len(lines) > height {
-		lines = lines[:height]
+	rows := m.rowsFrom(m.lastTop, lines, width, renderer)
+	if len(rows) < height {
+		padding := make([]transcriptRow, height-len(rows))
+		if m.follow {
+			rows = append(padding, rows...)
+		} else {
+			rows = append(rows, padding...)
+		}
+	} else if len(rows) > height {
+		rows = rows[:height]
 	}
-	return strings.Join(lines, "\n")
+	m.lastRows = rows
+	m.hasLayout = true
+	visible := make([]string, len(rows))
+	for index := range rows {
+		visible[index] = rows[index].text
+	}
+	return strings.Join(visible, "\n")
 }
 
 func (m *transcriptModel) viewTail(width, height int, renderer itemRenderer) ([]string, transcriptPosition) {
@@ -237,10 +264,6 @@ func (m *transcriptModel) viewTail(width, height int, renderer itemRenderer) ([]
 		prefix := append([]string(nil), itemLines[start:]...)
 		lines = append(prefix, lines...)
 		top = transcriptPosition{item: index, line: start}
-	}
-	if len(lines) < height {
-		padding := make([]string, height-len(lines))
-		lines = append(padding, lines...)
 	}
 	return lines, top
 }
@@ -296,6 +319,189 @@ func (m *transcriptModel) lines(index, width int, renderer itemRenderer) []strin
 		result = append([]string{""}, result...)
 	}
 	return result
+}
+
+func (m *transcriptModel) rowsFrom(
+	top transcriptPosition,
+	lines []string,
+	width int,
+	renderer itemRenderer,
+) []transcriptRow {
+	rows := make([]transcriptRow, 0, len(lines))
+	position := top
+	for _, line := range lines {
+		if position.item < 0 || position.item >= len(m.items) {
+			break
+		}
+		itemLines := m.lines(position.item, width, renderer)
+		if position.line < 0 || position.line >= len(itemLines) {
+			break
+		}
+		rows = append(rows, transcriptRow{position: position, text: line, valid: true})
+		position.line++
+		if position.line >= len(itemLines) {
+			position.item++
+			position.line = 0
+		}
+	}
+	return rows
+}
+
+func (m *transcriptModel) CellAt(row, column int, clamp bool) (transcriptCell, transcriptRow, bool) {
+	if m == nil || !m.hasLayout || len(m.lastRows) == 0 {
+		return transcriptCell{}, transcriptRow{}, false
+	}
+	if clamp {
+		row = max(0, min(len(m.lastRows)-1, row))
+	} else if row < 0 || row >= len(m.lastRows) {
+		return transcriptCell{}, transcriptRow{}, false
+	}
+	if !m.lastRows[row].valid && clamp {
+		nearest := -1
+		for distance := 1; distance < len(m.lastRows); distance++ {
+			if row-distance >= 0 && m.lastRows[row-distance].valid {
+				nearest = row - distance
+				break
+			}
+			if row+distance < len(m.lastRows) && m.lastRows[row+distance].valid {
+				nearest = row + distance
+				break
+			}
+		}
+		if nearest >= 0 {
+			row = nearest
+		}
+	}
+	visible := m.lastRows[row]
+	if !visible.valid {
+		return transcriptCell{}, transcriptRow{}, false
+	}
+	column = max(0, min(max(0, m.lastWidth-1), column))
+	return transcriptCell{position: visible.position, column: column}, visible, true
+}
+
+func (m *transcriptModel) VisibleRowBounds() (int, int, bool) {
+	if m == nil || !m.hasLayout {
+		return 0, 0, false
+	}
+	first, last := -1, -1
+	for index, row := range m.lastRows {
+		if !row.valid {
+			continue
+		}
+		if first < 0 {
+			first = index
+		}
+		last = index
+	}
+	return first, last, first >= 0
+}
+
+func compareTranscriptPosition(left, right transcriptPosition) int {
+	if left.item != right.item {
+		if left.item < right.item {
+			return -1
+		}
+		return 1
+	}
+	if left.line != right.line {
+		if left.line < right.line {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+func compareTranscriptCell(left, right transcriptCell) int {
+	if compared := compareTranscriptPosition(left.position, right.position); compared != 0 {
+		return compared
+	}
+	if left.column < right.column {
+		return -1
+	}
+	if left.column > right.column {
+		return 1
+	}
+	return 0
+}
+
+func (m *transcriptModel) lineAt(position transcriptPosition) (string, bool) {
+	if m == nil || position.item < 0 || position.item >= len(m.items) ||
+		position.line < 0 || m.lastWidth <= 0 {
+		return "", false
+	}
+	lines := m.lines(position.item, m.lastWidth, m.lastRenderer)
+	if position.line >= len(lines) {
+		return "", false
+	}
+	return lines[position.line], true
+}
+
+func (m *transcriptModel) nextPosition(position transcriptPosition) (transcriptPosition, bool) {
+	if _, ok := m.lineAt(position); !ok {
+		return transcriptPosition{}, false
+	}
+	position.line++
+	if position.line < len(m.lines(position.item, m.lastWidth, m.lastRenderer)) {
+		return position, true
+	}
+	position.item++
+	position.line = 0
+	if position.item >= len(m.items) {
+		return transcriptPosition{}, false
+	}
+	return position, true
+}
+
+func (m *transcriptModel) SelectedText(anchor, focus transcriptCell) string {
+	if m == nil || compareTranscriptCell(anchor, focus) == 0 {
+		return ""
+	}
+	start, end := anchor, focus
+	if compareTranscriptCell(start, end) > 0 {
+		start, end = end, start
+	}
+	if _, ok := m.lineAt(start.position); !ok {
+		return ""
+	}
+	if _, ok := m.lineAt(end.position); !ok {
+		return ""
+	}
+	selected := make([]string, 0)
+	for position := start.position; ; {
+		line, ok := m.lineAt(position)
+		if !ok {
+			return ""
+		}
+		lineWidth := VisibleWidth(line)
+		from, to := 0, lineWidth
+		if compareTranscriptPosition(position, start.position) == 0 {
+			if cell, ok := cellRangeAtColumn(line, start.column); ok {
+				from = cell.start
+			} else {
+				from = min(max(0, start.column), lineWidth)
+			}
+		}
+		if compareTranscriptPosition(position, end.position) == 0 {
+			if cell, ok := cellRangeAtColumn(line, end.column); ok {
+				to = cell.end
+			} else {
+				to = min(max(0, end.column+1), lineWidth)
+			}
+		}
+		part, _ := SliceColumns(line, from, max(0, to-from), true)
+		selected = append(selected, strings.TrimRightFunc(StripTerminalSequences(part), unicode.IsSpace))
+		if compareTranscriptPosition(position, end.position) == 0 {
+			break
+		}
+		next, ok := m.nextPosition(position)
+		if !ok || compareTranscriptPosition(next, end.position) > 0 {
+			return ""
+		}
+		position = next
+	}
+	return strings.Join(selected, "\n")
 }
 
 func (m *transcriptModel) ScrollUp(lines int) {

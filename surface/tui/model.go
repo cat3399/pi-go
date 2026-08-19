@@ -67,6 +67,12 @@ type Model struct {
 	fileCompletion           fileCompletionModel
 	fileCompletionGeneration uint64
 	setClipboard             func(string) tea.Cmd
+	openURL                  func(string) error
+	mouseSelection           *transcriptSelection
+	mouseAutoGeneration      uint64
+	mouseAutoDirection       int
+	mouseAutoPointer         tea.Mouse
+	lastScreen               []string
 	selector                 *selectorModel
 	selectorCancel           context.CancelFunc
 	selectorGeneration       uint64
@@ -129,6 +135,10 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 		transcript:        newTranscriptModel(), renderer: newContentRenderer(theme),
 		composer: newComposerModel(theme), setClipboard: tea.SetClipboard, width: 80, height: 24,
 		liveItems: make(map[string]contentItem), snapshotLeafID: cloneString(snapshot.LeafID),
+	}
+	model.openURL = options.OpenURL
+	if model.openURL == nil {
+		model.openURL = openURLWithSystem
 	}
 	model.readClipboardImage = options.ReadClipboardImage
 	if model.readClipboardImage == nil {
@@ -198,6 +208,12 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 			}
 		}
 		return m, nil
+	case tea.BlurMsg:
+		if m.mouseSelection != nil && m.mouseSelection.active {
+			m.mouseSelection = nil
+		}
+		m.stopSelectionAutoScroll()
+		return m, nil
 	case themeChangedMsg:
 		return m, m.applyThemeChanged(message)
 	case tea.KeyPressMsg:
@@ -207,12 +223,19 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		if handled, command := m.handleKey(message); handled {
 			return m, command
 		}
+	case tea.MouseClickMsg:
+		return m, m.handleMouseClick(message.Mouse())
+	case tea.MouseMotionMsg:
+		return m, m.handleMouseMotion(message.Mouse())
+	case tea.MouseReleaseMsg:
+		return m, m.handleMouseRelease(message.Mouse())
 	case tea.MouseWheelMsg:
-		switch message.Mouse().Button {
-		case tea.MouseWheelUp:
-			m.transcript.ScrollUp(3)
-		case tea.MouseWheelDown:
-			m.transcript.ScrollDown(3)
+		return m, m.handleMouseWheel(message.Mouse())
+	case selectionAutoScrollMsg:
+		return m, m.handleSelectionAutoScroll(message)
+	case urlOpenedMsg:
+		if message.err != nil {
+			m.setStatus("Open link failed: "+message.err.Error(), statusError)
 		}
 		return m, nil
 	case subscriptionReadyMsg:
@@ -964,7 +987,7 @@ func (m *Model) View() tea.View {
 		if height > 1 {
 			content += strings.Repeat("\n", height-1)
 		}
-		view := tea.NewView(content)
+		view := tea.NewView(m.prepareScreen(content))
 		view.AltScreen = m.mode == ScreenFull
 		view.WindowTitle = "pi-go"
 		return view
@@ -984,7 +1007,7 @@ func (m *Model) View() tea.View {
 	queueLines := m.renderQueueDock(width, maxQueueLines)
 	transcriptHeight := max(1, height-len(queueLines)-len(paletteLines)-composerHeight-1)
 
-	transcript := m.transcript.View(width, transcriptHeight, m.renderer)
+	transcript := m.renderTranscript(width, transcriptHeight)
 	if m.helpVisible {
 		transcript = m.renderHelp(width, transcriptHeight)
 	}
@@ -992,7 +1015,7 @@ func (m *Model) View() tea.View {
 	parts = append(parts, queueLines...)
 	parts = append(parts, paletteLines...)
 	parts = append(parts, composer, m.renderStateLine(width))
-	view := tea.NewView(strings.Join(parts, "\n"))
+	view := tea.NewView(m.prepareScreen(strings.Join(parts, "\n")))
 	view.AltScreen = m.mode == ScreenFull
 	view.MouseMode = tea.MouseModeNone
 	if m.mode == ScreenFull {

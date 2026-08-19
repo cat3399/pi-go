@@ -43,6 +43,7 @@ type Options struct {
 	ThemeSetting       string
 	InitialPrompt      string
 	ReadClipboardImage func(context.Context) (llm.ImageBlock, error)
+	OpenURL            func(string) error
 
 	Input       io.Reader
 	Output      io.Writer
