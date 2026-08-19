@@ -31,7 +31,7 @@ Surfaces:
   terminal  CLI and TUI (default), output: bin/pi-go
   web       CLI, TUI, and embedded Web UI, output: bin/pi-go
   gui       Desktop GUI, output: bin/pi-go-gui
-  mobile    Android app, output: bin/pi-go-mobile.apk
+  mobile    Android app, output: surface/mobile/bin/pi-go-mobile.apk
 
 Examples:
   make build
@@ -117,7 +117,7 @@ case "$action:$surface" in
 		;;
 	build:mobile)
 		require_no_args "$@"
-		exec make -C "$repo_dir/surface/mobile" build BIN_DIR="$repo_dir/bin"
+		exec make -C "$repo_dir/surface/mobile" build BIN_DIR="$repo_dir/surface/mobile/bin"
 		;;
 	dev:terminal)
 		cd "$repo_dir"
@@ -132,7 +132,7 @@ case "$action:$surface" in
 		;;
 	dev:mobile)
 		require_no_args "$@"
-		exec make -C "$repo_dir/surface/mobile" run BIN_DIR="$repo_dir/bin"
+		exec make -C "$repo_dir/surface/mobile" run BIN_DIR="$repo_dir/surface/mobile/bin"
 		;;
 	run:terminal)
 		exec "$repo_dir/bin/pi-go" "$@"
@@ -145,7 +145,7 @@ case "$action:$surface" in
 		;;
 	run:mobile)
 		require_no_args "$@"
-		exec make -C "$repo_dir/surface/mobile" run BIN_DIR="$repo_dir/bin"
+		exec make -C "$repo_dir/surface/mobile" run BIN_DIR="$repo_dir/surface/mobile/bin"
 		;;
 	doctor:mobile)
 		require_no_args "$@"

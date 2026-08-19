@@ -128,5 +128,8 @@ make build SURFACE=mobile
 make dev SURFACE=mobile
 ```
 
+APK 会从 Android/Gradle 的原始构建目录复制到
+`surface/mobile/bin/pi-go-mobile.apk`；后续安装与运行也统一读取这个 Surface 产物目录。
+
 Android 开发默认面向开启 USB 调试的真机，不要求安装模拟器或系统镜像。iOS 保留为未来同一
 移动产品的第二个平台，本阶段不生成或维护 iOS 工程。

@@ -10,7 +10,7 @@ pi-go 是 [pi](https://github.com/cat3399/pi) Agent Runtime 的 Go 实现。项�
 | `terminal` | CLI、TUI、RPC | `bin/pi-go` |
 | `web` | CLI、TUI、RPC、内嵌 Web UI | `bin/pi-go` |
 | `gui` | 内嵌完整 Core 的桌面应用 | `bin/pi-go-gui` |
-| `mobile` | 连接远程 Core 的 Android 应用 | `bin/pi-go-mobile.apk` |
+| `mobile` | 连接远程 Core 的 Android 应用 | `surface/mobile/bin/pi-go-mobile.apk` |
 
 ## 构建
 
