@@ -149,6 +149,103 @@ type cursorTestAPI struct {
 	revision uint64
 }
 
+type coreControlHTTPTestAPI struct {
+	application.API
+	sessionID string
+	command   application.Command
+}
+
+func (a *coreControlHTTPTestAPI) Dispatch(
+	_ context.Context,
+	sessionID string,
+	command application.Command,
+) (application.CommandResult, error) {
+	a.sessionID = sessionID
+	a.command = command
+	switch command.(type) {
+	case application.CycleModelCommand:
+		return application.CycleModelResult{}, nil
+	case application.GetAvailableModelsCommand:
+		return application.GetAvailableModelsResult{Models: []provider.Model{}}, nil
+	case application.CycleThinkingLevelCommand:
+		return application.CycleThinkingLevelResult{}, nil
+	case application.GetAvailableThinkingLevelsCommand:
+		return application.GetAvailableThinkingLevelsResult{Levels: []provider.ThinkingLevel{}}, nil
+	case application.SetSteeringModeCommand:
+		return application.SetSteeringModeResult{}, nil
+	case application.SetFollowUpModeCommand:
+		return application.SetFollowUpModeResult{}, nil
+	case application.AbortRetryCommand:
+		return application.AbortRetryResult{}, nil
+	case application.AbortBranchSummaryCommand:
+		return application.AbortBranchSummaryResult{}, nil
+	default:
+		return nil, application.ErrInvalidCommand
+	}
+}
+
+func TestHTTPCoreControlCommandsUseCanonicalApplicationBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want application.CommandType
+	}{
+		{name: "cycle model", body: `{"type":"cycle_model","direction":"backward"}`, want: application.CommandCycleModel},
+		{name: "available models", body: `{"type":"get_available_models"}`, want: application.CommandGetAvailableModels},
+		{name: "cycle thinking", body: `{"type":"cycle_thinking_level"}`, want: application.CommandCycleThinkingLevel},
+		{name: "available thinking", body: `{"type":"get_available_thinking_levels"}`, want: application.CommandGetThinkingLevels},
+		{name: "steering mode", body: `{"type":"set_steering_mode","mode":"all"}`, want: application.CommandSetSteeringMode},
+		{name: "follow-up mode", body: `{"type":"set_follow_up_mode","mode":"one-at-a-time"}`, want: application.CommandSetFollowUpMode},
+		{name: "abort retry", body: `{"type":"abort_retry"}`, want: application.CommandAbortRetry},
+		{name: "abort branch summary", body: `{"type":"abort_branch_summary"}`, want: application.CommandAbortBranchSummary},
+	}
+	api := &coreControlHTTPTestAPI{}
+	server, err := New(Options{Version: "test", Application: api, AllowedHosts: []string{"example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api.sessionID, api.command = "", nil
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/sessions/session-http/commands",
+				strings.NewReader(test.body),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if api.sessionID != "session-http" || api.command == nil || api.command.Type() != test.want {
+				t.Fatalf("dispatch = session %q, command %T (%v)", api.sessionID, api.command, api.command)
+			}
+			switch command := api.command.(type) {
+			case application.CycleModelCommand:
+				if command.Direction != agent.CycleBackward {
+					t.Fatalf("cycle direction = %q", command.Direction)
+				}
+			case application.SetSteeringModeCommand:
+				if command.Mode != agent.QueueAll {
+					t.Fatalf("steering mode = %q", command.Mode)
+				}
+			case application.SetFollowUpModeCommand:
+				if command.Mode != agent.QueueOneAtATime {
+					t.Fatalf("follow-up mode = %q", command.Mode)
+				}
+			}
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := envelope["data"]; !ok {
+				t.Fatalf("response omitted data envelope: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func (a cursorTestAPI) CurrentRevision() uint64 { return a.revision }
 
 func (a cursorTestAPI) SubscribeEvents(after uint64) (*application.EventSubscription, error) {
