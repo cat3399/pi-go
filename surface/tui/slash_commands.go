@@ -18,10 +18,13 @@ type slashCommand struct {
 
 type slashPaletteModel struct {
 	commands       []slashCommand
+	arguments      map[string][]slashCommand
 	matches        []slashCommand
 	selected       int
 	value          string
 	dismissedValue string
+	argumentMode   bool
+	argumentPrefix string
 }
 
 func builtinSlashCommands() []slashCommand {
@@ -29,8 +32,17 @@ func builtinSlashCommands() []slashCommand {
 		{name: "help", description: "Show commands and keyboard shortcuts", source: "builtin"},
 		{name: "new", description: "Start a new session", source: "builtin"},
 		{name: "resume", description: "Open the session selector", argumentHint: "[session-id]", source: "builtin"},
+		{name: "tree", description: "Navigate the current session tree", source: "builtin"},
+		{name: "fork", description: "Fork from an earlier user message", source: "builtin"},
+		{name: "clone", description: "Clone the session at its current position", source: "builtin"},
 		{name: "model", description: "Open the model selector", argumentHint: "[provider/model or search]", source: "builtin"},
 		{name: "thinking", description: "Choose the reasoning level", argumentHint: "[level]", source: "builtin"},
+		{name: "settings", description: "Configure runtime and display settings", source: "builtin"},
+		{name: "export", description: "Export this session as HTML or JSONL", argumentHint: "[path]", source: "builtin"},
+		{name: "import", description: "Replace this session from a JSONL file", argumentHint: "<path.jsonl>", source: "builtin"},
+		{name: "trust", description: "Trust project-local resources in this working directory", source: "builtin"},
+		{name: "login", description: "Authenticate a model provider", argumentHint: "[provider]", source: "builtin"},
+		{name: "logout", description: "Remove a stored provider credential", argumentHint: "[provider]", source: "builtin"},
 		{name: "compact", description: "Compact the current context", argumentHint: "[instructions]", source: "builtin"},
 		{name: "abort", description: "Abort the active operation", source: "builtin"},
 		{name: "clear-queue", description: "Clear queued steering and follow-up messages", source: "builtin"},
@@ -60,7 +72,8 @@ func mergeSlashCommands(dynamic []application.SlashCommandInfo) []slashCommand {
 		}
 		seen[key] = struct{}{}
 		commands = append(commands, slashCommand{
-			name: name, description: strings.TrimSpace(command.Description), source: string(command.Source),
+			name: name, description: strings.TrimSpace(command.Description),
+			argumentHint: strings.TrimSpace(command.ArgumentHint), source: string(command.Source),
 		})
 	}
 	return commands
@@ -74,6 +87,16 @@ func (p *slashPaletteModel) SetCommands(commands []slashCommand) {
 	p.Update(p.value)
 }
 
+func (p *slashPaletteModel) SetArgumentCompletions(arguments map[string][]slashCommand) {
+	if p == nil {
+		return
+	}
+	p.arguments = make(map[string][]slashCommand, len(arguments))
+	for name, values := range arguments {
+		p.arguments[strings.ToLower(strings.TrimSpace(name))] = append([]slashCommand(nil), values...)
+	}
+}
+
 func (p *slashPaletteModel) Update(value string) {
 	if p == nil {
 		return
@@ -85,8 +108,34 @@ func (p *slashPaletteModel) Update(value string) {
 	p.value = value
 	p.matches = nil
 	p.selected = 0
+	p.argumentMode = false
+	p.argumentPrefix = ""
 	if value != p.dismissedValue {
 		p.dismissedValue = ""
+	}
+	if command, query, prefix, argumentMode := slashArgumentQuery(value); argumentMode {
+		candidates := p.arguments[command]
+		if len(candidates) == 0 || p.dismissedValue == value {
+			return
+		}
+		p.argumentMode = true
+		p.argumentPrefix = prefix
+		query = strings.ToLower(strings.TrimSpace(query))
+		for _, candidate := range candidates {
+			if query == "" || slashCommandRank(candidate, query) < 3 ||
+				strings.Contains(strings.ToLower(candidate.description), query) {
+				p.matches = append(p.matches, candidate)
+			}
+		}
+		sort.SliceStable(p.matches, func(left, right int) bool {
+			leftRank := slashCommandRank(p.matches[left], query)
+			rightRank := slashCommandRank(p.matches[right], query)
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
+			return strings.ToLower(p.matches[left].name) < strings.ToLower(p.matches[right].name)
+		})
+		return
 	}
 	query, ok := slashCommandQuery(value)
 	if !ok || p.dismissedValue == value {
@@ -117,6 +166,30 @@ func (p *slashPaletteModel) Update(value string) {
 			break
 		}
 	}
+}
+
+func slashArgumentQuery(value string) (command, query, prefix string, ok bool) {
+	if !strings.HasPrefix(value, "/") || strings.ContainsAny(value, "\r\n") {
+		return "", "", "", false
+	}
+	space := strings.IndexFunc(value, unicode.IsSpace)
+	if space <= 1 {
+		return "", "", "", false
+	}
+	command = strings.ToLower(strings.TrimSpace(value[1:space]))
+	if command == "" {
+		return "", "", "", false
+	}
+	argumentStart := space
+	for argumentStart < len(value) && unicode.IsSpace(rune(value[argumentStart])) {
+		argumentStart++
+	}
+	prefix = value[:argumentStart]
+	if prefix == value {
+		prefix = value
+	}
+	query = value[argumentStart:]
+	return command, query, prefix, true
 }
 
 func slashCommandQuery(value string) (string, bool) {
@@ -173,10 +246,15 @@ func (p *slashPaletteModel) Accept() (string, bool) {
 		return "", false
 	}
 	value := "/" + p.matches[p.selected].name + " "
+	if p.argumentMode {
+		value = p.argumentPrefix + p.matches[p.selected].name
+	}
 	p.dismissedValue = value
 	p.value = value
 	p.matches = nil
 	p.selected = 0
+	p.argumentMode = false
+	p.argumentPrefix = ""
 	return value, true
 }
 
@@ -211,7 +289,9 @@ func (m *Model) renderSlashPalette(width, maxLines int) []string {
 	for index := start; index < start+count; index++ {
 		command := m.slashPalette.matches[index]
 		invocation := "/" + sanitizeDisplayText(command.name)
-		if command.argumentHint != "" {
+		if m.slashPalette.argumentMode {
+			invocation = sanitizeDisplayText(command.name)
+		} else if command.argumentHint != "" {
 			invocation += " " + sanitizeDisplayText(command.argumentHint)
 		}
 		description := sanitizeDisplayText(command.description)

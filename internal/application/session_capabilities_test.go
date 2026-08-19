@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -152,6 +153,31 @@ func TestSessionCapabilitiesReadDurableContentAndDeleteWithReparenting(t *testin
 	}
 	if strings.Contains(string(exported.HTML), "<script>alert(1)</script>") {
 		t.Fatal("session content was embedded as executable HTML")
+	}
+	jsonlExport, err := service.ExportSessionJSONL(context.Background(), "target-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(jsonlExport.JSONL)), "\n")
+	if len(lines) != 4 || !strings.HasSuffix(jsonlExport.FileName, ".jsonl") {
+		t.Fatalf("JSONL export = %q lines=%d", jsonlExport.FileName, len(lines))
+	}
+	previousID := ""
+	for index, line := range lines[1:] {
+		var entry struct {
+			ID       string  `json:"id"`
+			ParentID *string `json:"parentId"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if index == 0 && entry.ParentID != nil {
+			t.Fatalf("first exported parent = %q", *entry.ParentID)
+		}
+		if index > 0 && (entry.ParentID == nil || *entry.ParentID != previousID) {
+			t.Fatalf("entry %d parent = %#v, want %q", index, entry.ParentID, previousID)
+		}
+		previousID = entry.ID
 	}
 
 	if err := service.DeleteSession(context.Background(), "target-session"); err != nil {

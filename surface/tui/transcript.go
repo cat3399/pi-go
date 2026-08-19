@@ -377,3 +377,53 @@ func (m *transcriptModel) ScrollToBottom() {
 	m.anchor = contentAnchor{}
 	m.hasLayout = false
 }
+
+func (m *transcriptModel) ScrollToTop() {
+	if m == nil || len(m.items) == 0 {
+		return
+	}
+	m.follow = false
+	m.anchor = contentAnchor{id: m.items[0].content.ID}
+	m.hasLayout = false
+}
+
+func (m *transcriptModel) ScrollToPreviousPrompt() {
+	if m == nil || len(m.items) == 0 {
+		return
+	}
+	start := len(m.items) - 1
+	if !m.follow {
+		if current, ok := m.index[m.anchor.id]; ok {
+			start = current - 1
+		}
+	}
+	for index := start; index >= 0; index-- {
+		if m.items[index].content.Role != contentRoleUser {
+			continue
+		}
+		m.follow = false
+		m.anchor = contentAnchor{id: m.items[index].content.ID}
+		m.hasLayout = false
+		return
+	}
+	m.ScrollToTop()
+}
+
+func (m *transcriptModel) ScrollToNextPrompt() {
+	if m == nil || len(m.items) == 0 || m.follow {
+		return
+	}
+	start := 0
+	if current, ok := m.index[m.anchor.id]; ok {
+		start = current + 1
+	}
+	for index := start; index < len(m.items); index++ {
+		if m.items[index].content.Role != contentRoleUser {
+			continue
+		}
+		m.anchor = contentAnchor{id: m.items[index].content.ID}
+		m.hasLayout = false
+		return
+	}
+	m.ScrollToBottom()
+}

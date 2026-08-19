@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/cat3399/pi-go/internal/agent"
@@ -24,6 +26,34 @@ type selectorTestAPI struct {
 	commands     []application.Command
 	openedState  application.State
 	openSnapshot application.SessionSnapshot
+	providers    []application.ProviderAuthInfo
+	providerErr  error
+	savedID      string
+	savedKey     string
+	deletedID    string
+	deletedType  string
+	authErr      error
+	oauthID      string
+	oauthErr     error
+}
+
+func (a *selectorTestAPI) ListModelProviders(context.Context, string) ([]application.ProviderAuthInfo, error) {
+	return append([]application.ProviderAuthInfo(nil), a.providers...), a.providerErr
+}
+
+func (a *selectorTestAPI) SetProviderAPIKey(_ context.Context, providerID, apiKey string) error {
+	a.savedID, a.savedKey = providerID, apiKey
+	return a.authErr
+}
+
+func (a *selectorTestAPI) DeleteProviderCredential(_ context.Context, providerID, credentialType string) error {
+	a.deletedID, a.deletedType = providerID, credentialType
+	return a.authErr
+}
+
+func (a *selectorTestAPI) StartProviderOAuth(_ context.Context, providerID string) (*application.ProviderOAuthLogin, error) {
+	a.oauthID = providerID
+	return nil, a.oauthErr
 }
 
 func (a *selectorTestAPI) ListModels(context.Context, string) (application.ModelsSnapshot, error) {
@@ -122,6 +152,128 @@ func TestModelSelectorLoadsFiltersAndDispatchesSelection(t *testing.T) {
 	}
 	if model.selector != nil {
 		t.Fatal("selector remained open after model selection")
+	}
+}
+
+func TestLoginSelectorStoresMaskedAPIKeyWithoutEchoingIt(t *testing.T) {
+	api := &selectorTestAPI{providers: []application.ProviderAuthInfo{{
+		ID: "deepseek", Name: "DeepSeek", SupportsAPIKey: true, ModelCount: 2,
+	}}}
+	model := newModelWithAPIForTest(t, api)
+	open := model.openLoginSelector("deepseek")
+	loaded := selectorCommandAt(t, open, 1)().(selectorLoadedMsg)
+	model.handleSelectorLoaded(loaded)
+	if model.selector == nil || model.selector.kind != selectorLoginAPIKey ||
+		model.selector.input.EchoMode != textinput.EchoPassword {
+		t.Fatalf("API key selector = %#v", model.selector)
+	}
+	model.selector.input.SetValue("secret-test-key")
+	save := model.applySelectorSelection()
+	message, ok := selectorCommandAt(t, save, 1)().(providerAuthMutationMsg)
+	if !ok || message.err != nil || api.savedID != "deepseek" || api.savedKey != "secret-test-key" {
+		t.Fatalf("API key save = %#v / %q / %q", message, api.savedID, api.savedKey)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", message), "secret-test-key") {
+		t.Fatalf("API key escaped into completion message: %#v", message)
+	}
+	if model.selector != nil {
+		t.Fatal("API key selector remained open after save")
+	}
+}
+
+func TestSessionSelectorFiltersSortsAndTogglesFullPaths(t *testing.T) {
+	now := time.Now()
+	sessions := []application.SessionInfo{
+		{ID: "session-1", CWD: "/workspace/current", FirstMessage: "unnamed", MessageCount: 2, Modified: now},
+		{ID: "session-2", CWD: "/workspace/alpha", Name: "Alpha", MessageCount: 8, Modified: now.Add(-time.Hour)},
+		{ID: "session-3", CWD: "/workspace/beta", Name: "Beta", MessageCount: 4, Modified: now.Add(time.Hour)},
+	}
+	model := newModelForTest(t)
+	model.sessionNamedOnly = true
+	model.sessionSortMode = "messages"
+	model.sessionShowPath = true
+	items := model.sessionSelectorItems(sessions)
+	if len(items) != 2 || items[0].Key != "session-2" || items[0].Badge != "/workspace/alpha" {
+		t.Fatalf("filtered session items = %#v", items)
+	}
+
+	api := &selectorTestAPI{sessions: sessions}
+	model = newModelWithAPIForTest(t, api)
+	open := model.openSessionSelector("")
+	model.handleSelectorLoaded(selectorCommandAt(t, open, 1)().(selectorLoadedMsg))
+	command := model.handleSelectorKey(tea.KeyPressMsg(tea.Key{Code: 'n', Mod: tea.ModCtrl}))
+	if command == nil || !model.sessionNamedOnly {
+		t.Fatalf("named filter toggle = %t, command=%v", model.sessionNamedOnly, command != nil)
+	}
+	loaded := command().(selectorLoadedMsg)
+	model.handleSelectorLoaded(loaded)
+	if len(model.selector.items) != 2 || !strings.Contains(model.selector.notice, "named only") {
+		t.Fatalf("named selector = %#v", model.selector)
+	}
+}
+
+func TestLoginSelectorOffersOAuthAndAPIKeyMethods(t *testing.T) {
+	api := &selectorTestAPI{providers: []application.ProviderAuthInfo{{
+		ID: "openai-codex", Name: "OpenAI Codex", SupportsAPIKey: true, SupportsOAuth: true,
+		OAuthName: "ChatGPT Plus/Pro",
+	}}}
+	model := newModelWithAPIForTest(t, api)
+	open := model.openLoginSelector("")
+	loaded := selectorCommandAt(t, open, 1)().(selectorLoadedMsg)
+	model.handleSelectorLoaded(loaded)
+	model.applySelectorSelection()
+	if model.selector == nil || model.selector.kind != selectorLoginMethod || len(model.selector.items) != 2 {
+		t.Fatalf("login method selector = %#v", model.selector)
+	}
+	if !model.selector.SelectKey("api_key") {
+		t.Fatal("API key login method is missing")
+	}
+	model.applySelectorSelection()
+	if model.selector == nil || model.selector.kind != selectorLoginAPIKey {
+		t.Fatalf("selected login method opened %#v", model.selector)
+	}
+}
+
+func TestLogoutSelectorDeletesOnlyExpectedStoredCredentialType(t *testing.T) {
+	api := &selectorTestAPI{providers: []application.ProviderAuthInfo{
+		{ID: "anthropic", Name: "Anthropic", Configured: true, Source: "auth.json", CredentialType: "oauth"},
+		{ID: "deepseek", Name: "DeepSeek", Configured: true, Source: "environment"},
+	}}
+	model := newModelWithAPIForTest(t, api)
+	open := model.openLogoutSelector("anthropic")
+	loaded := selectorCommandAt(t, open, 1)().(selectorLoadedMsg)
+	model.handleSelectorLoaded(loaded)
+	if model.selector == nil || model.selector.kind != selectorLogoutConfirm || len(model.selector.items) != 2 {
+		t.Fatalf("logout confirmation = %#v", model.selector)
+	}
+	if !model.selector.SelectKey("logout") {
+		t.Fatal("logout confirmation item is missing")
+	}
+	remove := model.applySelectorSelection()
+	message, ok := selectorCommandAt(t, remove, 1)().(providerAuthMutationMsg)
+	if !ok || message.err != nil || api.deletedID != "anthropic" || api.deletedType != "oauth" {
+		t.Fatalf("logout = %#v / %q / %q", message, api.deletedID, api.deletedType)
+	}
+}
+
+func TestOAuthLoginStartFailureStaysLocalToAuthFlow(t *testing.T) {
+	api := &selectorTestAPI{
+		providers: []application.ProviderAuthInfo{{
+			ID: "openai-codex", Name: "OpenAI Codex", SupportsOAuth: true,
+		}},
+		oauthErr: errors.New("callback port unavailable"),
+	}
+	model := newModelWithAPIForTest(t, api)
+	open := model.openLoginSelector("openai-codex")
+	loaded := selectorCommandAt(t, open, 1)().(selectorLoadedMsg)
+	start := model.handleSelectorLoaded(loaded)
+	message, ok := selectorCommandAt(t, start, 1)().(providerOAuthStartedMsg)
+	if !ok || message.err == nil || api.oauthID != "openai-codex" {
+		t.Fatalf("OAuth start = %#v / %q", message, api.oauthID)
+	}
+	_, _ = model.Update(message)
+	if model.status.level != statusError || !strings.Contains(model.status.text, "callback port unavailable") {
+		t.Fatalf("OAuth failure status = %#v", model.status)
 	}
 }
 

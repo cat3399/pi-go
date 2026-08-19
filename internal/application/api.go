@@ -33,6 +33,8 @@ type API interface {
 	RenameSession(context.Context, string, string) error
 	DeleteSession(context.Context, string) error
 	ExportSession(context.Context, string) (SessionExport, error)
+	ExportSessionJSONL(context.Context, string) (SessionJSONLExport, error)
+	ImportSession(context.Context, string, string, string) (SessionImportResult, error)
 	GenerateSessionTitle(context.Context, string) (GeneratedSessionTitle, error)
 	SessionThinking(context.Context, string, string, int) (string, error)
 	OpenBashOutput(context.Context, string, string) (BashOutput, error)

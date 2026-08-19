@@ -22,6 +22,8 @@ type request struct {
 	StreamingBehavior   string         `json:"streamingBehavior"`
 	Provider            *string        `json:"provider"`
 	ModelID             *string        `json:"modelId"`
+	Direction           string         `json:"direction"`
+	Mode                *string        `json:"mode"`
 	EntryID             *string        `json:"entryId"`
 	Position            string         `json:"position"`
 	TargetID            *string        `json:"targetId"`
@@ -134,6 +136,14 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 			return decoded, err
 		}
 		decoded.command = application.SetModelCommand{Provider: providerID, ModelID: modelID}
+	case string(application.CommandCycleModel):
+		direction := agent.ModelCycleDirection(input.Direction)
+		if direction != "" && direction != agent.CycleForward && direction != agent.CycleBackward {
+			return decoded, fmt.Errorf("invalid direction %q", input.Direction)
+		}
+		decoded.command = application.CycleModelCommand{Direction: direction}
+	case string(application.CommandGetAvailableModels):
+		decoded.command = application.GetAvailableModelsCommand{}
 	case string(application.CommandFork):
 		entryID, err := requiredString(input.EntryID, "entryId")
 		if err != nil {
@@ -163,6 +173,30 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 			return decoded, fmt.Errorf("invalid thinking level %q", level)
 		}
 		decoded.command = application.SetThinkingLevelCommand{Level: thinking}
+	case string(application.CommandCycleThinkingLevel):
+		decoded.command = application.CycleThinkingLevelCommand{}
+	case string(application.CommandGetThinkingLevels):
+		decoded.command = application.GetAvailableThinkingLevelsCommand{}
+	case string(application.CommandSetSteeringMode):
+		mode, err := requiredString(input.Mode, "mode")
+		if err != nil {
+			return decoded, err
+		}
+		queueMode, ok := parseQueueMode(mode)
+		if !ok {
+			return decoded, fmt.Errorf("invalid mode %q", mode)
+		}
+		decoded.command = application.SetSteeringModeCommand{Mode: queueMode}
+	case string(application.CommandSetFollowUpMode):
+		mode, err := requiredString(input.Mode, "mode")
+		if err != nil {
+			return decoded, err
+		}
+		queueMode, ok := parseQueueMode(mode)
+		if !ok {
+			return decoded, fmt.Errorf("invalid mode %q", mode)
+		}
+		decoded.command = application.SetFollowUpModeCommand{Mode: queueMode}
 	case string(application.CommandCompact):
 		instructions := ""
 		if input.CustomInstructions != nil {
@@ -171,6 +205,8 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 		decoded.command = application.CompactCommand{CustomInstructions: instructions}
 	case string(application.CommandAbortCompaction):
 		decoded.command = application.AbortCompactionCommand{}
+	case string(application.CommandAbortBranchSummary):
+		decoded.command = application.AbortBranchSummaryCommand{}
 	case string(application.CommandSetSessionName):
 		name, err := requiredString(input.Name, "name")
 		if err != nil {
@@ -191,6 +227,8 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 			return decoded, fmt.Errorf("enabled is required")
 		}
 		decoded.command = application.SetAutoRetryCommand{Enabled: *input.Enabled}
+	case string(application.CommandAbortRetry):
+		decoded.command = application.AbortRetryCommand{}
 	case string(application.CommandGetTools):
 		decoded.command = application.GetToolsCommand{}
 	case string(application.CommandSetTools):
@@ -212,6 +250,17 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 		return decoded, fmt.Errorf("Unsupported command: %s", input.Type)
 	}
 	return decoded, nil
+}
+
+func parseQueueMode(value string) (agent.QueueMode, bool) {
+	switch value {
+	case "all":
+		return agent.QueueAll, true
+	case "one-at-a-time":
+		return agent.QueueOneAtATime, true
+	default:
+		return 0, false
+	}
 }
 
 func decodeImages(values []imageRequest) ([]llm.ImageBlock, error) {

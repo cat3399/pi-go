@@ -36,6 +36,16 @@ type SessionExport struct {
 	HTML     []byte
 }
 
+type SessionJSONLExport struct {
+	FileName string
+	JSONL    []byte
+}
+
+type SessionImportResult struct {
+	Cancelled bool
+	State     State
+}
+
 type BashOutput struct {
 	Reader io.ReadCloser
 	Size   int64

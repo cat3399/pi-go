@@ -136,6 +136,52 @@ func (m *composerModel) Value() string {
 	return m.input.Value()
 }
 
+func (m *composerModel) CursorOffset() int {
+	if m == nil {
+		return 0
+	}
+	lines := strings.Split(m.input.Value(), "\n")
+	row := max(0, min(m.input.Line(), len(lines)-1))
+	offset := 0
+	for index := 0; index < row; index++ {
+		offset += len([]rune(lines[index])) + 1
+	}
+	offset += min(max(0, m.input.Column()), len([]rune(lines[row])))
+	return offset
+}
+
+func (m *composerModel) ReplaceRuneRange(start, end int, replacement string, cursorOffset int) {
+	if m == nil {
+		return
+	}
+	value := []rune(m.input.Value())
+	start = max(0, min(start, len(value)))
+	end = max(start, min(end, len(value)))
+	replacementRunes := []rune(replacement)
+	next := make([]rune, 0, len(value)-(end-start)+len(replacementRunes))
+	next = append(next, value[:start]...)
+	next = append(next, replacementRunes...)
+	next = append(next, value[end:]...)
+	cursorOffset = max(0, min(start+cursorOffset, len(next)))
+	m.input.SetValue(string(next))
+	m.input.MoveToBegin()
+	prefix := next[:cursorOffset]
+	row, column := 0, 0
+	for _, char := range prefix {
+		if char == '\n' {
+			row++
+			column = 0
+		} else {
+			column++
+		}
+	}
+	for range row {
+		m.input.CursorDown()
+	}
+	m.input.SetCursorColumn(column)
+	m.exitHistory()
+}
+
 func (m *composerModel) Reset() {
 	if m != nil {
 		m.input.Reset()

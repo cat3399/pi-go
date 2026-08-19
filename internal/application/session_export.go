@@ -1,6 +1,7 @@
 package application
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type sessionExportData struct {
@@ -56,6 +58,78 @@ func (s *Service) ExportSession(ctx context.Context, id string) (SessionExport, 
 		return SessionExport{}, errors.New("session export has no valid file name")
 	}
 	return SessionExport{FileName: "pi-session-" + base + ".html", HTML: []byte(html)}, nil
+}
+
+// ExportSessionJSONL returns an importable, linearized copy of the selected
+// branch. Sibling branches remain in the source session and are intentionally
+// excluded, matching pi's exportToJsonl behavior.
+func (s *Service) ExportSessionJSONL(ctx context.Context, id string) (SessionJSONLExport, error) {
+	ctx = normalizeContext(ctx)
+	if cause := context.Cause(ctx); cause != nil {
+		return SessionJSONLExport{}, cause
+	}
+	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	if err != nil {
+		return SessionJSONLExport{}, err
+	}
+	if closeManager {
+		defer manager.Close()
+	}
+	branch, err := manager.BranchPath("")
+	if err != nil {
+		return SessionJSONLExport{}, err
+	}
+	header, err := json.Marshal(map[string]any{
+		"type": "session", "version": 3, "id": manager.SessionID(),
+		"timestamp": time.Now().UTC().Format(time.RFC3339Nano), "cwd": manager.Cwd(),
+	})
+	if err != nil {
+		return SessionJSONLExport{}, err
+	}
+	var output bytes.Buffer
+	output.Write(header)
+	output.WriteByte('\n')
+	var previous *string
+	for _, entry := range branch {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(entry.RawJSON(), &object); err != nil {
+			return SessionJSONLExport{}, fmt.Errorf("decode session entry %s: %w", entry.ID(), err)
+		}
+		if previous == nil {
+			object["parentId"] = json.RawMessage("null")
+		} else {
+			encodedParent, marshalErr := json.Marshal(*previous)
+			if marshalErr != nil {
+				return SessionJSONLExport{}, marshalErr
+			}
+			object["parentId"] = encodedParent
+		}
+		encodedEntry, marshalErr := json.Marshal(object)
+		if marshalErr != nil {
+			return SessionJSONLExport{}, marshalErr
+		}
+		output.Write(encodedEntry)
+		output.WriteByte('\n')
+		entryID := entry.ID()
+		previous = &entryID
+	}
+	base := sessionExportBase(manager)
+	if base == "" {
+		return SessionJSONLExport{}, errors.New("session export has no valid file name")
+	}
+	return SessionJSONLExport{FileName: "pi-session-" + base + ".jsonl", JSONL: output.Bytes()}, nil
+}
+
+func sessionExportBase(manager interface {
+	SessionFile() (string, bool)
+	SessionID() string
+}) string {
+	file, _ := manager.SessionFile()
+	base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+	if base == "" || base == "." {
+		base = manager.SessionID()
+	}
+	return safeExportFilePart(base)
 }
 
 var invalidExportFilePart = regexp.MustCompile(`[^A-Za-z0-9._-]+`)

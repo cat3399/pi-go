@@ -142,7 +142,7 @@ func TestRestoreQueuedMessagesPreservesRichImages(t *testing.T) {
 
 func TestRestoreQueuedMessagesDoesNotDispatchForEmptyQueue(t *testing.T) {
 	model := newModelForTest(t)
-	if command := model.restoreQueuedMessages(); command != nil {
+	if command := model.restoreQueuedMessages(false); command != nil {
 		t.Fatal("empty queue produced a command")
 	}
 	if model.status.level != statusWarning || model.status.text != "No queued messages to restore" {
@@ -169,7 +169,7 @@ func TestRestoreQueuedMessagesRejectsDuplicateRequest(t *testing.T) {
 	model := newModelForTest(t)
 	model.restoreQueueRequest = 3
 	model.state.PendingMessageCount = 1
-	if command := model.restoreQueuedMessages(); command != nil {
+	if command := model.restoreQueuedMessages(false); command != nil {
 		t.Fatal("duplicate restore produced a command")
 	}
 	if model.status.text != "Queue restore is already in progress" {

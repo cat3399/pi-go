@@ -72,6 +72,35 @@ func TestModelRendersSlashPaletteAboveComposer(t *testing.T) {
 	}
 }
 
+func TestSlashPaletteCompletesThinkingArguments(t *testing.T) {
+	model := newModelForTest(t)
+	model.composer.SetDraft("/thinking hi", nil)
+	model.updateSlashPalette()
+	if !model.slashPalette.Visible() || !model.slashPalette.argumentMode {
+		t.Fatalf("thinking argument palette = %#v", model.slashPalette)
+	}
+	value, ok := model.slashPalette.Accept()
+	if !ok || value != "/thinking high" {
+		t.Fatalf("thinking completion = %q, %t", value, ok)
+	}
+}
+
+func TestDynamicCommandRetainsArgumentHint(t *testing.T) {
+	commands := mergeSlashCommands([]application.SlashCommandInfo{{
+		Name: "review", Description: "Review a target", ArgumentHint: "<path>",
+		Source: application.CommandSourcePrompt,
+	}})
+	for _, command := range commands {
+		if command.name == "review" {
+			if command.argumentHint != "<path>" {
+				t.Fatalf("dynamic argument hint = %q", command.argumentHint)
+			}
+			return
+		}
+	}
+	t.Fatal("dynamic command is missing")
+}
+
 func TestModelHidesSlashPaletteForAttachmentDraft(t *testing.T) {
 	image, err := llm.NewImageDataBlock("image/png", []byte{1})
 	if err != nil {

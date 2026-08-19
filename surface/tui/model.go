@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/llm"
 )
@@ -27,11 +29,14 @@ type modelStatus struct {
 }
 
 type Model struct {
-	ctx     context.Context
-	api     application.API
-	version string
-	mode    ScreenMode
-	theme   Theme
+	ctx           context.Context
+	api           application.API
+	version       string
+	mode          ScreenMode
+	theme         Theme
+	environment   []string
+	keybindings   appKeybindings
+	initialPrompt string
 
 	sessionID string
 	state     application.State
@@ -45,20 +50,37 @@ type Model struct {
 	commandRequest         uint64
 	commandApplied         uint64
 	restoreQueueRequest    uint64
+	branchSummaryRequest   uint64
 	commandsRequest        uint64
 	openRequest            uint64
 
 	subscription *application.EventSubscription
 	closed       bool
 
-	transcript         transcriptModel
-	renderer           *contentRenderer
-	composer           composerModel
-	slashPalette       slashPaletteModel
-	setClipboard       func(string) tea.Cmd
-	selector           *selectorModel
-	selectorCancel     context.CancelFunc
-	selectorGeneration uint64
+	transcript               transcriptModel
+	renderer                 *contentRenderer
+	composer                 composerModel
+	slashPalette             slashPaletteModel
+	fileCompletion           fileCompletionModel
+	fileCompletionGeneration uint64
+	setClipboard             func(string) tea.Cmd
+	selector                 *selectorModel
+	selectorCancel           context.CancelFunc
+	selectorGeneration       uint64
+	treeTargetID             string
+	snapshotLeafID           *string
+	readClipboardImage       func(context.Context) (llm.ImageBlock, error)
+	clipboardInFlight        bool
+	pendingImportPath        string
+	pendingSessionID         string
+	sessionNamedOnly         bool
+	sessionSortMode          string
+	sessionShowPath          bool
+	authProviders            map[string]application.ProviderAuthInfo
+	pendingAuthID            string
+	pendingAuthType          string
+	authGeneration           uint64
+	oauthLogin               *application.ProviderOAuthLogin
 
 	width  int
 	height int
@@ -85,14 +107,22 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 	if snapshot.LiveState != nil {
 		state = *snapshot.LiveState
 	}
+	keybindings, _ := loadAppKeybindings(options.Application.AgentDir())
 	model := &Model{
 		ctx: ctx, api: options.Application, version: options.Version, mode: options.ScreenMode,
 		theme: theme, sessionID: snapshot.SessionID, state: state, revision: snapshot.Revision,
+		environment: append([]string(nil), options.Environment...), keybindings: keybindings,
+		initialPrompt:     strings.TrimSpace(options.InitialPrompt),
 		sessionGeneration: 1,
 		transcript:        newTranscriptModel(), renderer: newContentRenderer(theme),
 		composer: newComposerModel(theme), setClipboard: tea.SetClipboard, width: 80, height: 24,
-		liveItems: make(map[string]contentItem),
+		liveItems: make(map[string]contentItem), snapshotLeafID: cloneString(snapshot.LeafID),
 	}
+	model.readClipboardImage = options.ReadClipboardImage
+	if model.readClipboardImage == nil {
+		model.readClipboardImage = readSystemClipboardImage
+	}
+	model.renderer.SetImageProtocol(detectTerminalImageProtocol(options.Environment))
 	model.transcript.SetItems(contentItemsFromSnapshot(snapshot))
 	model.composer.SetWidth(model.width)
 	model.slashPalette.SetCommands(mergeSlashCommands(nil))
@@ -101,7 +131,13 @@ func newModel(ctx context.Context, options Options, snapshot application.Session
 }
 
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.composer.Init(), m.startSubscription(), m.requestCommands())
+	commands := []tea.Cmd{m.composer.Init(), m.startSubscription(), m.requestCommands()}
+	if m.initialPrompt != "" {
+		m.composer.SetDraft(m.initialPrompt, nil)
+		m.initialPrompt = ""
+		commands = append(commands, m.submit(false))
+	}
+	return tea.Batch(commands...)
 }
 
 func (m *Model) Close() {
@@ -112,6 +148,10 @@ func (m *Model) Close() {
 	if m.selectorCancel != nil {
 		m.selectorCancel()
 		m.selectorCancel = nil
+	}
+	if m.oauthLogin != nil {
+		m.oauthLogin.Close()
+		m.oauthLogin = nil
 	}
 	m.closeSubscription()
 }
@@ -205,12 +245,123 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		return m, nil
 	case selectorLoadedMsg:
 		return m, m.handleSelectorLoaded(message)
+	case clipboardImageMsg:
+		m.clipboardInFlight = false
+		if message.err != nil {
+			m.setStatus(message.err.Error(), statusWarning)
+			return m, nil
+		}
+		images := append(m.composer.Images(), message.image)
+		m.composer.SetDraft(m.composer.Value(), images)
+		m.updateSlashPalette()
+		m.setStatus(fmt.Sprintf("Attached image · %s", formatBytes(len(message.image.Data()))), statusSuccess)
+		return m, nil
+	case fileCompletionsLoadedMsg:
+		m.handleFileCompletionLoaded(message)
+		return m, nil
+	case externalEditorFinishedMsg:
+		if message.err != nil {
+			m.setStatus("External editor failed; draft preserved at "+message.path+": "+message.err.Error(), statusError)
+			return m, nil
+		}
+		data, err := os.ReadFile(message.path)
+		if err != nil {
+			m.setStatus("Read external editor draft failed; file preserved at "+message.path+": "+err.Error(), statusError)
+			return m, nil
+		}
+		value := strings.TrimSuffix(string(data), "\n")
+		m.composer.SetDraft(value, m.composer.Images())
+		m.updateSlashPalette()
+		m.setStatus("Draft updated from external editor", statusSuccess)
+		return m, m.refreshFileCompletion()
 	case commandFinishedMsg:
 		commands = append(commands, m.handleCommandFinished(message)...)
 		return m, tea.Batch(commands...)
 	case sessionOpenedMsg:
 		commands = append(commands, m.handleSessionOpened(message)...)
 		return m, tea.Batch(commands...)
+	case sessionExportedMsg:
+		if message.err != nil {
+			m.setStatus("Export failed: "+message.err.Error(), statusError)
+		} else {
+			m.setStatus("Session exported to "+message.path, statusSuccess)
+		}
+		return m, nil
+	case projectTrustMsg:
+		if message.err != nil {
+			m.setStatus("Project trust failed: "+message.err.Error(), statusError)
+			return m, nil
+		}
+		if message.applied {
+			m.setStatus("Project trusted; reopening session…", statusSuccess)
+			return m, m.openSession(m.sessionID)
+		}
+		switch {
+		case !message.status.RequiresTrust:
+			m.setStatus("This project has no resources that require trust", statusInfo)
+		case message.status.Trusted:
+			m.setStatus("Project is already trusted", statusSuccess)
+		default:
+			return m, m.openTrustConfirm()
+		}
+		return m, nil
+	case providerAuthMutationMsg:
+		if message.generation != m.authGeneration {
+			return m, nil
+		}
+		if message.err != nil {
+			m.setStatus(message.operation+" failed: "+message.err.Error(), statusError)
+			return m, nil
+		}
+		m.setStatus(message.operation+" completed for "+message.providerID, statusSuccess)
+		return m, nil
+	case providerOAuthStartedMsg:
+		if message.generation != m.authGeneration {
+			if message.login != nil {
+				message.login.Close()
+			}
+			return m, nil
+		}
+		if message.err != nil || message.login == nil {
+			if message.err == nil {
+				message.err = errors.New("OAuth login did not start")
+			}
+			m.setStatus("Login failed: "+message.err.Error(), statusError)
+			return m, nil
+		}
+		m.oauthLogin = message.login
+		focus := m.openOAuthCallback(message.providerID, message.login)
+		return m, tea.Batch(focus, waitProviderOAuthCmd(
+			m.ctx, message.login, message.providerID, message.generation,
+		))
+	case providerOAuthFinishedMsg:
+		if message.generation != m.authGeneration || message.login != m.oauthLogin {
+			return m, nil
+		}
+		m.oauthLogin = nil
+		var focus tea.Cmd
+		if m.selector != nil && m.selector.kind == selectorLoginOAuth {
+			focus = m.closeSelector()
+		}
+		if message.err != nil {
+			m.setStatus("OAuth login failed: "+message.err.Error(), statusError)
+		} else {
+			m.setStatus("Login completed for "+message.providerID, statusSuccess)
+		}
+		return m, focus
+	case sessionMutationMsg:
+		if message.sessionGeneration != m.sessionGeneration {
+			return m, nil
+		}
+		if message.err != nil {
+			m.setStatus(message.operation+" failed: "+message.err.Error(), statusError)
+			return m, nil
+		}
+		m.setStatus(message.operation+" completed", statusSuccess)
+		if m.selector != nil && m.selector.kind == selectorSessions {
+			return m, m.refreshSelector()
+		}
+		return m, nil
 	}
 
 	if m.selector != nil {
@@ -220,11 +371,31 @@ func (m *Model) Update(message tea.Msg) (updated tea.Model, command tea.Cmd) {
 		commands = append(commands, command)
 	}
 	m.updateSlashPalette()
+	if command := m.refreshFileCompletion(); command != nil {
+		commands = append(commands, command)
+	}
 	return m, tea.Batch(commands...)
 }
 
 func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 	keyName := message.String()
+	if m.fileCompletion.Active() {
+		switch keyName {
+		case "up":
+			m.fileCompletion.Move(-1)
+			return true, nil
+		case "down":
+			m.fileCompletion.Move(1)
+			return true, nil
+		case "tab", "enter":
+			if _, ok := m.fileCompletion.Selected(); ok {
+				return true, m.acceptFileCompletion()
+			}
+		case "esc":
+			m.fileCompletion.Dismiss()
+			return true, nil
+		}
+	}
 	if m.slashPalette.Visible() {
 		switch keyName {
 		case "up":
@@ -243,38 +414,96 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 	}
-	switch keyName {
-	case "ctrl+l":
+	switch {
+	case m.keybindings.Matches(keyModelSelect, keyName):
 		return true, m.openModelSelector("")
-	case "up", "down":
+	case m.keybindings.Matches(keyModelForward, keyName):
+		m.setStatus("Cycling model…", statusInfo)
+		return true, m.dispatchCommand(application.CycleModelCommand{Direction: agent.CycleForward}, "", nil)
+	case m.keybindings.Matches(keyModelBackward, keyName):
+		m.setStatus("Cycling model backward…", statusInfo)
+		return true, m.dispatchCommand(application.CycleModelCommand{Direction: agent.CycleBackward}, "", nil)
+	case m.keybindings.Matches(keyThinkingCycle, keyName):
+		m.setStatus("Cycling thinking level…", statusInfo)
+		return true, m.dispatchCommand(application.CycleThinkingLevelCommand{}, "", nil)
+	case m.keybindings.Matches(keyThinkingToggle, keyName):
+		m.renderer.SetThinkingVisible(!m.renderer.thinkingVisible)
+		if m.renderer.thinkingVisible {
+			m.setStatus("Thinking content shown", statusSuccess)
+		} else {
+			m.setStatus("Thinking content hidden", statusSuccess)
+		}
+		return true, nil
+	case m.keybindings.Matches(keyMessageCopy, keyName):
+		m.setStatus("Copying last assistant reply…", statusInfo)
+		return true, m.dispatchCommand(application.GetLastAssistantTextCommand{}, "", nil)
+	case m.keybindings.Matches(keyPasteImage, keyName):
+		if m.clipboardInFlight {
+			m.setStatus("Reading clipboard image…", statusInfo)
+			return true, nil
+		}
+		m.clipboardInFlight = true
+		m.setStatus("Reading clipboard image…", statusInfo)
+		return true, readClipboardImageCmd(m.ctx, m.readClipboardImage)
+	case m.keybindings.Matches(keyExternalEditor, keyName):
+		command, path, err := prepareExternalEditor(
+			m.environment, m.state.CWD, m.composer.Value(),
+		)
+		if err != nil {
+			m.setStatus("External editor failed: "+err.Error(), statusError)
+			return true, nil
+		}
+		m.fileCompletion.Hide()
+		m.slashPalette.Hide(m.composer.Value())
+		m.setStatus("Opening external editor…", statusInfo)
+		return true, tea.ExecProcess(command, func(err error) tea.Msg {
+			return externalEditorFinishedMsg{path: path, err: err}
+		})
+	case keyName == "up" || keyName == "down":
 		if m.composer.NavigateHistory(keyName) {
 			m.updateSlashPalette()
 			return true, nil
 		}
-	case "ctrl+o":
+	case m.keybindings.Matches(keyToolsExpand, keyName):
 		m.renderer.SetToolsExpanded(!m.renderer.toolsExpanded)
 		return true, nil
-	case "alt+up":
-		return true, m.restoreQueuedMessages()
-	case "pgup", "ctrl+up":
+	case m.keybindings.Matches(keyMessageDequeue, keyName):
+		return true, m.restoreQueuedMessages(false)
+	case m.keybindings.Matches(keyViewportPageUp, keyName):
 		m.transcript.ScrollUp(max(1, m.transcript.lastHeight-2))
 		return true, nil
-	case "pgdown", "ctrl+down":
+	case m.keybindings.Matches(keyViewportPageDown, keyName):
 		m.transcript.ScrollDown(max(1, m.transcript.lastHeight-2))
 		return true, nil
-	case "ctrl+end":
+	case m.keybindings.Matches(keyViewportTop, keyName):
+		m.transcript.ScrollToTop()
+		return true, nil
+	case m.keybindings.Matches(keyViewportBottom, keyName):
 		m.transcript.ScrollToBottom()
 		return true, nil
-	case "enter":
+	case m.keybindings.Matches(keyViewportPrevious, keyName):
+		m.transcript.ScrollToPreviousPrompt()
+		return true, nil
+	case m.keybindings.Matches(keyViewportNext, keyName):
+		m.transcript.ScrollToNextPrompt()
+		return true, nil
+	case m.keybindings.Matches(keyInputSubmit, keyName):
 		return true, m.submit(false)
-	case "alt+enter":
+	case m.keybindings.Matches(keyMessageFollowUp, keyName):
 		return true, m.submit(true)
-	case "esc":
+	case m.keybindings.Matches(keyInterrupt, keyName):
 		if m.helpVisible {
 			m.helpVisible = false
 			return true, nil
 		}
+		if m.state.RetryWaiting {
+			m.setStatus("Cancelling retry…", statusWarning)
+			return true, m.dispatchCommand(application.AbortRetryCommand{}, "", nil)
+		}
 		if m.busy() {
+			if m.state.IsPromptRunning || m.state.IsStreaming {
+				return true, m.restoreQueuedMessages(true)
+			}
 			return true, m.abort()
 		}
 		if !m.composer.Empty() {
@@ -282,7 +511,7 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			m.updateSlashPalette()
 			return true, nil
 		}
-	case "ctrl+c":
+	case m.keybindings.Matches(keyClear, keyName):
 		if m.busy() {
 			return true, m.abort()
 		}
@@ -292,7 +521,7 @@ func (m *Model) handleKey(message tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		return true, tea.Quit
-	case "ctrl+d":
+	case m.keybindings.Matches(keyExit, keyName):
 		if m.composer.Empty() {
 			return true, tea.Quit
 		}
@@ -337,7 +566,40 @@ func (m *Model) submit(followUp bool) tea.Cmd {
 	case inputActionToolsSelector:
 		m.composer.Reset()
 		return m.openToolsSelector()
+	case inputActionSettingsSelector:
+		m.composer.Reset()
+		return m.openSettingsSelector()
+	case inputActionExport:
+		m.composer.Reset()
+		m.setStatus("Exporting session…", statusInfo)
+		return exportSessionCmd(m.ctx, m.api, m.sessionID, m.state.CWD, action.path)
+	case inputActionImport:
+		m.composer.Reset()
+		return m.openImportConfirm(action.path)
+	case inputActionTrust:
+		m.composer.Reset()
+		m.setStatus("Checking project trust…", statusInfo)
+		return projectTrustStatusCmd(m.ctx, m.api, m.state.CWD)
+	case inputActionLogin:
+		m.composer.Reset()
+		return m.openLoginSelector(action.query)
+	case inputActionLogout:
+		m.composer.Reset()
+		return m.openLogoutSelector(action.query)
+	case inputActionTreeSelector:
+		m.composer.Reset()
+		return m.openTreeSelector()
+	case inputActionForkSelector:
+		m.composer.Reset()
+		return m.openForkSelector()
+	case inputActionClone:
+		m.composer.Reset()
+		return m.cloneCurrentSession()
 	case inputActionDispatch:
+		if _, abort := action.command.(application.AbortCommand); abort {
+			m.composer.Reset()
+			return m.abort()
+		}
 		switch action.command.(type) {
 		case application.PromptCommand, application.BashCommand:
 			if len(draftImages) == 0 {
@@ -355,7 +617,9 @@ func (m *Model) submit(followUp bool) tea.Cmd {
 
 func (m *Model) abort() tea.Cmd {
 	var command application.Command = application.AbortCommand{}
-	if m.state.IsBashRunning {
+	if m.branchSummaryRequest != 0 {
+		command = application.AbortBranchSummaryCommand{}
+	} else if m.state.IsBashRunning {
 		command = application.AbortBashCommand{}
 	} else if m.state.IsCompacting && !m.state.IsStreaming {
 		command = application.AbortCompactionCommand{}
@@ -364,20 +628,26 @@ func (m *Model) abort() tea.Cmd {
 	return m.dispatchCommand(command, "", nil)
 }
 
-func (m *Model) restoreQueuedMessages() tea.Cmd {
+func (m *Model) restoreQueuedMessages(abort bool) tea.Cmd {
 	if m.restoreQueueRequest != 0 {
 		m.setStatus("Queue restore is already in progress", statusWarning)
 		return nil
 	}
-	if m.state.PendingMessageCount == 0 {
+	if !abort && m.state.PendingMessageCount == 0 {
 		m.setStatus("No queued messages to restore", statusWarning)
 		return nil
 	}
-	command := m.dispatchCommand(
-		application.ClearQueueCommand{}, m.composer.Value(), m.composer.Images(),
+	m.commandRequest++
+	command := restoreQueuedMessagesCmd(
+		m.ctx, m.api, m.sessionID, m.sessionGeneration, m.commandRequest,
+		m.composer.Value(), m.composer.Images(), abort,
 	)
 	m.restoreQueueRequest = m.commandRequest
-	m.setStatus("Restoring queued messages…", statusInfo)
+	if abort {
+		m.setStatus("Restoring queued messages and aborting…", statusWarning)
+	} else {
+		m.setStatus("Restoring queued messages…", statusInfo)
+	}
 	return command
 }
 
@@ -441,7 +711,8 @@ func (m *Model) openSession(sessionID string) tea.Cmd {
 }
 
 func (m *Model) busy() bool {
-	return m.state.IsPromptRunning || m.state.IsStreaming || m.state.IsBashRunning || m.state.IsCompacting
+	return m.state.IsPromptRunning || m.state.IsStreaming || m.state.IsBashRunning ||
+		m.state.IsCompacting || m.branchSummaryRequest != 0
 }
 
 func (m *Model) syncComposerState() {
@@ -457,11 +728,44 @@ func (m *Model) replaceState(state application.State) tea.Cmd {
 }
 
 func (m *Model) updateSlashPalette() {
+	fileTarget, hasFileTarget := currentFileCompletionTarget(m.composer.Value(), m.composer.CursorOffset())
+	if !hasFileTarget || !m.fileCompletion.target.equal(fileTarget) {
+		m.fileCompletion.Hide()
+	}
+	if hasFileTarget {
+		m.slashPalette.Hide(m.composer.Value())
+		return
+	}
 	if m.composer.HasImages() {
 		m.slashPalette.Hide(m.composer.Value())
 		return
 	}
+	m.slashPalette.SetArgumentCompletions(m.slashArgumentCompletions())
 	m.slashPalette.Update(m.composer.Value())
+}
+
+func (m *Model) slashArgumentCompletions() map[string][]slashCommand {
+	arguments := make(map[string][]slashCommand)
+	thinking := m.thinkingSelectorItems()
+	arguments["thinking"] = make([]slashCommand, 0, len(thinking))
+	for _, item := range thinking {
+		arguments["thinking"] = append(arguments["thinking"], slashCommand{
+			name: item.Key, description: item.Description, source: "argument",
+		})
+	}
+	for _, info := range m.authProviders {
+		if info.SupportsAPIKey || info.SupportsOAuth {
+			arguments["login"] = append(arguments["login"], slashCommand{
+				name: info.ID, description: info.Name, source: "argument",
+			})
+		}
+		if info.CredentialType != "" {
+			arguments["logout"] = append(arguments["logout"], slashCommand{
+				name: info.ID, description: info.Name + " · " + info.CredentialType, source: "argument",
+			})
+		}
+	}
+	return arguments
 }
 
 func (m *Model) setStatus(text string, level statusLevel) {
@@ -539,6 +843,7 @@ func (m *Model) handleSnapshot(message snapshotLoadedMsg) []tea.Cmd {
 		}
 	}
 	m.transcript.SetItems(contentItemsFromSnapshot(message.snapshot))
+	m.snapshotLeafID = cloneString(message.snapshot.LeafID)
 	m.liveItems = make(map[string]contentItem)
 	m.liveAssistantID = ""
 	m.snapshotNeeded = false
@@ -565,6 +870,10 @@ func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
 		m.setStatus("Open session failed: "+message.err.Error(), statusError)
 		return nil
 	}
+	if message.cancelled {
+		m.setStatus("Import cancelled", statusWarning)
+		return nil
+	}
 	if message.state.SessionID == "" || message.snapshot.SessionID != message.state.SessionID {
 		m.setStatus("Opened session returned an inconsistent snapshot", statusError)
 		return nil
@@ -582,11 +891,17 @@ func (m *Model) handleSessionOpened(message sessionOpenedMsg) []tea.Cmd {
 	m.state = message.state
 	m.revision = message.snapshot.Revision
 	m.transcript.SetItems(contentItemsFromSnapshot(message.snapshot))
+	m.snapshotLeafID = cloneString(message.snapshot.LeafID)
 	m.transcript.ScrollToBottom()
 	m.liveItems = make(map[string]contentItem)
 	m.liveAssistantID = ""
+	m.branchSummaryRequest = 0
 	m.syncComposerState()
-	m.setStatus("Opened session "+shortID(m.sessionID), statusSuccess)
+	if message.notice != "" {
+		m.setStatus(message.notice, statusSuccess)
+	} else {
+		m.setStatus("Opened session "+shortID(m.sessionID), statusSuccess)
+	}
 	commands = append(commands, m.startSubscription(), m.requestCommands())
 	return commands
 }
@@ -609,7 +924,10 @@ func (m *Model) View() tea.View {
 	composer := m.composer.View()
 	composerHeight := lipgloss.Height(composer)
 	dockBudget := max(0, height-composerHeight-2)
-	paletteLines := m.renderSlashPalette(width, min(5, dockBudget))
+	paletteLines := m.renderFileCompletion(width, min(5, dockBudget))
+	if len(paletteLines) == 0 {
+		paletteLines = m.renderSlashPalette(width, min(5, dockBudget))
+	}
 	dockBudget -= len(paletteLines)
 	maxQueueLines := max(0, min(3, dockBudget))
 	queueLines := m.renderQueueDock(width, maxQueueLines)
@@ -625,11 +943,10 @@ func (m *Model) View() tea.View {
 	parts = append(parts, composer, m.renderStateLine(width))
 	view := tea.NewView(strings.Join(parts, "\n"))
 	view.AltScreen = m.mode == ScreenFull
-	// Leave the mouse to the terminal so users can select arbitrary visible
-	// output and copy it with their terminal's normal shortcut. Bubble Tea's
-	// cell-motion mode captures drag events even though this surface only used
-	// mouse input for scrolling.
 	view.MouseMode = tea.MouseModeNone
+	if m.mode == ScreenFull {
+		view.MouseMode = tea.MouseModeCellMotion
+	}
 	view.ReportFocus = true
 	view.WindowTitle = "pi-go"
 	view.KeyboardEnhancements.ReportAlternateKeys = true
@@ -653,9 +970,16 @@ func (m *Model) renderHelp(width, height int) string {
 		"Shift+Enter        insert a newline",
 		"Esc                abort current operation",
 		"PgUp / PgDn        scroll conversation",
-		"Ctrl+End           follow live output",
+		"Ctrl+Home / End    jump to top / follow live output",
+		"Ctrl+Shift+↑ / ↓   jump between user prompts",
 		"Ctrl+O             collapse / expand tool output",
 		"Ctrl+L             open model selector",
+		"Ctrl+P / Ctrl+Shift+P  cycle model forward / backward",
+		"Shift+Tab          cycle thinking level",
+		"Ctrl+T             hide / show thinking content",
+		"Ctrl+X             copy last assistant reply",
+		"Ctrl+V             attach image from clipboard",
+		"Ctrl+G             edit draft in external editor",
 		"Up / Down          browse prompt history at editor edges",
 		"Alt+Up             restore queued messages",
 		"Ctrl+D             quit when editor is empty",
@@ -663,8 +987,17 @@ func (m *Model) renderHelp(width, height int) string {
 		"/help /hotkeys     show this page",
 		"/new               create a session",
 		"/resume [id]       select or open a session",
+		"/tree              navigate the session tree",
+		"/fork              fork from a user message",
+		"/clone             clone the current branch",
 		"/model [p/id]      select or switch model",
 		"/thinking [level]  select reasoning level",
+		"/settings          configure runtime and display settings",
+		"/export [path]     export HTML, or JSONL when path ends in .jsonl",
+		"/import <path>     replace the current session from JSONL",
+		"/trust             trust project-local resources",
+		"/login [provider]  authenticate with OAuth or an API key",
+		"/logout [provider] remove a stored provider credential",
 		"/compact [text]    compact context",
 		"/reload            reload resources",
 		"/copy              copy the last assistant reply",

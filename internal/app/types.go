@@ -143,7 +143,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	factory := func(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 		toolOptions := bashOptions
 		toolOptions.WorkingDir = options.SessionManager.Cwd()
-		executor, definitions, _, standaloneBash, err := buildProductionToolRuntime(productionToolRuntimeOptions{
+		executor, definitions, resourceTools, standaloneBash, err := buildProductionToolRuntime(productionToolRuntimeOptions{
 			Bash: toolOptions, Filesystem: tool.FilesystemOptions{WorkingDir: toolOptions.WorkingDir},
 		})
 		if err != nil {
@@ -173,7 +173,8 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 			ExplicitModel: &catalogModel,
 			BaseConfig: agent.SessionConfig{
 				SystemPrompt: deps.SystemPrompt, Tool: executor, Tools: definitions,
-				Stream: stream, Hooks: deps.Hooks, Now: deps.AgentNow, SettlementTimeout: deps.SettlementTimeout,
+				ToolMetadata: productionToolMetadata(resourceTools),
+				Stream:       stream, Hooks: deps.Hooks, Now: deps.AgentNow, SettlementTimeout: deps.SettlementTimeout,
 			},
 			SessionStartEvent: options.SessionStartEvent, DocsDir: deps.DocsDir,
 		})
@@ -261,6 +262,20 @@ func buildProductionToolRuntime(options productionToolRuntimeOptions) (agent.Too
 		}
 	}
 	return executor, definitions, resourceTools, standaloneBash, nil
+}
+
+func productionToolMetadata(tools []resource.Tool) map[string]agent.ToolMetadata {
+	metadata := make(map[string]agent.ToolMetadata, len(tools))
+	for _, tool := range tools {
+		metadata[tool.Name] = agent.ToolMetadata{
+			PromptGuidelines: append([]string(nil), tool.PromptGuidelines...),
+			SourceInfo: agent.SystemPromptSourceInfo{
+				Path: "<builtin:" + tool.Name + ">", Source: "builtin",
+				Scope: agent.SystemPromptSourceTemporary, Origin: agent.SystemPromptSourceTopLevel,
+			},
+		}
+	}
+	return metadata
 }
 
 func defaultActiveToolNames() []string {

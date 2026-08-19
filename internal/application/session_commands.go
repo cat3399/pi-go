@@ -86,6 +86,30 @@ func (s *ApplicationSession) dispatchSetModel(ctx context.Context, command SetMo
 	return nil, fmt.Errorf("Model not found: %s/%s", command.Provider, command.ModelID)
 }
 
+func (s *ApplicationSession) dispatchCycleModel(ctx context.Context, command CycleModelCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.CycleModel(ctx, command.Direction)
+	if err != nil {
+		return nil, err
+	}
+	return CycleModelResult{Result: result}, nil
+}
+
+func (s *ApplicationSession) dispatchGetAvailableModels(ctx context.Context) (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	models, err := session.AvailableModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return GetAvailableModelsResult{Models: models}, nil
+}
+
 func (s *ApplicationSession) dispatchFork(ctx context.Context, command ForkCommand) (CommandResult, error) {
 	if _, _, err := s.currentSession(); err != nil {
 		return nil, err
@@ -132,6 +156,48 @@ func (s *ApplicationSession) dispatchSetThinkingLevel(command SetThinkingLevelCo
 	return SetThinkingLevelResult{}, nil
 }
 
+func (s *ApplicationSession) dispatchCycleThinkingLevel() (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	level, err := session.CycleThinkingLevel()
+	if err != nil {
+		return nil, err
+	}
+	return CycleThinkingLevelResult{Level: level}, nil
+}
+
+func (s *ApplicationSession) dispatchGetAvailableThinkingLevels() (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	return GetAvailableThinkingLevelsResult{Levels: session.AvailableThinkingLevels()}, nil
+}
+
+func (s *ApplicationSession) dispatchSetSteeringMode(command SetSteeringModeCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	if err := session.SetSteeringMode(command.Mode); err != nil {
+		return nil, err
+	}
+	return SetSteeringModeResult{}, nil
+}
+
+func (s *ApplicationSession) dispatchSetFollowUpMode(command SetFollowUpModeCommand) (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	if err := session.SetFollowUpMode(command.Mode); err != nil {
+		return nil, err
+	}
+	return SetFollowUpModeResult{}, nil
+}
+
 func (s *ApplicationSession) dispatchCompact(ctx context.Context, command CompactCommand) (CommandResult, error) {
 	session, _, err := s.currentSession()
 	if err != nil {
@@ -151,6 +217,15 @@ func (s *ApplicationSession) dispatchAbortCompaction() (CommandResult, error) {
 	}
 	session.AbortCompaction()
 	return AbortCompactionResult{}, nil
+}
+
+func (s *ApplicationSession) dispatchAbortBranchSummary() (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	session.AbortBranchSummary()
+	return AbortBranchSummaryResult{}, nil
 }
 
 func (s *ApplicationSession) dispatchSetSessionName(ctx context.Context, command SetSessionNameCommand) (CommandResult, error) {
@@ -218,6 +293,15 @@ func (s *ApplicationSession) dispatchSetAutoRetry(command SetAutoRetryCommand) (
 	return SetAutoRetryResult{}, nil
 }
 
+func (s *ApplicationSession) dispatchAbortRetry() (CommandResult, error) {
+	session, _, err := s.currentSession()
+	if err != nil {
+		return nil, err
+	}
+	session.AbortRetry()
+	return AbortRetryResult{}, nil
+}
+
 func (s *ApplicationSession) dispatchGetTools() (CommandResult, error) {
 	session, _, err := s.currentSession()
 	if err != nil {
@@ -227,11 +311,16 @@ func (s *ApplicationSession) dispatchGetTools() (CommandResult, error) {
 	for _, name := range session.ActiveToolNames() {
 		active[name] = struct{}{}
 	}
-	definitions := session.AllTools()
+	definitions := session.AllToolInfo()
 	tools := make([]ToolInfo, len(definitions))
-	for index, definition := range definitions {
+	for index, info := range definitions {
+		definition := info.Definition
 		_, enabled := active[definition.Name()]
-		tools[index] = ToolInfo{Name: definition.Name(), Description: definition.Description(), Active: enabled}
+		tools[index] = ToolInfo{
+			Name: definition.Name(), Description: definition.Description(),
+			Parameters: definition.ParametersJSON(), PromptGuidelines: append([]string(nil), info.PromptGuidelines...),
+			SourceInfo: info.SourceInfo, Active: enabled,
+		}
 	}
 	return GetToolsResult{Tools: tools}, nil
 }
@@ -303,7 +392,8 @@ func resourceCommands(snapshot resource.Snapshot) []SlashCommandInfo {
 	commands := make([]SlashCommandInfo, 0, len(snapshot.Templates)+len(snapshot.Skills))
 	for _, template := range snapshot.Templates {
 		commands = append(commands, SlashCommandInfo{
-			Name: template.Name, Description: template.Description, Source: CommandSourcePrompt, SourceInfo: template.Source,
+			Name: template.Name, Description: template.Description, ArgumentHint: template.ArgumentHint,
+			Source: CommandSourcePrompt, SourceInfo: template.Source,
 		})
 	}
 	for _, skill := range snapshot.Skills {

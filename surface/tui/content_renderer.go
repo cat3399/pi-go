@@ -15,25 +15,39 @@ type itemRenderer interface {
 }
 
 type contentRenderer struct {
-	theme         Theme
-	markdown      map[int]*glamour.TermRenderer
-	toolsExpanded bool
+	theme           Theme
+	markdown        map[int]*glamour.TermRenderer
+	toolsExpanded   bool
+	thinkingVisible bool
+	imageProtocol   terminalImageProtocol
 }
 
 func newContentRenderer(theme Theme) *contentRenderer {
-	return &contentRenderer{theme: theme, markdown: make(map[int]*glamour.TermRenderer)}
+	return &contentRenderer{theme: theme, markdown: make(map[int]*glamour.TermRenderer), thinkingVisible: true}
 }
 
 func (r *contentRenderer) CacheKey() string {
 	if r == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s:tools=%t", r.theme.ID, r.toolsExpanded)
+	return fmt.Sprintf("%s:tools=%t:thinking=%t:images=%d", r.theme.ID, r.toolsExpanded, r.thinkingVisible, r.imageProtocol)
 }
 
 func (r *contentRenderer) SetToolsExpanded(expanded bool) {
 	if r != nil {
 		r.toolsExpanded = expanded
+	}
+}
+
+func (r *contentRenderer) SetThinkingVisible(visible bool) {
+	if r != nil {
+		r.thinkingVisible = visible
+	}
+}
+
+func (r *contentRenderer) SetImageProtocol(protocol terminalImageProtocol) {
+	if r != nil {
+		r.imageProtocol = protocol
 	}
 }
 
@@ -58,6 +72,9 @@ func (r *contentRenderer) Render(item contentItem, width int) []string {
 	bodyWidth := max(1, width-2)
 	for index := 0; index < len(item.Blocks); index++ {
 		block := item.Blocks[index]
+		if block.Kind == contentBlockThinking && !r.thinkingVisible {
+			continue
+		}
 		var blockLines []string
 		if block.Kind == contentBlockToolCall {
 			result := make([]contentBlock, 0)
@@ -114,6 +131,9 @@ func (r *contentRenderer) renderBlock(block contentBlock, width int) []string {
 	case contentBlockCode:
 		return r.renderCode(block.Text, width, block.IsError)
 	case contentBlockImage:
+		if lines := renderTerminalImage(block, width, r.imageProtocol); len(lines) != 0 {
+			return lines
+		}
 		detail := sanitizeDisplayText(block.MediaType)
 		if detail == "" {
 			detail = "image"

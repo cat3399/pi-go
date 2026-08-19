@@ -58,11 +58,21 @@ func TestAgentSessionOwnsToolRegistryPromptRebuildAndPromptExpansion(t *testing.
 		"/review-rich":      "expanded rich prompt",
 	}}
 	implementation := newScriptedProvider(t, mustTextTerminal(t, "done"), mustTextTerminal(t, "rich done"))
+	sourceBase := "/workspace/tools"
 	var hookPrompt string
 	var hookOptions agent.BuildSystemPromptOptions
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 		Tool: sessionCatalogExecutor{}, Tools: definitions[:2], AllTools: definitions,
+		ToolMetadata: map[string]agent.ToolMetadata{
+			"read": {
+				PromptGuidelines: []string{"Use absolute paths"},
+				SourceInfo: agent.SystemPromptSourceInfo{
+					Path: "/workspace/tools/read.go", Source: "fixture", Scope: agent.SystemPromptSourceProject,
+					Origin: agent.SystemPromptSourcePackage, BaseDir: &sourceBase,
+				},
+			},
+		},
 		ActiveToolNames: []string{"read", "bash"}, Resources: resources,
 		Hooks: agent.Hooks{BeforeAgentStart: func(_ context.Context, event agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
 			hookPrompt = event.Prompt
@@ -79,6 +89,18 @@ func TestAgentSessionOwnsToolRegistryPromptRebuildAndPromptExpansion(t *testing.
 	}
 	if got := runtime.AllTools(); len(got) != 3 || got[0].Name() != "read" || got[2].Name() != "edit" {
 		t.Fatalf("all tools = %#v", got)
+	}
+	toolInfo := runtime.AllToolInfo()
+	if len(toolInfo) != 3 || !sameStrings(toolInfo[0].PromptGuidelines, []string{"Use absolute paths"}) ||
+		toolInfo[0].SourceInfo.Path != "/workspace/tools/read.go" || toolInfo[0].SourceInfo.BaseDir == nil ||
+		*toolInfo[0].SourceInfo.BaseDir != sourceBase || toolInfo[2].SourceInfo.Path != "<sdk:edit>" {
+		t.Fatalf("all tool info = %#v", toolInfo)
+	}
+	toolInfo[0].PromptGuidelines[0] = "mutated"
+	*toolInfo[0].SourceInfo.BaseDir = "mutated"
+	toolInfo = runtime.AllToolInfo()
+	if toolInfo[0].PromptGuidelines[0] != "Use absolute paths" || *toolInfo[0].SourceInfo.BaseDir != sourceBase {
+		t.Fatalf("tool metadata escaped ownership = %#v", toolInfo[0])
 	}
 	if runtime.SystemPrompt() != "active tools: read,bash" {
 		t.Fatalf("initial system prompt = %q", runtime.SystemPrompt())

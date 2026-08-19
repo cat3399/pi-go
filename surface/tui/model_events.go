@@ -383,17 +383,27 @@ func encodeToolDetails(value any) json.RawMessage {
 
 func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //nolint:gocyclo
 	restoreResult := m.restoreQueueRequest != 0 && message.request == m.restoreQueueRequest
+	branchSummaryResult := m.branchSummaryRequest != 0 && message.request == m.branchSummaryRequest
 	if message.sessionID != m.sessionID ||
 		message.sessionGeneration != m.sessionGeneration ||
-		(message.request <= m.commandApplied && !restoreResult) {
+		(message.request <= m.commandApplied && !restoreResult && !branchSummaryResult) {
 		return nil
 	}
 	if message.request > m.commandApplied {
 		m.commandApplied = message.request
 	}
 	if message.err != nil {
+		if branchSummaryResult {
+			m.branchSummaryRequest = 0
+			m.syncComposerState()
+		}
 		if message.request == m.restoreQueueRequest {
 			m.restoreQueueRequest = 0
+			if result, ok := message.result.(application.ClearQueueResult); ok {
+				restoredCount := m.restoreQueueDraft(result.Queue)
+				m.setStatus(fmt.Sprintf("Restored %d queued messages; abort failed: %v", restoredCount, message.err), statusError)
+				return []tea.Cmd{m.requestState()}
+			}
 		}
 		if _, modelSelection := message.command.(application.SetModelCommand); modelSelection && m.selector == nil {
 			name, query, slash := splitSlashCommand(strings.TrimSpace(message.draft))
@@ -417,6 +427,9 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 	case application.AbortResult, application.AbortBashResult, application.AbortCompactionResult:
 		m.setStatus("Abort requested", statusWarning)
 		refreshState = true
+	case application.AbortBranchSummaryResult:
+		m.setStatus("Branch summary cancellation requested", statusWarning)
+		refreshState = true
 	case application.GetStateResult:
 		m.state = result.State
 	case application.ClearQueueResult:
@@ -424,14 +437,13 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		m.state.PendingMessageCount = 0
 		if message.request == m.restoreQueueRequest {
 			m.restoreQueueRequest = 0
-			restored, restoredImages, restoredCount := queueDraft(result.Queue)
-			current := strings.TrimSpace(m.composer.Value())
-			if current != "" {
-				restored = append(restored, current)
+			restoredCount := m.restoreQueueDraft(result.Queue)
+			if message.restoreAndAbort {
+				m.setStatus(fmt.Sprintf("Abort requested · restored %d queued messages", restoredCount), statusWarning)
+				refreshState = true
+			} else {
+				m.setStatus(fmt.Sprintf("Restored %d queued messages", restoredCount), statusSuccess)
 			}
-			restoredImages = append(restoredImages, m.composer.Images()...)
-			m.composer.SetDraft(strings.Join(restored, "\n\n"), restoredImages)
-			m.setStatus(fmt.Sprintf("Restored %d queued messages", restoredCount), statusSuccess)
 		} else {
 			m.setStatus("Queue cleared", statusSuccess)
 		}
@@ -439,7 +451,11 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		if command := m.closeSelectorForCommand(application.CommandReload); command != nil {
 			commands = append(commands, command)
 		}
-		m.setStatus("Resources reloaded", statusSuccess)
+		if err := m.reloadKeybindings(); err != nil {
+			m.setStatus("Resources reloaded; keybindings reload failed: "+err.Error(), statusError)
+		} else {
+			m.setStatus("Resources and keybindings reloaded", statusSuccess)
+		}
 		refreshSnapshot, refreshState, refreshCommands = true, true, true
 	case application.SetModelResult:
 		if command := m.closeSelectorForCommand(application.CommandSetModel); command != nil {
@@ -447,6 +463,22 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		}
 		m.state.Model, m.state.HasModel = result.Model, true
 		m.setStatus("Model: "+result.Model.Provider()+"/"+result.Model.ID(), statusSuccess)
+	case application.CycleModelResult:
+		if result.Result == nil {
+			m.setStatus("No model available to cycle", statusWarning)
+			break
+		}
+		m.state.Model, m.state.HasModel = result.Result.Model, true
+		m.state.ThinkingLevel = result.Result.ThinkingLevel
+		m.setStatus("Model: "+result.Result.Model.Provider()+"/"+result.Result.Model.ID(), statusSuccess)
+		m.refreshOpenSettings()
+	case application.GetAvailableModelsResult:
+		lines := make([]string, 0, len(result.Models))
+		for _, model := range result.Models {
+			lines = append(lines, model.Provider()+"/"+model.ID())
+		}
+		m.appendLocalNotice("Available models", strings.Join(lines, "\n"))
+		m.setStatus(fmt.Sprintf("%d models available", len(result.Models)), statusSuccess)
 	case application.SetThinkingLevelResult:
 		if command := m.closeSelectorForCommand(application.CommandSetThinkingLevel); command != nil {
 			commands = append(commands, command)
@@ -455,6 +487,34 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 			m.state.ThinkingLevel = command.Level
 		}
 		m.setStatus("Thinking level updated", statusSuccess)
+		m.refreshOpenSettings()
+	case application.CycleThinkingLevelResult:
+		if result.Level == nil {
+			m.setStatus("The active model does not support thinking", statusWarning)
+			break
+		}
+		m.state.ThinkingLevel = *result.Level
+		m.setStatus("Thinking level: "+string(*result.Level), statusSuccess)
+		m.refreshOpenSettings()
+	case application.GetAvailableThinkingLevelsResult:
+		levels := make([]string, len(result.Levels))
+		for index, level := range result.Levels {
+			levels[index] = string(level)
+		}
+		m.appendLocalNotice("Available thinking levels", strings.Join(levels, "\n"))
+		m.setStatus(fmt.Sprintf("%d thinking levels available", len(result.Levels)), statusSuccess)
+	case application.SetSteeringModeResult:
+		if command, ok := message.command.(application.SetSteeringModeCommand); ok {
+			m.state.SteeringMode = command.Mode
+			m.setStatus(settingUpdatedStatus("Steering mode", command.Mode.String()), statusSuccess)
+		}
+		m.refreshOpenSettings()
+	case application.SetFollowUpModeResult:
+		if command, ok := message.command.(application.SetFollowUpModeCommand); ok {
+			m.state.FollowUpMode = command.Mode
+			m.setStatus(settingUpdatedStatus("Follow-up mode", command.Mode.String()), statusSuccess)
+		}
+		m.refreshOpenSettings()
 	case application.CompactResult:
 		m.setStatus("Compaction completed", statusSuccess)
 		refreshSnapshot, refreshState = true, true
@@ -464,10 +524,7 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		}
 		m.setStatus("Session renamed", statusSuccess)
 	case application.GetSessionStatsResult:
-		m.appendLocalNotice("Session stats", fmt.Sprintf(
-			"messages: %d\ntool calls: %d\ntokens: %d\ncost: $%.6f",
-			result.Stats.TotalMessages, result.Stats.ToolCalls, result.Stats.Tokens.Total, result.Stats.Cost,
-		))
+		m.appendLocalNotice("Session stats", formatSessionStats(result))
 		m.setStatus("Session stats loaded", statusSuccess)
 	case application.GetLastAssistantTextResult:
 		if result.Text == nil || strings.TrimSpace(*result.Text) == "" {
@@ -478,6 +535,22 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 			commands = append(commands, m.setClipboard(*result.Text))
 			m.setStatus("Copied last assistant reply", statusSuccess)
 		}
+	case application.SetAutoCompactionResult:
+		if command, ok := message.command.(application.SetAutoCompactionCommand); ok {
+			m.state.AutoCompactionEnabled = command.Enabled
+			m.setStatus(settingUpdatedStatus("Automatic compaction", enabledLabel(command.Enabled)), statusSuccess)
+		}
+		m.refreshOpenSettings()
+	case application.SetAutoRetryResult:
+		if command, ok := message.command.(application.SetAutoRetryCommand); ok {
+			m.state.AutoRetryEnabled = command.Enabled
+			m.setStatus(settingUpdatedStatus("Automatic retry", enabledLabel(command.Enabled)), statusSuccess)
+		}
+		m.refreshOpenSettings()
+	case application.AbortRetryResult:
+		m.state.RetryWaiting = false
+		m.setStatus("Retry cancellation requested", statusWarning)
+		refreshState = true
 	case application.GetToolsResult:
 		lines := make([]string, 0, len(result.Tools))
 		for _, tool := range result.Tools {
@@ -499,7 +572,37 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		m.state.IsBashRunning = false
 		m.setStatus("Bash completed", statusSuccess)
 		refreshSnapshot, refreshState = true, true
-	case application.ForkResult, application.NavigateTreeResult:
+	case application.ForkResult:
+		if result.Cancelled {
+			m.setStatus("Fork cancelled", statusWarning)
+			break
+		}
+		if result.SelectedText != nil {
+			m.composer.SetDraft(*result.SelectedText, nil)
+			m.updateSlashPalette()
+		}
+		if result.SessionID == nil || strings.TrimSpace(*result.SessionID) == "" {
+			m.setStatus("Fork completed without a session id", statusError)
+			break
+		}
+		m.setStatus("Opening forked session…", statusInfo)
+		commands = append(commands, m.openSession(*result.SessionID))
+	case application.NavigateTreeResult:
+		if branchSummaryResult {
+			m.branchSummaryRequest = 0
+		}
+		if result.EditorText != nil {
+			m.composer.SetDraft(*result.EditorText, nil)
+			m.updateSlashPalette()
+		}
+		switch {
+		case result.Aborted:
+			m.setStatus("Branch summary cancelled", statusWarning)
+		case result.Cancelled:
+			m.setStatus("Tree navigation cancelled", statusWarning)
+		default:
+			m.setStatus("Session tree position updated", statusSuccess)
+		}
 		refreshSnapshot, refreshState = true, true
 	default:
 		m.setStatus(strings.ReplaceAll(string(message.command.Type()), "_", " ")+" completed", statusSuccess)
@@ -515,6 +618,54 @@ func (m *Model) handleCommandFinished(message commandFinishedMsg) []tea.Cmd { //
 		commands = append(commands, m.requestCommands())
 	}
 	return commands
+}
+
+func formatSessionStats(result application.GetSessionStatsResult) string {
+	stats := result.Stats
+	lines := []string{
+		"session id: " + stats.SessionID,
+		fmt.Sprintf(
+			"messages: %d total · %d user · %d assistant · %d tool results",
+			stats.TotalMessages, stats.UserMessages, stats.AssistantMessages, stats.ToolResults,
+		),
+		fmt.Sprintf("tool calls: %d", stats.ToolCalls),
+		fmt.Sprintf(
+			"tokens: %d total · %d input · %d output · %d cache read · %d cache write",
+			stats.Tokens.Total, stats.Tokens.Input, stats.Tokens.Output, stats.Tokens.CacheRead, stats.Tokens.CacheWrite,
+		),
+		fmt.Sprintf("cost: $%.6f", stats.Cost),
+	}
+	if result.SessionName != nil && strings.TrimSpace(*result.SessionName) != "" {
+		lines = append(lines, "name: "+strings.TrimSpace(*result.SessionName))
+	}
+	if stats.SessionFile != nil && strings.TrimSpace(*stats.SessionFile) != "" {
+		lines = append(lines, "file: "+strings.TrimSpace(*stats.SessionFile))
+	}
+	if stats.ContextUsage != nil {
+		context := "context: unknown"
+		if stats.ContextUsage.Tokens != nil {
+			context = fmt.Sprintf("context: %d / %d tokens", *stats.ContextUsage.Tokens, stats.ContextUsage.ContextWindow)
+		}
+		if stats.ContextUsage.Percent != nil {
+			context += fmt.Sprintf(" · %.1f%%", *stats.ContextUsage.Percent)
+		}
+		lines = append(lines, context)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) restoreQueueDraft(queue agent.QueueState) int {
+	m.state.QueuedMessages = agent.QueueState{}
+	m.state.PendingMessageCount = 0
+	restored, restoredImages, restoredCount := queueDraft(queue)
+	current := strings.TrimSpace(m.composer.Value())
+	if current != "" {
+		restored = append(restored, current)
+	}
+	restoredImages = append(restoredImages, m.composer.Images()...)
+	m.composer.SetDraft(strings.Join(restored, "\n\n"), restoredImages)
+	m.updateSlashPalette()
+	return restoredCount
 }
 
 func (m *Model) appendLocalNotice(title, text string) {

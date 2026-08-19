@@ -80,6 +80,41 @@ func TestTranscriptAnchorSurvivesLiveAppend(t *testing.T) {
 	}
 }
 
+func TestTranscriptJumpsToBoundsAndUserPrompts(t *testing.T) {
+	items := []contentItem{
+		{ID: "system", Revision: 1, Role: contentRoleSystem, Title: "system"},
+		{ID: "user-1", Revision: 1, Role: contentRoleUser, Title: "first"},
+		{ID: "assistant-1", Revision: 1, Role: contentRoleAssistant, Title: "answer"},
+		{ID: "user-2", Revision: 1, Role: contentRoleUser, Title: "second"},
+		{ID: "assistant-2", Revision: 1, Role: contentRoleAssistant, Title: "answer"},
+	}
+	model := newTranscriptModel()
+	model.SetItems(items)
+	renderer := &countingItemRenderer{}
+	_ = model.View(80, 4, renderer)
+
+	model.ScrollToPreviousPrompt()
+	if model.follow || model.anchor.id != "user-2" {
+		t.Fatalf("previous prompt anchor = %#v, follow=%t", model.anchor, model.follow)
+	}
+	model.ScrollToPreviousPrompt()
+	if model.anchor.id != "user-1" {
+		t.Fatalf("second previous prompt anchor = %#v", model.anchor)
+	}
+	model.ScrollToNextPrompt()
+	if model.anchor.id != "user-2" {
+		t.Fatalf("next prompt anchor = %#v", model.anchor)
+	}
+	model.ScrollToNextPrompt()
+	if !model.follow {
+		t.Fatal("next prompt at tail did not resume live following")
+	}
+	model.ScrollToTop()
+	if model.follow || model.anchor.id != "system" {
+		t.Fatalf("top anchor = %#v, follow=%t", model.anchor, model.follow)
+	}
+}
+
 func TestContentProjectionPreservesRichMessageSemantics(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	text, err := llm.NewTextBlock("hello")

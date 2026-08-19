@@ -1856,6 +1856,17 @@ func TestAgentSessionManualCompactSharesGateAndAbort(t *testing.T) {
 	if _, err := runtime.Run(context.Background(), "busy"); !errors.Is(err, agent.ErrBusy) {
 		t.Fatalf("Run during manual compact = %v", err)
 	}
+	abortCtx, cancelAbort := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	if err := runtime.Abort(abortCtx); err != nil {
+		cancelAbort()
+		t.Fatalf("ordinary Abort waited for manual compaction: %v", err)
+	}
+	cancelAbort()
+	select {
+	case err := <-done:
+		t.Fatalf("ordinary Abort cancelled manual compaction: %v", err)
+	default:
+	}
 	runtime.AbortCompaction()
 	if err := <-done; err == nil {
 		t.Fatal("manual compact unexpectedly succeeded after Abort")

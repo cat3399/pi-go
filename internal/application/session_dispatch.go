@@ -55,16 +55,30 @@ func (s *ApplicationSession) Dispatch(ctx context.Context, command Command) (Com
 		return s.dispatchFollowUp(command)
 	case SetModelCommand:
 		return s.dispatchSetModel(ctx, command)
+	case CycleModelCommand:
+		return s.dispatchCycleModel(ctx, command)
+	case GetAvailableModelsCommand:
+		return s.dispatchGetAvailableModels(ctx)
 	case ForkCommand:
 		return s.dispatchFork(ctx, command)
 	case NavigateTreeCommand:
 		return s.dispatchNavigateTree(ctx, command)
 	case SetThinkingLevelCommand:
 		return s.dispatchSetThinkingLevel(command)
+	case CycleThinkingLevelCommand:
+		return s.dispatchCycleThinkingLevel()
+	case GetAvailableThinkingLevelsCommand:
+		return s.dispatchGetAvailableThinkingLevels()
+	case SetSteeringModeCommand:
+		return s.dispatchSetSteeringMode(command)
+	case SetFollowUpModeCommand:
+		return s.dispatchSetFollowUpMode(command)
 	case CompactCommand:
 		return s.dispatchCompact(ctx, command)
 	case AbortCompactionCommand:
 		return s.dispatchAbortCompaction()
+	case AbortBranchSummaryCommand:
+		return s.dispatchAbortBranchSummary()
 	case SetSessionNameCommand:
 		return s.dispatchSetSessionName(ctx, command)
 	case GetSessionStatsCommand:
@@ -75,6 +89,8 @@ func (s *ApplicationSession) Dispatch(ctx context.Context, command Command) (Com
 		return s.dispatchSetAutoCompaction(command)
 	case SetAutoRetryCommand:
 		return s.dispatchSetAutoRetry(command)
+	case AbortRetryCommand:
+		return s.dispatchAbortRetry()
 	case GetToolsCommand:
 		return s.dispatchGetTools()
 	case SetToolsCommand:

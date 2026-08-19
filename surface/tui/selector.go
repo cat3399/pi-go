@@ -17,6 +17,21 @@ const (
 	selectorSessions
 	selectorThinking
 	selectorTools
+	selectorSettings
+	selectorImportConfirm
+	selectorSessionRename
+	selectorSessionDelete
+	selectorTrustConfirm
+	selectorTree
+	selectorFork
+	selectorTreeSummary
+	selectorTreeSummaryCustom
+	selectorLoginProvider
+	selectorLoginMethod
+	selectorLoginAPIKey
+	selectorLoginOAuth
+	selectorLogoutProvider
+	selectorLogoutConfirm
 )
 
 type selectorItem struct {
@@ -27,6 +42,8 @@ type selectorItem struct {
 	Keywords    string
 	Current     bool
 	Checked     bool
+	sortTime    int64
+	sortCount   int
 }
 
 type selectorModel struct {
@@ -141,10 +158,19 @@ func (s *selectorModel) Update(message tea.Msg) tea.Cmd {
 	before := s.input.Value()
 	updated, command := s.input.Update(message)
 	s.input = updated
-	if s.input.Value() != before {
+	if s.input.Value() != before && !selectorUsesRawInput(s.kind) {
 		s.refilter(true)
 	}
 	return command
+}
+
+func selectorUsesRawInput(kind selectorKind) bool {
+	switch kind {
+	case selectorTreeSummaryCustom, selectorSessionRename, selectorLoginAPIKey, selectorLoginOAuth:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *selectorModel) Move(delta int) {
@@ -398,6 +424,16 @@ func (s *selectorModel) View(width, maxHeight int) string {
 			hint = "ctrl+r retry • esc back"
 		} else if s.multi {
 			hint = "↑↓ navigate • space toggle • enter apply • esc back"
+		} else if s.kind == selectorTreeSummaryCustom {
+			hint = "enter summarize • esc back"
+		} else if s.kind == selectorSessionRename {
+			hint = "enter rename • esc back"
+		} else if s.kind == selectorLoginAPIKey {
+			hint = "enter save • esc back"
+		} else if s.kind == selectorLoginOAuth {
+			hint = "enter submit callback • esc cancel login"
+		} else if s.kind == selectorSessions {
+			hint = "enter open • ctrl+n named • ctrl+s sort • ctrl+p path • ctrl+e rename • ctrl+d delete"
 		}
 		lines = append(lines, Truncate(s.theme.subtleStyle().Render(hint), innerWidth, "…", false))
 	}
@@ -473,6 +509,16 @@ func (s *selectorModel) emptyLabel() string {
 		return "No supported thinking levels"
 	case selectorTools:
 		return "No tools available"
+	case selectorSettings:
+		return "No settings available"
+	case selectorTree:
+		return "No session entries"
+	case selectorFork:
+		return "No user messages to fork from"
+	case selectorLoginProvider:
+		return "No providers support interactive login"
+	case selectorLogoutProvider:
+		return "No stored provider credentials"
 	default:
 		return "No items available"
 	}

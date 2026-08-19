@@ -25,6 +25,7 @@ func runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	modelRef := flags.String("model", "", "initial model as provider/model-id")
 	thinking := flags.String("thinking", "", "initial thinking level")
 	screen := flags.String("screen", string(tuisurface.ScreenFull), "screen mode: full, inline, or auto")
+	prompt := flags.String("prompt", "", "send an initial prompt after opening the TUI")
 	fps := flags.Int("fps", 60, "maximum terminal render rate (1-120)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -32,9 +33,12 @@ func runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		return 2
 	}
-	if flags.NArg() != 0 {
-		_, _ = fmt.Fprintln(stderr, "pi-go tui: unexpected positional arguments")
-		return 2
+	initialPrompt := strings.TrimSpace(*prompt)
+	if positional := strings.TrimSpace(strings.Join(flags.Args(), " ")); positional != "" {
+		if initialPrompt != "" {
+			initialPrompt += " "
+		}
+		initialPrompt += positional
 	}
 	mode, err := tuisurface.ParseScreenMode(*screen)
 	if err != nil {
@@ -108,7 +112,7 @@ func runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 
 	if err := tuisurface.Run(ctx, tuisurface.Options{
 		Application: service, SessionID: selectedSession, Version: version,
-		ScreenMode: mode, Input: stdin, Output: stdout, FPS: *fps,
+		ScreenMode: mode, InitialPrompt: initialPrompt, Input: stdin, Output: stdout, FPS: *fps,
 	}); err != nil && !errors.Is(err, context.Canceled) {
 		_, _ = fmt.Fprintln(stderr, "pi-go tui:", err)
 		return 1

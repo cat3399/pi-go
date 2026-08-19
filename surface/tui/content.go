@@ -58,6 +58,8 @@ type contentBlock struct {
 	ToolDetails json.RawMessage
 	MediaType   string
 	ByteSize    int
+	ImageData   []byte
+	ImageURL    string
 	IsError     bool
 	Live        bool
 }
@@ -288,10 +290,18 @@ func assistantBlocks(blocks []llm.AssistantBlock, live bool) []contentBlock {
 
 func imageContentBlock(image llm.ImageBlock) contentBlock {
 	size := 0
+	var data []byte
+	var rawURL string
 	if image.Source() == llm.ImageSourceData {
-		size = len(image.Data())
+		data = image.Data()
+		size = len(data)
+	} else {
+		rawURL = image.URL()
 	}
-	return contentBlock{Kind: contentBlockImage, MediaType: image.MediaType(), ByteSize: size}
+	return contentBlock{
+		Kind: contentBlockImage, MediaType: image.MediaType(), ByteSize: size,
+		ImageData: data, ImageURL: rawURL,
+	}
 }
 
 func prettyJSON(data []byte) string {

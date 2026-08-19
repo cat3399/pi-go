@@ -503,12 +503,22 @@ func TestApplicationSessionModelThinkingPolicyAndToolCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sourceBase := "/workspace/tools"
 	harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{
 		Models: []provider.Model{modelA, modelB},
 		Configure: func(config *agent.SessionConfig) {
 			config.Tool = sessionToolExecutor{}
 			config.Tools = []provider.ToolDefinition{firstTool}
 			config.AllTools = []provider.ToolDefinition{firstTool, secondTool}
+			config.ToolMetadata = map[string]agent.ToolMetadata{
+				"second": {
+					PromptGuidelines: []string{"Keep values exact"},
+					SourceInfo: agent.SystemPromptSourceInfo{
+						Path: "/workspace/tools/second.go", Source: "fixture", Scope: agent.SystemPromptSourceProject,
+						Origin: agent.SystemPromptSourcePackage, BaseDir: &sourceBase,
+					},
+				},
+			}
 		},
 	})
 
@@ -533,6 +543,49 @@ func TestApplicationSessionModelThinkingPolicyAndToolCommands(t *testing.T) {
 	if err != nil || !state.Model.Equal(modelB) || state.ThinkingLevel != provider.ThinkingHigh || state.AutoCompactionEnabled || state.AutoRetryEnabled {
 		t.Fatalf("selected controls = (%#v, %v)", state, err)
 	}
+	availableResult, err := harness.session.Dispatch(context.Background(), application.GetAvailableModelsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	available := availableResult.(application.GetAvailableModelsResult)
+	if len(available.Models) != 2 {
+		t.Fatalf("available models = %#v", available.Models)
+	}
+	cycledResult, err := harness.session.Dispatch(context.Background(), application.CycleModelCommand{Direction: agent.CycleForward})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycled := cycledResult.(application.CycleModelResult)
+	if cycled.Result == nil || !cycled.Result.Model.Equal(modelA) {
+		t.Fatalf("cycled model = %#v", cycled.Result)
+	}
+	levelsResult, err := harness.session.Dispatch(context.Background(), application.GetAvailableThinkingLevelsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if levels := levelsResult.(application.GetAvailableThinkingLevelsResult).Levels; len(levels) == 0 {
+		t.Fatal("available thinking levels are empty")
+	}
+	thinkingResult, err := harness.session.Dispatch(context.Background(), application.CycleThinkingLevelCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thinkingResult.(application.CycleThinkingLevelResult).Level == nil {
+		t.Fatal("cycle thinking returned no level for reasoning model")
+	}
+	if _, err := harness.session.Dispatch(context.Background(), application.SetSteeringModeCommand{Mode: agent.QueueAll}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.session.Dispatch(context.Background(), application.SetFollowUpModeCommand{Mode: agent.QueueAll}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.session.Dispatch(context.Background(), application.AbortRetryCommand{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = harness.session.State()
+	if err != nil || state.SteeringMode != agent.QueueAll || state.FollowUpMode != agent.QueueAll {
+		t.Fatalf("queue controls = (%#v, %v)", state, err)
+	}
 
 	toolsResult, err := harness.session.Dispatch(context.Background(), application.GetToolsCommand{})
 	if err != nil {
@@ -541,6 +594,12 @@ func TestApplicationSessionModelThinkingPolicyAndToolCommands(t *testing.T) {
 	tools := toolsResult.(application.GetToolsResult).Tools
 	if len(tools) != 2 || !tools[0].Active || tools[1].Active {
 		t.Fatalf("initial tools = %#v", tools)
+	}
+	if string(tools[1].Parameters) != `{"type":"object"}` ||
+		!reflect.DeepEqual(tools[1].PromptGuidelines, []string{"Keep values exact"}) ||
+		tools[1].SourceInfo.Path != "/workspace/tools/second.go" || tools[1].SourceInfo.BaseDir == nil ||
+		*tools[1].SourceInfo.BaseDir != sourceBase {
+		t.Fatalf("tool inspection metadata = %#v", tools[1])
 	}
 	if _, err := harness.session.Dispatch(context.Background(), application.SetToolsCommand{ToolNames: []string{"missing", "second", "second"}}); err != nil {
 		t.Fatal(err)
@@ -690,6 +749,17 @@ func TestApplicationSessionCompactionCommandsExposeManualActivityAndAbort(t *tes
 	})
 }
 
+func TestApplicationSessionExposesBranchSummaryAbortCommand(t *testing.T) {
+	harness := newSessionHarness(t, mustFixedStep(t, sessionTextTerminal(t, "answer")))
+	result, err := harness.session.Dispatch(context.Background(), application.AbortBranchSummaryCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result.(application.AbortBranchSummaryResult); !ok {
+		t.Fatalf("result = %T", result)
+	}
+}
+
 func TestApplicationSessionBashCommandsUseSessionExecutionAndEvents(t *testing.T) {
 	t.Run("execute", func(t *testing.T) {
 		harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{Configure: func(config *agent.SessionConfig) {
@@ -766,7 +836,7 @@ func TestApplicationSessionBashCommandsUseSessionExecutionAndEvents(t *testing.T
 func TestApplicationSessionGetCommandsProjectsPromptAndSkillResources(t *testing.T) {
 	harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{
 		ConfigureServices: func(cwd string, services *agentruntime.Services) {
-			writeSessionFile(t, filepath.Join(cwd, "prompts", "review.md"), "---\ndescription: Review files\n---\nreview $1")
+			writeSessionFile(t, filepath.Join(cwd, "prompts", "review.md"), "---\ndescription: Review files\nargument-hint: <path>\n---\nreview $1")
 			writeSessionFile(t, filepath.Join(cwd, "skills", "audit", "SKILL.md"), "---\nname: audit\ndescription: Audit project\n---\naudit")
 			resources, err := resource.New(resource.Config{CWD: cwd, AgentDir: cwd})
 			if err != nil {
@@ -783,7 +853,7 @@ func TestApplicationSessionGetCommandsProjectsPromptAndSkillResources(t *testing
 		t.Fatal(err)
 	}
 	commands := result.(application.GetCommandsResult).Commands
-	if len(commands) != 2 || commands[0].Name != "review" || commands[0].Source != application.CommandSourcePrompt || commands[0].Description != "Review files" ||
+	if len(commands) != 2 || commands[0].Name != "review" || commands[0].Source != application.CommandSourcePrompt || commands[0].Description != "Review files" || commands[0].ArgumentHint != "<path>" ||
 		commands[1].Name != "skill:audit" || commands[1].Source != application.CommandSourceSkill || commands[1].Description != "Audit project" {
 		t.Fatalf("commands = %#v", commands)
 	}

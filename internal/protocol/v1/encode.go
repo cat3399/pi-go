@@ -63,9 +63,10 @@ func encodeResult(result application.CommandResult) (any, error) {
 	case application.PromptStartedResult:
 		return map[string]any{"operationId": value.OperationID}, nil
 	case application.AbortResult, application.SteerResult, application.FollowUpResult,
-		application.SetThinkingLevelResult, application.AbortCompactionResult, application.SetSessionNameResult,
+		application.SetThinkingLevelResult, application.AbortCompactionResult, application.AbortBranchSummaryResult,
+		application.SetSessionNameResult, application.SetSteeringModeResult, application.SetFollowUpModeResult,
 		application.SetAutoCompactionResult, application.SetAutoRetryResult, application.SetToolsResult,
-		application.AbortBashResult:
+		application.AbortRetryResult, application.AbortBashResult:
 		return omittedData, nil
 	case application.GetStateResult:
 		return stateWire(value.State), nil
@@ -75,6 +76,20 @@ func encodeResult(result application.CommandResult) (any, error) {
 		return map[string]any{"success": true}, nil
 	case application.SetModelResult:
 		return modelWire(value.Model), nil
+	case application.CycleModelResult:
+		if value.Result == nil {
+			return nil, nil
+		}
+		return map[string]any{
+			"model": modelWire(value.Result.Model), "thinkingLevel": value.Result.ThinkingLevel,
+			"isScoped": value.Result.IsScoped,
+		}, nil
+	case application.GetAvailableModelsResult:
+		models := make([]map[string]any, len(value.Models))
+		for index, model := range value.Models {
+			models[index] = modelWire(model)
+		}
+		return map[string]any{"models": models}, nil
 	case application.ForkResult:
 		data := map[string]any{"cancelled": value.Cancelled}
 		if value.SelectedText != nil {
@@ -93,6 +108,13 @@ func encodeResult(result application.CommandResult) (any, error) {
 			data["summaryEntry"] = json.RawMessage(value.SummaryEntry.RawJSON())
 		}
 		return data, nil
+	case application.CycleThinkingLevelResult:
+		if value.Level == nil {
+			return nil, nil
+		}
+		return map[string]any{"level": *value.Level}, nil
+	case application.GetAvailableThinkingLevelsResult:
+		return map[string]any{"levels": value.Levels}, nil
 	case application.CompactResult:
 		return compactResultWire(value.Result)
 	case application.GetSessionStatsResult:
@@ -102,7 +124,11 @@ func encodeResult(result application.CommandResult) (any, error) {
 	case application.GetToolsResult:
 		tools := make([]map[string]any, len(value.Tools))
 		for index, tool := range value.Tools {
-			tools[index] = map[string]any{"name": tool.Name, "description": tool.Description, "active": tool.Active}
+			tools[index] = map[string]any{
+				"name": tool.Name, "description": tool.Description, "parameters": tool.Parameters,
+				"promptGuidelines": tool.PromptGuidelines, "sourceInfo": agentSourceWire(tool.SourceInfo),
+				"active": tool.Active,
+			}
 		}
 		return tools, nil
 	case application.BashResult:
@@ -116,6 +142,9 @@ func encodeResult(result application.CommandResult) (any, error) {
 			}
 			if command.Description != "" {
 				item["description"] = command.Description
+			}
+			if command.ArgumentHint != "" {
+				item["argumentHint"] = command.ArgumentHint
 			}
 			commands[index] = item
 		}
@@ -327,6 +356,14 @@ func sourceWire(value resource.Source) map[string]any {
 	result := map[string]any{"path": value.Path, "source": value.Source, "scope": value.Scope, "origin": value.Origin}
 	if value.BaseDir != "" {
 		result["baseDir"] = value.BaseDir
+	}
+	return result
+}
+
+func agentSourceWire(value agent.SystemPromptSourceInfo) map[string]any {
+	result := map[string]any{"path": value.Path, "source": value.Source, "scope": value.Scope, "origin": value.Origin}
+	if value.BaseDir != nil {
+		result["baseDir"] = *value.BaseDir
 	}
 	return result
 }

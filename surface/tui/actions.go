@@ -23,6 +23,15 @@ const (
 	inputActionSessionSelector
 	inputActionThinkingSelector
 	inputActionToolsSelector
+	inputActionSettingsSelector
+	inputActionExport
+	inputActionImport
+	inputActionTrust
+	inputActionLogin
+	inputActionLogout
+	inputActionTreeSelector
+	inputActionForkSelector
+	inputActionClone
 )
 
 type inputAction struct {
@@ -30,6 +39,7 @@ type inputAction struct {
 	command   application.Command
 	sessionID string
 	query     string
+	path      string
 }
 
 func planInput(text string, state application.State, followUp bool) (inputAction, error) {
@@ -80,6 +90,21 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 				return inputAction{kind: inputActionSessionSelector}, nil
 			}
 			return inputAction{kind: inputActionOpenSession, sessionID: argument}, nil
+		case "tree":
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /tree")
+			}
+			return inputAction{kind: inputActionTreeSelector}, nil
+		case "fork":
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /fork")
+			}
+			return inputAction{kind: inputActionForkSelector}, nil
+		case "clone":
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /clone")
+			}
+			return inputAction{kind: inputActionClone}, nil
 		case "abort":
 			return inputAction{kind: inputActionDispatch, command: application.AbortCommand{}}, nil
 		case "reload":
@@ -110,6 +135,35 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 				return inputAction{}, fmt.Errorf("invalid thinking level %q", argument)
 			}
 			return inputAction{kind: inputActionDispatch, command: application.SetThinkingLevelCommand{Level: level}}, nil
+		case "settings":
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /settings")
+			}
+			return inputAction{kind: inputActionSettingsSelector}, nil
+		case "export":
+			path, pathErr := slashPathArgument(argument)
+			if pathErr != nil {
+				return inputAction{}, pathErr
+			}
+			return inputAction{kind: inputActionExport, path: path}, nil
+		case "import":
+			path, pathErr := slashPathArgument(argument)
+			if pathErr != nil {
+				return inputAction{}, pathErr
+			}
+			if path == "" {
+				return inputAction{}, errors.New("usage: /import <path.jsonl>")
+			}
+			return inputAction{kind: inputActionImport, path: path}, nil
+		case "trust":
+			if argument != "" {
+				return inputAction{}, errors.New("usage: /trust")
+			}
+			return inputAction{kind: inputActionTrust}, nil
+		case "login":
+			return inputAction{kind: inputActionLogin, query: argument}, nil
+		case "logout":
+			return inputAction{kind: inputActionLogout, query: argument}, nil
 		case "stats":
 			return inputAction{kind: inputActionDispatch, command: application.GetSessionStatsCommand{}}, nil
 		case "copy":
@@ -125,6 +179,20 @@ func planRichInput(text string, images []llm.ImageBlock, state application.State
 	}
 
 	return promptInputAction(text, nil, state, followUp), nil
+}
+
+func slashPathArgument(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if value[0] != '\'' && value[0] != '"' {
+		return value, nil
+	}
+	if len(value) < 2 || value[len(value)-1] != value[0] {
+		return "", errors.New("path has an unmatched quote")
+	}
+	return value[1 : len(value)-1], nil
 }
 
 func promptInputAction(text string, images []llm.ImageBlock, state application.State, followUp bool) inputAction {

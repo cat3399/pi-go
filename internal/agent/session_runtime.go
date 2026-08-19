@@ -42,6 +42,7 @@ type SessionConfig struct {
 	Tools           []provider.ToolDefinition
 	AllTools        []provider.ToolDefinition
 	ActiveToolNames []string
+	ToolMetadata    map[string]ToolMetadata
 	// Resources is the last-healthy resource snapshot owned through the
 	// AgentSession lifecycle. It rebuilds the prompt when active tools change
 	// and expands skill/template commands after extension command/input
@@ -175,7 +176,22 @@ type SessionConfig struct {
 type ToolRuntime struct {
 	Executor       ToolExecutor
 	Tools          []provider.ToolDefinition
+	Metadata       map[string]ToolMetadata
 	StandaloneBash StandaloneBashExecutor
+}
+
+// ToolMetadata is prompt/UI metadata that does not belong in the
+// provider-visible function definition.
+type ToolMetadata struct {
+	PromptGuidelines []string
+	SourceInfo       SystemPromptSourceInfo
+}
+
+// ToolInfo is the complete inspection projection exposed by AgentSession.
+type ToolInfo struct {
+	Definition       provider.ToolDefinition
+	PromptGuidelines []string
+	SourceInfo       SystemPromptSourceInfo
 }
 
 const (
@@ -389,6 +405,7 @@ type AgentSession struct {
 	toolExecutor           ToolExecutor
 	toolRegistry           map[string]provider.ToolDefinition
 	toolOrder              []string
+	toolMetadata           map[string]ToolMetadata
 	beforeToolCall         BeforeToolCallHook
 	afterToolCall          AfterToolCallHook
 	stream                 provider.StreamOptions
@@ -483,6 +500,7 @@ type sessionRun struct {
 	started                      bool
 	extensionSystemPrompt        *string
 	agentRunActive               bool
+	agentPipeline                bool
 	branchSummary                bool
 	branchCancellation           *runCancellation
 	finishOnce                   sync.Once
@@ -609,6 +627,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		standaloneBash: config.StandaloneBash, resolveStandaloneBash: config.ResolveStandaloneBash,
 		bashCommandPrefix: config.BashCommandPrefix, resolveBashPrefix: config.ResolveBashCommandPrefix,
 		toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
+		toolMetadata:   cloneToolMetadataForRegistry(config.ToolMetadata, toolRegistry),
 		beforeToolCall: composeBeforeToolHooks(config.BeforeToolCall, config.Hooks.ToolCall),
 		stream:         provider.CloneStreamOptions(config.Stream),
 		resolveStream:  config.ResolveStreamOptions, validateAccess: config.ValidateModelAccess, validateSelect: config.ValidateModelSelection,
@@ -1532,7 +1551,7 @@ func (s *AgentSession) setTools(executor ToolExecutor, tools []provider.ToolDefi
 	if err != nil {
 		return err
 	}
-	return s.publishToolRuntime(executor, selected, registry, order, nil, false)
+	return s.publishToolRuntime(executor, selected, registry, order, nil, nil, false)
 }
 
 func (s *AgentSession) replaceToolRuntime(runtime ToolRuntime, activeNames []string) error {
@@ -1546,7 +1565,7 @@ func (s *AgentSession) replaceToolRuntime(runtime ToolRuntime, activeNames []str
 	if err != nil {
 		return err
 	}
-	return s.publishToolRuntime(runtime.Executor, selected, registry, order, runtime.StandaloneBash, true)
+	return s.publishToolRuntime(runtime.Executor, selected, registry, order, runtime.Metadata, runtime.StandaloneBash, true)
 }
 
 func (s *AgentSession) publishToolRuntime(
@@ -1554,6 +1573,7 @@ func (s *AgentSession) publishToolRuntime(
 	selected []provider.ToolDefinition,
 	registry map[string]provider.ToolDefinition,
 	order []string,
+	metadata map[string]ToolMetadata,
 	standaloneBash StandaloneBashExecutor,
 	replaceStandalone bool,
 ) error {
@@ -1591,6 +1611,7 @@ func (s *AgentSession) publishToolRuntime(
 	s.toolExecutor = executor
 	s.toolRegistry = registry
 	s.toolOrder = order
+	s.toolMetadata = cloneToolMetadataForRegistry(metadata, registry)
 	if replaceStandalone {
 		s.standaloneBash = standaloneBash
 	}
@@ -1613,6 +1634,58 @@ func (s *AgentSession) AllTools() []provider.ToolDefinition {
 	}
 	s.mu.RUnlock()
 	return tools
+}
+
+// AllToolInfo retains schema, per-tool prompt guidelines, and provenance in
+// stable registration order. AllTools remains the provider-only compatibility
+// view used by existing low-level callers.
+func (s *AgentSession) AllToolInfo() []ToolInfo {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	tools := make([]ToolInfo, 0, len(s.toolOrder))
+	for _, name := range s.toolOrder {
+		definition, exists := s.toolRegistry[name]
+		if !exists {
+			continue
+		}
+		metadata, hasMetadata := s.toolMetadata[name]
+		if !hasMetadata {
+			metadata.SourceInfo = SystemPromptSourceInfo{
+				Path: "<sdk:" + name + ">", Source: "sdk",
+				Scope: SystemPromptSourceTemporary, Origin: SystemPromptSourceTopLevel,
+			}
+		}
+		tools = append(tools, ToolInfo{
+			Definition: definition, PromptGuidelines: append([]string(nil), metadata.PromptGuidelines...),
+			SourceInfo: cloneSystemPromptSourceInfo(metadata.SourceInfo),
+		})
+	}
+	s.mu.RUnlock()
+	return tools
+}
+
+func cloneToolMetadataForRegistry(values map[string]ToolMetadata, registry map[string]provider.ToolDefinition) map[string]ToolMetadata {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]ToolMetadata, min(len(values), len(registry)))
+	for name, value := range values {
+		if _, exists := registry[name]; !exists {
+			continue
+		}
+		result[name] = ToolMetadata{
+			PromptGuidelines: append([]string(nil), value.PromptGuidelines...),
+			SourceInfo:       cloneSystemPromptSourceInfo(value.SourceInfo),
+		}
+	}
+	return result
+}
+
+func cloneSystemPromptSourceInfo(value SystemPromptSourceInfo) SystemPromptSourceInfo {
+	value.BaseDir = cloneStringPointer(value.BaseDir)
+	return value
 }
 
 func (s *AgentSession) ActiveToolNames() []string {
@@ -1820,7 +1893,7 @@ func (s *AgentSession) runSession(
 		next.toolExecutions = toolExecutions
 		return next
 	}
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, true)
 	if err != nil {
 		return Result{}, err
 	}
@@ -2857,7 +2930,7 @@ func (s *AgentSession) sessionRunCommittedAgentMessages(run *sessionRun) []agent
 	return agentmsg.Clone(run.committedAgent)
 }
 
-func (s *AgentSession) admitSessionRun(ctx context.Context) (*sessionRun, error) {
+func (s *AgentSession) admitSessionRun(ctx context.Context, agentPipeline bool) (*sessionRun, error) {
 	if s == nil || ctx == nil || context.Cause(ctx) != nil {
 		return nil, fmt.Errorf("%w: invalid session context", ErrInvalidRun)
 	}
@@ -2870,7 +2943,10 @@ func (s *AgentSession) admitSessionRun(ctx context.Context) (*sessionRun, error)
 		return nil, ErrBusy
 	}
 	runCtx, cancel := context.WithCancelCause(ctx)
-	run := &sessionRun{ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, acceptingQueues: true}
+	run := &sessionRun{
+		ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, acceptingQueues: true,
+		agentPipeline: agentPipeline,
+	}
 	if s.idleWait == nil {
 		s.idleWait = make(chan struct{})
 	}
@@ -3265,9 +3341,11 @@ func (s *AgentSession) Abort(ctx context.Context) error {
 	run := s.run
 	var idle chan struct{}
 	var cancelRetry context.CancelCauseFunc
-	if run != nil {
+	if run != nil && run.agentPipeline {
 		idle = s.idleWait
 		cancelRetry = run.retryCancel
+	} else {
+		run = nil
 	}
 	s.lifecycleMu.Unlock()
 	if run == nil {
@@ -3532,7 +3610,7 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 	if s.sessionManager == nil {
 		return session.CompactResult{}, ErrCompactionUnavailable
 	}
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, false)
 	if err != nil {
 		return session.CompactResult{}, err
 	}
@@ -3705,7 +3783,7 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 	if err := s.rejectIfClosed(); err != nil {
 		return NavigateTreeResult{}, err
 	}
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, false)
 	if err != nil {
 		if errors.Is(err, ErrBusy) {
 			return NavigateTreeResult{}, treeNavigationBusyError{}
@@ -3933,7 +4011,7 @@ func (s *AgentSession) SelectLeaf(ctx context.Context, id string) error {
 		return err
 	}
 	manager := s.sessionManager
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -3998,7 +4076,7 @@ func (s *AgentSession) ResetLeaf(ctx context.Context) error {
 	if err := s.rejectIfClosed(); err != nil {
 		return err
 	}
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, false)
 	if err != nil {
 		return err
 	}
@@ -4027,7 +4105,7 @@ func (s *AgentSession) CreateBranchedSession(ctx context.Context, leafID string)
 	if err := s.rejectIfClosed(); err != nil {
 		return "", false, err
 	}
-	run, err := s.admitSessionRun(ctx)
+	run, err := s.admitSessionRun(ctx, false)
 	if err != nil {
 		return "", false, err
 	}

@@ -19,6 +19,7 @@ import (
 
 type modelTestAPI struct{ application.API }
 
+func (modelTestAPI) AgentDir() string   { return "" }
 func (modelTestAPI) DefaultCWD() string { return "/workspace" }
 
 func newModelForTest(t *testing.T) *Model {
@@ -49,6 +50,81 @@ type dispatchRecordingAPI struct {
 func (a *dispatchRecordingAPI) Dispatch(_ context.Context, _ string, command application.Command) (application.CommandResult, error) {
 	a.command = command
 	return application.PromptStartedResult{OperationID: 1}, nil
+}
+
+type queueAbortRecordingAPI struct {
+	modelTestAPI
+	commands []application.CommandType
+	queue    agent.QueueState
+	abortErr error
+}
+
+func (a *queueAbortRecordingAPI) Dispatch(_ context.Context, _ string, command application.Command) (application.CommandResult, error) {
+	a.commands = append(a.commands, command.Type())
+	switch command.(type) {
+	case application.ClearQueueCommand:
+		return application.ClearQueueResult{Queue: a.queue}, nil
+	case application.AbortCommand:
+		return application.AbortResult{}, a.abortErr
+	default:
+		return nil, application.ErrInvalidCommand
+	}
+}
+
+func TestEscapeRestoresQueuedMessagesBeforeAbort(t *testing.T) {
+	api := &queueAbortRecordingAPI{queue: agent.QueueState{
+		Steering: []string{"change direction"}, FollowUp: []string{"then summarize"},
+	}}
+	model := newModelWithAPIForTest(t, api)
+	model.state.IsPromptRunning = true
+	model.state.IsStreaming = true
+	model.state.PendingMessageCount = 2
+	model.state.QueuedMessages = api.queue
+	model.composer.SetDraft("current draft", nil)
+
+	handled, command := model.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	if !handled || command == nil {
+		t.Fatal("Escape did not start queue recall and abort")
+	}
+	message, ok := command().(commandFinishedMsg)
+	if !ok || message.err != nil || !message.restoreAndAbort {
+		t.Fatalf("queue recall message = %#v", message)
+	}
+	if len(api.commands) != 2 || api.commands[0] != application.CommandClearQueue || api.commands[1] != application.CommandAbort {
+		t.Fatalf("dispatch order = %#v", api.commands)
+	}
+	model.handleCommandFinished(message)
+	if got := model.composer.Value(); got != "change direction\n\nthen summarize\n\ncurrent draft" {
+		t.Fatalf("restored composer = %q", got)
+	}
+	if model.state.PendingMessageCount != 0 || model.restoreQueueRequest != 0 {
+		t.Fatalf("queue state = %#v, restore request = %d", model.state.QueuedMessages, model.restoreQueueRequest)
+	}
+	if model.status.level != statusWarning || model.status.text != "Abort requested · restored 2 queued messages" {
+		t.Fatalf("status = %#v", model.status)
+	}
+}
+
+func TestEscapePreservesRecalledQueueWhenAbortFails(t *testing.T) {
+	api := &queueAbortRecordingAPI{
+		queue:    agent.QueueState{Steering: []string{"do not lose me"}},
+		abortErr: errors.New("abort unavailable"),
+	}
+	model := newModelWithAPIForTest(t, api)
+	model.state.IsStreaming = true
+	model.state.PendingMessageCount = 1
+	command := model.restoreQueuedMessages(true)
+	message, ok := command().(commandFinishedMsg)
+	if !ok || message.err == nil {
+		t.Fatalf("queue recall message = %#v", message)
+	}
+	model.handleCommandFinished(message)
+	if got := model.composer.Value(); got != "do not lose me" {
+		t.Fatalf("restored composer = %q", got)
+	}
+	if model.status.level != statusError || !strings.Contains(model.status.text, "abort unavailable") {
+		t.Fatalf("status = %#v", model.status)
+	}
 }
 
 func TestModelComposerDistinguishesSubmitAndNewline(t *testing.T) {
@@ -102,6 +178,36 @@ func TestModelSubmitPreservesComposerImages(t *testing.T) {
 	}
 }
 
+func TestModelInitDispatchesConfiguredInitialPrompt(t *testing.T) {
+	api := &dispatchRecordingAPI{}
+	state := application.State{SessionID: "session-1", CWD: "/workspace", Phase: agent.PhaseIdle}
+	model, err := newModel(context.Background(), Options{
+		Application: api, SessionID: "session-1", ScreenMode: ScreenFull, InitialPrompt: "review this change",
+	}, application.SessionSnapshot{
+		Revision: 1, SessionID: "session-1", Info: application.SessionInfo{ID: "session-1", CWD: "/workspace"},
+		LiveState: &state,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Init()()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("initial command batch = %#v", message)
+	}
+	finished, ok := batch[len(batch)-1]().(commandFinishedMsg)
+	if !ok || finished.err != nil {
+		t.Fatalf("initial prompt result = %#v", finished)
+	}
+	prompt, ok := api.command.(application.PromptCommand)
+	if !ok || prompt.Message != "review this change" || prompt.Source != agent.InputInteractive {
+		t.Fatalf("initial prompt = %#v", api.command)
+	}
+	if !model.composer.Empty() {
+		t.Fatalf("initial prompt remained in composer: %q", model.composer.Value())
+	}
+}
+
 func TestModelRendersSafeSmallTerminalFallback(t *testing.T) {
 	model := newModelForTest(t)
 	for _, size := range []struct{ width, height int }{{12, 3}, {1, 1}} {
@@ -141,11 +247,15 @@ func TestModelRendersSafeSmallTerminalFallbackWithAttachment(t *testing.T) {
 	}
 }
 
-func TestModelLeavesMouseSelectionToTerminal(t *testing.T) {
+func TestModelEnablesWheelEventsOnlyInFullScreen(t *testing.T) {
 	model := newModelForTest(t)
 	view := model.View()
-	if view.MouseMode != tea.MouseModeNone {
-		t.Fatalf("mouse mode = %v, want terminal-owned selection", view.MouseMode)
+	if view.MouseMode != tea.MouseModeCellMotion {
+		t.Fatalf("full-screen mouse mode = %v, want cell motion", view.MouseMode)
+	}
+	model.mode = ScreenInline
+	if view := model.View(); view.MouseMode != tea.MouseModeNone {
+		t.Fatalf("inline mouse mode = %v, want terminal-owned selection", view.MouseMode)
 	}
 }
 

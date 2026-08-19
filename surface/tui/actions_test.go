@@ -48,6 +48,35 @@ func TestPlanInputKeepsSurfaceActionsOutOfCoreCommands(t *testing.T) {
 	if err != nil || resumeSelector.kind != inputActionSessionSelector {
 		t.Fatalf("resume selector = %#v, err=%v", resumeSelector, err)
 	}
+	for input, want := range map[string]inputActionKind{
+		"/tree":     inputActionTreeSelector,
+		"/fork":     inputActionForkSelector,
+		"/clone":    inputActionClone,
+		"/settings": inputActionSettingsSelector,
+		"/login":    inputActionLogin,
+		"/logout":   inputActionLogout,
+	} {
+		action, actionErr := planInput(input, application.State{}, false)
+		if actionErr != nil || action.kind != want || action.command != nil {
+			t.Fatalf("%s = %#v, err=%v", input, action, actionErr)
+		}
+	}
+	login, err := planInput("/login openai-codex", application.State{}, false)
+	if err != nil || login.kind != inputActionLogin || login.query != "openai-codex" {
+		t.Fatalf("login = %#v, err=%v", login, err)
+	}
+	logout, err := planInput("/logout anthropic", application.State{}, false)
+	if err != nil || logout.kind != inputActionLogout || logout.query != "anthropic" {
+		t.Fatalf("logout = %#v, err=%v", logout, err)
+	}
+	export, err := planInput(`/export "reports/session export.jsonl"`, application.State{}, false)
+	if err != nil || export.kind != inputActionExport || export.path != "reports/session export.jsonl" {
+		t.Fatalf("export = %#v, err=%v", export, err)
+	}
+	imported, err := planInput("/import backup.jsonl", application.State{}, false)
+	if err != nil || imported.kind != inputActionImport || imported.path != "backup.jsonl" {
+		t.Fatalf("import = %#v, err=%v", imported, err)
+	}
 	modelSelector, err := planInput("/model deepseek-v4", application.State{}, false)
 	if err != nil || modelSelector.kind != inputActionModelSelector || modelSelector.query != "deepseek-v4" {
 		t.Fatalf("model selector = %#v, err=%v", modelSelector, err)

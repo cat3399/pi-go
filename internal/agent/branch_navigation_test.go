@@ -304,8 +304,8 @@ func TestAbortBranchSummaryDoesNotMutateTree(t *testing.T) {
 	}
 	abortCtx, cancelAbort := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancelAbort()
-	if err := runtime.Abort(abortCtx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("agent Abort crossed branch-summary cancellation domain: %v", err)
+	if err := runtime.Abort(abortCtx); err != nil {
+		t.Fatalf("agent Abort waited on the independent branch-summary domain: %v", err)
 	}
 	select {
 	case got := <-done:

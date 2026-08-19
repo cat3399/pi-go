@@ -382,12 +382,13 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		AuthRuntime: authResolver.runtime, Provider: catalog, Tool: executor,
 		Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
 		ReloadTools: func(_ context.Context) (agent.ToolRuntime, error) {
-			reloadedExecutor, reloadedDefinitions, _, reloadedStandalone, reloadErr := p.buildToolRuntime(cwd, catalog.Snapshot().Settings)
+			reloadedExecutor, reloadedDefinitions, reloadedResources, reloadedStandalone, reloadErr := p.buildToolRuntime(cwd, catalog.Snapshot().Settings)
 			if reloadErr != nil {
 				return agent.ToolRuntime{}, reloadErr
 			}
 			return agent.ToolRuntime{
-				Executor: reloadedExecutor, Tools: reloadedDefinitions, StandaloneBash: reloadedStandalone,
+				Executor: reloadedExecutor, Tools: reloadedDefinitions,
+				Metadata: productionToolMetadata(reloadedResources), StandaloneBash: reloadedStandalone,
 			}, nil
 		},
 	}
@@ -425,7 +426,8 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		ExplicitThinkingLevel: explicitThinking, ScopedModels: scope.ScopedModels, Settings: snapshot.Settings,
 		BaseConfig: agent.SessionConfig{
 			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: activeDefinitions,
-			AllTools: definitions, ActiveToolNames: activeToolNames, Stream: stream,
+			AllTools: definitions, ActiveToolNames: activeToolNames,
+			ToolMetadata: productionToolMetadata(resourceTools), Stream: stream,
 			ResolveBashCommandPrefix: func() string { return catalog.Snapshot().Settings.ShellCommandPrefix },
 			ResolveStandaloneBash: func(resolveCtx context.Context) (agent.StandaloneBashExecutor, error) {
 				if cause := context.Cause(resolveCtx); cause != nil {

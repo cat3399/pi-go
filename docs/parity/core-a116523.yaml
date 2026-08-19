@@ -172,13 +172,13 @@ capabilities:
     go:
       path: internal/agent/agent.go
       symbol: func (a *Agent) drainQueueLocked
-    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: go_test, path: internal/agent/stateful_agent_test.go, symbol: TestStatefulAgentContinueDrainsAssistantTailQueuesByModeAndPriority}
       - {kind: upstream_oracle, path: internal/agent/upstream_queue_abort_oracle_test.go, symbol: TestUpstreamAgentSessionQueueAbortOracle}
       - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
     intentionalGoDifference: Queue delivery staging is explicit so cancellation and UI queue snapshots remain race-free.
-    remainingDifference: SetSteeringMode and SetFollowUpMode are not exposed through Application/protocol commands.
+    remainingDifference: The HTTP product surface does not currently expose queue-mode controls.
 
   - id: agent.listener_settlement_and_reentry
     category: agent
@@ -268,12 +268,12 @@ capabilities:
     go:
       path: internal/agent/runtime_controls.go
       symbol: func (s *AgentSession) AbortRetry
-    surfaceExposure: {application: partial, jsonl: deferred, http: deferred}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionAbortRetryOracle}
       - {kind: go_test, path: internal/agent/runtime_controls_test.go, symbol: TestAbortRetryCancelsOnlySleepAndEmitsExactCleanup}
     intentionalGoDifference: Only the retry-delay child context is cancelled; the owning run context remains valid.
-    remainingDifference: The transport-neutral core behavior is verified; an Application command is not yet present.
+    remainingDifference: The HTTP product surface does not currently expose retry cancellation.
 
   - id: agent_session.manual_compaction
     category: agent_session
@@ -315,12 +315,12 @@ capabilities:
     go:
       path: internal/agent/model_management.go
       symbol: func (s *AgentSession) CycleModel
-    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
       - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionCycleHookSourceAndSettingsFailureAreAtomic}
     intentionalGoDifference: Model/settings publication exposes definite-failure versus commit-unknown outcomes.
-    remainingDifference: Core set/scoped-cycle behavior is verified; direct Application commands remain absent.
+    remainingDifference: The HTTP product surface does not currently expose model cycling.
 
   - id: agent_session.dynamic_available_models
     category: agent_session
@@ -331,12 +331,12 @@ capabilities:
     go:
       path: internal/agent/model_management.go
       symbol: func (s *AgentSession) AvailableModels
-    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionUnscopedCycleRefreshesAvailableModelsAndResolverFailureIsClean}
       - {kind: go_test, path: internal/agent/model_management_internal_test.go, symbol: TestScopedAvailabilityChecksConcurrentlyPreserveOrderAndFirstError}
     intentionalGoDifference: Availability resolution is transport-neutral and returns explicit callback errors.
-    remainingDifference: Ambient-auth-independent production oracle coverage and direct Application commands are still absent.
+    remainingDifference: Ambient-auth-independent production oracle coverage remains absent; the HTTP product surface does not expose the session-aware query.
 
   - id: agent_session.thinking_selection_cycle_and_clamp
     category: agent_session
@@ -347,12 +347,12 @@ capabilities:
     go:
       path: internal/agent/model_management.go
       symbol: func (s *AgentSession) CycleThinkingLevel
-    surfaceExposure: {application: partial, jsonl: deferred, http: partial}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: upstream_oracle, path: internal/agent/upstream_control_oracle_test.go, symbol: TestUpstreamAgentSessionModelThinkingQueueControlOracle}
       - {kind: go_test, path: internal/agent/model_management_test.go, symbol: TestAgentSessionThinkingLevelsClampAndCycle}
     intentionalGoDifference: Supported levels are model-owned immutable metadata.
-    remainingDifference: Core cycle/clamp/available-level behavior is verified; direct Application commands remain absent.
+    remainingDifference: The HTTP product surface does not currently expose thinking-level cycling and queries.
 
   - id: agent_session.tool_registry_active_tools_and_reload
     category: agent_session
@@ -711,14 +711,17 @@ capabilities:
 
   - id: application.core_control_exposure
     category: application_boundary
-    status: remaining
+    status: source_aligned
     upstream:
       path: packages/coding-agent/src/modes/rpc/rpc-types.ts
       symbol: type RpcCommand
+    go:
+      path: internal/application/session_dispatch.go
+      symbol: func (s *ApplicationSession) Dispatch
     targetGoBoundary: internal/application Command and internal/protocol/v1 adapters
-    surfaceExposure: {application: partial, jsonl: partial, http: partial}
+    surfaceExposure: {application: full, jsonl: full, http: partial}
     evidence:
       - {kind: go_test, path: internal/application/session_test.go, symbol: TestApplicationSessionModelThinkingPolicyAndToolCommands}
       - {kind: go_test, path: internal/rpc/server_test.go, symbol: TestServerStreamsRealAgentSessionProtocol}
-    intentionalGoDifference: Surface commands are added only for real consumers; core methods remain transport-neutral.
-    remainingDifference: Cycle model/thinking, available model/thinking queries, queue-mode setters, and AbortRetry are not exposed as Application/protocol commands.
+    intentionalGoDifference: Core methods remain transport-neutral and Application command results are strongly typed before protocol encoding.
+    remainingDifference: The HTTP product surface does not currently project every session control.

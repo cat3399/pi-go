@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/llm"
 	"golang.org/x/term"
 )
 
@@ -34,11 +35,13 @@ func ParseScreenMode(value string) (ScreenMode, error) {
 }
 
 type Options struct {
-	Application application.API
-	SessionID   string
-	Version     string
-	ScreenMode  ScreenMode
-	Theme       Theme
+	Application        application.API
+	SessionID          string
+	Version            string
+	ScreenMode         ScreenMode
+	Theme              Theme
+	InitialPrompt      string
+	ReadClipboardImage func(context.Context) (llm.ImageBlock, error)
 
 	Input       io.Reader
 	Output      io.Writer
