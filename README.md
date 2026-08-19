@@ -41,6 +41,21 @@ make setup SURFACE=web
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build SURFACE=web
 ```
 
+## 端到端验收
+
+稳定的 production、Application、RPC 和 Web 端到端测试可以统一运行：
+
+```sh
+make e2e-core
+```
+
+真实 DeepSeek 验收是显式启用的付费网络测试。它覆盖真实 provider transport、Agent 工具循环、
+压缩与分支摘要，并会构建真实 `pi-go` 二进制，跨两个进程验证默认工具、JSONL 持久化和恢复：
+
+```sh
+DEEPSEEK_API_KEY='...' make e2e-deepseek
+```
+
 移动端工具链和设备：
 
 ```sh
