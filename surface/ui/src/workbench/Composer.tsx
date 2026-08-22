@@ -1,5 +1,5 @@
 import { forwardRef, KeyboardEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { ArrowUp, Clock3, CornerDownRight, LoaderCircle, Plus, Square, X } from "lucide-react";
+import { ArrowUp, LoaderCircle, Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
@@ -19,6 +19,7 @@ import {
   type SlashCommandPaletteSource,
 } from "./slash-commands";
 import type { ToolPreset } from "../tool-presets";
+import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import type { SendBehavior } from "./useApplicationController";
 
 interface ComposerProps {
@@ -30,6 +31,7 @@ interface ComposerProps {
   thinkingLevel: string;
   contextUsage: ContextUsage | null;
   busy: boolean;
+  streamingInputBehavior: StreamingInputBehavior;
   sessions: SessionInfo[];
   toolPreset: ToolPreset;
   slashCommands: SlashCommandInfo[];
@@ -57,7 +59,6 @@ const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [queueBehavior, setQueueBehavior] = useState<Extract<SendBehavior, "steer" | "follow_up">>("steer");
   const [submitting, setSubmitting] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -210,13 +211,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     element.style.height = `${Math.min(element.scrollHeight, 180)}px`;
   }, [text]);
 
-  const send = async (behavior?: SendBehavior) => {
+  const send = async () => {
     const value = text.trim();
     if (!value || submitting || (props.busy && images.length > 0)) return;
     setSubmitting(true);
     setText("");
     try {
-      await props.onSend(value, behavior ?? (props.busy ? queueBehavior : "prompt"), images);
+      await props.onSend(value, props.busy ? props.streamingInputBehavior : "prompt", images);
       for (const image of images) {
         if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
       }
@@ -382,7 +383,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ref={textareaRef}
           rows={1}
           value={text}
-          placeholder={props.busy ? "插入当前运行，或切换为稍后处理" : props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行"}
+          placeholder={props.busy
+            ? (props.streamingInputBehavior === "steer" ? "输入消息以插入当前运行" : "输入消息以排到当前运行之后")
+            : (props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行")}
           aria-label="消息"
           enterKeyHint={props.mobile ? "enter" : "send"}
           onChange={(event) => {
@@ -409,28 +412,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             >
               <Plus size={18} />
             </button>
-            {props.busy && (
-              <div className="pi-queue-mode" role="group" aria-label="消息处理方式">
-                <button
-                  type="button"
-                  className={queueBehavior === "steer" ? "is-active" : ""}
-                  aria-pressed={queueBehavior === "steer"}
-                  onClick={() => setQueueBehavior("steer")}
-                >
-                  <CornerDownRight size={12} />
-                  插入
-                </button>
-                <button
-                  type="button"
-                  className={queueBehavior === "follow_up" ? "is-active" : ""}
-                  aria-pressed={queueBehavior === "follow_up"}
-                  onClick={() => setQueueBehavior("follow_up")}
-                >
-                  <Clock3 size={12} />
-                  稍后
-                </button>
-              </div>
-            )}
           </div>
           <div className="pi-composer-meta">
             <ContextUsageIndicator usage={props.contextUsage} />
@@ -458,33 +439,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 />
               </>
             )}
-            {props.busy ? (
-              <>
-                <button
-                  className="pi-stop-button"
-                  type="button"
-                  aria-label="停止"
-                  onClick={() => void props.onAbort()}
-                >
-                  <Square size={11} fill="currentColor" />
-                </button>
-                {text.trim() && (
-                  <button
-                    className="pi-send-button is-queue"
-                    type="button"
-                    aria-label={queueBehavior === "steer" ? "插入消息" : "稍后发送"}
-                    disabled={images.length > 0 || submitting}
-                    onClick={() => void send(queueBehavior)}
-                  >
-                    {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
-                  </button>
-                )}
-              </>
+            {props.busy && (!text.trim() || images.length > 0) ? (
+              <button
+                className="pi-stop-button"
+                type="button"
+                aria-label="停止"
+                onClick={() => void props.onAbort()}
+              >
+                <Square size={11} fill="currentColor" />
+              </button>
             ) : (
               <button
-                className="pi-send-button"
+                className={`pi-send-button ${props.busy ? "is-queue" : ""}`}
                 type="button"
-                aria-label="发送"
+                aria-label={props.busy
+                  ? (props.streamingInputBehavior === "steer" ? "插入消息" : "稍后发送")
+                  : "发送"}
                 disabled={!text.trim() || submitting}
                 onClick={() => void send()}
               >

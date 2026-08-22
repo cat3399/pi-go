@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArrowLeft, Info, Radio, Settings } from "lucide-react";
+import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Radio, Settings } from "lucide-react";
 import type { ClientKind } from "../contracts";
+import type { StreamingInputBehavior } from "../streaming-input-behavior";
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -10,15 +11,17 @@ interface SettingsDrawerProps {
   localAvailable: boolean;
   localError?: string;
   hostKind: "desktop" | "web" | "mobile";
+  streamingInputBehavior: StreamingInputBehavior;
   onClose(): void;
   onUseLocal(): void;
   onUseRemote(endpoint: string): void;
+  onStreamingInputBehaviorChange(value: StreamingInputBehavior): void;
 }
 
 export function SettingsDrawer(props: SettingsDrawerProps) {
   const [endpoint, setEndpoint] = useState(props.endpoint);
   const [error, setError] = useState("");
-  const [page, setPage] = useState<"connection" | "about">("connection");
+  const [page, setPage] = useState<"connection" | "input" | "about">("connection");
 
   useEffect(() => setEndpoint(props.endpoint), [props.endpoint]);
   useEffect(() => {
@@ -53,6 +56,14 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
           >
             <Radio size={17} />
             <span>连接</span>
+          </button>
+          <button
+            type="button"
+            className={page === "input" ? "is-active" : ""}
+            onClick={() => setPage("input")}
+          >
+            <MessageSquareText size={17} />
+            <span>输入</span>
           </button>
           <button
             type="button"
@@ -107,6 +118,44 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                   {error && <p className="pi-settings-error">{error}</p>}
                 </form>
               </div>
+            </section>
+          </>
+        ) : page === "input" ? (
+          <>
+            <h1>输入</h1>
+            <section className="pi-settings-content-section">
+              <h2>任务运行时发送</h2>
+              <div className="pi-settings-card" role="radiogroup" aria-label="任务运行时的消息处理方式">
+                <button
+                  className={`pi-settings-choice-row ${props.streamingInputBehavior === "steer" ? "is-selected" : ""}`}
+                  type="button"
+                  role="radio"
+                  aria-checked={props.streamingInputBehavior === "steer"}
+                  onClick={() => props.onStreamingInputBehaviorChange("steer")}
+                >
+                  <span className="pi-settings-item-icon"><CornerDownRight size={17} /></span>
+                  <span>
+                    <strong>插入当前运行</strong>
+                    <small>在当前任务下一次模型调用前送入这条消息。</small>
+                  </span>
+                  <span className="pi-selection-dot" aria-hidden="true" />
+                </button>
+                <button
+                  className={`pi-settings-choice-row ${props.streamingInputBehavior === "follow_up" ? "is-selected" : ""}`}
+                  type="button"
+                  role="radio"
+                  aria-checked={props.streamingInputBehavior === "follow_up"}
+                  onClick={() => props.onStreamingInputBehaviorChange("follow_up")}
+                >
+                  <span className="pi-settings-item-icon"><Clock3 size={17} /></span>
+                  <span>
+                    <strong>排到下一轮</strong>
+                    <small>当前任务结束后，自动把这条消息作为下一轮输入。</small>
+                  </span>
+                  <span className="pi-selection-dot" aria-hidden="true" />
+                </button>
+              </div>
+              <p className="pi-settings-footnote">任务运行时，输入框为空显示停止按钮；有文字时，同一位置切换为发送按钮。</p>
             </section>
           </>
         ) : (

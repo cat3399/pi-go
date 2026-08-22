@@ -2,6 +2,12 @@
 
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import {
+  DEFAULT_STREAMING_INPUT_BEHAVIOR,
+  readStreamingInputBehavior,
+  writeStreamingInputBehavior,
+  type StreamingInputBehavior,
+} from "@cat3399/pi-workbench";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -10,6 +16,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
+import { PreferencesConfig } from "./PreferencesConfig";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
@@ -69,6 +76,8 @@ export function AppShell() {
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
+  const [preferencesConfigOpen, setPreferencesConfigOpen] = useState(false);
+  const [streamingInputBehavior, setStreamingInputBehavior] = useState<StreamingInputBehavior>(DEFAULT_STREAMING_INPUT_BEHAVIOR);
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
@@ -145,6 +154,15 @@ export function AppShell() {
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const languageBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    setStreamingInputBehavior(readStreamingInputBehavior());
+  }, []);
+
+  const changeStreamingInputBehavior = useCallback((value: StreamingInputBehavior) => {
+    setStreamingInputBehavior(value);
+    writeStreamingInputBehavior(value);
+  }, []);
 
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
@@ -674,6 +692,17 @@ export function AppShell() {
                 <path d="M15 7V2" />
                 <path d="M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0Z" />
                 <path d="M12 19v3" />
+              </svg>
+            ),
+          },
+          {
+            label: translate("common.settings"),
+            onClick: () => setPreferencesConfigOpen(true),
+            disabled: false,
+            icon: (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.12.4.33.75.6 1 .28.26.67.4 1.1.4h.1v4h-.1c-.43 0-.82.14-1.1.4-.27.25-.48.6-.6 1Z" />
               </svg>
             ),
           },
@@ -1496,6 +1525,7 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              streamingInputBehavior={streamingInputBehavior}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -1637,6 +1667,13 @@ export function AppShell() {
       </svg>
     </button>
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
+    {preferencesConfigOpen && (
+      <PreferencesConfig
+        streamingInputBehavior={streamingInputBehavior}
+        onStreamingInputBehaviorChange={changeStreamingInputBehavior}
+        onClose={() => setPreferencesConfigOpen(false)}
+      />
+    )}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}

@@ -2,6 +2,11 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import { Folder, LoaderCircle, PanelLeft, Settings } from "lucide-react";
 import type { ApplicationClient, ImageAttachment } from "../contracts";
 import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
+import {
+  readStreamingInputBehavior,
+  writeStreamingInputBehavior,
+  type StreamingInputBehavior,
+} from "../streaming-input-behavior";
 import { AuthGate } from "./AuthGate";
 import { Composer, type ComposerHandle } from "./Composer";
 import { MessageList } from "./MessageList";
@@ -80,6 +85,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
   const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
+  const [streamingInputBehavior, setStreamingInputBehavior] = useState(readStreamingInputBehavior);
   const composerRef = useRef<ComposerHandle>(null);
   const controller = useApplicationController(client);
   const sidebar = useResizableSidebar();
@@ -154,6 +160,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   };
 
   const closePointPicker = useCallback(() => setPointPicker(null), []);
+  const changeStreamingInputBehavior = useCallback((value: StreamingInputBehavior) => {
+    setStreamingInputBehavior(value);
+    writeStreamingInputBehavior(value);
+  }, []);
   const send = useCallback(async (
     text: string,
     behavior?: SendBehavior,
@@ -261,9 +271,11 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       localAvailable={props.localAvailable}
       localError={props.localError}
       hostKind={hostKind}
+      streamingInputBehavior={streamingInputBehavior}
       onClose={() => setSettingsOpen(false)}
       onUseLocal={useLocal}
       onUseRemote={useRemote}
+      onStreamingInputBehaviorChange={changeStreamingInputBehavior}
     />
   );
 
@@ -419,6 +431,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               thinkingLevel={controller.thinkingLevel}
               contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
               busy={controller.busy}
+              streamingInputBehavior={streamingInputBehavior}
               sessions={sessions}
               toolPreset={controller.toolPreset}
               slashCommands={controller.slashCommands}
