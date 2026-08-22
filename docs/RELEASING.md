@@ -47,7 +47,8 @@ make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
 - Go module 和编译缓存按 runner、架构及对应 `go.sum` 区分；
 - npm 下载缓存按各 frontend 的 lockfile 区分；
 - Web 额外复用 Next 增量构建缓存，六个目标只执行一次前端生产构建；
-- Android 缓存 Gradle 依赖与 wrapper、固定版本的 NDK，以及固定版本的 Task/Wails 工具。
+- Android 缓存 Gradle 依赖与 wrapper、固定版本的 NDK 和 Wails CLI；Task 使用固定版本的预编译工具，
+  避免为运行构建任务额外编译 Task 自身。
 
 所有引用的第三方 GitHub Actions 都固定到完整 commit SHA，避免浮动 tag 在无代码变更时改变构建。
 

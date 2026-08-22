@@ -3,4 +3,5 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
+npm --prefix "$repo_dir/surface/ui" ci
 npm --prefix "$repo_dir/surface/web/_frontend" ci

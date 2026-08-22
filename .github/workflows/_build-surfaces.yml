@@ -89,15 +89,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: surface/web/_frontend/package-lock.json
+          cache-dependency-path: |
+            surface/ui/package-lock.json
+            surface/web/_frontend/package-lock.json
 
       - name: Restore Next build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: surface/web/_frontend/.next/cache
-          key: web-next-${{ runner.os }}-${{ hashFiles('surface/web/_frontend/package-lock.json') }}-${{ github.sha }}
+          key: web-next-${{ runner.os }}-${{ hashFiles('surface/ui/package-lock.json', 'surface/web/_frontend/package-lock.json') }}-${{ github.sha }}
           restore-keys: |
-            web-next-${{ runner.os }}-${{ hashFiles('surface/web/_frontend/package-lock.json') }}-
+            web-next-${{ runner.os }}-${{ hashFiles('surface/ui/package-lock.json', 'surface/web/_frontend/package-lock.json') }}-
 
       - name: Build frontend once and package web targets
         env:
@@ -191,7 +193,6 @@ jobs:
     timeout-minutes: 60
     env:
       ANDROID_NDK_VERSION: 26.3.11579264
-      TASK_VERSION: 3.52.0
       WAILS_VERSION: v3.0.0-beta.8
     steps:
       - name: Check out source
@@ -230,29 +231,35 @@ jobs:
         with:
           path: /usr/local/lib/android/sdk/ndk/26.3.11579264
           key: android-ndk-${{ runner.os }}-26.3.11579264
+          save-always: true
 
       - name: Install pinned Android NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ANDROID_NDK_VERSION" > /dev/null
 
-      - name: Restore pinned build tools
-        id: go-tools-cache
+      - name: Set up Task
+        uses: go-task/setup-task@a00fbb05ce67b35648be3c78cbc9fd85354c757e # v2.2.0
+        with:
+          version: 3.52.0
+
+      - name: Restore pinned Wails CLI
+        id: wails-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/bin
-          key: go-tools-${{ runner.os }}-${{ runner.arch }}-task-3.52.0-wails-3.0.0-beta.8
+          key: go-tool-${{ runner.os }}-${{ runner.arch }}-wails-3.0.0-beta.8
+          save-always: true
 
-      - name: Install Task and Wails
+      - name: Install Wails
         run: |
           tool_bin="$(go env GOPATH)/bin"
           mkdir -p "$tool_bin"
-          if [[ ! -x "$tool_bin/task" ]]; then
-            go install github.com/go-task/task/v3/cmd/task@v${TASK_VERSION}
-          fi
           if [[ ! -x "$tool_bin/wails3" ]]; then
             go install github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_VERSION}
           fi
           echo "$tool_bin" >> "$GITHUB_PATH"
+          task --version
+          "$tool_bin/wails3" version
 
       - name: Install frontend dependencies
         run: make setup SURFACE=mobile
