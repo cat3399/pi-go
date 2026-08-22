@@ -203,7 +203,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, request Request) EventSt
 		model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes,
 		onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides),
 		configurationFail: p.configurationFail, maxRetries: valueOrZero32(options.MaxRetries), maxRetryDelayMS: cloneUint64(options.MaxRetryDelayMS),
-		slots: make(map[int]*anthropicContentSlot), toolNames: toolNames,
+		slots: make(map[int]*anthropicContentSlot), ignoredContent: make(map[int]struct{}), toolNames: toolNames,
 	}
 }
 
@@ -841,17 +841,18 @@ type anthropicFailureSpec struct {
 }
 
 type anthropicContentSlot struct {
-	kind          string
-	contentIndex  int
-	providerIndex int
-	text          strings.Builder
-	signature     strings.Builder
-	redactedData  string
-	toolID        string
-	toolName      string
-	arguments     []byte
-	rawArguments  []byte
-	argumentDelta bool
+	kind            string
+	contentIndex    int
+	thinkingStarted bool
+	providerIndex   int
+	text            strings.Builder
+	signature       strings.Builder
+	redactedData    string
+	toolID          string
+	toolName        string
+	arguments       []byte
+	rawArguments    []byte
+	argumentDelta   bool
 }
 
 type anthropicStream struct {
@@ -886,6 +887,7 @@ type anthropicStream struct {
 	decoder          *responsesSSEDecoder
 	queue            []llm.StreamEvent
 	slots            map[int]*anthropicContentSlot
+	ignoredContent   map[int]struct{}
 	toolNames        map[string]string
 	nextContentIndex int
 	responseID       string
@@ -912,7 +914,7 @@ func newAnthropicFailureStream(ctx context.Context, clock Clock, model Model, ki
 		clock = time.Now
 	}
 	streamContext, cancel := context.WithCancelCause(ctx)
-	return &anthropicStream{ctx: streamContext, cancel: cancel, clock: clock, timestamp: clock(), model: model, preflight: &anthropicFailureSpec{kind: kind, cause: cause, message: message}, slots: make(map[int]*anthropicContentSlot)}
+	return &anthropicStream{ctx: streamContext, cancel: cancel, clock: clock, timestamp: clock(), model: model, preflight: &anthropicFailureSpec{kind: kind, cause: cause, message: message}, slots: make(map[int]*anthropicContentSlot), ignoredContent: make(map[int]struct{})}
 }
 
 func (s *anthropicStream) Next() (llm.StreamEvent, error) {
@@ -1194,8 +1196,8 @@ type anthropicUsageWire struct {
 type anthropicMessageStartEvent struct {
 	Type    string `json:"type"`
 	Message struct {
-		ID    string             `json:"id"`
-		Usage anthropicUsageWire `json:"usage"`
+		ID    json.RawMessage `json:"id"`
+		Usage json.RawMessage `json:"usage"`
 	} `json:"message"`
 }
 
@@ -1203,21 +1205,21 @@ type anthropicContentEvent struct {
 	Type         string `json:"type"`
 	Index        int    `json:"index"`
 	ContentBlock struct {
-		Type      string         `json:"type"`
-		Text      string         `json:"text"`
-		Thinking  string         `json:"thinking"`
-		Signature string         `json:"signature"`
-		Data      string         `json:"data"`
-		ID        string         `json:"id"`
-		Name      string         `json:"name"`
-		Input     map[string]any `json:"input"`
+		Type      string          `json:"type"`
+		Text      string          `json:"text"`
+		Thinking  string          `json:"thinking"`
+		Signature json.RawMessage `json:"signature"`
+		Data      json.RawMessage `json:"data"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Input     map[string]any  `json:"input"`
 	} `json:"content_block"`
 	Delta struct {
-		Type        string `json:"type"`
-		Text        string `json:"text"`
-		Thinking    string `json:"thinking"`
-		PartialJSON string `json:"partial_json"`
-		Signature   string `json:"signature"`
+		Type        string          `json:"type"`
+		Text        string          `json:"text"`
+		Thinking    string          `json:"thinking"`
+		PartialJSON string          `json:"partial_json"`
+		Signature   json.RawMessage `json:"signature"`
 	} `json:"delta"`
 }
 
@@ -1229,7 +1231,7 @@ type anthropicMessageDeltaEvent struct {
 			Explanation string `json:"explanation"`
 		} `json:"stop_details"`
 	} `json:"delta"`
-	Usage *anthropicUsageWire `json:"usage"`
+	Usage json.RawMessage `json:"usage"`
 }
 
 type anthropicErrorEvent struct {
@@ -1259,12 +1261,9 @@ func (s *anthropicStream) process(data []byte) *anthropicFailureSpec {
 		if s.sawMessageStart {
 			return s.invalidEvent(errors.New("duplicate message_start"))
 		}
-		if !utf8.ValidString(event.Message.ID) || strings.TrimSpace(event.Message.ID) == "" {
-			return s.invalidEvent(errors.New("message_start is missing an id"))
-		}
 		s.sawMessageStart = true
-		s.responseID = event.Message.ID
-		s.usage.apply(event.Message.Usage)
+		s.responseID = anthropicResponseID(event.Message.ID)
+		s.usage.applyRaw(event.Message.Usage)
 		return nil
 	case "content_block_start":
 		var event anthropicContentEvent
@@ -1289,9 +1288,7 @@ func (s *anthropicStream) process(data []byte) *anthropicFailureSpec {
 		if err := unmarshalAnthropicEvent(data, &event); err != nil {
 			return s.invalidEvent(err)
 		}
-		if event.Usage != nil {
-			s.usage.apply(*event.Usage)
-		}
+		s.usage.applyRaw(event.Usage)
 		if event.Delta.StopReason != "" {
 			s.stopReason = event.Delta.StopReason
 			reason, failure := anthropicFinishReason(event.Delta.StopReason, event.Delta.StopDetails)
@@ -1311,10 +1308,7 @@ func (s *anthropicStream) process(data []byte) *anthropicFailureSpec {
 		if !s.hasFinishReason {
 			return s.invalidEvent(errors.New("message_stop arrived without stop_reason"))
 		}
-		usage, failure := s.usage.normalized(s.model)
-		if failure != nil {
-			return failure
-		}
+		usage := s.usage.normalized(s.model)
 		metadata := &llm.AssistantResponseMetadata{ResponseID: s.responseID, RawStopReason: s.stopReason}
 		done, err := llm.NewDoneEventWithMetadata(s.finishReason, usage, s.timestamp, assistantProvenanceForModel(s.model), metadata, nil)
 		if err != nil {
@@ -1347,14 +1341,17 @@ func (s *anthropicStream) startContent(event anthropicContentEvent) *anthropicFa
 	if _, duplicate := s.slots[event.Index]; duplicate {
 		return s.invalidEvent(fmt.Errorf("content block index %d started twice", event.Index))
 	}
-	slot := &anthropicContentSlot{kind: event.ContentBlock.Type, contentIndex: s.nextContentIndex, providerIndex: event.Index}
+	delete(s.ignoredContent, event.Index)
+	slot := &anthropicContentSlot{kind: event.ContentBlock.Type, contentIndex: -1, providerIndex: event.Index}
 	switch event.ContentBlock.Type {
 	case "text":
+		slot.contentIndex = s.nextContentIndex
 		start, err := llm.NewTextStartEvent(slot.contentIndex)
 		if err != nil {
 			return s.invalidEvent(err)
 		}
 		s.queue = append(s.queue, start)
+		s.nextContentIndex++
 		if event.ContentBlock.Text != "" {
 			slot.text.WriteString(event.ContentBlock.Text)
 			// The TypeScript event carries the initial block through `partial`.
@@ -1364,29 +1361,36 @@ func (s *anthropicStream) startContent(event anthropicContentEvent) *anthropicFa
 			s.queue = append(s.queue, delta)
 		}
 	case "thinking":
-		start, err := llm.NewThinkingStartEvent(slot.contentIndex)
-		if err != nil {
-			return s.invalidEvent(err)
+		if signature, ok := anthropicOpaqueMetadata(event.ContentBlock.Signature); ok {
+			slot.signature.WriteString(signature)
 		}
-		s.queue = append(s.queue, start)
-		slot.signature.WriteString(event.ContentBlock.Signature)
 		if event.ContentBlock.Thinking != "" {
 			slot.text.WriteString(event.ContentBlock.Thinking)
+		}
+		if failure := s.startThinking(slot); failure != nil {
+			return failure
+		}
+		if slot.thinkingStarted && event.ContentBlock.Thinking != "" {
 			delta, _ := llm.NewThinkingDeltaEvent(slot.contentIndex, event.ContentBlock.Thinking)
 			s.queue = append(s.queue, delta)
 		}
 	case "redacted_thinking":
-		slot.redactedData = event.ContentBlock.Data
-		if strings.TrimSpace(slot.redactedData) == "" {
-			return s.invalidEvent(errors.New("redacted thinking block has no data"))
+		data, ok := anthropicOpaqueMetadata(event.ContentBlock.Data)
+		if !ok || strings.TrimSpace(data) == "" {
+			s.ignoredContent[event.Index] = struct{}{}
+			return nil
 		}
+		if _, err := llm.NewThinkingBlockWithSignature("[Reasoning redacted]", data, true); err != nil {
+			s.ignoredContent[event.Index] = struct{}{}
+			return nil
+		}
+		slot.redactedData = data
 		slot.text.WriteString("[Reasoning redacted]")
-		start, err := llm.NewThinkingStartEvent(slot.contentIndex)
-		if err != nil {
-			return s.invalidEvent(err)
+		if failure := s.startThinking(slot); failure != nil {
+			return failure
 		}
 		delta, _ := llm.NewThinkingDeltaEvent(slot.contentIndex, "[Reasoning redacted]")
-		s.queue = append(s.queue, start, delta)
+		s.queue = append(s.queue, delta)
 	case "tool_use":
 		if strings.TrimSpace(event.ContentBlock.ID) == "" || strings.TrimSpace(event.ContentBlock.Name) == "" {
 			return s.invalidEvent(errors.New("tool_use block has no id/name"))
@@ -1395,11 +1399,13 @@ func (s *anthropicStream) startContent(event anthropicContentEvent) *anthropicFa
 		if original, ok := s.toolNames[strings.ToLower(slot.toolName)]; ok {
 			slot.toolName = original
 		}
+		slot.contentIndex = s.nextContentIndex
 		start, err := llm.NewToolCallStartEvent(slot.contentIndex, slot.toolID, slot.toolName)
 		if err != nil {
 			return s.invalidEvent(err)
 		}
 		s.queue = append(s.queue, start)
+		s.nextContentIndex++
 		if len(event.ContentBlock.Input) != 0 {
 			initial, _ := json.Marshal(event.ContentBlock.Input)
 			if string(initial) != "{}" {
@@ -1407,24 +1413,44 @@ func (s *anthropicStream) startContent(event anthropicContentEvent) *anthropicFa
 			}
 		}
 	default:
-		// Preserve provider index accounting but do not expose unknown blocks as
-		// executable or replayable assistant content.
-		slot.kind = "ignored"
-		s.slots[event.Index] = slot
+		// Unknown blocks are forward-compatible metadata. Do not register them as
+		// open known content: a gateway may not give them the lifecycle events our
+		// adapter understands, and they must never hold a completed tool call open.
+		s.ignoredContent[event.Index] = struct{}{}
 		return nil
 	}
 	s.slots[event.Index] = slot
+	return nil
+}
+
+func (s *anthropicStream) startThinking(slot *anthropicContentSlot) *anthropicFailureSpec {
+	if slot.thinkingStarted {
+		return nil
+	}
+	thinking := slot.text.String()
+	if thinking == "" {
+		if _, err := llm.NewThinkingBlockWithSignature("", slot.signature.String(), false); err != nil {
+			return nil
+		}
+	}
+	slot.contentIndex = s.nextContentIndex
+	start, err := llm.NewThinkingStartEvent(slot.contentIndex)
+	if err != nil {
+		return s.invalidEvent(err)
+	}
 	s.nextContentIndex++
+	slot.thinkingStarted = true
+	s.queue = append(s.queue, start)
 	return nil
 }
 
 func (s *anthropicStream) deltaContent(event anthropicContentEvent) *anthropicFailureSpec {
 	slot := s.slots[event.Index]
 	if slot == nil {
+		if _, ignored := s.ignoredContent[event.Index]; ignored {
+			return nil
+		}
 		return s.invalidEvent(fmt.Errorf("delta has no open content block at index %d", event.Index))
-	}
-	if slot.kind == "ignored" {
-		return nil
 	}
 	switch event.Delta.Type {
 	case "text_delta":
@@ -1442,16 +1468,37 @@ func (s *anthropicStream) deltaContent(event anthropicContentEvent) *anthropicFa
 			return s.invalidEvent(errors.New("thinking delta does not match open block"))
 		}
 		slot.text.WriteString(event.Delta.Thinking)
+		if failure := s.startThinking(slot); failure != nil {
+			return failure
+		}
+		if !slot.thinkingStarted {
+			return nil
+		}
 		delta, err := llm.NewThinkingDeltaEvent(slot.contentIndex, event.Delta.Thinking)
 		if err != nil {
 			return s.invalidEvent(err)
 		}
 		s.queue = append(s.queue, delta)
 	case "signature_delta":
-		if slot.kind != "thinking" || !utf8.ValidString(event.Delta.Signature) {
+		if slot.kind != "thinking" {
 			return s.invalidEvent(errors.New("signature delta does not match open block"))
 		}
-		slot.signature.WriteString(event.Delta.Signature)
+		signature, ok := anthropicOpaqueMetadata(event.Delta.Signature)
+		if !ok {
+			return nil
+		}
+		if slot.text.Len() == 0 {
+			candidate := slot.signature.String() + signature
+			if _, err := llm.NewThinkingBlockWithSignature("", candidate, false); err != nil {
+				// Keep the last replayable handle. A later invalid signature fragment
+				// must not leave an already-started empty thinking block uncloseable.
+				return nil
+			}
+		}
+		slot.signature.WriteString(signature)
+		if failure := s.startThinking(slot); failure != nil {
+			return failure
+		}
 	case "input_json_delta":
 		if slot.kind != "tool_use" || !utf8.ValidString(event.Delta.PartialJSON) {
 			return s.invalidEvent(errors.New("tool input delta does not match open block"))
@@ -1486,6 +1533,10 @@ func (s *anthropicStream) deltaContent(event anthropicContentEvent) *anthropicFa
 func (s *anthropicStream) stopContent(index int) *anthropicFailureSpec {
 	slot := s.slots[index]
 	if slot == nil {
+		if _, ignored := s.ignoredContent[index]; ignored {
+			delete(s.ignoredContent, index)
+			return nil
+		}
 		return s.invalidEvent(fmt.Errorf("content block stop has no open block at index %d", index))
 	}
 	delete(s.slots, index)
@@ -1497,10 +1548,18 @@ func (s *anthropicStream) stopContent(index int) *anthropicFailureSpec {
 		}
 		s.queue = append(s.queue, end)
 	case "thinking":
+		if !slot.thinkingStarted {
+			return nil
+		}
 		signature := slot.signature.String()
 		block, err := llm.NewThinkingBlockWithSignature(slot.text.String(), signature, false)
 		if err != nil {
-			return s.invalidEvent(err)
+			// A malformed replay handle is not a reason to discard visible thinking
+			// or a later tool call. Its safe degradation is an unreplayable block.
+			block, err = llm.NewThinkingBlock(slot.text.String())
+			if err != nil {
+				return nil
+			}
 		}
 		end, err := llm.NewThinkingEndEvent(slot.contentIndex, block)
 		if err != nil {
@@ -1510,7 +1569,9 @@ func (s *anthropicStream) stopContent(index int) *anthropicFailureSpec {
 	case "redacted_thinking":
 		block, err := llm.NewThinkingBlockWithSignature(slot.text.String(), slot.redactedData, true)
 		if err != nil {
-			return s.invalidEvent(err)
+			// This is checked at block start; keep a defensive non-blocking path in
+			// case a future wire change makes the opaque value unrepresentable.
+			return nil
 		}
 		end, err := llm.NewThinkingEndEvent(slot.contentIndex, block)
 		if err != nil {
@@ -1545,8 +1606,6 @@ func (s *anthropicStream) stopContent(index int) *anthropicFailureSpec {
 			return s.invalidEvent(err)
 		}
 		s.queue = append(s.queue, end)
-	case "ignored":
-		// Forward-compatible block kinds are intentionally non-observable.
 	}
 	return nil
 }
@@ -1572,6 +1631,28 @@ func anthropicFinishReason(value string, details *struct {
 	default:
 		return 0, &anthropicFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: unhandled stop reason %q", ErrAnthropicStream, value), message: "Anthropic returned an unknown stop reason"}
 	}
+}
+
+func anthropicOpaqueMetadata(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !utf8.ValidString(value) {
+		return "", false
+	}
+	return value, true
+}
+
+func (u *anthropicUsageAccumulator) applyRaw(raw json.RawMessage) {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return
+	}
+	var usage anthropicUsageWire
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		return
+	}
+	u.apply(usage)
 }
 
 func (u *anthropicUsageAccumulator) apply(raw anthropicUsageWire) {
@@ -1603,18 +1684,38 @@ func (u *anthropicUsageAccumulator) apply(raw anthropicUsageWire) {
 	}
 }
 
-func (u anthropicUsageAccumulator) normalized(model Model) (llm.Usage, *anthropicFailureSpec) {
-	usage, err := llm.NewUsage(llm.UsageSpec{Input: u.input, Output: u.output, CacheRead: u.cacheRead, CacheWrite: u.cacheWrite, Reasoning: u.reasoning, CacheWrite1h: u.cacheWrite1h})
+func (u anthropicUsageAccumulator) normalized(model Model) llm.Usage {
+	cacheWrite1h := u.cacheWrite1h
+	if cacheWrite1h != nil && *cacheWrite1h > u.cacheWrite {
+		// The 1h value is only a billing split. Preserve the request's usable
+		// accounting rather than rejecting its completed content for this detail.
+		cacheWrite1h = nil
+	}
+	usage, err := llm.NewUsage(llm.UsageSpec{Input: u.input, Output: u.output, CacheRead: u.cacheRead, CacheWrite: u.cacheWrite, Reasoning: u.reasoning, CacheWrite1h: cacheWrite1h})
 	if err != nil {
-		return llm.Usage{}, &anthropicFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: invalid token usage: %v", ErrAnthropicStream, err), message: "Anthropic returned invalid usage"}
+		// llm.Usage cannot represent an overflowing total. It is still safer to
+		// expose a completed assistant result with zero accounting than turn an
+		// optional provider usage report into an Agent failure.
+		return llm.Usage{}
 	}
-	if u.hasUsage {
-		usage, err = usage.WithCost(model.CalculateCost(usage))
-		if err != nil {
-			return llm.Usage{}, &anthropicFailureSpec{kind: FailureInvalidResponse, cause: err, message: "Anthropic returned invalid usage cost"}
-		}
+	if !u.hasUsage {
+		return usage
 	}
-	return usage, nil
+	withCost, err := usage.WithCost(model.CalculateCost(usage))
+	if err != nil {
+		// Price catalog and cost math are observability concerns. Keep normalized
+		// tokens and the zero-value cost object when they are not representable.
+		return usage
+	}
+	return withCost
+}
+
+func anthropicResponseID(raw json.RawMessage) string {
+	value, ok := anthropicOpaqueMetadata(raw)
+	if !ok || len(value) > 256 {
+		return ""
+	}
+	return value
 }
 
 func (s *anthropicStream) invalidEvent(err error) *anthropicFailureSpec {
@@ -1654,7 +1755,7 @@ func (s *anthropicStream) fail(spec *anthropicFailureSpec) (llm.StreamEvent, err
 	if spec.kind == FailureCancelled {
 		reason = llm.FinishAborted
 	}
-	usage, _ := s.usage.normalized(s.model)
+	usage := s.usage.normalized(s.model)
 	var response *llm.AssistantResponseMetadata
 	if s.responseID != "" || s.stopReason != "" {
 		response = &llm.AssistantResponseMetadata{ResponseID: s.responseID, RawStopReason: s.stopReason}

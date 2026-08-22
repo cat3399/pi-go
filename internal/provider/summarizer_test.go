@@ -177,6 +177,35 @@ func TestContextSummarizerSplitTurnUsesTwoIsolatedCallsAndPiBudgets(t *testing.T
 	}
 }
 
+func TestContextSummarizerPreservesCompletedSplitSummaryWhenUsageCannotBeCombined(t *testing.T) {
+	implementation := mustProvider(t, provider.ScriptedConfig{})
+	maxUint64 := ^uint64(0)
+	mustSetResponses(t, implementation,
+		mustFixedStep(t, summaryTerminalWithUsage(t, "history", maxUint64, 0)),
+		mustFixedStep(t, summaryTerminalWithUsage(t, "prefix", 1, 0)),
+	)
+	model, err := newModel(provider.ModelSpec{Provider: "openai", API: provider.OpenAIResponsesAPI, ID: "split-model", MaxTokens: 1_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return responsesTestTime }, provider.RetryPolicy{MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := summarizer.Summarize(context.Background(), session.SummaryInput{
+		SystemPrompt: "system", Prompt: "history prompt", TurnPrefixPrompt: "prefix prompt",
+		MessagesToSummarize: []agentmsg.Message{summaryAgentMessage(t, "history")},
+		TurnPrefixMessages:  []agentmsg.Message{summaryAgentMessage(t, "prefix")},
+		IsSplitTurn:         true, Settings: session.CompactionSettings{Enabled: true, ReserveTokens: 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output.Text != "history\n\n---\n\n**Turn Context (split turn):**\n\nprefix" || output.Usage != nil {
+		t.Fatalf("output = %#v", output)
+	}
+}
+
 func TestContextSummarizerJoinsResponseTextBlocksLikeContentText(t *testing.T) {
 	implementation := mustProvider(t, provider.ScriptedConfig{})
 	rich, err := newAssistantRichMessage([]llm.AssistantBlock{

@@ -922,11 +922,12 @@ func (l *AgentLoop) toolResultMessages(ctx context.Context, turn uint32, outcome
 func (l *AgentLoop) toolResultMessage(outcome loopToolOutcome) (agentmsg.Message, error) {
 	var details json.RawMessage
 	if outcome.output.Details != nil {
+		// Extension details are not provider-visible. If the untyped value cannot
+		// be represented as JSON, omit it without discarding the settled result.
 		encoded, err := json.Marshal(outcome.output.Details)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			details = encoded
 		}
-		details = encoded
 	}
 	metadata := llm.ToolResultMetadata{Details: details, Usage: outcome.output.Usage, AddedToolNames: outcome.output.AddedToolNames}
 	var conversation llm.ConversationMessage

@@ -340,11 +340,6 @@ func (s *Session) snapshotForExport(ctx context.Context, leafID *string) (export
 	if s.poisoned {
 		return exportSnapshot{}, ErrPoisoned
 	}
-	for _, diagnostic := range s.loadDiagnostics {
-		if diagnostic.Code == LoadDiagnosticMalformedLine {
-			return exportSnapshot{}, fmt.Errorf("%w: line %d must be preserved or explicitly repaired before export", ErrMalformedRecords, diagnostic.Line)
-		}
-	}
 	var entries []Entry
 	if leafID != nil {
 		index, ok := s.byID[*leafID]

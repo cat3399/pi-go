@@ -141,7 +141,10 @@ func (s *ContextSummarizer) SummarizeWithRetryObserver(ctx context.Context, inpu
 		if historyUsage != nil {
 			usage, err = combineCompactionUsage(historyUsage, prefix.Usage)
 			if err != nil {
-				return session.SummaryOutput{}, fmt.Errorf("combine summary usage: %w", err)
+				// The two summaries are already valid durable content. Usage is
+				// accounting metadata, so an unrepresentable aggregate must not
+				// discard the compaction result.
+				usage = nil
 			}
 		}
 		return session.SummaryOutput{

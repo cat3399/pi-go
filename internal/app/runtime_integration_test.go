@@ -621,6 +621,115 @@ func TestProductionAPIKeyWithoutModelRemainsDiagnosticOnly(t *testing.T) {
 	}
 }
 
+func TestProductionNonFatalModelSourceDiagnosticKeepsRuntimeHooks(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doer := &dynamicAuthDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
+	config.OpenAIHTTPClient = doer
+	var beforeAgentStarts atomic.Uint32
+	config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+		beforeAgentStarts.Add(1)
+		return agent.BeforeAgentStartResult{}, nil
+	}
+	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := runtimeDeps.factory(context.Background(), agentruntime.CreateOptions{
+		CWD: cwd, AgentDir: agentDir, SessionManager: manager,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer created.Session.Close(context.Background())
+	if len(created.Diagnostics) == 0 || created.Diagnostics[0].Kind != agentruntime.DiagnosticWarning {
+		t.Fatalf("source diagnostics = %#v", created.Diagnostics)
+	}
+	if _, err := created.Session.Run(context.Background(), "keep hooks"); err != nil {
+		t.Fatal(err)
+	}
+	if beforeAgentStarts.Load() != 1 {
+		t.Fatalf("before_agent_start calls = %d, want 1", beforeAgentStarts.Load())
+	}
+}
+
+func TestRunProductionKeepsHealthyExplicitRouteWithUnrelatedModelSourceDiagnostic(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doer := &dynamicAuthDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
+	config.OpenAIHTTPClient = doer
+	var beforeAgentStarts atomic.Uint32
+	config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+		beforeAgentStarts.Add(1)
+		return agent.BeforeAgentStartResult{}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := RunProduction(context.Background(), config, []string{
+		"--model", "openai/gpt-5.5", "--session", filepath.Join(cwd, "healthy-route.jsonl"), "-p", "continue",
+	}, &stdout, &stderr)
+	if code != ExitSuccess || stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "Warning: Model configuration:") {
+		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if beforeAgentStarts.Load() != 1 || len(doer.snapshot()) != 1 {
+		t.Fatalf("healthy route hooks=%d requests=%d", beforeAgentStarts.Load(), len(doer.snapshot()))
+	}
+}
+
+func TestRunProductionRejectsSelectedProviderWithInvalidCachedCatalog(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "models-store.json"), []byte(`{"openai":{"models":"invalid"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doer := &dynamicAuthDoer{}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
+	config.OpenAIHTTPClient = doer
+	var beforeAgentStarts atomic.Uint32
+	config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
+		beforeAgentStarts.Add(1)
+		return agent.BeforeAgentStartResult{}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := RunProduction(context.Background(), config, []string{
+		"--model", "openai/gpt-5.5", "--session", filepath.Join(cwd, "bad-selected-catalog.jsonl"), "-p", "must not run",
+	}, &stdout, &stderr)
+	if code != ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "selected provider/API is not supported") {
+		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if beforeAgentStarts.Load() != 0 || len(doer.snapshot()) != 0 {
+		t.Fatalf("selected invalid route hooks=%d requests=%d", beforeAgentStarts.Load(), len(doer.snapshot()))
+	}
+}
+
+func TestRunProductionContinuesWithInvalidSettingsDiagnostic(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"retry":"invalid"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
+	config.OpenAIHTTPClient = &dynamicAuthDoer{}
+	var stdout, stderr bytes.Buffer
+	code := RunProduction(context.Background(), config, []string{
+		"--model", "openai/gpt-5.5", "--session", filepath.Join(cwd, "settings-fallback.jsonl"), "-p", "continue",
+	}, &stdout, &stderr)
+	if code != ExitSuccess || stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "Warning: Settings configuration: global settings.json") {
+		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestProductionRuntimeReplacementRebuildsCwdBoundServices(t *testing.T) {
 	firstCWD, secondCWD := t.TempDir(), t.TempDir()
 	agentDir, docsDir := t.TempDir(), t.TempDir()

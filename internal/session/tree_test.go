@@ -359,27 +359,30 @@ func TestForkFromPreservesOrphanForestSemantics(t *testing.T) {
 	}
 }
 
-func TestExportRefusesToSilentlyDropMalformedPhysicalRecords(t *testing.T) {
+func TestExportSkipsMalformedPhysicalRecordsLikeCompatibleLoad(t *testing.T) {
 	directory := t.TempDir()
 	sourcePath := filepath.Join(directory, "damaged-source.jsonl")
 	sourceBytes := []byte(testHeader + "\n" + propertyForestEntry("root", "null") + "\nnot-json\n")
 	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	targetPath := filepath.Join(directory, "must-not-exist.jsonl")
-	if _, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "damaged-fork", WorkingDir: directory}); !errors.Is(err, ErrMalformedRecords) {
-		t.Fatalf("ForkFrom malformed records = %v, want ErrMalformedRecords", err)
+	targetPath := filepath.Join(directory, "damaged-fork.jsonl")
+	fork, err := ForkFrom(context.Background(), sourcePath, ExtractOptions{TargetPath: targetPath, ID: "damaged-fork", WorkingDir: directory})
+	if err != nil {
+		t.Fatalf("ForkFrom malformed records = %v", err)
 	}
-	if _, err := os.Stat(targetPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("malformed export created target: %v", err)
+	defer fork.Close()
+	if entries := fork.Entries(); len(entries) != 1 || entries[0].ID() != "root" {
+		t.Fatalf("fork entries = %#v", entries)
 	}
 	manager, err := OpenSessionManager(sourcePath, directory, directory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	if _, _, err := manager.CreateBranchedSession(context.Background(), "root"); !errors.Is(err, ErrMalformedRecords) {
-		t.Fatalf("CreateBranchedSession malformed records = %v, want ErrMalformedRecords", err)
+	branchedPath, persisted, err := manager.CreateBranchedSession(context.Background(), "root")
+	if err != nil || !persisted {
+		t.Fatalf("CreateBranchedSession malformed records = (%q, %t, %v)", branchedPath, persisted, err)
 	}
 	after, err := os.ReadFile(sourcePath)
 	if err != nil || !bytes.Equal(after, sourceBytes) {

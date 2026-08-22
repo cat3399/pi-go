@@ -379,10 +379,17 @@ type Runtime struct {
 	storeErrors map[string]error
 	configError error
 	storeError  error
-	composeErrs map[string]error
-	faults      atomicWriteFaults
-	refreshMu   sync.Mutex
-	refreshing  map[string]*providerRefreshCall
+	// Settings layers retain their last successful projections. A malformed
+	// settings file is a diagnostic source, not a reason to discard a healthy
+	// Agent/runtime: this mirrors SettingsManager's per-layer recovery.
+	globalSettings       Settings
+	projectSettings      Settings
+	globalSettingsError  error
+	projectSettingsError error
+	composeErrs          map[string]error
+	faults               atomicWriteFaults
+	refreshMu            sync.Mutex
+	refreshing           map[string]*providerRefreshCall
 }
 
 func NewRuntime(options Options) (*Runtime, error) {
@@ -457,16 +464,46 @@ func (r *Runtime) Snapshot() Snapshot {
 	return cloneSnapshot(r.snapshot)
 }
 
-// Error returns non-fatal model-source diagnostics from the latest reload.
-// Invalid models.json or models-store.json never removes built-in providers or
-// prevents Runtime construction; callers may surface this alongside the
-// healthy fallback catalog, matching ModelRuntime.getError().
+// Error returns non-fatal model/settings-source diagnostics from the latest
+// reload. Settings retain their last healthy layer; invalid model sources use
+// the built-in fallback catalog. Neither prevents Runtime construction.
 func (r *Runtime) Error() error {
 	if r == nil {
 		return nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return errors.Join(r.settingsErrorLocked(), r.modelSourceErrorLocked())
+}
+
+// SettingsError reports non-fatal settings-layer diagnostics separately from
+// model/catalog sources. Selected-route validation remains a separate strict
+// boundary.
+func (r *Runtime) SettingsError() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.settingsErrorLocked()
+}
+
+// ModelSourceError reports the non-settings model/catalog diagnostics used by
+// the selected-route assembly boundary.
+func (r *Runtime) ModelSourceError() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.modelSourceErrorLocked()
+}
+
+func (r *Runtime) settingsErrorLocked() error {
+	return errors.Join(r.globalSettingsError, r.projectSettingsError)
+}
+
+func (r *Runtime) modelSourceErrorLocked() error {
 	values := []error{r.configError, r.storeError}
 	ids := make([]string, 0, len(r.composeErrs))
 	for id := range r.composeErrs {
@@ -526,27 +563,37 @@ func (r *Runtime) ValidateRoute(selected Model) error {
 	return nil
 }
 
-// Reload publishes settings transactionally. A malformed models.json or
-// models-store.json is instead recorded as a non-fatal source diagnostic and
-// publishes the healthy built-in fallback, matching ModelRuntime.getError().
-// A missing optional file is a healthy empty source.
+// Reload publishes source projections transactionally. A malformed settings
+// layer retains its previous successful layer (or an empty initial layer) and
+// is recorded as a non-fatal diagnostic. Invalid models.json or
+// models-store.json likewise publish their healthy fallback. A missing
+// optional file is a healthy empty source.
 func (r *Runtime) Reload(ctx context.Context) error {
 	releaseLocal, err := acquireLocal(ctx, r.local)
 	if err != nil {
 		return err
 	}
 	defer releaseLocal()
-	settings, err := loadSettings(filepath.Join(r.options.AgentDir, "settings.json"), "global settings.json")
-	if err != nil {
-		return err
+	r.mu.RLock()
+	globalSettings := cloneSettings(r.globalSettings)
+	projectSettings := cloneSettings(r.projectSettings)
+	r.mu.RUnlock()
+	loadedGlobal, globalSettingsError := loadSettings(filepath.Join(r.options.AgentDir, "settings.json"), "global settings.json")
+	if globalSettingsError == nil {
+		globalSettings = loadedGlobal
 	}
+	var projectSettingsError error
 	if r.options.ProjectTrusted {
-		project, err := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
+		loadedProject, err := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
 		if err != nil {
-			return err
+			projectSettingsError = err
+		} else {
+			projectSettings = loadedProject
 		}
-		settings = mergeSettings(settings, project)
+	} else {
+		projectSettings = Settings{}
 	}
+	settings := mergeSettings(globalSettings, projectSettings)
 	providers, configError := loadModels(filepath.Join(r.options.AgentDir, "models.json"))
 	compositionErrors := map[string]error{}
 	if configError != nil {
@@ -568,6 +615,10 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.storeErrors = storeErrors
 	r.configError = configError
 	r.storeError = storeError
+	r.globalSettings = cloneSettings(globalSettings)
+	r.projectSettings = cloneSettings(projectSettings)
+	r.globalSettingsError = globalSettingsError
+	r.projectSettingsError = projectSettingsError
 	r.composeErrs = compositionErrors
 	r.snapshot = snapshot
 	r.registered = rebuildRuntimeProviders(snapshot, r)
@@ -713,14 +764,20 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if err := validateSettings(current, "global settings.json"); err != nil {
 		return err
 	}
-	settings := current
+	projectSettings := Settings{}
+	var projectSettingsError error
 	if r.options.ProjectTrusted {
+		r.mu.RLock()
+		projectSettings = cloneSettings(r.projectSettings)
+		r.mu.RUnlock()
 		project, e := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
 		if e != nil {
-			return e
+			projectSettingsError = e
+		} else {
+			projectSettings = project
 		}
-		settings = mergeSettings(settings, project)
 	}
+	settings := mergeSettings(current, projectSettings)
 	cached, storeErrors, storeError := loadStoreCatalogs(r.options.ModelsStorePath)
 	if storeError != nil {
 		cached = map[string]CachedCatalog{}
@@ -784,6 +841,10 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	r.snapshot.Generation = generation
 	r.storeErrors = storeErrors
 	r.storeError = storeError
+	r.globalSettings = cloneSettings(current)
+	r.projectSettings = cloneSettings(projectSettings)
+	r.globalSettingsError = nil
+	r.projectSettingsError = projectSettingsError
 	r.mu.Unlock()
 	return writeErr
 }

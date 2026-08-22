@@ -44,6 +44,49 @@ func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T)
 	}
 }
 
+func TestListModelProvidersIsolatesUnrelatedAuthCheckFailure(t *testing.T) {
+	cwd := t.TempDir()
+	agentDir := filepath.Join(t.TempDir(), "agent")
+	store, err := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAPIKey(context.Background(), "anthropic", "test-anthropic-key", nil); err != nil {
+		t.Fatal(err)
+	}
+	// OAuth is a valid durable credential shape, but it is not supported by
+	// DeepSeek. Its per-provider CheckAuth must not hide the healthy Anthropic
+	// provider from an authentication-management listing.
+	if err := store.SetOAuth(context.Background(), "deepseek", auth.OAuthCredential{
+		Access: "access", Refresh: "refresh", Expires: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(ServiceOptions{
+		Production:    app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir, Environment: []string{}},
+		DisableReaper: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close(context.Background()) })
+
+	providers, err := service.ListModelProviders(context.Background(), cwd)
+	if err != nil {
+		t.Fatalf("ListModelProviders() = %v", err)
+	}
+	byID := make(map[string]ProviderAuthInfo, len(providers))
+	for _, info := range providers {
+		byID[info.ID] = info
+	}
+	if got, ok := byID["anthropic"]; !ok || !got.Configured || got.Source != "stored credential" {
+		t.Fatalf("healthy Anthropic provider = %#v, present=%v", got, ok)
+	}
+	if got, ok := byID["deepseek"]; !ok || got.Configured || got.Source != "" || got.CredentialType != "oauth" {
+		t.Fatalf("failed DeepSeek provider must degrade to unconfigured without an error: %#v, present=%v", got, ok)
+	}
+}
+
 func TestUIThemeSettingsPersistWithoutLosingUnknownFields(t *testing.T) {
 	cwd := t.TempDir()
 	agentDir := filepath.Join(t.TempDir(), "agent")

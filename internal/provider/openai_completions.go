@@ -1474,11 +1474,15 @@ type completionsUsageWire struct {
 }
 
 type completionsChunk struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
+	// Usage and response metadata are optional accounting/observation fields.
+	// Keep them raw until after the content-bearing chunk has been decoded so a
+	// gateway's malformed accounting does not discard an otherwise complete
+	// assistant turn.
+	ID      json.RawMessage `json:"id"`
+	Model   json.RawMessage `json:"model"`
 	Choices []struct {
-		FinishReason *string               `json:"finish_reason"`
-		Usage        *completionsUsageWire `json:"usage"`
+		FinishReason *string         `json:"finish_reason"`
+		Usage        json.RawMessage `json:"usage"`
 		Delta        struct {
 			Content          *string                      `json:"content"`
 			ToolCalls        []completionsToolCall        `json:"tool_calls"`
@@ -1488,7 +1492,7 @@ type completionsChunk struct {
 			ReasoningDetails []completionsReasoningDetail `json:"reasoning_details"`
 		} `json:"delta"`
 	} `json:"choices"`
-	Usage *completionsUsageWire `json:"usage"`
+	Usage json.RawMessage `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 		Code    string `json:"code"`
@@ -1517,37 +1521,21 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 	if c.Error != nil {
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: errors.New(c.Error.Message), message: c.Error.Message}
 	}
-	if s.responseID == "" && c.ID != "" {
-		s.responseID = c.ID
+	if s.responseID == "" {
+		s.responseID = completionsOptionalString(c.ID, 256)
 	}
-	if s.responseModel == "" && c.Model != "" && c.Model != s.model.ID() {
-		s.responseModel = c.Model
-	}
-	if c.Usage != nil {
-		u, err := completionsUsage(c.Usage)
-		if err != nil {
-			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
+	if s.responseModel == "" {
+		if model := completionsOptionalString(c.Model, 512); model != "" && model != s.model.ID() {
+			s.responseModel = model
 		}
-		u, err = u.WithCost(s.model.CalculateCost(u))
-		if err != nil {
-			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
-		}
-		s.usage = u
 	}
+	hasChunkUsage := s.recordUsage(c.Usage)
 	if len(c.Choices) == 0 {
 		return nil
 	}
 	choice := c.Choices[0]
-	if c.Usage == nil && choice.Usage != nil {
-		u, err := completionsUsage(choice.Usage)
-		if err != nil {
-			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
-		}
-		u, err = u.WithCost(s.model.CalculateCost(u))
-		if err != nil {
-			return &completionsFailureSpec{kind: FailureInvalidResponse, cause: err, message: "OpenAI Chat Completions returned invalid usage"}
-		}
-		s.usage = u
+	if !hasChunkUsage {
+		s.recordUsage(choice.Usage)
 	}
 	if choice.FinishReason != nil {
 		s.sawFinish = true
@@ -1604,28 +1592,62 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 	return nil
 }
 
-func completionsUsage(raw *completionsUsageWire) (llm.Usage, error) {
+func (s *openAICompletionsStream) recordUsage(raw json.RawMessage) bool {
+	usage, ok := completionsUsage(raw)
+	if !ok {
+		return false
+	}
+	if withCost, err := usage.WithCost(s.model.CalculateCost(usage)); err == nil {
+		usage = withCost
+	}
+	s.usage = usage
+	return true
+}
+
+func completionsUsage(raw json.RawMessage) (llm.Usage, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return llm.Usage{}, false
+	}
+	var wire completionsUsageWire
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return llm.Usage{}, false
+	}
 	cacheRead, cacheWrite := uint64(0), uint64(0)
-	if raw.PromptDetails != nil {
-		if raw.PromptDetails.CachedTokens != nil {
-			cacheRead = *raw.PromptDetails.CachedTokens
-		} else if raw.PromptCacheHitTokens != nil {
-			cacheRead = *raw.PromptCacheHitTokens
+	if wire.PromptDetails != nil {
+		if wire.PromptDetails.CachedTokens != nil {
+			cacheRead = *wire.PromptDetails.CachedTokens
+		} else if wire.PromptCacheHitTokens != nil {
+			cacheRead = *wire.PromptCacheHitTokens
 		}
-		cacheWrite = raw.PromptDetails.CacheWriteTokens
-	} else if raw.PromptCacheHitTokens != nil {
-		cacheRead = *raw.PromptCacheHitTokens
+		cacheWrite = wire.PromptDetails.CacheWriteTokens
+	} else if wire.PromptCacheHitTokens != nil {
+		cacheRead = *wire.PromptCacheHitTokens
 	}
 	input := uint64(0)
-	if cacheRead <= raw.PromptTokens && cacheWrite <= raw.PromptTokens-cacheRead {
-		input = raw.PromptTokens - cacheRead - cacheWrite
+	if cacheRead <= wire.PromptTokens && cacheWrite <= wire.PromptTokens-cacheRead {
+		input = wire.PromptTokens - cacheRead - cacheWrite
 	}
-	spec := llm.UsageSpec{Input: input, Output: raw.CompletionTokens, CacheRead: cacheRead, CacheWrite: cacheWrite}
-	if raw.CompletionDetails != nil {
-		r := raw.CompletionDetails.ReasoningTokens
+	spec := llm.UsageSpec{Input: input, Output: wire.CompletionTokens, CacheRead: cacheRead, CacheWrite: cacheWrite}
+	if wire.CompletionDetails != nil {
+		r := wire.CompletionDetails.ReasoningTokens
 		spec.Reasoning = &r
 	}
-	return llm.NewUsage(spec)
+	usage, err := llm.NewUsage(spec)
+	if err != nil {
+		return llm.Usage{}, false
+	}
+	return usage, true
+}
+
+func completionsOptionalString(raw json.RawMessage, limit int) string {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !utf8.ValidString(value) || len(value) > limit {
+		return ""
+	}
+	return value
 }
 
 func (s *openAICompletionsStream) textDelta(delta string) *completionsFailureSpec {

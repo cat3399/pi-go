@@ -255,7 +255,7 @@ func TestProjectNullRequestAssemblySettingsResetGlobalValues(t *testing.T) {
 	}
 }
 
-func TestRequestAssemblySettingsRejectInvalidValues(t *testing.T) {
+func TestRequestAssemblySettingsInvalidInitialLayerPublishesDefaultsAndDiagnostic(t *testing.T) {
 	for _, input := range []string{
 		`{"skills":"skill.md"}`,
 		`{"prompts":[1]}`,
@@ -266,8 +266,15 @@ func TestRequestAssemblySettingsRejectInvalidValues(t *testing.T) {
 	} {
 		agentDir := t.TempDir()
 		writeFile(t, filepath.Join(agentDir, "settings.json"), input)
-		if _, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()}); err == nil {
-			t.Fatalf("NewRuntime(%s) error = nil", input)
+		runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("NewRuntime(%s) = %v", input, err)
+		}
+		if !reflect.DeepEqual(runtime.Snapshot().Settings, Settings{}) {
+			t.Fatalf("NewRuntime(%s) settings = %#v, want defaults", input, runtime.Snapshot().Settings)
+		}
+		if diagnostic := runtime.Error(); diagnostic == nil || !strings.Contains(diagnostic.Error(), "global settings.json") {
+			t.Fatalf("NewRuntime(%s) diagnostic = %v", input, diagnostic)
 		}
 	}
 }
@@ -310,7 +317,7 @@ func TestQueueModeMigrationDoesNotReplaceExplicitSteeringOrUnknownLegacyField(t 
 	}
 }
 
-func TestQueueModeSettingsRejectInvalidValues(t *testing.T) {
+func TestQueueModeSettingsInvalidInitialLayerPublishesDefaultsAndDiagnostic(t *testing.T) {
 	for _, input := range []string{
 		`{"steeringMode":"batch"}`,
 		`{"followUpMode":"batch"}`,
@@ -318,8 +325,15 @@ func TestQueueModeSettingsRejectInvalidValues(t *testing.T) {
 	} {
 		agentDir := t.TempDir()
 		writeFile(t, filepath.Join(agentDir, "settings.json"), input)
-		if _, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()}); err == nil {
-			t.Fatalf("NewRuntime(%s) error = %v", input, err)
+		runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("NewRuntime(%s) = %v", input, err)
+		}
+		if runtime.Snapshot().Settings.SteeringMode != "" || runtime.Snapshot().Settings.FollowUpMode != "" {
+			t.Fatalf("NewRuntime(%s) retained invalid queue settings: %#v", input, runtime.Snapshot().Settings)
+		}
+		if diagnostic := runtime.Error(); diagnostic == nil || !strings.Contains(diagnostic.Error(), "global settings.json") {
+			t.Fatalf("NewRuntime(%s) diagnostic = %v", input, diagnostic)
 		}
 	}
 }
@@ -437,7 +451,7 @@ func TestProviderTransportSettingsParseMergeCloneAndPersistPresence(t *testing.T
 	}
 }
 
-func TestProviderTransportSettingsRejectNullNegativeAndWrongTypes(t *testing.T) {
+func TestProviderTransportSettingsInvalidInitialLayerPublishesDefaultsAndDiagnostic(t *testing.T) {
 	for _, settings := range []string{
 		`{"transport":null}`,
 		`{"transport":""}`,
@@ -452,8 +466,17 @@ func TestProviderTransportSettingsRejectNullNegativeAndWrongTypes(t *testing.T) 
 		`{"retry":{"provider":{"maxRetries":-1}}}`,
 		`{"retry":{"provider":{"maxRetryDelayMs":"1"}}}`,
 	} {
-		if _, _, err := newTestRuntimeNoFatal(t, "", settings, false); err == nil {
-			t.Fatalf("invalid provider transport settings accepted: %s", settings)
+		agentDir := t.TempDir()
+		writeFile(t, filepath.Join(agentDir, "settings.json"), settings)
+		runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("NewRuntime(%s) = %v", settings, err)
+		}
+		if runtime.Snapshot().Settings.Transport != "" || runtime.Snapshot().Settings.Retry.Provider.TimeoutMS != nil {
+			t.Fatalf("invalid provider transport settings retained: %#v", runtime.Snapshot().Settings)
+		}
+		if diagnostic := runtime.Error(); diagnostic == nil || !strings.Contains(diagnostic.Error(), "global settings.json") {
+			t.Fatalf("invalid provider transport settings diagnostic = %v", diagnostic)
 		}
 	}
 }
@@ -1168,6 +1191,53 @@ func TestRuntimeInvalidModelsJSONPublishesBuiltinFallbackAndDiagnostic(t *testin
 	}
 	if _, ok := r.GetModel(OpenAIProviderID, DefaultOpenAIModel); !ok {
 		t.Fatal("builtin fallback catalog was not retained")
+	}
+}
+
+func TestRuntimeSettingsReloadRetainsLastHealthyLayersAndReportsDiagnostics(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"global-one","theme":"dark"}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellCommandPrefix":"project-one"}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings := runtime.Snapshot().Settings; settings.ShellPath != "global-one" || settings.ShellCommandPrefix != "project-one" {
+		t.Fatalf("initial settings = %#v", settings)
+	}
+
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"retry":"invalid"}`)
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatalf("reload with invalid global settings = %v", err)
+	}
+	if settings := runtime.Snapshot().Settings; settings.ShellPath != "global-one" || settings.ShellCommandPrefix != "project-one" {
+		t.Fatalf("global fallback settings = %#v", settings)
+	}
+	if diagnostic := runtime.Error(); diagnostic == nil || !strings.Contains(diagnostic.Error(), "global settings.json") {
+		t.Fatalf("global fallback diagnostic = %v", diagnostic)
+	}
+
+	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"global-two"}`)
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"skills":"invalid"}`)
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatalf("reload with invalid project settings = %v", err)
+	}
+	if settings := runtime.Snapshot().Settings; settings.ShellPath != "global-two" || settings.ShellCommandPrefix != "project-one" {
+		t.Fatalf("project fallback settings = %#v", settings)
+	}
+	if diagnostic := runtime.Error(); diagnostic == nil || strings.Contains(diagnostic.Error(), "global settings.json") || !strings.Contains(diagnostic.Error(), "project settings.json") {
+		t.Fatalf("project fallback diagnostic = %v", diagnostic)
+	}
+
+	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellCommandPrefix":"project-two"}`)
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatalf("reload with repaired settings = %v", err)
+	}
+	if settings := runtime.Snapshot().Settings; settings.ShellPath != "global-two" || settings.ShellCommandPrefix != "project-two" {
+		t.Fatalf("repaired settings = %#v", settings)
+	}
+	if diagnostic := runtime.Error(); diagnostic != nil {
+		t.Fatalf("repaired settings diagnostic = %v", diagnostic)
 	}
 }
 

@@ -1069,17 +1069,16 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			secrets: []string{"ambient-secret", "command-secret"},
 		},
 		{
-			name:        "malformed models JSON",
-			args:        []string{"--model", "openai/gpt-test", "-p", "hello"},
+			name:        "selected provider cached catalog is invalid",
+			args:        []string{"--model", "openai/gpt-5.5", "-p", "hello"},
 			environment: []string{"OPENAI_API_KEY=ambient-secret"},
 			prepare: func(t *testing.T, agentDir string) {
-				content := `{"providers":{"openai":{"apiKey":"models-secret",}} trailing-secret`
-				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(content), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(agentDir, "models-store.json"), []byte(`{"openai":{"models":"invalid"}}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
-			want:    "Model configuration: models.json",
-			secrets: []string{"ambient-secret", "models-secret", "trailing-secret"},
+			want:    "selected provider/API is not supported",
+			secrets: []string{"ambient-secret"},
 		},
 		{
 			name: "missing all credential sources",

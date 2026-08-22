@@ -381,6 +381,131 @@ func TestAnthropicRepairsMalformedToolJSONAndIgnoresUnknownWireContent(t *testin
 	}
 }
 
+func TestAnthropicOptionalUsageAndReplayMetadataCannotVetoCompletedToolCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writeResponsesSSE(t, writer,
+			// Response IDs and token accounting are optional observations. This
+			// gateway omits the former and sends malformed/inconsistent variants
+			// of the latter while still returning a complete executable call.
+			map[string]any{"type": "message_start", "message": map[string]any{"usage": map[string]any{
+				"input_tokens": 1, "cache_creation_input_tokens": 1,
+				"cache_creation": map[string]any{"ephemeral_1h_input_tokens": 2},
+			}}},
+			// Thinking/redaction signatures are replay metadata, not a prerequisite
+			// for executing the following tool call.
+			map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "thinking", "thinking": "plan", "signature": map[string]any{"unexpected": true}}},
+			map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "signature_delta", "signature": []any{"unexpected"}}},
+			map[string]any{"type": "content_block_stop", "index": 0},
+			map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "redacted_thinking", "data": map[string]any{"unexpected": true}}},
+			map[string]any{"type": "content_block_stop", "index": 1},
+			// A future block may not have lifecycle events this adapter knows. It
+			// must not keep the known-content tracker open at message_stop.
+			map[string]any{"type": "content_block_start", "index": 2, "content_block": map[string]any{"type": "future_metadata"}},
+			map[string]any{"type": "content_block_start", "index": 3, "content_block": map[string]any{"type": "tool_use", "id": "toolu-optional", "name": "read", "input": map[string]any{}}},
+			map[string]any{"type": "content_block_delta", "index": 3, "delta": map[string]any{"type": "input_json_delta", "partial_json": `{"path":"README.md"}`}},
+			map[string]any{"type": "content_block_stop", "index": 3},
+			map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}, "usage": map[string]any{"output_tokens": "also-not-a-number"}},
+			map[string]any{"type": "message_stop"},
+		)
+	}))
+	defer server.Close()
+
+	model, err := newModel(provider.ModelSpec{
+		Provider: provider.AnthropicProviderID, API: provider.AnthropicMessagesAPI, ID: "claude-optional", Name: "Claude Optional",
+		BaseURL: server.URL, Input: []provider.InputKind{provider.InputText},
+		// NewModel intentionally accepts catalog cost values from dynamic sources;
+		// unusable billing must not change this completed Agent turn into an error.
+		Cost: provider.CostRates{CacheWrite: -1}, ContextWindow: 100_000, MaxTokens: 8_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := provider.NewToolDefinition("read", "Read a file", false, []byte(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequestWithTools(model, "", []llm.ConversationMessage{mustUser(t, "read")}, []provider.ToolDefinition{tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, err := provider.NewAnthropicProvider(provider.AnthropicConfig{BaseURL: server.URL, APIKey: "anthropic-test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	message, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || message.FinishReason() != llm.FinishToolUse || len(message.Blocks()) != 2 {
+		t.Fatalf("terminal = %T %#v", terminal, terminal)
+	}
+	thinking, ok := message.Blocks()[0].(llm.ThinkingBlock)
+	if !ok || thinking.Thinking() != "plan" {
+		t.Fatalf("thinking = %#v", message.Blocks()[0])
+	}
+	if _, hasSignature := thinking.ThinkingSignature(); hasSignature {
+		t.Fatalf("invalid thinking signature was retained")
+	}
+	call, ok := message.Blocks()[1].(llm.ToolCallBlock)
+	if !ok || call.ID() != "toolu-optional" || string(call.ArgumentsJSON()) != `{"path":"README.md"}` {
+		t.Fatalf("tool call = %#v", message.Blocks()[1])
+	}
+	metadata, ok := message.ResponseMetadata()
+	if !ok || metadata.ResponseID != "" || metadata.RawStopReason != "tool_use" {
+		t.Fatalf("response metadata = %#v, present=%t", metadata, ok)
+	}
+	usage := message.Usage()
+	if usage.CacheWrite() != 1 {
+		t.Fatalf("cache write = %d", usage.CacheWrite())
+	}
+	if _, hasLongCache := usage.CacheWrite1h(); hasLongCache || usage.Cost().Total != 0 {
+		t.Fatalf("usage accounting = %#v", usage)
+	}
+}
+
+func TestAnthropicMalformedOuterUsageCannotVetoCompletedToolCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writeResponsesSSE(t, writer,
+			map[string]any{"type": "message_start", "message": map[string]any{"id": "msg-bad-usage", "usage": "not-an-object"}},
+			map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "tool_use", "id": "toolu-bad-usage", "name": "read", "input": map[string]any{}}},
+			map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "input_json_delta", "partial_json": `{"path":"README.md"}`}},
+			map[string]any{"type": "content_block_stop", "index": 0},
+			map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "tool_use"}, "usage": []any{"also-not-an-object"}},
+			map[string]any{"type": "message_stop"},
+		)
+	}))
+	defer server.Close()
+
+	model, err := newModel(provider.ModelSpec{
+		Provider: provider.AnthropicProviderID, API: provider.AnthropicMessagesAPI, ID: "claude-bad-usage", Name: "Claude Bad Usage",
+		BaseURL: server.URL, Input: []provider.InputKind{provider.InputText}, ContextWindow: 100_000, MaxTokens: 8_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := provider.NewToolDefinition("read", "Read a file", false, []byte(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequestWithTools(model, "", []llm.ConversationMessage{mustUser(t, "read")}, []provider.ToolDefinition{tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation, err := provider.NewAnthropicProvider(provider.AnthropicConfig{BaseURL: server.URL, APIKey: "anthropic-test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	message, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || message.FinishReason() != llm.FinishToolUse || len(message.Blocks()) != 1 {
+		t.Fatalf("terminal = %T %#v", terminal, terminal)
+	}
+	call, ok := message.Blocks()[0].(llm.ToolCallBlock)
+	if !ok || call.ID() != "toolu-bad-usage" || string(call.ArgumentsJSON()) != `{"path":"README.md"}` {
+		t.Fatalf("tool call = %#v", message.Blocks()[0])
+	}
+}
+
 func TestAnthropicFailureStopReasonsPreserveResponseMetadata(t *testing.T) {
 	tests := []struct {
 		name, stopReason, message, vendorCode string

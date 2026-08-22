@@ -419,7 +419,11 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			return Entry{}, fmt.Errorf("message entry is missing message")
 		}
 		if compatible {
-			messageRaw = normalizeCompatibleMessage(messageRaw, timestamp)
+			var omittedOptionalMetadata int
+			messageRaw, omittedOptionalMetadata = normalizeCompatibleMessage(messageRaw, timestamp)
+			for range omittedOptionalMetadata {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticOptionalMetadataOmitted, EntryID: id, ContentIndex: -1})
+			}
 		}
 		if messageObject, objectErr := decodeObject(messageRaw); objectErr == nil {
 			if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
@@ -435,7 +439,9 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			entry.assistant = AssistantProvenance{}
 			entry.hasAssistant = false
 		}
-		entry.message, entry.diagnostics, err = decodeMessage(id, messageRaw)
+		var messageDiagnostics []Diagnostic
+		entry.message, messageDiagnostics, err = decodeMessage(id, messageRaw)
+		entry.diagnostics = append(entry.diagnostics, messageDiagnostics...)
 		if err != nil {
 			if compatible {
 				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
@@ -471,6 +477,13 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			}
 		}
 	} else if typeName == "compaction" {
+		if compatible {
+			var omitted bool
+			object, omitted = normalizeCompatibleOptionalUsage(object, decodeCompactionUsage)
+			if omitted {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticOptionalMetadataOmitted, EntryID: id, ContentIndex: -1})
+			}
+		}
 		compaction, err := decodeCompactionRecord(object)
 		if err != nil {
 			if compatible {
@@ -483,6 +496,13 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 		_, hasFromHook := object["fromHook"]
 		entry.payload = CompactionPayload{Record: compaction, Details: bytes.Clone(object["details"]), FromHook: decodeOptionalBool(object, "fromHook"), HasFromHook: hasFromHook}
 	} else {
+		if compatible && typeName == "branch_summary" {
+			var omitted bool
+			object, omitted = normalizeCompatibleOptionalUsage(object, decodeCompactionUsage)
+			if omitted {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticOptionalMetadataOmitted, EntryID: id, ContentIndex: -1})
+			}
+		}
 		if compatible && typeName == "custom_message" {
 			object = normalizeCompatibleCustomMessage(object)
 		}
@@ -503,16 +523,17 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 	return entry, nil
 }
 
-func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) []byte {
+func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) ([]byte, int) {
 	object, err := decodeObject(raw)
 	if err != nil {
-		return raw
+		return raw, 0
 	}
 	role, err := requiredString(object, "role")
 	if err != nil {
-		return raw
+		return raw, 0
 	}
 	changed := false
+	omittedOptionalMetadata := 0
 	if role == "user" || role == "assistant" || role == "toolResult" {
 		if content, exists := object["content"]; !exists || bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
 			object["content"] = json.RawMessage("[]")
@@ -524,19 +545,39 @@ func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) []byte {
 		changed = true
 	}
 	if role == "assistant" {
-		changed = normalizeCompatibleAssistantUsage(object) || changed
+		var omitted bool
+		usageChanged, omitted := normalizeCompatibleAssistantUsage(object)
+		changed = usageChanged || changed
+		if omitted {
+			omittedOptionalMetadata++
+		}
+		if rawDiagnostics, exists := object["diagnostics"]; exists {
+			if _, err := decodeAssistantDiagnostics(rawDiagnostics); err != nil {
+				delete(object, "diagnostics")
+				changed = true
+				omittedOptionalMetadata++
+			}
+		}
+	}
+	if role == "toolResult" {
+		var omitted bool
+		object, omitted = normalizeCompatibleToolResultMetadata(object)
+		if omitted {
+			changed = true
+			omittedOptionalMetadata++
+		}
 	}
 	if !changed {
-		return raw
+		return raw, omittedOptionalMetadata
 	}
 	encoded, err := json.Marshal(object)
 	if err != nil {
-		return raw
+		return raw, 0
 	}
-	return encoded
+	return encoded, omittedOptionalMetadata
 }
 
-func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) bool {
+func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) (bool, bool) {
 	rawUsage, exists := message["usage"]
 	changed := false
 	if !exists || bytes.Equal(bytes.TrimSpace(rawUsage), []byte("null")) {
@@ -545,7 +586,8 @@ func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) bool 
 	}
 	usage, err := decodeObject(rawUsage)
 	if err != nil {
-		return false
+		message["usage"] = zeroCompatibleAssistantUsage()
+		return true, true
 	}
 	zero := json.RawMessage("0")
 	for _, key := range []string{"input", "output", "cacheRead", "cacheWrite"} {
@@ -576,11 +618,75 @@ func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) bool 
 	if changed {
 		encoded, marshalErr := json.Marshal(usage)
 		if marshalErr != nil {
-			return false
+			return false, false
 		}
 		message["usage"] = encoded
 	}
-	return changed
+	if _, err := decodeUsage(message["usage"]); err != nil {
+		message["usage"] = zeroCompatibleAssistantUsage()
+		return true, true
+	}
+	return changed, false
+}
+
+func zeroCompatibleAssistantUsage() json.RawMessage {
+	return json.RawMessage(`{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`)
+}
+
+func normalizeCompatibleOptionalUsage(object map[string]json.RawMessage, decode func([]byte) (CompactionUsage, error)) (map[string]json.RawMessage, bool) {
+	raw, exists := object["usage"]
+	if !exists {
+		return object, false
+	}
+	if _, err := decode(raw); err == nil {
+		return object, false
+	}
+	clone := make(map[string]json.RawMessage, len(object)-1)
+	for key, value := range object {
+		if key != "usage" {
+			clone[key] = value
+		}
+	}
+	return clone, true
+}
+
+func normalizeCompatibleToolResultMetadata(object map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	omitUsage := false
+	if raw, exists := object["usage"]; exists {
+		if _, err := decodePortableUsage(raw); err != nil {
+			omitUsage = true
+		}
+	}
+	omitAddedToolNames := false
+	if raw, exists := object["addedToolNames"]; exists {
+		var names []string
+		omitAddedToolNames = bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &names) != nil || !validCompatibleAddedToolNames(names)
+	}
+	if !omitUsage && !omitAddedToolNames {
+		return object, false
+	}
+	clone := make(map[string]json.RawMessage, len(object)-1)
+	for key, value := range object {
+		if (key == "usage" && omitUsage) || (key == "addedToolNames" && omitAddedToolNames) {
+			continue
+		}
+		clone[key] = value
+	}
+	return clone, true
+}
+
+func validCompatibleAddedToolNames(names []string) bool {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if !utf8.ValidString(name) || strings.TrimSpace(name) == "" {
+			return false
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return false
+		}
+		seen[name] = struct{}{}
+	}
+	return true
 }
 
 func normalizeCompatibleCustomMessage(object map[string]json.RawMessage) map[string]json.RawMessage {

@@ -320,12 +320,22 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	var explicit *modelcatalog.Model
 	var explicitThinking *provider.ThinkingLevel
 	var diagnostics []agentruntime.Diagnostic
-	if catalogError := catalog.Error(); catalogError != nil {
+	hooksBlockedByDiagnostic := false
+	if settingsError := catalog.SettingsError(); settingsError != nil {
 		diagnostics = append(diagnostics, agentruntime.Diagnostic{
-			Kind: agentruntime.DiagnosticError, Message: "Model configuration: " + catalogError.Error(),
+			Kind: agentruntime.DiagnosticWarning, Message: "Settings configuration: " + settingsError.Error(),
+		})
+	}
+	if catalogError := catalog.ModelSourceError(); catalogError != nil {
+		diagnostics = append(diagnostics, agentruntime.Diagnostic{
+			// Model source files are catalog inputs, not the selected request
+			// contract. A malformed unrelated provider must remain observable
+			// without preventing a healthy explicit route from starting.
+			Kind: agentruntime.DiagnosticWarning, Message: "Model configuration: " + catalogError.Error(),
 		})
 	}
 	if p.parsed.hasAPIKey && p.parsed.modelID == "" {
+		hooksBlockedByDiagnostic = true
 		diagnostics = append(diagnostics, agentruntime.Diagnostic{
 			Kind:    agentruntime.DiagnosticError,
 			Message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
@@ -401,14 +411,13 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	if err != nil {
 		return agentruntime.CreateResult{}, err
 	}
+	// Source diagnostics (for example, an unrelated malformed models-store
+	// entry) are reported by the caller before prompt dispatch. They do not
+	// invalidate the selected route and must not disable healthy extension
+	// hooks. Actual session-construction failures return above.
 	runtimeHooks := p.config.Hooks
-	for _, diagnostic := range diagnostics {
-		if diagnostic.Kind == agentruntime.DiagnosticError {
-			// main.ts reports blocking runtime diagnostics before a mode binds
-			// extension lifecycle hooks. Keep startup and disposal hook-free.
-			runtimeHooks = agent.Hooks{}
-			break
-		}
+	if hooksBlockedByDiagnostic {
+		runtimeHooks = agent.Hooks{}
 	}
 	requirePromptAccess := func(accessCtx context.Context, selected provider.Model) error {
 		resolved, authErr := catalog.GetAuth(accessCtx, selected, modelcatalog.AuthOverrides{})

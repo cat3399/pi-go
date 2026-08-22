@@ -187,7 +187,7 @@ func TestRunCreatesExplicitSessionParentDirectories(t *testing.T) {
 	}
 }
 
-func TestRunClosesManagerWhenAgentSessionConstructionFails(t *testing.T) {
+func TestRunClosesManagerWhenSessionStartHookFails(t *testing.T) {
 	workingDir := t.TempDir()
 	sessionPath := filepath.Join(workingDir, "existing.jsonl")
 	manager, err := session.OpenSessionManagerWithOptions(sessionPath, workingDir, workingDir, session.ManagerOptions{
@@ -210,22 +210,29 @@ func TestRunClosesManagerWhenAgentSessionConstructionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	constructionErr := errors.New("session start rejected")
-	deps := testDependencies(t, workingDir, newScriptedProvider(t), &scriptedRunner{})
+	startFailure := errors.New("session start rejected")
+	deps := testDependencies(t, workingDir, newScriptedProvider(t, fixedStep(t, textTerminal(t, "continued"))), &scriptedRunner{})
 	deps.Hooks.SessionStart = func(context.Context, agent.SessionStartHookEvent) error {
-		return constructionErr
+		return startFailure
+	}
+	var extensionErrors []agent.ExtensionErrorEvent
+	deps.Hooks.ExtensionError = func(_ context.Context, event agent.ExtensionErrorEvent) {
+		extensionErrors = append(extensionErrors, event)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := app.Run(context.Background(), deps, []string{"--print", "unused", "--session", sessionPath}, &stdout, &stderr); code != app.ExitFailure {
-		t.Fatalf("Run() exit = %d, want failure", code)
+	if code := app.Run(context.Background(), deps, []string{"--print", "unused", "--session", sessionPath}, &stdout, &stderr); code != app.ExitSuccess {
+		t.Fatalf("Run() exit = %d, want success; stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), constructionErr.Error()) {
-		t.Fatalf("Run() stderr = %q, want construction error", stderr.String())
+	if stdout.String() != "continued\n" || stderr.Len() != 0 {
+		t.Fatalf("Run() output = stdout %q, stderr %q", stdout.String(), stderr.String())
+	}
+	if len(extensionErrors) != 1 || extensionErrors[0].Event != "session_start" || !errors.Is(extensionErrors[0].Cause, startFailure) {
+		t.Fatalf("session_start hook errors = %#v", extensionErrors)
 	}
 
 	reopened, err := session.OpenSessionManager(sessionPath, workingDir, workingDir)
 	if err != nil {
-		t.Fatalf("manager lock leaked after AgentSession construction failure: %v", err)
+		t.Fatalf("manager lock leaked after session_start hook failure: %v", err)
 	}
 	if err := reopened.Close(); err != nil {
 		t.Fatal(err)

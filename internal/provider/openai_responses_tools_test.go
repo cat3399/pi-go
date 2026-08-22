@@ -580,7 +580,7 @@ func TestOpenAIResponsesReplaysNullableEncryptedReasoningUnchanged(t *testing.T)
 	}
 }
 
-func TestOpenAIResponsesRejectsUnsafeTerminalReasoningBackfill(t *testing.T) {
+func TestOpenAIResponsesIgnoresInconsistentTerminalReasoningBackfill(t *testing.T) {
 	tests := []struct {
 		name   string
 		frames []any
@@ -622,12 +622,42 @@ func TestOpenAIResponsesRejectsUnsafeTerminalReasoningBackfill(t *testing.T) {
 				Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", responsesSSE(testCase.frames...))),
 			})
 			_, terminal := collectStream(t, implementation.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
-			failure := terminalFailure(t, terminal)
-			assertProviderFailure(t, failure, provider.FailureInvalidResponse, provider.ErrOpenAIResponsesStream)
-			if len(failure.Blocks()) != 0 {
-				t.Fatalf("unsafe reasoning was persisted in failure blocks: %#v", failure.Blocks())
+			if _, ok := terminal.(llm.AssistantRichMessage); !ok {
+				t.Fatalf("terminal = %T, want completed reasoning response", terminal)
 			}
 		})
+	}
+}
+
+func TestOpenAIResponsesDoesNotLetTerminalMetadataVetoCompletedToolCall(t *testing.T) {
+	body := responsesSSE(
+		map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc", "call_id": "call", "name": "bash", "arguments": ""}},
+		map[string]any{"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc", "delta": `{"command":"echo ok"}`},
+		map[string]any{"type": "response.function_call_arguments.done", "output_index": 0, "item_id": "fc", "arguments": `{"command":"echo ok"}`},
+		map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "function_call", "id": "fc", "call_id": "call", "name": "bash", "arguments": `{"command":"echo ok"}`}},
+		map[string]any{"type": "response.completed", "response": map[string]any{
+			"status":       "completed",
+			"id":           map[string]any{"unexpected": true},
+			"model":        strings.Repeat("m", 513),
+			"service_tier": map[string]any{"unexpected": true},
+			"usage":        map[string]any{"input_tokens": 1.5, "output_tokens": 1},
+			"output":       map[string]any{"not": "an output array"},
+		}},
+	)
+	implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
+		BaseURL: "https://fixture.test/v1", APIKey: "secret",
+		Client: staticResponsesDoer(responsesHTTPResponse(http.StatusOK, "text/event-stream", body)),
+	})
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), mustResponsesRequest(t, "", []llm.ConversationMessage{mustUser(t, "go")})))
+	if got, want := eventKinds(events), []string{"start", "toolcall_start", "toolcall_delta", "toolcall_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	message, ok := terminal.(llm.AssistantToolUseMessage)
+	if !ok || len(message.Blocks()) != 1 || message.Usage().TotalTokens() != 0 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	if metadata, present := message.ResponseMetadata(); !present || metadata.ResponseID != "" || metadata.ResponseModel != "" || metadata.RawStopReason != "completed" {
+		t.Fatalf("response metadata = %#v, present = %t", metadata, present)
 	}
 }
 

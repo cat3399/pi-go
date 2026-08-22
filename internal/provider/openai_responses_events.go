@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/bits"
 	"strings"
 	"unicode/utf8"
 
@@ -98,12 +97,15 @@ type responsesTerminalEvent struct {
 }
 
 type responsesResponse struct {
-	ID                string                      `json:"id"`
-	Model             string                      `json:"model"`
-	ServiceTier       string                      `json:"service_tier"`
+	// These are terminal observation/accounting fields, not the streamed
+	// assistant output. Decode them separately so a non-conforming gateway does
+	// not turn a completed response into an Agent failure.
+	ID                json.RawMessage             `json:"id"`
+	Model             json.RawMessage             `json:"model"`
+	ServiceTier       json.RawMessage             `json:"service_tier"`
 	Status            string                      `json:"status"`
-	Output            []responsesOutputItem       `json:"output"`
-	Usage             *responsesUsage             `json:"usage"`
+	Output            json.RawMessage             `json:"output"`
+	Usage             json.RawMessage             `json:"usage"`
 	Error             *responsesAPIError          `json:"error"`
 	IncompleteDetails *responsesIncompleteDetails `json:"incomplete_details"`
 }
@@ -1033,109 +1035,22 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if event.Response.Error != nil {
 		return invalidResponsesEventFailure(fmt.Errorf("%s unexpectedly carries an error", event.Type))
 	}
-	type terminalReasoning struct {
-		index            int
-		encryptedContent string
-	}
-	terminalReasoningByID := make(map[string]terminalReasoning)
-	for outputIndex, item := range event.Response.Output {
-		if item.ID != "" {
-			expectedID, completed := s.completedItemIDs[outputIndex]
-			if !completed || item.ID != expectedID {
-				return invalidResponsesEventFailure(fmt.Errorf(
-					"terminal output item id %q at index %d does not match completed item",
-					item.ID,
-					outputIndex,
-				))
-			}
-		}
-		switch item.Type {
-		case "message":
-			if failure := validateResponsesMessagePhase(item.Phase); failure != nil {
-				return failure
-			}
-			if item.Role != "" && item.Role != "assistant" {
-				return invalidResponsesEventFailure(fmt.Errorf(
-					"terminal output message at index %d has role %q",
-					outputIndex,
-					item.Role,
-				))
-			}
-			if _, completed := s.completedOutputs[outputIndex]; !completed {
-				return invalidResponsesEventFailure(fmt.Errorf(
-					"terminal output message at index %d was not completed by output_item events",
-					outputIndex,
-				))
-			}
-			if item.Phase != "" && item.Phase != s.completedPhases[outputIndex] {
-				return invalidResponsesEventFailure(fmt.Errorf(
-					"terminal output message phase %q at index %d does not match %q",
-					item.Phase,
-					outputIndex,
-					s.completedPhases[outputIndex],
-				))
-			}
-			if len(item.Content) != 0 {
-				if _, failure := responsesOutputItemText(item); failure != nil {
-					return failure
-				}
-			}
-		case "function_call":
-			if _, completed := s.completedOutputs[outputIndex]; !completed {
-				return invalidResponsesEventFailure(fmt.Errorf("terminal function call at index %d was not completed by output_item events", outputIndex))
-			}
-		case "reasoning":
-			if _, completed := s.completedOutputs[outputIndex]; !completed {
-				return invalidResponsesEventFailure(fmt.Errorf("terminal reasoning item at index %d was not completed", outputIndex))
-			}
-			if item.ID != "" {
-				if previous, duplicate := terminalReasoningByID[item.ID]; duplicate {
-					return invalidResponsesEventFailure(fmt.Errorf(
-						"terminal reasoning item id %q is duplicated at indexes %d and %d",
-						item.ID,
-						previous.index,
-						outputIndex,
-					))
-				}
-				terminalReasoningByID[item.ID] = terminalReasoning{
-					index:            outputIndex,
-					encryptedContent: item.EncryptedContent,
-				}
-			}
-		case "custom_tool_call":
-			if _, completed := s.completedOutputs[outputIndex]; !completed {
-				return invalidResponsesEventFailure(fmt.Errorf("terminal custom tool call at index %d was not completed by output_item events", outputIndex))
-			}
-		default:
-			return unsupportedResponsesOutputFailure(item.Type)
-		}
-	}
-	for _, pending := range s.pendingReasoning {
-		if terminal, ok := terminalReasoningByID[pending.itemID]; ok {
-			if terminal.encryptedContent != "" {
-				patched, err := patchResponsesReasoningEncryption(pending.rawItem, terminal.encryptedContent)
-				if err != nil {
-					return invalidResponsesEventFailure(fmt.Errorf("backfill reasoning encryption: %w", err))
-				}
-				pending.rawItem = patched
-			}
-		}
-	}
+	// response.output duplicates output_item.done. Per pi it is only a
+	// best-effort source for Azure's delayed reasoning.encrypted_content; it
+	// must not revalidate or veto an output/tool call already completed above.
+	s.backfillTerminalReasoningEncryption(event.Response.Output)
 	if len(s.slots) != 0 || len(s.toolSlots) != 0 || len(s.reasoningSlots) != 0 {
 		return invalidResponsesEventFailure(errors.New("terminal response arrived with an open output item"))
 	}
 	if err := s.flushResponsesDeferredEvents(); err != nil {
 		return invalidResponsesEventFailure(fmt.Errorf("seal deferred reasoning: %w", err))
 	}
-	usage, failure := normalizeResponsesUsage(event.Response.Usage)
-	if failure != nil {
-		return failure
-	}
-	if event.Response.Usage != nil {
-		var costErr error
+	usage := llm.Usage{}
+	if normalized, ok := normalizeResponsesUsage(event.Response.Usage); ok {
+		usage = normalized
 		cost := s.model.CalculateCost(usage)
 		if s.applyServiceTierPricing {
-			serviceTier := event.Response.ServiceTier
+			serviceTier := responsesOptionalString(event.Response.ServiceTier, 128)
 			if s.codexServiceTier && serviceTier == "default" && (s.serviceTier == "flex" || s.serviceTier == "priority") {
 				serviceTier = s.serviceTier
 			}
@@ -1144,9 +1059,8 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 			}
 			cost = applyOpenAIServiceTierPricing(cost, s.model.ID(), serviceTier)
 		}
-		usage, costErr = usage.WithCost(cost)
-		if costErr != nil {
-			return invalidResponsesEventFailure(fmt.Errorf("calculate token cost: %w", costErr))
+		if withCost, err := usage.WithCost(cost); err == nil {
+			usage = withCost
 		}
 	}
 	// A completed function call always produces a tool-use terminal even when
@@ -1154,13 +1068,18 @@ func (s *openAIResponsesStream) finishResponsesTerminal(
 	if reason == llm.FinishStop && s.sawFunctionCall {
 		reason = llm.FinishToolUse
 	}
-	response := &llm.AssistantResponseMetadata{ResponseID: event.Response.ID, ResponseModel: event.Response.Model, RawStopReason: wantStatus}
+	responseID := responsesOptionalString(event.Response.ID, 256)
+	responseModel := responsesOptionalString(event.Response.Model, 512)
+	var response *llm.AssistantResponseMetadata
+	if responseID != "" || responseModel != "" || wantStatus != "" {
+		response = &llm.AssistantResponseMetadata{ResponseID: responseID, ResponseModel: responseModel, RawStopReason: wantStatus}
+	}
 	provenance := assistantProvenanceForModel(s.model)
 	done, err := llm.NewDoneEventWithMetadata(reason, usage, s.timestamp, provenance, response, nil)
 	if err != nil {
 		return invalidResponsesEventFailure(err)
 	}
-	s.commitResponsesTerminal(event.Response.ID)
+	s.commitResponsesTerminal(responseID)
 	s.pendingDone = &done
 	return nil
 }
@@ -1217,26 +1136,29 @@ func responsesAPIFailure(code, message, fallback string) *responsesFailureSpec {
 	}
 }
 
-func normalizeResponsesUsage(raw *responsesUsage) (llm.Usage, *responsesFailureSpec) {
-	if raw == nil {
-		return llm.Usage{}, nil
+func normalizeResponsesUsage(raw json.RawMessage) (llm.Usage, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return llm.Usage{}, false
 	}
-	input := valueOrZero(raw.InputTokens)
-	output := valueOrZero(raw.OutputTokens)
+	var wire responsesUsage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return llm.Usage{}, false
+	}
+	input := valueOrZero(wire.InputTokens)
+	output := valueOrZero(wire.OutputTokens)
 	cacheRead := uint64(0)
 	cacheWrite := uint64(0)
-	if raw.InputTokenDetails != nil {
-		cacheRead = valueOrZero(raw.InputTokenDetails.CachedTokens)
-		cacheWrite = valueOrZero(raw.InputTokenDetails.CacheWriteTokens)
+	if wire.InputTokenDetails != nil {
+		cacheRead = valueOrZero(wire.InputTokenDetails.CachedTokens)
+		cacheWrite = valueOrZero(wire.InputTokenDetails.CacheWriteTokens)
 	}
-	cacheTotal, carry := bits.Add64(cacheRead, cacheWrite, 0)
-	if carry != 0 || cacheTotal > input {
-		return llm.Usage{}, invalidResponsesEventFailure(errors.New("cached input token subsets exceed input tokens"))
+	normalInput := uint64(0)
+	if cacheRead <= input && cacheWrite <= input-cacheRead {
+		normalInput = input - cacheRead - cacheWrite
 	}
-	normalInput := input - cacheTotal
 	var reasoning *uint64
-	if raw.OutputTokenDetails != nil && raw.OutputTokenDetails.ReasoningTokens != nil {
-		value := *raw.OutputTokenDetails.ReasoningTokens
+	if wire.OutputTokenDetails != nil && wire.OutputTokenDetails.ReasoningTokens != nil {
+		value := *wire.OutputTokenDetails.ReasoningTokens
 		reasoning = &value
 	}
 	usage, err := llm.NewUsage(llm.UsageSpec{
@@ -1247,16 +1169,58 @@ func normalizeResponsesUsage(raw *responsesUsage) (llm.Usage, *responsesFailureS
 		Reasoning:  reasoning,
 	})
 	if err != nil {
-		return llm.Usage{}, invalidResponsesEventFailure(fmt.Errorf("invalid token usage: %w", err))
+		return llm.Usage{}, false
 	}
-	if raw.TotalTokens != nil && *raw.TotalTokens != usage.TotalTokens() {
-		return llm.Usage{}, invalidResponsesEventFailure(fmt.Errorf(
-			"reported total tokens %d do not match normalized total %d",
-			*raw.TotalTokens,
-			usage.TotalTokens(),
-		))
+	return usage, true
+}
+
+func (s *openAIResponsesStream) backfillTerminalReasoningEncryption(raw json.RawMessage) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return
 	}
-	return usage, nil
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return
+	}
+	pendingByID := make(map[string]*responsesCompletedReasoning, len(s.pendingReasoning))
+	for _, pending := range s.pendingReasoning {
+		pendingByID[pending.itemID] = pending
+	}
+	backfilled := make(map[string]struct{})
+	for _, rawItem := range items {
+		var item struct {
+			Type             string `json:"type"`
+			ID               string `json:"id"`
+			EncryptedContent string `json:"encrypted_content"`
+		}
+		if json.Unmarshal(rawItem, &item) != nil || item.Type != "reasoning" || item.ID == "" || item.EncryptedContent == "" {
+			continue
+		}
+		if _, already := backfilled[item.ID]; already {
+			continue
+		}
+		pending := pendingByID[item.ID]
+		if pending == nil {
+			continue
+		}
+		patched, err := patchResponsesReasoningEncryption(pending.rawItem, item.EncryptedContent)
+		if err != nil {
+			continue
+		}
+		pending.rawItem = patched
+		backfilled[item.ID] = struct{}{}
+	}
+}
+
+func responsesOptionalString(raw json.RawMessage, limit int) string {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || !utf8.ValidString(value) || len(value) > limit {
+		return ""
+	}
+	return value
 }
 
 func valueOrZero(value *uint64) uint64 {

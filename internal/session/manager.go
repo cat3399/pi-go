@@ -710,11 +710,6 @@ func (m *SessionManager) cloneBranchedManagerLocked(ctx context.Context, leafID 
 	if cause := context.Cause(ctx); cause != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAppendCanceled, cause)
 	}
-	for _, diagnostic := range m.store.LoadDiagnostics() {
-		if diagnostic.Code == LoadDiagnosticMalformedLine {
-			return nil, fmt.Errorf("%w: line %d must be preserved or explicitly repaired before branch extraction", ErrMalformedRecords, diagnostic.Line)
-		}
-	}
 	path, err := m.store.PathTo(leafID)
 	if err != nil {
 		return nil, err

@@ -192,6 +192,41 @@ func TestAgentSessionOwnsManagerPersistenceAndSessionMetadata(t *testing.T) {
 	}
 }
 
+func TestAgentSessionLifecycleHookFailuresAreReportedWithoutBlockingLifecycle(t *testing.T) {
+	manager := newSessionManager(t)
+	startFailure := errors.New("session start failed")
+	shutdownFailure := errors.New("session shutdown failed")
+	var reports []agent.ExtensionErrorEvent
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: manager, Model: sessionTestModel(t),
+		Hooks: agent.Hooks{
+			SessionStart: func(context.Context, agent.SessionStartHookEvent) error { return startFailure },
+			SessionShutdown: func(context.Context, agent.SessionShutdownHookEvent) error {
+				return shutdownFailure
+			},
+			ExtensionError: func(_ context.Context, event agent.ExtensionErrorEvent) {
+				reports = append(reports, event)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSession() = %v", err)
+	}
+	if result, err := runtime.Run(context.Background(), "continue despite lifecycle hook errors"); err != nil || !result.Succeeded() {
+		t.Fatalf("Run() = (%#v, %v)", result, err)
+	}
+	if err := runtime.Close(context.Background()); err != nil {
+		t.Fatalf("Close() = %v", err)
+	}
+	if _, err := manager.AppendSessionInfo(context.Background(), "must be closed"); !errors.Is(err, session.ErrClosed) {
+		t.Fatalf("manager after Close error = %v, want ErrClosed", err)
+	}
+	if len(reports) != 2 || reports[0].Event != "session_start" || !errors.Is(reports[0].Cause, startFailure) ||
+		reports[1].Event != "session_shutdown" || !errors.Is(reports[1].Cause, shutdownFailure) {
+		t.Fatalf("lifecycle hook reports = %#v", reports)
+	}
+}
+
 func TestAgentSessionMetadataModelAndThinkingEventOrderMatchesOriginal(t *testing.T) {
 	manager := newSessionManager(t)
 	reasoningModel, err := newAgentModel(provider.ModelSpec{

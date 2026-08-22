@@ -744,20 +744,20 @@ func TestUnknownMessageRoleIsPreservedButNotProjected(t *testing.T) {
 	}
 }
 
-func TestOpenSupportsOldAssistantUsageAndDiagnosesUnsafeUsage(t *testing.T) {
+func TestOpenRecoversAssistantUsageWithoutDroppingContent(t *testing.T) {
 	t.Parallel()
 
 	base := `{"type":"message","id":"entry-1","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"reply"}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":%s,"stopReason":"stop","timestamp":1}}`
 	tests := []struct {
 		name  string
 		usage string
-		valid bool
+		zero  bool
 	}{
-		{name: "missing cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}`, valid: true},
-		{name: "negative cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":-1,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
-		{name: "fractional token", usage: `{"input":1.5,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
-		{name: "wrong total", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
-		{name: "reasoning independent from output", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":2,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, valid: true},
+		{name: "missing cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}`},
+		{name: "negative cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":-1,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, zero: true},
+		{name: "fractional token", usage: `{"input":1.5,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, zero: true},
+		{name: "wrong total", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, zero: true},
+		{name: "reasoning independent from output", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":2,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -769,20 +769,157 @@ func TestOpenSupportsOldAssistantUsageAndDiagnosesUnsafeUsage(t *testing.T) {
 			}
 			defer session.Close()
 			entry := session.Entries()[0]
-			if tt.valid {
-				message, ok := entry.Message()
-				if !ok || len(entry.Diagnostics()) != 0 {
-					t.Fatalf("old usage projection = %#v / %#v", message, entry.Diagnostics())
+			message, ok := entry.Message()
+			if !ok || message == nil {
+				t.Fatalf("recovered usage dropped message: %#v", entry.Diagnostics())
+			}
+			if tt.zero {
+				assistant := message.(llm.AssistantTextMessage)
+				if assistant.Usage().TotalTokens() != 0 {
+					t.Fatalf("recovered usage = %#v, want zero", assistant.Usage())
 				}
-				return
-			}
-			if message, ok := entry.Message(); ok || message != nil {
-				t.Fatalf("unsafe usage projected as %#v", message)
-			}
-			if diagnostics := entry.Diagnostics(); len(diagnostics) == 0 || diagnostics[len(diagnostics)-1].Code != DiagnosticUnprojectablePayload {
-				t.Fatalf("unsafe usage diagnostics = %#v", diagnostics)
+				if diagnostics := entry.Diagnostics(); len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticOptionalMetadataOmitted {
+					t.Fatalf("recovered usage diagnostics = %#v", diagnostics)
+				}
+			} else if diagnostics := entry.Diagnostics(); len(diagnostics) != 0 {
+				t.Fatalf("compatible usage diagnostics = %#v", diagnostics)
 			}
 		})
+	}
+}
+
+func TestOpenOmitsInvalidOptionalMetadataWithoutDroppingContext(t *testing.T) {
+	t.Parallel()
+	root := `{"type":"message","id":"root","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"start","timestamp":1}}`
+	assistant := `{"type":"message","id":"assistant","parentId":"root","timestamp":"2026-08-01T00:00:01.500Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call","name":"echo","arguments":{"value":"ok"}}],"api":"scripted","provider":"scripted","model":"scripted-1","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1,"diagnostics":[{"type":false}]}}`
+	toolResult := `{"type":"message","id":"tool","parentId":"assistant","timestamp":"2026-08-01T00:00:02Z","message":{"role":"toolResult","toolCallId":"call","toolName":"echo","content":[{"type":"text","text":"completed"}],"isError":false,"timestamp":2,"usage":{"input":"bad"},"addedToolNames":{}}}`
+	compaction := `{"type":"compaction","id":"compact","parentId":"tool","timestamp":"2026-08-01T00:00:03Z","summary":"checkpoint","firstKeptEntryId":"root","tokensBefore":2,"usage":{"input":"bad"}}`
+	branchSummary := `{"type":"branch_summary","id":"branch","parentId":"compact","timestamp":"2026-08-01T00:00:04Z","fromId":"root","summary":"branch checkpoint","usage":{"input":"bad"}}`
+	path := writeSessionFixture(t, testHeader+"\n"+root+"\n"+assistant+"\n"+toolResult+"\n"+compaction+"\n"+branchSummary+"\n")
+
+	session, err := Open(path, OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	entries := session.Entries()
+	if len(entries) != 5 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	assistantMessage, ok := entries[1].Message()
+	if !ok {
+		t.Fatalf("assistant tool call was dropped: %#v", entries[1].Diagnostics())
+	}
+	assistantCall, ok := assistantMessage.(llm.AssistantToolUseMessage)
+	blocks := assistantCall.Blocks()
+	call, hasCall := llm.AssistantBlock(nil), false
+	if ok && len(blocks) == 1 {
+		call, hasCall = blocks[0].(llm.ToolCallBlock)
+	}
+	if !ok || !hasCall || call.(llm.ToolCallBlock).ID() != "call" {
+		t.Fatalf("assistant tool call = %#v", assistantMessage)
+	}
+	toolMessage, ok := entries[2].Message()
+	if !ok {
+		t.Fatalf("tool result was dropped: %#v", entries[2].Diagnostics())
+	}
+	tool, ok := toolMessage.(llm.ToolResultMessage)
+	if !ok || len(tool.Content()) != 1 || tool.Content()[0].Text() != "completed" {
+		t.Fatalf("tool result = %#v", toolMessage)
+	}
+	if _, hasUsage := tool.Usage(); hasUsage {
+		t.Fatal("invalid tool-result usage survived")
+	}
+	if tool.HasAddedToolNames() {
+		t.Fatal("invalid addedToolNames survived")
+	}
+	if _, ok := entries[3].Compaction(); !ok {
+		t.Fatalf("compaction was dropped: %#v", entries[3].Diagnostics())
+	}
+	branch, ok := entries[4].Payload().(BranchSummaryPayload)
+	if !ok || branch.Summary != "branch checkpoint" || branch.Usage != nil {
+		t.Fatalf("branch summary = %#v", entries[4].Payload())
+	}
+	for _, entry := range entries[1:] {
+		diagnostics := entry.Diagnostics()
+		if len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticOptionalMetadataOmitted {
+			t.Fatalf("entry %s diagnostics = %#v", entry.ID(), diagnostics)
+		}
+	}
+	context := session.BuildContext()
+	if len(context.AgentMessages()) != 5 {
+		t.Fatalf("recovered context messages = %d", len(context.AgentMessages()))
+	}
+}
+
+func TestOpenOmitsUnsafeAddedToolNamesWithoutDroppingToolResult(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "null", value: `null`},
+		{name: "blank name", value: `[""]`},
+		{name: "duplicate names", value: `["deferred","deferred"]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			sourcePath := filepath.Join(directory, "source.jsonl")
+			root := `{"type":"message","id":"root","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"user","content":"start","timestamp":1}}`
+			toolResult := fmt.Sprintf(`{"type":"message","id":"tool","parentId":"root","timestamp":"2026-08-01T00:00:02Z","message":{"role":"toolResult","toolCallId":"call","toolName":"echo","content":[{"type":"text","text":"completed"}],"isError":false,"timestamp":2,"addedToolNames":%s}}`, test.value)
+			if err := os.WriteFile(sourcePath, []byte(testHeader+"\n"+root+"\n"+toolResult+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session, err := Open(sourcePath, OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			assertRecoveredToolResultWithoutAddedToolNames(t, session)
+
+			extracted, err := session.ExtractBranch(stdcontext.Background(), "tool", ExtractOptions{TargetPath: filepath.Join(directory, "branch.jsonl"), ID: "branch", WorkingDir: directory})
+			if err != nil {
+				t.Fatalf("ExtractBranch() = %v", err)
+			}
+			assertRecoveredToolResultWithoutAddedToolNames(t, extracted)
+			if err := extracted.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fork, err := session.Fork(stdcontext.Background(), ExtractOptions{TargetPath: filepath.Join(directory, "fork.jsonl"), ID: "fork", WorkingDir: directory})
+			if err != nil {
+				t.Fatalf("Fork() = %v", err)
+			}
+			assertRecoveredToolResultWithoutAddedToolNames(t, fork)
+			if err := fork.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func assertRecoveredToolResultWithoutAddedToolNames(t *testing.T, session *Session) {
+	t.Helper()
+	entries := session.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	message, ok := entries[1].Message()
+	if !ok {
+		t.Fatalf("tool result was dropped: %#v", entries[1].Diagnostics())
+	}
+	tool, ok := message.(llm.ToolResultMessage)
+	if !ok || len(tool.Content()) != 1 || tool.Content()[0].Text() != "completed" || tool.HasAddedToolNames() {
+		t.Fatalf("tool result = %#v", message)
+	}
+	diagnostics := entries[1].Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Code != DiagnosticOptionalMetadataOmitted {
+		t.Fatalf("tool result diagnostics = %#v", diagnostics)
+	}
+	context := session.BuildContext()
+	if len(context.AgentMessages()) != 2 {
+		t.Fatalf("context messages = %d", len(context.AgentMessages()))
 	}
 }
 

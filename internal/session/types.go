@@ -293,6 +293,10 @@ const (
 	DiagnosticUnprojectableMessage DiagnosticCode = "unprojectable-message"
 	DiagnosticUnprojectablePayload DiagnosticCode = "unprojectable-entry-payload"
 	DiagnosticUnsafeContentOmitted DiagnosticCode = "unsafe-content-omitted"
+	// DiagnosticOptionalMetadataOmitted records compatibility recovery where an
+	// invalid optional accounting or diagnostic field was excluded while the
+	// durable conversation content remained usable.
+	DiagnosticOptionalMetadataOmitted DiagnosticCode = "optional-metadata-omitted"
 )
 
 // Diagnostic deliberately contains no raw JSON or arbitrary upstream text.

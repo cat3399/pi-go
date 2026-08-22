@@ -700,9 +700,11 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		if config.SessionStartEvent != nil {
 			startEvent = cloneSessionStartHookEvent(*config.SessionStartEvent)
 		}
-		if hookErr := s.hooks.SessionStart(context.Background(), startEvent); hookErr != nil {
-			s.loopUnsubscribe()
-			return nil, hookErr
+		if hookErr := callSessionStartHook(s.hooks.SessionStart, context.Background(), startEvent); hookErr != nil {
+			// Lifecycle extension handlers are observational. Match ExtensionRunner:
+			// report a handler failure, but retain the newly constructed durable
+			// session and allow the agent to run.
+			s.reportExtensionError(context.Background(), "session_start", 0, hookErr)
 		}
 	}
 	return s, nil
@@ -3547,11 +3549,11 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		return err
 	}
 	if s.hooks.SessionShutdown != nil {
-		if hookErr := s.hooks.SessionShutdown(ctx, cloneSessionShutdownHookEvent(options.Event)); hookErr != nil {
-			s.lifecycleMu.Lock()
-			s.closing = false
-			s.lifecycleMu.Unlock()
-			return hookErr
+		if hookErr := callSessionShutdownHook(s.hooks.SessionShutdown, ctx, cloneSessionShutdownHookEvent(options.Event)); hookErr != nil {
+			// session_shutdown follows the same ExtensionRunner error isolation as
+			// reload. A failing extension must not strand a settled session, block
+			// runtime replacement, or leave the owned manager writable.
+			s.reportExtensionError(ctx, "session_shutdown", 0, hookErr)
 		}
 	}
 	if options.BeforeInvalidate != nil {

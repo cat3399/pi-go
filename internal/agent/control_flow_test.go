@@ -407,14 +407,17 @@ func TestToolHookPanicsBecomeAssociatedErrorResults(t *testing.T) {
 	}
 }
 
-func TestUnmarshalableToolDetailsFailBeforeDurableResult(t *testing.T) {
+func TestUnmarshalableToolDetailsAreOmittedWithoutBlockingToolContinuation(t *testing.T) {
 	transcript := newSession(t)
 	tool := &fakeTool{name: "echo", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 		return agent.ToolOutput{Text: "ordinary result", Details: func() {}}, nil
 	}}
 	runtime, err := agent.New(agent.Config{
-		Provider: newScriptedProvider(t, mustToolUseTerminal(t, "call", "echo", []byte(`{}`))),
-		Model:    sessionTestModel(t), Tool: tool,
+		Provider: newScriptedProvider(t,
+			mustToolUseTerminal(t, "call", "echo", []byte(`{}`)),
+			mustTextTerminal(t, "continued"),
+		),
+		Model: sessionTestModel(t), Tool: tool,
 		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
@@ -422,14 +425,23 @@ func TestUnmarshalableToolDetailsFailBeforeDurableResult(t *testing.T) {
 	}
 	subscribeTestTranscript(t, runtime, transcript)
 	result, err := runtime.Run(context.Background(), "go")
-	terminal, ok := result.Terminal()
-	failure, failed := terminal.(llm.AssistantFailureMessage)
-	if err != nil || !ok || !failed || !strings.Contains(failure.Failure().Cause().Error(), "unsupported type") {
-		t.Fatalf("Run terminal=%T cause=%v error=%v, want synthetic encoding failure", terminal, failure.Failure().Cause(), err)
+	if err != nil || !result.Succeeded() || result.ProviderTurns() != 2 || result.ToolExecutions() != 1 {
+		t.Fatalf("Run = (%#v, %v), want settled tool continuation", result, err)
 	}
 	messages := transcript.Context().Messages()
-	if len(messages) != 3 || messages[0].Role() != llm.RoleUser || messages[1].Role() != llm.RoleAssistant || messages[2].Role() != llm.RoleAssistant {
-		t.Fatalf("messages after invalid details = %#v", messages)
+	if roles := messageRoles(messages); !reflect.DeepEqual(roles, []llm.Role{llm.RoleUser, llm.RoleAssistant, llm.RoleToolResult, llm.RoleAssistant}) {
+		t.Fatalf("message roles after invalid details = %v", roles)
+	}
+	toolResult := toolResultAt(t, messages, 2)
+	if details := toolResult.Details(); len(details) != 0 || toolResult.IsError() || onlyText(t, toolResult.Content()) != "ordinary result" {
+		t.Fatalf("tool result after invalid details = details %s error %t content %q", details, toolResult.IsError(), onlyText(t, toolResult.Content()))
+	}
+	continued, ok := messages[3].(llm.AssistantTextMessage)
+	if !ok {
+		t.Fatalf("continued message = %T, want llm.AssistantTextMessage", messages[3])
+	}
+	if got := onlyText(t, continued.Content()); got != "continued" {
+		t.Fatalf("continued assistant text = %q", got)
 	}
 }
 

@@ -175,6 +175,7 @@ func (s *Service) ListModels(ctx context.Context, cwd string) (ModelsSnapshot, e
 }
 
 func (s *Service) ListModelProviders(ctx context.Context, cwd string) ([]ProviderAuthInfo, error) {
+	ctx = normalizeContext(ctx)
 	runtime, err := s.openModels(ctx, cwd)
 	if err != nil {
 		return nil, err
@@ -194,9 +195,21 @@ func (s *Service) ListModelProviders(ctx context.Context, cwd string) ([]Provide
 	providers := runtime.GetProviders()
 	result := make([]ProviderAuthInfo, 0, len(providers))
 	for _, entry := range providers {
-		check, checkErr := entry.CheckAuth(normalizeContext(ctx))
+		if cause := context.Cause(ctx); cause != nil {
+			return nil, cause
+		}
+		check, checkErr := entry.CheckAuth(ctx)
 		if checkErr != nil {
-			return nil, checkErr
+			if cause := context.Cause(ctx); cause != nil {
+				return nil, cause
+			}
+			// Provider cards are an observational catalog. A broken credential for
+			// one unrelated provider must not prevent users from seeing or managing
+			// healthy providers. Deliberately omit the failed check (and its error,
+			// which may describe local credential state) from this entry. Operations
+			// that actually select a provider continue to resolve and return its auth
+			// error through their normal strict paths.
+			check = nil
 		}
 		configured, _ := runtime.Provider(entry.ID())
 		supportsOAuth, oauthName := productionOAuthInfo(entry.ID())

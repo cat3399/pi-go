@@ -995,6 +995,42 @@ func TestOpenAICompletionsClampsInconsistentCacheUsage(t *testing.T) {
 	}
 }
 
+func TestOpenAICompletionsDoesNotLetUsageOrMetadataVetoCompletedText(t *testing.T) {
+	model, err := newTestModel("compatible", provider.OpenAICompletionsAPI, "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := provider.NewRequest(model, "", []llm.ConversationMessage{mustUser(t, "hi")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := completionsSSE(map[string]any{
+		"id":    map[string]any{"unexpected": true},
+		"model": strings.Repeat("m", 513),
+		"usage": map[string]any{"prompt_tokens": 1.5, "completion_tokens": 1},
+		"choices": []any{map[string]any{
+			"delta": map[string]any{"content": "ok"}, "finish_reason": "stop",
+		}},
+	}) + "data: [DONE]\n\n"
+	implementation, err := provider.NewOpenAICompletionsProvider(provider.OpenAICompletionsConfig{BaseURL: "https://fixture.test/v1", APIKey: "key", Client: responsesDoerFunc(func(*http.Request) (*http.Response, error) {
+		return responsesHTTPResponse(http.StatusOK, "text/event-stream", body), nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, terminal := collectStream(t, implementation.Stream(context.Background(), request))
+	if got, want := eventKinds(events), []string{"start", "text_start", "text_delta", "text_end", "done"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+	message, ok := terminal.(llm.AssistantTextMessage)
+	if !ok || message.Content()[0].Text() != "ok" || message.Usage().TotalTokens() != 0 {
+		t.Fatalf("terminal = %#v", terminal)
+	}
+	if metadata, present := message.ResponseMetadata(); !present || metadata.ResponseID != "" || metadata.ResponseModel != "" || metadata.RawStopReason != "stop" {
+		t.Fatalf("response metadata = %#v, present = %t", metadata, present)
+	}
+}
+
 func completionsSSE(events ...map[string]any) string {
 	var b strings.Builder
 	for _, event := range events {

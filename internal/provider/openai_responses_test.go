@@ -369,19 +369,6 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			),
 		},
 		{
-			name: "terminal carries unstreamed text", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"status": "completed",
-					"output": []any{map[string]any{
-						"type": "message", "id": "msg", "role": "assistant",
-						"content": []any{map[string]any{"type": "output_text", "text": "lost"}},
-					}},
-				},
-			}),
-		},
-		{
 			name: "terminal with open text item", contentType: "text/event-stream",
 			body: responsesSSE(
 				map[string]any{
@@ -400,32 +387,6 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 					"error":  map[string]any{"code": "bad", "message": "inconsistent"},
 				},
 			}),
-		},
-		{
-			name: "terminal message has wrong role", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"status": "completed",
-					"output": []any{map[string]any{"type": "message", "role": "user"}},
-				},
-			}),
-		},
-		{
-			name: "invalid usage total", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 2, "output_tokens": 3, "total_tokens": 99}}}),
-		},
-		{
-			name: "cached usage exceeds input", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 2, "output_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 3}}}}),
-		},
-		{
-			name: "negative usage", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": -1}}}),
-		},
-		{
-			name: "fractional usage", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 1.5}}}),
 		},
 		{
 			name: "incomplete reasoning item is invalid", contentType: "text/event-stream",
@@ -476,13 +437,6 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 			body: responsesSSE(
 				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg_final", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "done"}}}},
 				map[string]any{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "message", "id": "msg_late", "role": "assistant", "phase": "commentary", "content": []any{}}},
-			),
-		},
-		{
-			name: "terminal message phase mismatch", contentType: "text/event-stream",
-			body: responsesSSE(
-				map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "commentary", "content": []any{map[string]any{"type": "output_text", "text": "working"}}}},
-				map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{map[string]any{"type": "message", "id": "msg", "role": "assistant", "phase": "final_answer"}}}},
 			),
 		},
 		{name: "bounded SSE event", contentType: "text/event-stream", body: "data: " + strings.Repeat("x", 128) + "\n\n", maxEvent: 32},
