@@ -9,7 +9,7 @@ import (
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
-func TestBuiltinStaticProviderMetadataMatchesPiAI083(t *testing.T) {
+func TestBuiltinStaticProviderMetadataMatchesPiAI0842(t *testing.T) {
 	want := map[string]ProviderConfig{
 		AzureOpenAIProviderID: {
 			ID: AzureOpenAIProviderID, Name: "Azure OpenAI", API: AzureOpenAIResponsesAPI,
@@ -44,11 +44,11 @@ func TestBuiltinStaticProviderMetadataMatchesPiAI083(t *testing.T) {
 		}
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("static Provider metadata differs from pi-ai 0.83.0\n got: %#v\nwant: %#v", got, want)
+		t.Fatalf("static Provider metadata differs from pi-ai 0.84.2\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
-func TestBuiltinStaticProviderCatalogOracleMatchesPiAI083(t *testing.T) {
+func TestBuiltinStaticProviderCatalogOracleMatchesPiAI0842(t *testing.T) {
 	want := map[string]catalogOracle{
 		"azure-openai-responses.json": {
 			Provider: AzureOpenAIProviderID, APIs: []string{AzureOpenAIResponsesAPI},
@@ -60,19 +60,19 @@ func TestBuiltinStaticProviderCatalogOracleMatchesPiAI083(t *testing.T) {
 		},
 		"deepseek.json": {
 			Provider: "deepseek", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "d8443a8cb5f33377b3bc18d9d923c4e18c9d2fe53d931d1b108ecf4e02f8a01b", Count: 2,
+			SHA256: "d0703aa3d6fbe64f8620cc9c98d9609ab6fcbe1146184dfa7e64531795d5434a", Count: 2,
 		},
 		"groq.json": {
 			Provider: "groq", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "ff2649b13ac97ffe9383fcb5bb34f7b04b5bbb040a7e5d2030e3434898ca99d3", Count: 7,
+			SHA256: "3f5efefbde4a7fab894410a930eb4af63402cf23d2fffa19df8d41acde294573", Count: 6,
 		},
 		"together.json": {
 			Provider: "together", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "2c7cacebb0af3d6d62bf919d5181e8c17b8675bceb0084a4059d5fecd216ccab", Count: 17,
+			SHA256: "2b722f44768912111713d1327b5989c61f9de6c74502e84574e122e6fc2d6317", Count: 18,
 		},
 		"xai.json": {
 			Provider: "xai", APIs: []string{OpenAICompletionsAPI, OpenAIResponsesAPI},
-			SHA256: "0e1176eb8529d6591fe352fd6ed790c580ad0a81301f02ffce8319e0181eb494", Count: 3,
+			SHA256: "14d8273304cd361e8fd7750d47cdf0c913a9fd629890aa919175e831c12c9414", Count: 4,
 		},
 	}
 
@@ -92,8 +92,8 @@ func TestBuiltinStaticProviderCatalogOracleMatchesPiAI083(t *testing.T) {
 	}
 }
 
-func TestBuiltinStaticProviderModelsPreservePiAI083Fields(t *testing.T) {
-	wantCounts := map[string]int{AzureOpenAIProviderID: 38, "deepseek": 2, "xai": 3, "groq": 7, "cerebras": 3, "together": 17}
+func TestBuiltinStaticProviderModelsPreservePiAI0842Fields(t *testing.T) {
+	wantCounts := map[string]int{AzureOpenAIProviderID: 38, "deepseek": 2, "xai": 4, "groq": 6, "cerebras": 3, "together": 18}
 	counts := make(map[string]int, len(wantCounts))
 	models := make(map[string]Model)
 	for _, candidate := range generatedBuiltinModels() {
@@ -131,7 +131,8 @@ func TestBuiltinStaticProviderModelsPreservePiAI083Fields(t *testing.T) {
 	}
 	deepseekCompat := deepseek.Compat.OpenAICompletions
 	if deepseekCompat == nil || !boolValue(deepseekCompat.RequiresReasoningContentOnAssistantMessages) ||
-		stringValue(deepseekCompat.ThinkingFormat) != "deepseek" || stringValue(deepseek.ThinkingLevelMap[provider.ThinkingHigh]) != "high" {
+		stringValue(deepseekCompat.MaxTokensField) != "max_tokens" || stringValue(deepseekCompat.ThinkingFormat) != "deepseek" ||
+		stringValue(deepseek.ThinkingLevelMap[provider.ThinkingHigh]) != "high" {
 		t.Fatalf("deepseek-v4-pro compat/thinking = %#v / %#v", deepseek.Compat, deepseek.ThinkingLevelMap)
 	}
 
@@ -144,11 +145,12 @@ func TestBuiltinStaticProviderModelsPreservePiAI083Fields(t *testing.T) {
 		t.Fatalf("grok-4.5 fields = %#v", xai)
 	}
 
-	groq := models["groq/qwen/qwen3-32b"]
-	if groq.Name != "Qwen3-32B" || groq.API != OpenAICompletionsAPI || !groq.Reasoning ||
-		!reflect.DeepEqual(groq.Cost, provider.CostRates{Input: 0.29, Output: 0.59}) || groq.ContextWindow != 131_072 || groq.MaxTokens != 40_960 ||
+	groq := models["groq/qwen/qwen3.6-27b"]
+	if groq.Name != "Qwen3.6 27B" || groq.API != OpenAICompletionsAPI || !groq.Reasoning ||
+		!reflect.DeepEqual(groq.Input, []provider.InputKind{provider.InputText, provider.InputImage}) ||
+		!reflect.DeepEqual(groq.Cost, provider.CostRates{Input: 0.6, Output: 3, CacheRead: 0.3}) || groq.ContextWindow != 131_072 || groq.MaxTokens != 16_384 ||
 		stringValue(groq.ThinkingLevelMap[provider.ThinkingOff]) != "none" || stringValue(groq.ThinkingLevelMap[provider.ThinkingHigh]) != "default" {
-		t.Fatalf("qwen/qwen3-32b fields = %#v", groq)
+		t.Fatalf("qwen/qwen3.6-27b fields = %#v", groq)
 	}
 
 	cerebras := models["cerebras/gemma-4-31b"]

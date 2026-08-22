@@ -632,7 +632,7 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/provider/azure_openai_responses_test.go, symbol: TestAzureOpenAIResponsesUsesAzureWireAndBasePricing}
       - {kind: go_test, path: internal/app/production_provider_integration_test.go, symbol: TestRunProductionRoutesBuiltinAzureOpenAIResponses}
-      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI083}
+      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI0842}
       - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
     intentionalGoDifference: Azure shares the bounded Go Responses parser and replay state machine while retaining its own endpoint, deployment, environment, and api-key wire contract.
     remainingDifference: none
@@ -693,7 +693,7 @@ capabilities:
     targetGoBoundary: internal/model/builtin_providers.go plus auth/runtime production composition
     surfaceExposure: {application: partial, jsonl: partial, http: partial}
     evidence:
-      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI083}
+      - {kind: go_test, path: internal/model/builtin_static_providers_test.go, symbol: TestBuiltinStaticProviderCatalogOracleMatchesPiAI0842}
       - {kind: go_test, path: internal/auth/provider_auth_test.go, symbol: TestStandardOpenAIAndCodexCredentialsAreIndependent}
     intentionalGoDifference: OpenAI-compatible providers should share one dialect adapter rather than duplicate transport code.
     remainingDifference: pi-go has 9 built-in providers while upstream registers 38; independent auth/catalog/compat behavior remains deferred until those providers are needed.

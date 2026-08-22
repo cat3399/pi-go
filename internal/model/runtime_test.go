@@ -699,12 +699,12 @@ func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
 }
 
 func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
-	if generatedCatalogSource != "@earendil-works/pi-ai@0.83.0" {
+	if generatedCatalogSource != "@earendil-works/pi-ai@0.84.2" {
 		t.Fatalf("catalog source = %q", generatedCatalogSource)
 	}
 	models := builtinModels()
-	if len(models) != 130 {
-		t.Fatalf("builtin model count = %d, want 130", len(models))
+	if len(models) != 129 {
+		t.Fatalf("builtin model count = %d, want 129", len(models))
 	}
 	allowedAPIs := map[string]map[string]bool{
 		OpenAIProviderID:      {OpenAIResponsesAPI: true},
@@ -741,6 +741,7 @@ func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
 		"openai/gpt-5.5-pro", "openai/gpt-5.6-sol", "openai-codex/gpt-5.6-sol",
 		"anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-6", "anthropic/claude-opus-4-8",
 		"anthropic/claude-sonnet-4-6", "anthropic/claude-fable-5",
+		"groq/qwen/qwen3.6-27b", "together/deepseek-ai/DeepSeek-V4-Flash-0731", "xai/grok-4.6",
 	} {
 		if _, ok := byID[required]; !ok {
 			t.Fatalf("catalog is missing required upstream model %q", required)

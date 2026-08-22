@@ -40,7 +40,7 @@ var targets = []target{
 	{File: "xai.json", Provider: "xai", APIs: []string{"openai-completions", "openai-responses"}},
 }
 
-const upstreamCatalogPackage = "@earendil-works/pi-ai@0.83.0"
+const upstreamCatalogPackage = "@earendil-works/pi-ai@0.84.2"
 
 type modelIdentity struct {
 	ID       string `json:"id"`
