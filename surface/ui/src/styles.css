@@ -108,10 +108,13 @@ textarea {
   user-select: none;
 }
 
-.pi-message-user,
 .pi-markdown,
+.pi-bash-command,
 .pi-bash-output,
-.pi-tool-section-content,
+.pi-message-error,
+.pi-tool-input,
+.pi-tool-output,
+.pi-edit-preview pre,
 .pi-file-change-line code,
 input,
 textarea {
@@ -119,14 +122,43 @@ textarea {
   user-select: text;
 }
 
-.pi-message-user::selection,
-.pi-message-user ::selection,
-.pi-markdown::selection,
-.pi-markdown ::selection,
+/* Cross-block ranges include layout nodes. Keep those highlights transparent,
+ * then paint only nodes that actually carry readable text below. */
+.pi-transcript::selection,
+.pi-transcript *::selection {
+  background: transparent;
+}
+
+.pi-markdown h1::selection,
+.pi-markdown h2::selection,
+.pi-markdown h3::selection,
+.pi-markdown h4::selection,
+.pi-markdown h5::selection,
+.pi-markdown h6::selection,
+.pi-markdown p::selection,
+.pi-markdown li::selection,
+.pi-markdown blockquote::selection,
+.pi-markdown a::selection,
+.pi-markdown strong::selection,
+.pi-markdown em::selection,
+.pi-markdown del::selection,
+.pi-markdown code::selection,
+.pi-markdown th::selection,
+.pi-markdown td::selection,
+.pi-markdown summary::selection,
+.pi-markdown kbd::selection,
+.pi-markdown span::selection,
+.pi-markdown sub::selection,
+.pi-markdown sup::selection,
+.pi-bash-command::selection,
 .pi-bash-output::selection,
-.pi-tool-section-content::selection,
-.pi-tool-section-content ::selection,
+.pi-message-error::selection,
+.pi-tool-input::selection,
+.pi-tool-output::selection,
+.pi-edit-preview pre::selection,
 .pi-file-change-line code::selection,
+.pi-transcript input::selection,
+.pi-transcript textarea::selection,
 input::selection,
 textarea::selection {
   background: rgba(10, 132, 255, 0.2);
