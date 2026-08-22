@@ -72,22 +72,52 @@ tasks:
         export GOOS=android
         export GOARCH=arm64
         version="${PI_GO_VERSION:-0.1.0-dev}"
+        build_type="${PI_GO_ANDROID_BUILD_TYPE:-debug}"
         mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
-        go build -buildmode=c-shared -overlay build/android/overlay.json \
-          -tags android,debug -buildvcs=false -gcflags=all="-l" \
-          -ldflags="-X=main.version=$version" \
-          -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so .
+        case "$build_type" in
+          debug)
+            go build -buildmode=c-shared -overlay build/android/overlay.json \
+              -tags android,debug -buildvcs=false -gcflags=all="-l" \
+              -ldflags="-X=main.version=$version" \
+              -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so .
+            ;;
+          release)
+            go build -buildmode=c-shared -overlay build/android/overlay.json \
+              -tags production,android -trimpath -buildvcs=false \
+              -ldflags="-w -s -X=main.version=$version" \
+              -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so .
+            ;;
+          *)
+            echo "Unsupported PI_GO_ANDROID_BUILD_TYPE: $build_type" >&2
+            exit 2
+            ;;
+        esac
 
   apk:
-    summary: Build a debug arm64 APK without installing an emulator
+    summary: Build a signed debug or release arm64 APK without installing an emulator
     deps: [go:shared]
     cmds:
+      - mkdir -p {{.BIN_DIR}}
       - |
+        output_dir=$(cd "{{.BIN_DIR}}" && pwd)
         cd build/android
         chmod +x ./gradlew
-        ./gradlew assembleDebug
-      - mkdir -p {{.BIN_DIR}}
-      - cp build/android/app/build/outputs/apk/debug/app-debug.apk {{.BIN_DIR}}/{{.APP_NAME}}.apk
+        build_type="${PI_GO_ANDROID_BUILD_TYPE:-debug}"
+        case "$build_type" in
+          debug)
+            ./gradlew assembleDebug
+            apk_path=app/build/outputs/apk/debug/app-debug.apk
+            ;;
+          release)
+            ./gradlew assembleRelease
+            apk_path=app/build/outputs/apk/release/app-release.apk
+            ;;
+          *)
+            echo "Unsupported PI_GO_ANDROID_BUILD_TYPE: $build_type" >&2
+            exit 2
+            ;;
+        esac
+        cp "$apk_path" "$output_dir/{{.APP_NAME}}.apk"
       - echo "APK created at {{.BIN_DIR}}/{{.APP_NAME}}.apk"
 
   device:list:

@@ -24,7 +24,7 @@ tasks:
       - CGO_ENABLED=0 go test -tags server ./...
 
   build:
-    summary: Build a debug APK for a physical Android device
+    summary: Build an Android APK (debug by default, release when PI_GO_ANDROID_BUILD_TYPE=release)
     cmds:
       - task: android:apk
 

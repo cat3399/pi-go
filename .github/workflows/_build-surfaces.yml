@@ -11,6 +11,20 @@ on:
         description: Semantic version embedded in artifacts
         required: true
         type: string
+      production:
+        description: Build production variants where a surface supports them
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -20,24 +34,57 @@ jobs:
     name: Validate inputs
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      terminal: ${{ steps.selection.outputs.terminal }}
+      web: ${{ steps.selection.outputs.web }}
+      gui: ${{ steps.selection.outputs.gui }}
+      mobile: ${{ steps.selection.outputs.mobile }}
     steps:
       - name: Validate surface and version
+        id: selection
         env:
           SURFACE: ${{ inputs.surface }}
           VERSION: ${{ inputs.version }}
         run: |
-          case "$SURFACE" in
-            all|terminal|web|gui|mobile) ;;
-            *) echo "Unsupported surface: $SURFACE" >&2; exit 2 ;;
-          esac
+          terminal=false
+          web=false
+          gui=false
+          mobile=false
+          if [[ "$SURFACE" == all ]]; then
+            terminal=true
+            web=true
+            gui=true
+            mobile=true
+          else
+            IFS=',' read -ra selected <<< "$SURFACE"
+            if (( ${#selected[@]} == 0 )); then
+              echo "Surface selection is empty" >&2
+              exit 2
+            fi
+            for item in "${selected[@]}"; do
+              case "$item" in
+                terminal) terminal=true ;;
+                web) web=true ;;
+                gui) gui=true ;;
+                mobile) mobile=true ;;
+                *) echo "Unsupported surface: $item" >&2; exit 2 ;;
+              esac
+            done
+          fi
           if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$ ]]; then
             echo "Invalid semantic version: $VERSION" >&2
             exit 2
           fi
+          {
+            echo "terminal=$terminal"
+            echo "web=$web"
+            echo "gui=$gui"
+            echo "mobile=$mobile"
+          } >> "$GITHUB_OUTPUT"
 
   terminal:
     name: Terminal · portable
-    if: inputs.surface == 'all' || inputs.surface == 'terminal'
+    if: needs.validate.outputs.terminal == 'true'
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -69,7 +116,7 @@ jobs:
 
   web:
     name: Web · portable
-    if: inputs.surface == 'all' || inputs.surface == 'web'
+    if: needs.validate.outputs.web == 'true'
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -118,7 +165,7 @@ jobs:
 
   gui:
     name: GUI · ${{ matrix.target }}
-    if: inputs.surface == 'all' || inputs.surface == 'gui'
+    if: needs.validate.outputs.gui == 'true'
     needs: validate
     strategy:
       fail-fast: false
@@ -186,14 +233,15 @@ jobs:
           retention-days: 14
 
   mobile:
-    name: Mobile · Android arm64
-    if: inputs.surface == 'all' || inputs.surface == 'mobile'
+    name: Mobile · Android arm64 · ${{ inputs.production && 'release' || 'debug' }}
+    if: needs.validate.outputs.mobile == 'true'
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       ANDROID_NDK_VERSION: 26.3.11579264
       WAILS_VERSION: v3.0.0-beta.8
+      EXPECTED_ANDROID_CERT_SHA256: c1e95eadc815e6b5419f9fa1ef541ac35771d22816b4981afe1d0729b2bf6578
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,6 +272,27 @@ jobs:
             surface/mobile/build/android/*.gradle
             surface/mobile/build/android/app/*.gradle
             surface/mobile/build/android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Configure fixed Android signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_FILE: ${{ runner.temp }}/pi-go-signing.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo "The four Android signing secrets must all be configured" >&2
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          keytool -list -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          cert_sha256=$(keytool -exportcert -keystore "$KEYSTORE_FILE" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" | sha256sum | awk '{print $1}')
+          if [[ "$cert_sha256" != "$EXPECTED_ANDROID_CERT_SHA256" ]]; then
+            echo "Unexpected Android signing certificate: $cert_sha256" >&2
+            exit 1
+          fi
+          echo "Using Android signing certificate SHA-256: $cert_sha256"
 
       - name: Restore pinned Android NDK
         id: ndk-cache
@@ -264,13 +333,24 @@ jobs:
 
       - name: Build versioned Android APK
         env:
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/pi-go-signing.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PI_GO_ANDROID_BUILD_TYPE: ${{ inputs.production && 'release' || 'debug' }}
           VERSION: ${{ inputs.version }}
         run: |
           output_dir="$RUNNER_TEMP/pi-go-mobile"
           make build SURFACE=mobile VERSION="$VERSION" OUTPUT_DIR="$output_dir"
           mkdir -p dist
           cp "$output_dir/pi-go-mobile.apk" "dist/pi-go-mobile_${VERSION}_android_arm64.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "dist/pi-go-mobile_${VERSION}_android_arm64.apk" | head -n 1
+          apk="dist/pi-go-mobile_${VERSION}_android_arm64.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 1
+          cert_sha256=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          if [[ "$cert_sha256" != "$EXPECTED_ANDROID_CERT_SHA256" ]]; then
+            echo "APK was signed by an unexpected certificate: $cert_sha256" >&2
+            exit 1
+          fi
 
       - name: Upload Android APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

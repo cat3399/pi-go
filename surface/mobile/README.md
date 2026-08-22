@@ -37,13 +37,21 @@ make doctor SURFACE=mobile
 make check SURFACE=mobile
 ```
 
-Build a debug APK without installing it:
+Build a debug APK without installing it. Local debug builds use the standard
+`~/.android/debug.keystore`; GitHub Actions is configured with that same key so
+its APKs can update local installations:
 
 ```sh
 make build SURFACE=mobile
 ```
 
 The APK is written to `surface/mobile/bin/pi-go-mobile.apk`.
+
+To exercise the production build locally with the same signing key:
+
+```sh
+PI_GO_ANDROID_BUILD_TYPE=release make build SURFACE=mobile VERSION=1.2.3
+```
 
 ## Run on a physical Android device
 

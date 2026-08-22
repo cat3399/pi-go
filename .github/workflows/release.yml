@@ -16,7 +16,7 @@ on:
           - gui
           - mobile
       bump:
-        description: Semantic version increment
+        description: Version increment when the selected surface already exists
         required: true
         default: patch
         type: choice
@@ -34,12 +34,14 @@ concurrency:
 
 jobs:
   version:
-    name: Reserve next version
+    name: Resolve shared surface version
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      surfaces: ${{ steps.version.outputs.surfaces }}
+      release_exists: ${{ steps.version.outputs.release_exists }}
     steps:
       - name: Require the default branch
         env:
@@ -56,29 +58,61 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Calculate next semantic version
+      - name: Plan surface-aware release version
         id: version
         env:
           BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+          SURFACE: ${{ inputs.surface }}
         run: |
           git fetch --force --tags origin
-          version=$(./scripts/next-version.sh "$BUMP")
-          tag="v$version"
-          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
-            echo "Tag already exists: $tag" >&2
-            exit 1
+          latest=$(./scripts/latest-version.sh)
+          release_exists=false
+          if [[ -z "$latest" ]]; then
+            version=0.1.0
+            surfaces=$SURFACE
+          else
+            assets_file="$RUNNER_TEMP/release-assets.txt"
+            if gh release view "v$latest" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$assets_file"; then
+              release_exists=true
+            else
+              : > "$assets_file"
+            fi
+            missing=$(./scripts/release-surfaces.sh missing "$SURFACE" "$latest" "$assets_file")
+            if [[ -n "$missing" ]]; then
+              version=$latest
+              surfaces=$missing
+              echo "Completing v$version with missing surfaces: $surfaces"
+            else
+              version=$(./scripts/next-version.sh "$BUMP")
+              surfaces=$SURFACE
+              release_exists=false
+              if git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
+                echo "Tag already exists: v$version" >&2
+                exit 1
+              fi
+            fi
           fi
+          tag="v$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Publishing $tag"
+          echo "surfaces=$surfaces" >> "$GITHUB_OUTPUT"
+          echo "release_exists=$release_exists" >> "$GITHUB_OUTPUT"
+          echo "Publishing $surfaces as $tag (existing release: $release_exists)"
 
   build:
     name: Build selected surfaces
     needs: version
     uses: ./.github/workflows/_build-surfaces.yml
     with:
-      surface: ${{ inputs.surface }}
+      surface: ${{ needs.version.outputs.surfaces }}
       version: ${{ needs.version.outputs.version }}
+      production: true
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
   publish:
     name: Publish GitHub release
@@ -88,30 +122,103 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download release packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
-          path: dist
+          path: dist-new
           merge-multiple: true
 
-      - name: Generate SHA-256 checksums
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Create version tag and GitHub release
+      - name: Download existing checksums
+        if: needs.version.outputs.release_exists == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir -p dist-existing
+          if ! gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir dist-existing; then
+            : > dist-existing/SHA256SUMS
+          fi
+
+      - name: Merge SHA-256 checksums
+        env:
+          RELEASE_EXISTS: ${{ needs.version.outputs.release_exists }}
+        run: |
+          mkdir -p dist-meta
+          (
+            cd dist-new
+            sha256sum *
+          ) > dist-meta/new-SHA256SUMS
+          if [[ "$RELEASE_EXISTS" == true && -s dist-existing/SHA256SUMS ]]; then
+            awk '
+              NR == FNR { replacement[$2] = $0; next }
+              !($2 in replacement) { print }
+              END { for (name in replacement) print replacement[name] }
+            ' dist-meta/new-SHA256SUMS dist-existing/SHA256SUMS > dist-meta/SHA256SUMS.unsorted
+          else
+            cp dist-meta/new-SHA256SUMS dist-meta/SHA256SUMS.unsorted
+          fi
+          sort -k2 dist-meta/SHA256SUMS.unsorted > dist-meta/SHA256SUMS
+          cat dist-meta/SHA256SUMS
+
+      - name: Prepare release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EXISTS: ${{ needs.version.outputs.release_exists }}
+          TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
-          SURFACE: ${{ inputs.surface }}
+        run: |
+          assets_file="$RUNNER_TEMP/release-assets.txt"
+          if [[ "$RELEASE_EXISTS" == true ]]; then
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$assets_file"
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/previous-notes.md"
+          else
+            : > "$assets_file"
+            : > "$RUNNER_TEMP/previous-notes.md"
+          fi
+          for asset_path in dist-new/*; do
+            basename "$asset_path" >> "$assets_file"
+          done
+          sort -u "$assets_file" > "$RUNNER_TEMP/all-release-assets.txt"
+          published=$(./scripts/release-surfaces.sh present all "$VERSION" "$RUNNER_TEMP/all-release-assets.txt")
+          display_surfaces=${published//,/, }
+          awk '
+            $0 == "<!-- pi-go-surfaces:start -->" { marker = 1; next }
+            $0 == "<!-- pi-go-surfaces:end -->" { marker = 0; next }
+            marker { next }
+            NR == 1 && /^Built surface selection:/ { next }
+            { print }
+          ' "$RUNNER_TEMP/previous-notes.md" > "$RUNNER_TEMP/previous-notes.filtered.md"
+          {
+            echo '<!-- pi-go-surfaces:start -->'
+            echo "Published surfaces: $display_surfaces. All archives are versioned as $VERSION; verify downloads with SHA256SUMS."
+            echo '<!-- pi-go-surfaces:end -->'
+            echo
+            cat "$RUNNER_TEMP/previous-notes.filtered.md"
+          } > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish version tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_EXISTS: ${{ needs.version.outputs.release_exists }}
+          TAG: ${{ needs.version.outputs.tag }}
           TARGET_SHA: ${{ github.sha }}
         run: |
-          gh release create "$TAG" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$TARGET_SHA" \
-            --title "pi-go $TAG" \
-            --notes "Built surface selection: $SURFACE. All archives are versioned as $VERSION; verify downloads with SHA256SUMS." \
-            --generate-notes
+          if [[ "$RELEASE_EXISTS" == true ]]; then
+            gh release upload "$TAG" dist-new/* dist-meta/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$TAG" dist-new/* dist-meta/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$TARGET_SHA" \
+              --title "pi-go $TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --generate-notes
+          fi

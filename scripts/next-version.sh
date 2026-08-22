@@ -10,33 +10,17 @@ case "$bump" in
 		;;
 esac
 
-latest_major=-1
-latest_minor=-1
-latest_patch=-1
-
-while IFS= read -r tag; do
-	if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-		continue
-	fi
-
-	major=$((10#${BASH_REMATCH[1]}))
-	minor=$((10#${BASH_REMATCH[2]}))
-	patch=$((10#${BASH_REMATCH[3]}))
-	if (( major > latest_major \
-		|| (major == latest_major && minor > latest_minor) \
-		|| (major == latest_major && minor == latest_minor && patch > latest_patch) )); then
-		latest_major=$major
-		latest_minor=$minor
-		latest_patch=$patch
-	fi
-done < <(git tag --list)
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+latest_version=$("$script_dir/latest-version.sh")
 
 # The repository started at 0.1.0-dev without historical release tags. Keep
 # the first automated release aligned with that public version.
-if (( latest_major < 0 )); then
+if [[ -z "$latest_version" ]]; then
 	printf '0.1.0\n'
 	exit 0
 fi
+
+IFS=. read -r latest_major latest_minor latest_patch <<< "$latest_version"
 
 case "$bump" in
 	major)

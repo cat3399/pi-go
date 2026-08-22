@@ -5,19 +5,22 @@
 在 GitHub 仓库的 **Actions** 页面中：
 
 1. 日常取包选择 **Build**，再选择需要的 surface；
-2. 正式发布选择 **Release**。默认的 `all` 和 `patch` 会构建全部 surface，并自动发布下一个补丁版本；
+2. 正式发布选择 **Release**。默认的 `all` 会补齐当前版本缺少的 surface；如果当前版本已经包含全部
+   surface，`patch` 才会创建下一个补丁版本；
 3. 只在不兼容变更或新增能力时把升级级别改为 `major` 或 `minor`。
 
 不需要手工修改源码版本、创建 tag、整理压缩包或计算校验和。Release 必须从默认分支运行，多个
-Release workflow 会串行执行，避免并发任务使用同一个版本号。
+Release workflow 会串行执行，避免并发任务同时修改同一个版本。
 
 ## 版本规则
 
 - 只把精确匹配 `vMAJOR.MINOR.PATCH` 的 tag 视为稳定版本；
 - 仓库没有稳定 tag 时，首个自动发布版本为 `v0.1.0`；
-- 后续版本以最高稳定 tag 为基准，按照选择的 `patch`、`minor` 或 `major` 自动递增；
-- **Build** 不占用版本号。它使用下一个补丁版本加 `-dev.<commit>`，例如
-  `0.1.1-dev.a1b2c3d4e5f6`；
+- 所有 surface 共用同一个版本。若所选 surface 尚未出现在最高稳定版本中，Release 会把它追加到
+  现有 tag 和 GitHub Release，不递增版本；
+- 只有所选 surface 已经完整存在于最高稳定版本中，才按照 `patch`、`minor` 或 `major` 创建新版本；
+- 选择 `all` 时只补建当前版本缺少的 surface；当前版本四个 surface 都完整时才递增并重新构建全部；
+- **Build** 不占用版本号。其 SemVer 基准使用同一套 surface 判断，并追加 `-dev.<commit>`；
 - 同一版本会注入 Go CLI、内嵌 Web UI、GUI bridge、移动端 Go 库，以及 Android 的
   `versionName`。Android `versionCode` 由 SemVer 单调映射生成。
 
@@ -37,8 +40,8 @@ make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
 | `gui` | Linux amd64、Windows amd64、macOS amd64 与 arm64 原生包 |
 | `mobile` | Android arm64 APK |
 
-所有发布资产旁会生成 `SHA256SUMS`。正式 Release 使用 GitHub 自动生成的发布说明，并在说明开头
-记录本次选择的 surface。
+所有发布资产旁会生成 `SHA256SUMS`。向已有版本补充 surface 时，workflow 会保留原资产的校验和、
+合并新资产校验和，并更新发布说明中的完整 surface 列表。
 
 ## 缓存
 
@@ -54,10 +57,21 @@ make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
 
 ## 签名边界
 
-当前项目构建入口生成的是可安装的 debug Android APK；它不适合直接提交应用商店。GUI 产物也尚未
-进行 Windows 代码签名或 Apple Developer ID 签名、公证。GitHub Release、SemVer、版本注入和校验和
-不依赖额外 secret；以后接入商店或桌面签名时，应在各自的原生 job 中配置证书，不把证书下沉到共享
-Go Core 或通用构建 job。
+Android 普通 **Build** 生成 debug APK，正式 **Release** 生成 release APK；两者使用同一个固定证书，
+因此本机产物、Action 产物和正式发布包可以相互覆盖升级。当前证书是项目维护者本机的 Android debug
+keystore，SHA-256 指纹为
+`C1:E9:5E:AD:C8:15:E6:B5:41:9F:9F:A1:EF:54:1A:C3:57:71:D2:28:16:B4:98:1A:FE:1D:07:29:B2:BF:65:78`。
+workflow 会在构建前后检查该指纹，防止 Secret 被错误替换。
+
+GitHub Actions 使用 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS` 和
+`ANDROID_KEY_PASSWORD` 四个仓库 Secret。keystore 本身不得提交到仓库。本机普通构建继续使用 Android
+默认的 `~/.android/debug.keystore`；需要检查 production 构建时可运行：
+
+```sh
+PI_GO_ANDROID_BUILD_TYPE=release make build SURFACE=mobile VERSION=1.2.3
+```
+
+GUI 产物尚未进行 Windows 代码签名或 Apple Developer ID 签名、公证。
 
 如果 Release job 在创建 tag 时收到权限错误，请确认仓库 **Settings → Actions → General → Workflow
 permissions** 允许 `GITHUB_TOKEN` 写入仓库内容。workflow 本身只在发布 job 请求 `contents: write`，
