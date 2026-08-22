@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useRef,
   useState,
   type CSSProperties,
 } from "react";
@@ -16,30 +17,46 @@ interface MessageAnchorsProps {
   activeIndex: number;
   mobile: boolean;
   open: boolean;
-  previewIndex: number | null;
   onSelect(index: number): void;
 }
 
 export interface MessageAnchorsHandle {
   setGestureIndex(index: number | null): void;
+  setPreviewIndex(index: number | null): void;
+  setPreviewTop(top: number | null): void;
 }
 
 export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsProps>(function MessageAnchors(props, ref) {
   const [gestureIndex, setGestureIndex] = useState<number | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const previewRef = useRef<HTMLDivElement>(null);
 
-  useImperativeHandle(ref, () => ({ setGestureIndex }), []);
+  useImperativeHandle(ref, () => ({
+    setGestureIndex,
+    setPreviewIndex,
+    setPreviewTop(top) {
+      if (top === null) {
+        previewRef.current?.style.removeProperty("--pi-anchor-scrub-top");
+      } else {
+        previewRef.current?.style.setProperty("--pi-anchor-scrub-top", `${top}px`);
+      }
+    },
+  }), []);
   useEffect(() => {
-    if (!props.open) setGestureIndex(null);
+    if (!props.open) {
+      setGestureIndex(null);
+      setPreviewIndex(null);
+    }
   }, [props.open]);
 
   if (props.items.length === 0) return null;
   const displayedActiveIndex = gestureIndex === null
     ? props.activeIndex
     : Math.max(0, Math.min(gestureIndex, props.items.length - 1));
-  const previewIndex = props.previewIndex === null
+  const displayedPreviewIndex = previewIndex === null
     ? null
-    : Math.max(0, Math.min(props.previewIndex, props.items.length - 1));
-  const preview = previewIndex === null ? null : props.items[previewIndex];
+    : Math.max(0, Math.min(previewIndex, props.items.length - 1));
+  const preview = displayedPreviewIndex === null ? null : props.items[displayedPreviewIndex];
   const desktopHeight = Math.min(320, 16 + props.items.length * 18);
   const mobileHeight = Math.max(40, 16 + props.items.length * 24);
   const mobileDotSize = props.items.length > 120 ? 3 : props.items.length > 80 ? 4 : props.items.length > 60 ? 5 : 6;
@@ -79,10 +96,14 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
           ))}
         </div>
       </aside>
-      {props.mobile && props.open && previewIndex !== null && preview && (
-        <div className="pi-anchor-scrub-preview" role="status" aria-live="polite">
-          <small>{String(previewIndex + 1).padStart(2, "0")}</small>
-          <span>{preview.label || "（无文字消息）"}</span>
+      {props.mobile && (
+        <div
+          ref={previewRef}
+          className={`pi-anchor-scrub-preview ${props.open && preview ? "is-visible" : ""}`}
+          aria-hidden="true"
+        >
+          <small>{preview && displayedPreviewIndex !== null ? String(displayedPreviewIndex + 1).padStart(2, "0") : ""}</small>
+          <span>{preview?.label || (preview ? "（无文字消息）" : "")}</span>
         </div>
       )}
     </>

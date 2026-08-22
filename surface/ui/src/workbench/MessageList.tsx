@@ -27,24 +27,28 @@ interface MessageListProps {
   onFork(entryId: string): Promise<void>;
 }
 
-interface AnchorScrub {
-  index: number;
+interface AnchorTrackMetrics {
+  innerTop: number;
+  innerHeight: number;
+  slotHeight: number;
 }
 
 interface AnchorGesture {
   pointerId: number;
   startX: number;
   startY: number;
+  lastY: number;
   engaged: boolean;
   hasSelection: boolean;
   insideHitRegion: boolean;
   index: number;
+  trackMetrics: AnchorTrackMetrics | null;
+  stageTop: number;
+  stageBottom: number;
 }
 
 const MOBILE_EDGE_SIZE = 44;
 const TOUCH_SLOP = 8;
-const ANCHOR_HIT_HALF_WIDTH = 48;
-const ANCHOR_HIT_VERTICAL_OVERSHOOT = 24;
 const ANCHOR_PREVIEW_DWELL_MS = 160;
 const ANCHOR_PREVIEW_HALF_HEIGHT = 38;
 
@@ -909,10 +913,9 @@ export function MessageList({
   const atBottomRef = useRef(true);
   const anchorGestureRef = useRef<AnchorGesture | null>(null);
   const anchorPreviewTimerRef = useRef<number | null>(null);
-  const anchorScrubIndexRef = useRef<number | null>(null);
+  const anchorPreviewVisibleRef = useRef(false);
   const [activeAnchorIndex, setActiveAnchorIndex] = useState(0);
   const [anchorOpen, setAnchorOpen] = useState(false);
-  const [anchorScrub, setAnchorScrub] = useState<AnchorScrub | null>(null);
   const toolResults = useMemo(() => {
     const values = new Map<string, AgentMessage>();
     for (const message of messages) {
@@ -982,27 +985,17 @@ export function MessageList({
     const innerHeight = Math.max(0, bounds.height - 16);
     if (bounds.width <= 0 || innerHeight <= 0) return null;
     return {
-      centerX: bounds.left + bounds.width / 2,
       innerTop,
       innerHeight,
       slotHeight: innerHeight / anchors.length,
     };
   };
 
-  const anchorCenterY = (index: number): number | null => {
-    const metrics = anchorTrackMetrics();
-    if (!metrics || index < 0 || index >= anchors.length) return null;
-    return metrics.innerTop + (index + 0.5) * metrics.slotHeight;
-  };
-
-  const anchorIndexNear = (clientX: number, clientY: number): number | null => {
-    const metrics = anchorTrackMetrics();
+  const anchorIndexAtY = (clientY: number, gesture: AnchorGesture): number | null => {
+    const metrics = gesture.trackMetrics ?? anchorTrackMetrics();
     if (!metrics) return null;
-    if (
-      Math.abs(clientX - metrics.centerX) > ANCHOR_HIT_HALF_WIDTH
-      || clientY < metrics.innerTop - ANCHOR_HIT_VERTICAL_OVERSHOOT
-      || clientY > metrics.innerTop + metrics.innerHeight + ANCHOR_HIT_VERTICAL_OVERSHOOT
-    ) return null;
+    gesture.trackMetrics = metrics;
+    if (clientY < metrics.innerTop || clientY > metrics.innerTop + metrics.innerHeight) return null;
     const estimated = Math.round((clientY - metrics.innerTop) / metrics.slotHeight - 0.5);
     return Math.max(0, Math.min(anchors.length - 1, estimated));
   };
@@ -1015,40 +1008,32 @@ export function MessageList({
 
   const hideAnchorPreview = () => {
     clearAnchorPreviewTimer();
-    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
-    if (anchorScrubIndexRef.current === null) return;
-    anchorScrubIndexRef.current = null;
-    setAnchorScrub(null);
+    anchorPreviewVisibleRef.current = false;
+    messageAnchorsRef.current?.setPreviewTop(null);
+    messageAnchorsRef.current?.setPreviewIndex(null);
+  };
+
+  const positionAnchorPreview = (gesture: AnchorGesture, clientY: number) => {
+    const minimumCenter = gesture.stageTop + ANCHOR_PREVIEW_HALF_HEIGHT;
+    const maximumCenter = Math.max(minimumCenter, gesture.stageBottom - ANCHOR_PREVIEW_HALF_HEIGHT);
+    const previewCenter = Math.max(minimumCenter, Math.min(maximumCenter, clientY));
+    messageAnchorsRef.current?.setPreviewTop(previewCenter - ANCHOR_PREVIEW_HALF_HEIGHT);
   };
 
   const scheduleAnchorPreview = (index: number) => {
     clearAnchorPreviewTimer();
-    if (anchorScrubIndexRef.current !== null) {
-      anchorScrubIndexRef.current = null;
-      setAnchorScrub(null);
-    }
-    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
     anchorPreviewTimerRef.current = window.setTimeout(() => {
       anchorPreviewTimerRef.current = null;
       const gesture = anchorGestureRef.current;
-      const stage = stageRef.current;
       if (
-        !stage
-        || !gesture?.engaged
+        !gesture?.engaged
         || !gesture.hasSelection
         || !gesture.insideHitRegion
         || gesture.index !== index
       ) return;
-      const pointY = anchorCenterY(index);
-      if (pointY === null) return;
-      const stageBounds = stage.getBoundingClientRect();
-      const previewY = Math.max(
-        stageBounds.top + ANCHOR_PREVIEW_HALF_HEIGHT,
-        Math.min(stageBounds.bottom - ANCHOR_PREVIEW_HALF_HEIGHT, pointY),
-      );
-      stage.style.setProperty("--pi-anchor-scrub-y", `${previewY}px`);
-      anchorScrubIndexRef.current = index;
-      setAnchorScrub({ index });
+      positionAnchorPreview(gesture, gesture.lastY);
+      anchorPreviewVisibleRef.current = true;
+      messageAnchorsRef.current?.setPreviewIndex(index);
     }, ANCHOR_PREVIEW_DWELL_MS);
   };
 
@@ -1068,10 +1053,14 @@ export function MessageList({
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      lastY: event.clientY,
       engaged: false,
       hasSelection: false,
       insideHitRegion: false,
       index: activeAnchorIndex,
+      trackMetrics: null,
+      stageTop: bounds.top,
+      stageBottom: bounds.bottom,
     };
   };
 
@@ -1080,6 +1069,7 @@ export function MessageList({
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
+    gesture.lastY = event.clientY;
     if (!gesture.engaged) {
       if (isTextSelectionInteraction(event.target, event.clientX, event.clientY)) {
         anchorGestureRef.current = null;
@@ -1095,10 +1085,10 @@ export function MessageList({
       setAnchorOpen(true);
     }
     event.preventDefault();
-    const index = anchorIndexNear(event.clientX, event.clientY);
+    const index = anchorIndexAtY(event.clientY, gesture);
     if (index === null) {
       gesture.insideHitRegion = false;
-      hideAnchorPreview();
+      clearAnchorPreviewTimer();
       return;
     }
     const changed = !gesture.hasSelection || gesture.index !== index;
@@ -1109,7 +1099,10 @@ export function MessageList({
     if (changed) {
       messageAnchorsRef.current?.setGestureIndex(index);
     }
-    if (changed || entered) {
+    if (anchorPreviewVisibleRef.current) {
+      positionAnchorPreview(gesture, event.clientY);
+      if (changed || entered) messageAnchorsRef.current?.setPreviewIndex(index);
+    } else if (changed || entered) {
       scheduleAnchorPreview(index);
     }
   };
@@ -1120,7 +1113,7 @@ export function MessageList({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    const releasedIndex = anchorIndexNear(event.clientX, event.clientY);
+    const releasedIndex = anchorIndexAtY(event.clientY, gesture);
     if (releasedIndex !== null) {
       gesture.hasSelection = true;
       gesture.index = releasedIndex;
@@ -1143,10 +1136,10 @@ export function MessageList({
     anchorGestureRef.current = null;
     messageAnchorsRef.current?.setGestureIndex(null);
     clearAnchorPreviewTimer();
-    anchorScrubIndexRef.current = null;
-    stageRef.current?.style.removeProperty("--pi-anchor-scrub-y");
+    anchorPreviewVisibleRef.current = false;
+    messageAnchorsRef.current?.setPreviewIndex(null);
+    messageAnchorsRef.current?.setPreviewTop(null);
     setAnchorOpen(false);
-    setAnchorScrub(null);
     setActiveAnchorIndex(Math.max(0, turns.length - 1));
     const frame = requestAnimationFrame(() => {
       transcript.scrollTop = transcript.scrollHeight;
@@ -1273,7 +1266,6 @@ export function MessageList({
         activeIndex={activeAnchorIndex}
         mobile={mobile}
         open={!mobile || (anchorsEnabled && anchorOpen)}
-        previewIndex={anchorScrub?.index ?? null}
         onSelect={(index) => {
           scrollToAnchor(index);
           if (!mobile) return;
