@@ -36,7 +36,8 @@ interface AnchorGesture {
   startX: number;
   startY: number;
   engaged: boolean;
-  selecting: boolean;
+  hasSelection: boolean;
+  insideHitRegion: boolean;
   index: number;
 }
 
@@ -1029,7 +1030,13 @@ export function MessageList({
       anchorPreviewTimerRef.current = null;
       const gesture = anchorGestureRef.current;
       const stage = stageRef.current;
-      if (!stage || !gesture?.engaged || !gesture.selecting || gesture.index !== index) return;
+      if (
+        !stage
+        || !gesture?.engaged
+        || !gesture.hasSelection
+        || !gesture.insideHitRegion
+        || gesture.index !== index
+      ) return;
       const pointY = anchorCenterY(index);
       if (pointY === null) return;
       const stageBounds = stage.getBoundingClientRect();
@@ -1057,7 +1064,8 @@ export function MessageList({
       startX: event.clientX,
       startY: event.clientY,
       engaged: false,
-      selecting: false,
+      hasSelection: false,
+      insideHitRegion: false,
       index: activeAnchorIndex,
     };
   };
@@ -1082,20 +1090,22 @@ export function MessageList({
       setAnchorOpen(true);
     }
     event.preventDefault();
-    if (!gesture.selecting && Math.abs(dy) < TOUCH_SLOP) return;
+    if (!gesture.hasSelection && Math.abs(dy) < TOUCH_SLOP) return;
     const index = anchorIndexNear(event.clientX, event.clientY);
     if (index === null) {
-      gesture.selecting = false;
-      gesture.index = -1;
-      messageAnchorsRef.current?.setGestureIndex(null);
+      gesture.insideHitRegion = false;
       hideAnchorPreview();
       return;
     }
-    const changed = !gesture.selecting || gesture.index !== index;
-    gesture.selecting = true;
+    const changed = !gesture.hasSelection || gesture.index !== index;
+    const entered = !gesture.insideHitRegion;
+    gesture.hasSelection = true;
+    gesture.insideHitRegion = true;
     gesture.index = index;
     if (changed) {
       messageAnchorsRef.current?.setGestureIndex(index);
+    }
+    if (changed || entered) {
       scheduleAnchorPreview(index);
     }
   };
@@ -1106,13 +1116,18 @@ export function MessageList({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    const selected = anchorIndexNear(event.clientX, event.clientY);
+    const releasedIndex = anchorIndexNear(event.clientX, event.clientY);
+    if (releasedIndex !== null) {
+      gesture.hasSelection = true;
+      gesture.index = releasedIndex;
+    }
+    const selected = gesture.hasSelection ? gesture.index : null;
     anchorGestureRef.current = null;
     messageAnchorsRef.current?.setGestureIndex(null);
     hideAnchorPreview();
     if (!gesture.engaged) return;
     setAnchorOpen(false);
-    if (cancelled || !gesture.selecting || selected === null) return;
+    if (cancelled || selected === null) return;
     scrollToAnchor(selected);
   };
 
