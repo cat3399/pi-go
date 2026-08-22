@@ -18,6 +18,7 @@ import android.os.PowerManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
@@ -31,6 +32,11 @@ import android.webkit.WebViewClient;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.FileProvider;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.webkit.WebViewAssetLoader;
 
 import org.json.JSONObject;
@@ -42,6 +48,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MainActivity hosts the WebView and manages the Wails application lifecycle.
@@ -57,6 +64,10 @@ public class MainActivity extends AppCompatActivity {
 
     private WebView webView;
     private WailsBridge bridge;
+    private int safeInsetTop;
+    private int safeInsetRight;
+    private int safeInsetBottom;
+    private int safeInsetLeft;
     // Battery: system-event receivers are registered only while the activity is
     // in the foreground (onStart) and torn down in onStop, so background battery/
     // network/screen broadcasts don't wake the app.
@@ -83,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        configureEdgeToEdge();
         setContentView(R.layout.activity_main);
 
         // Initialize the native Go library
@@ -96,10 +108,52 @@ public class MainActivity extends AppCompatActivity {
         loadApplication();
     }
 
+    /**
+     * The workbench owns its system-bar spacing through CSS safe-area variables,
+     * so the native window only needs to draw edge-to-edge and keep the system
+     * icons legible over the workbench's light background.
+     */
+    private void configureEdgeToEdge() {
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            getWindow().setNavigationBarDividerColor(Color.TRANSPARENT);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().setStatusBarContrastEnforced(false);
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
+
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(
+                getWindow(),
+                getWindow().getDecorView()
+        );
+        controller.setAppearanceLightStatusBars(true);
+        controller.setAppearanceLightNavigationBars(true);
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         webView = findViewById(R.id.webview);
         bridge.setWebView(webView);
+
+        // WebView versions that predate native CSS safe-area forwarding still
+        // receive the same insets through our custom properties. Returning the
+        // original insets also keeps modern WebView viewport/IME handling intact.
+        ViewCompat.setOnApplyWindowInsetsListener(webView, (view, windowInsets) -> {
+            Insets insets = windowInsets.getInsets(
+                    WindowInsetsCompat.Type.systemBars()
+                            | WindowInsetsCompat.Type.displayCutout()
+            );
+            safeInsetTop = insets.top;
+            safeInsetRight = insets.right;
+            safeInsetBottom = insets.bottom;
+            safeInsetLeft = insets.left;
+            applySafeAreaInsets();
+            return windowInsets;
+        });
+        ViewCompat.requestApplyInsets(webView);
 
         // Configure WebView settings
         WebSettings settings = webView.getSettings();
@@ -188,6 +242,7 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 if (DEBUG) Log.d(TAG, "Page loaded: " + url);
+                applySafeAreaInsets();
                 bridge.onPageFinished(url);
                 // Now that JS listeners are mounted, push a snapshot of the
                 // current battery / network / theme so the UI starts populated.
@@ -197,6 +252,23 @@ public class MainActivity extends AppCompatActivity {
 
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
+    }
+
+    private void applySafeAreaInsets() {
+        if (webView == null) return;
+        float density = getResources().getDisplayMetrics().density;
+        String script = String.format(
+                Locale.US,
+                "document.documentElement.style.setProperty('--pi-safe-area-top','%.3fpx');"
+                        + "document.documentElement.style.setProperty('--pi-safe-area-right','%.3fpx');"
+                        + "document.documentElement.style.setProperty('--pi-safe-area-bottom','%.3fpx');"
+                        + "document.documentElement.style.setProperty('--pi-safe-area-left','%.3fpx');",
+                safeInsetTop / density,
+                safeInsetRight / density,
+                safeInsetBottom / density,
+                safeInsetLeft / density
+        );
+        webView.evaluateJavascript(script, null);
     }
 
     private void loadApplication() {
@@ -744,6 +816,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        configureEdgeToEdge();
+        if (webView != null) {
+            ViewCompat.requestApplyInsets(webView);
+        }
         // Fires for light/dark switches because the manifest lists uiMode in
         // android:configChanges (otherwise the activity would be recreated).
         emitTheme();

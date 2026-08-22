@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.WailsApp" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+    <style name="Theme.WailsApp" parent="Theme.MaterialComponents.Light.NoActionBar">
         <!-- Primary brand color. -->
         <item name="colorPrimary">@color/wails_blue</item>
         <item name="colorPrimaryVariant">@color/wails_blue_dark</item>
         <item name="colorOnPrimary">@android:color/white</item>
-        <!-- Status bar color. -->
-        <item name="android:statusBarColor">@color/wails_background</item>
-        <item name="android:navigationBarColor">@color/wails_background</item>
+        <!-- Web content draws beneath transparent system bars. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <!-- Window background -->
         <item name="android:windowBackground">@color/wails_background</item>
     </style>

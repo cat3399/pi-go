@@ -27,6 +27,10 @@
   --pi-sidebar-titlebar-height: 38px;
   --pi-topbar-height: 38px;
   --pi-content-max-width: 800px;
+  --pi-safe-area-top: env(safe-area-inset-top, 0px);
+  --pi-safe-area-right: env(safe-area-inset-right, 0px);
+  --pi-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --pi-safe-area-left: env(safe-area-inset-left, 0px);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -1542,7 +1546,7 @@ textarea {
   }
 
   .pi-composer-wrap {
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding-bottom: max(12px, var(--pi-safe-area-bottom));
   }
 
   .pi-composer-wrap h1 {
@@ -3169,7 +3173,7 @@ textarea {
   }
 
   .pi-composer-wrap.is-centered {
-    bottom: max(28px, env(safe-area-inset-bottom));
+    bottom: max(28px, var(--pi-safe-area-bottom));
   }
 
   .pi-composer-left {
@@ -3195,7 +3199,7 @@ textarea {
 }
 
 .pi-workbench.is-mobile {
-  --pi-topbar-height: calc(44px + env(safe-area-inset-top));
+  --pi-topbar-height: calc(44px + var(--pi-safe-area-top));
   --pi-sidebar-titlebar-height: 0px;
 }
 
@@ -3250,8 +3254,8 @@ textarea {
 }
 
 .pi-workbench.is-mobile .pi-sidebar {
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: max(10px, env(safe-area-inset-bottom));
+  padding-top: var(--pi-safe-area-top);
+  padding-bottom: max(10px, var(--pi-safe-area-bottom));
 }
 
 .pi-workbench.is-mobile .pi-sidebar-header {
@@ -3260,7 +3264,7 @@ textarea {
 
 .pi-workbench.is-mobile .pi-topbar {
   align-items: flex-end;
-  padding-top: env(safe-area-inset-top);
+  padding-top: var(--pi-safe-area-top);
   padding-bottom: 3px;
   --wails-draggable: no-drag;
 }
@@ -3271,12 +3275,12 @@ textarea {
 }
 
 .pi-workbench.is-mobile .pi-sidebar-toggle {
-  top: calc(env(safe-area-inset-top) + 7px);
+  top: calc(var(--pi-safe-area-top) + 7px);
   left: 8px;
 }
 
 .pi-workbench.is-mobile .pi-composer-wrap {
-  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  padding-bottom: max(8px, var(--pi-safe-area-bottom));
 }
 
 .pi-workbench.is-mobile .pi-attach-button {
@@ -3284,8 +3288,8 @@ textarea {
 }
 
 .pi-workbench.is-mobile .pi-settings-page {
-  padding-top: env(safe-area-inset-top);
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: var(--pi-safe-area-top);
+  padding-bottom: var(--pi-safe-area-bottom);
 }
 
 @media (max-width: 599px) {
@@ -4142,7 +4146,7 @@ textarea {
   .pi-command-picker-backdrop {
     align-items: end;
     padding: 10px;
-    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    padding-bottom: max(10px, var(--pi-safe-area-bottom));
   }
 
   .pi-command-picker {
