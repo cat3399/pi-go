@@ -13,7 +13,7 @@ import { MarkdownBody } from "../content/MarkdownBody";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
-import { blocksEdgeGestureStart, hasActiveTextSelection } from "./edge-gesture-target";
+import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
 interface MessageListProps {
   sessionId: string;
@@ -43,7 +43,8 @@ interface AnchorGesture {
 
 const MOBILE_EDGE_SIZE = 44;
 const TOUCH_SLOP = 8;
-const ANCHOR_HIT_RADIUS = 24;
+const ANCHOR_HIT_HALF_WIDTH = 48;
+const ANCHOR_HIT_VERTICAL_OVERSHOOT = 24;
 const ANCHOR_PREVIEW_DWELL_MS = 160;
 const ANCHOR_PREVIEW_HALF_HEIGHT = 38;
 
@@ -997,12 +998,13 @@ export function MessageList({
   const anchorIndexNear = (clientX: number, clientY: number): number | null => {
     const metrics = anchorTrackMetrics();
     if (!metrics) return null;
+    if (
+      Math.abs(clientX - metrics.centerX) > ANCHOR_HIT_HALF_WIDTH
+      || clientY < metrics.innerTop - ANCHOR_HIT_VERTICAL_OVERSHOOT
+      || clientY > metrics.innerTop + metrics.innerHeight + ANCHOR_HIT_VERTICAL_OVERSHOOT
+    ) return null;
     const estimated = Math.round((clientY - metrics.innerTop) / metrics.slotHeight - 0.5);
-    const index = Math.max(0, Math.min(anchors.length - 1, estimated));
-    const centerY = metrics.innerTop + (index + 0.5) * metrics.slotHeight;
-    return Math.hypot(clientX - metrics.centerX, clientY - centerY) <= ANCHOR_HIT_RADIUS
-      ? index
-      : null;
+    return Math.max(0, Math.min(anchors.length - 1, estimated));
   };
 
   const clearAnchorPreviewTimer = () => {
@@ -1054,7 +1056,10 @@ export function MessageList({
     if (!mobile || !anchorsEnabled || anchors.length === 0 || event.pointerType !== "touch" || !event.isPrimary) return;
     const target = event.target instanceof Element ? event.target : null;
     if (
-      (blocksEdgeGestureStart(target) || hasActiveTextSelection())
+      (
+        blocksEdgeGestureStart(target)
+        || isTextSelectionInteraction(target, event.clientX, event.clientY)
+      )
       && !target?.closest("#pi-message-anchors")
     ) return;
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -1076,7 +1081,7 @@ export function MessageList({
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
     if (!gesture.engaged) {
-      if (hasActiveTextSelection()) {
+      if (isTextSelectionInteraction(event.target, event.clientX, event.clientY)) {
         anchorGestureRef.current = null;
         return;
       }
@@ -1090,7 +1095,6 @@ export function MessageList({
       setAnchorOpen(true);
     }
     event.preventDefault();
-    if (!gesture.hasSelection && Math.abs(dy) < TOUCH_SLOP) return;
     const index = anchorIndexNear(event.clientX, event.clientY);
     if (index === null) {
       gesture.insideHitRegion = false;

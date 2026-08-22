@@ -1,5 +1,5 @@
 import { useRef, type PointerEvent as ReactPointerEvent, type PointerEventHandler, type RefObject } from "react";
-import { blocksEdgeGestureStart, hasActiveTextSelection } from "./edge-gesture-target";
+import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
 type GestureMode = "open-sidebar" | "close-sidebar";
 
@@ -49,7 +49,10 @@ export function useMobilePanelGestures(options: MobilePanelGesturesOptions): Mob
   const onPointerDownCapture: PointerEventHandler<HTMLDivElement> = (event) => {
     if (!options.enabled || event.pointerType !== "touch" || !event.isPrimary) return;
     const target = event.target instanceof Element ? event.target : null;
-    if (blocksEdgeGestureStart(target) || hasActiveTextSelection()) return;
+    if (
+      blocksEdgeGestureStart(target)
+      || isTextSelectionInteraction(target, event.clientX, event.clientY)
+    ) return;
     let mode: GestureMode | null = null;
     let panel: HTMLElement | null = null;
 
@@ -82,7 +85,7 @@ export function useMobilePanelGestures(options: MobilePanelGesturesOptions): Mob
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
     if (!gesture.engaged) {
-      if (hasActiveTextSelection()) {
+      if (isTextSelectionInteraction(event.target, event.clientX, event.clientY)) {
         clearGesture();
         return;
       }
@@ -90,7 +93,12 @@ export function useMobilePanelGestures(options: MobilePanelGesturesOptions): Mob
         clearGesture();
         return;
       }
-      if (Math.abs(dx) < TOUCH_SLOP || Math.abs(dx) < Math.abs(dy) * 1.1) return;
+      const forwardDistance = gesture.mode === "open-sidebar" ? dx : -dx;
+      if (forwardDistance <= -TOUCH_SLOP) {
+        clearGesture();
+        return;
+      }
+      if (forwardDistance < TOUCH_SLOP || Math.abs(dx) < Math.abs(dy) * 1.1) return;
       gesture.engaged = true;
       event.currentTarget.setPointerCapture(event.pointerId);
       event.currentTarget.dataset.piGesture = gesture.mode;

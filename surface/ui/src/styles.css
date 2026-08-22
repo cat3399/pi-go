@@ -3768,6 +3768,10 @@ textarea {
     touch-action: pan-y;
   }
 
+  .pi-workbench.is-mobile .pi-message-stage {
+    touch-action: pan-y;
+  }
+
   .pi-workbench.is-mobile .pi-topbar-heading {
     gap: 0;
     padding-left: 34px !important;

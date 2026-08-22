@@ -149,7 +149,7 @@ public class WailsJSBridge {
         if (width <= 0 || height <= 0) return;
 
         float density = webView.getResources().getDisplayMetrics().density;
-        int edgeWidth = Math.min(width / 2, Math.round(32f * density));
+        int edgeWidth = Math.min(width / 2, Math.round(44f * density));
         int exclusionHeight = Math.min(height, Math.round(200f * density));
         int exclusionTop = Math.max(0, (height - exclusionHeight) / 2);
         int exclusionBottom = Math.min(height, exclusionTop + exclusionHeight);

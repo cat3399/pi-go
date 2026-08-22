@@ -116,22 +116,22 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   );
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
   const mobile = hostKind === "mobile";
-  const edgeGesturesEnabled = mobile
+  const mobileGesturesEnabled = mobile
     && controller.status === "ready"
     && !settingsOpen
-    && !sidebarOpen
     && pointPicker === null
     && !controller.sessionStatsOpen;
+  const anchorGesturesEnabled = mobileGesturesEnabled && !sidebarOpen;
   const listFiles = useCallback((path: string) => client.listFiles(path), [client]);
   const gestures = useMobilePanelGestures({
-    enabled: edgeGesturesEnabled,
+    enabled: mobileGesturesEnabled,
     sidebarOpen,
     setSidebarOpen,
   });
 
   useEffect(() => {
-    props.onEdgeGesturesEnabledChange?.(edgeGesturesEnabled);
-  }, [edgeGesturesEnabled, props.onEdgeGesturesEnabledChange]);
+    props.onEdgeGesturesEnabledChange?.(mobileGesturesEnabled);
+  }, [mobileGesturesEnabled, props.onEdgeGesturesEnabledChange]);
 
   useEffect(() => () => {
     props.onEdgeGesturesEnabledChange?.(false);
@@ -416,7 +416,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               streamingMessage={controller.streamingMessage}
               busy={controller.busy}
               mobile={mobile}
-              anchorsEnabled={!mobile || edgeGesturesEnabled}
+              anchorsEnabled={!mobile || anchorGesturesEnabled}
               onFork={controller.fork}
             />
           ) : null}
