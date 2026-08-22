@@ -751,12 +751,13 @@ func TestOpenSupportsOldAssistantUsageAndDiagnosesUnsafeUsage(t *testing.T) {
 	tests := []struct {
 		name  string
 		usage string
+		valid bool
 	}{
-		{name: "missing cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}`},
+		{name: "missing cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2}`, valid: true},
 		{name: "negative cost", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":-1,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
 		{name: "fractional token", usage: `{"input":1.5,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
 		{name: "wrong total", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
-		{name: "reasoning exceeds output", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":2,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`},
+		{name: "reasoning independent from output", usage: `{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"reasoning":2,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, valid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -768,7 +769,7 @@ func TestOpenSupportsOldAssistantUsageAndDiagnosesUnsafeUsage(t *testing.T) {
 			}
 			defer session.Close()
 			entry := session.Entries()[0]
-			if tt.name == "missing cost" {
+			if tt.valid {
 				message, ok := entry.Message()
 				if !ok || len(entry.Diagnostics()) != 0 {
 					t.Fatalf("old usage projection = %#v / %#v", message, entry.Diagnostics())

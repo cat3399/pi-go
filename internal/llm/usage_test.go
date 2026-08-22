@@ -11,7 +11,7 @@ import (
 func TestNewUsage(t *testing.T) {
 	t.Parallel()
 
-	reasoning := uint64(7)
+	reasoning := uint64(17)
 	cacheWrite1h := uint64(3)
 	usage, err := llm.NewUsage(llm.UsageSpec{
 		Input:        11,
@@ -40,8 +40,8 @@ func TestNewUsage(t *testing.T) {
 	if got := usage.TotalTokens(); got != 33 {
 		t.Fatalf("TotalTokens() = %d, want 33", got)
 	}
-	if got, ok := usage.Reasoning(); !ok || got != 7 {
-		t.Fatalf("Reasoning() = (%d, %t), want (7, true)", got, ok)
+	if got, ok := usage.Reasoning(); !ok || got != 17 {
+		t.Fatalf("Reasoning() = (%d, %t), want (17, true)", got, ok)
 	}
 	if got, ok := usage.CacheWrite1h(); !ok || got != 3 {
 		t.Fatalf("CacheWrite1h() = (%d, %t), want (3, true)", got, ok)
@@ -50,7 +50,7 @@ func TestNewUsage(t *testing.T) {
 	// NewUsage copies optional values instead of retaining caller-owned pointers.
 	reasoning = 0
 	cacheWrite1h = 0
-	if got, _ := usage.Reasoning(); got != 7 {
+	if got, _ := usage.Reasoning(); got != 17 {
 		t.Fatalf("Reasoning() changed through input pointer: got %d", got)
 	}
 	if got, _ := usage.CacheWrite1h(); got != 3 {
@@ -76,32 +76,12 @@ func TestNewUsageOptionalBreakdownAbsent(t *testing.T) {
 	}
 }
 
-func TestNewUsageRejectsInvalidSubset(t *testing.T) {
+func TestNewUsageRejectsInvalidCacheSubset(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		spec llm.UsageSpec
-	}{
-		{
-			name: "reasoning exceeds output",
-			spec: llm.UsageSpec{Output: 2, Reasoning: uint64Pointer(3)},
-		},
-		{
-			name: "one-hour cache exceeds cache write",
-			spec: llm.UsageSpec{CacheWrite: 2, CacheWrite1h: uint64Pointer(3)},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := llm.NewUsage(tt.spec)
-			if !errors.Is(err, llm.ErrUsageSubset) {
-				t.Fatalf("NewUsage() error = %v, want ErrUsageSubset", err)
-			}
-		})
+	_, err := llm.NewUsage(llm.UsageSpec{CacheWrite: 2, CacheWrite1h: uint64Pointer(3)})
+	if !errors.Is(err, llm.ErrUsageSubset) {
+		t.Fatalf("NewUsage() error = %v, want ErrUsageSubset", err)
 	}
 }
 

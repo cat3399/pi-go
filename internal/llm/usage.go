@@ -55,14 +55,6 @@ func NewUsage(spec UsageSpec) (Usage, error) {
 			}
 		}
 	}
-	if spec.Reasoning != nil && *spec.Reasoning > spec.Output {
-		return Usage{}, fmt.Errorf(
-			"%w: reasoning (%d) exceeds output (%d)",
-			ErrUsageSubset,
-			*spec.Reasoning,
-			spec.Output,
-		)
-	}
 	if spec.CacheWrite1h != nil && *spec.CacheWrite1h > spec.CacheWrite {
 		return Usage{}, fmt.Errorf(
 			"%w: cacheWrite1h (%d) exceeds cacheWrite (%d)",

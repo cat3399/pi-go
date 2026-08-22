@@ -60,7 +60,7 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 		fmt.Fprint(w, completionsSSE(
 			map[string]any{"id": "chat-1", "model": "resolved-model", "choices": []any{map[string]any{"delta": map[string]any{"content": "hello"}, "finish_reason": nil}}},
 			map[string]any{"id": "chat-1", "choices": []any{map[string]any{"delta": map[string]any{}, "finish_reason": "stop"}}},
-			map[string]any{"id": "chat-1", "choices": []any{}, "usage": map[string]any{"prompt_tokens": 9, "completion_tokens": 3, "prompt_tokens_details": map[string]any{"cached_tokens": 2, "cache_write_tokens": 1}, "completion_tokens_details": map[string]any{"reasoning_tokens": 1}}},
+			map[string]any{"id": "chat-1", "choices": []any{}, "usage": map[string]any{"prompt_tokens": 9, "completion_tokens": 3, "prompt_tokens_details": map[string]any{"cached_tokens": 2, "cache_write_tokens": 1}, "completion_tokens_details": map[string]any{"reasoning_tokens": 4}}},
 		)+"data: [DONE]\n\n")
 	}))
 	defer server.Close()
@@ -76,8 +76,12 @@ func TestOpenAICompletionsStreamsTextAndEncodesRichRequest(t *testing.T) {
 	if !ok || terminalText(t, terminal) != "hello" {
 		t.Fatalf("terminal=%T", terminal)
 	}
-	if u := message.Usage(); u.Input() != 6 || u.Output() != 3 || u.CacheRead() != 2 || u.CacheWrite() != 1 || u.TotalTokens() != 12 {
+	u := message.Usage()
+	if u.Input() != 6 || u.Output() != 3 || u.CacheRead() != 2 || u.CacheWrite() != 1 || u.TotalTokens() != 12 {
 		t.Fatalf("usage=%#v", u)
+	}
+	if reasoning, ok := u.Reasoning(); !ok || reasoning != 4 {
+		t.Fatalf("reasoning=(%d, %t), want (4, true)", reasoning, ok)
 	}
 	if provenance := message.AssistantProvenance(); !provenance.Matches("compatible", provider.OpenAICompletionsAPI, "test-model") {
 		t.Fatalf("assistant provenance=%#v", provenance)

@@ -140,7 +140,7 @@ func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 					"usage": map[string]any{
 						"input_tokens": 10, "output_tokens": 4, "total_tokens": 14,
 						"input_tokens_details":  map[string]any{"cached_tokens": 2, "cache_write_tokens": 1},
-						"output_tokens_details": map[string]any{"reasoning_tokens": 1},
+						"output_tokens_details": map[string]any{"reasoning_tokens": 5},
 					},
 				},
 			},
@@ -165,7 +165,7 @@ func TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage(t *testing.T) {
 	if usage.Input() != 7 || usage.Output() != 4 || usage.CacheRead() != 2 || usage.CacheWrite() != 1 || usage.TotalTokens() != 14 {
 		t.Fatalf("usage = input %d output %d read %d write %d total %d", usage.Input(), usage.Output(), usage.CacheRead(), usage.CacheWrite(), usage.TotalTokens())
 	}
-	if reasoning, ok := usage.Reasoning(); !ok || reasoning != 1 {
+	if reasoning, ok := usage.Reasoning(); !ok || reasoning != 5 {
 		t.Fatalf("reasoning = (%d, %t)", reasoning, ok)
 	}
 	if message.Timestamp() != responsesTestTime {
@@ -418,10 +418,6 @@ func TestOpenAIResponsesRejectsMalformedAndUnsupportedStreams(t *testing.T) {
 		{
 			name: "cached usage exceeds input", contentType: "text/event-stream",
 			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 2, "output_tokens": 0, "input_tokens_details": map[string]any{"cached_tokens": 3}}}}),
-		},
-		{
-			name: "reasoning usage exceeds output", contentType: "text/event-stream",
-			body: responsesSSE(map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "usage": map[string]any{"input_tokens": 0, "output_tokens": 1, "output_tokens_details": map[string]any{"reasoning_tokens": 2}}}}),
 		},
 		{
 			name: "negative usage", contentType: "text/event-stream",
