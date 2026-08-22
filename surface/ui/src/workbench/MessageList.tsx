@@ -13,6 +13,7 @@ import { MarkdownBody } from "../content/MarkdownBody";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
+import { blocksEdgeGestureStart, hasActiveTextSelection } from "./edge-gesture-target";
 
 interface MessageListProps {
   sessionId: string;
@@ -1046,8 +1047,8 @@ export function MessageList({
     if (!mobile || !anchorsEnabled || anchors.length === 0 || event.pointerType !== "touch" || !event.isPrimary) return;
     const target = event.target instanceof Element ? event.target : null;
     if (
-      target?.closest("button, a, input, textarea, select, [data-swipe-ignore]")
-      && !target.closest("#pi-message-anchors")
+      (blocksEdgeGestureStart(target) || hasActiveTextSelection())
+      && !target?.closest("#pi-message-anchors")
     ) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     if (bounds.right - event.clientX > MOBILE_EDGE_SIZE) return;
@@ -1067,6 +1068,10 @@ export function MessageList({
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
     if (!gesture.engaged) {
+      if (hasActiveTextSelection()) {
+        anchorGestureRef.current = null;
+        return;
+      }
       if (Math.abs(dy) > TOUCH_SLOP && Math.abs(dy) > Math.abs(dx)) {
         anchorGestureRef.current = null;
         return;
@@ -1148,7 +1153,7 @@ export function MessageList({
     if (!mobile || !anchorOpen) return;
     const dismiss = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("#pi-message-anchors, .pi-mobile-anchor-edge")) return;
+      if (target?.closest("#pi-message-anchors")) return;
       setAnchorOpen(false);
       messageAnchorsRef.current?.setGestureIndex(null);
       hideAnchorPreview();
@@ -1243,7 +1248,6 @@ export function MessageList({
         </div>
         <OverlayScrollbar viewportRef={transcriptRef} />
       </div>
-      {mobile && anchorsEnabled && anchors.length > 0 && <div className="pi-mobile-anchor-edge" aria-hidden="true" />}
       <MessageAnchors
         ref={messageAnchorsRef}
         items={anchors}

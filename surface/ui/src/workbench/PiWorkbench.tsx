@@ -331,7 +331,6 @@ export function PiWorkbench(props: PiWorkbenchProps) {
 
   return (
     <div {...gestures} className={workbenchClass} style={workbenchStyle}>
-      {edgeGesturesEnabled && !sidebarOpen && <div className="pi-mobile-sidebar-edge" aria-hidden="true" />}
       <button
         className={`pi-sidebar-toggle ${sidebarOpen ? "is-sidebar" : "is-main"}`}
         type="button"

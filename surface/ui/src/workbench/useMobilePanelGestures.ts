@@ -1,4 +1,5 @@
 import { useRef, type PointerEvent as ReactPointerEvent, type PointerEventHandler, type RefObject } from "react";
+import { blocksEdgeGestureStart, hasActiveTextSelection } from "./edge-gesture-target";
 
 type GestureMode = "open-sidebar" | "close-sidebar";
 
@@ -48,7 +49,7 @@ export function useMobilePanelGestures(options: MobilePanelGesturesOptions): Mob
   const onPointerDownCapture: PointerEventHandler<HTMLDivElement> = (event) => {
     if (!options.enabled || event.pointerType !== "touch" || !event.isPrimary) return;
     const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest("input, textarea, select, button, a, [data-swipe-ignore]")) return;
+    if (blocksEdgeGestureStart(target) || hasActiveTextSelection()) return;
     let mode: GestureMode | null = null;
     let panel: HTMLElement | null = null;
 
@@ -81,6 +82,10 @@ export function useMobilePanelGestures(options: MobilePanelGesturesOptions): Mob
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
     if (!gesture.engaged) {
+      if (hasActiveTextSelection()) {
+        clearGesture();
+        return;
+      }
       if (Math.abs(dy) > TOUCH_SLOP && Math.abs(dy) > Math.abs(dx)) {
         clearGesture();
         return;

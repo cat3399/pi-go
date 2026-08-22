@@ -3197,8 +3197,6 @@ textarea {
 .pi-workbench.is-mobile {
   --pi-topbar-height: calc(44px + env(safe-area-inset-top));
   --pi-sidebar-titlebar-height: 0px;
-  -webkit-user-select: none;
-  user-select: none;
 }
 
 .pi-workbench.is-mobile .pi-sidebar-backdrop.is-open {
@@ -3245,15 +3243,6 @@ textarea {
   border-radius: 10px;
   color: inherit;
   background: #f5f5f5;
-}
-
-.pi-workbench.is-mobile input,
-.pi-workbench.is-mobile textarea,
-.pi-workbench.is-mobile pre,
-.pi-workbench.is-mobile code,
-.pi-workbench.is-mobile .pi-message-assistant {
-  -webkit-user-select: text;
-  user-select: text;
 }
 
 .pi-workbench.is-mobile .pi-sidebar-titlebar {
@@ -3795,11 +3784,6 @@ textarea {
   position: relative;
 }
 
-.pi-mobile-sidebar-edge,
-.pi-mobile-anchor-edge {
-  display: none;
-}
-
 .pi-message-anchors {
   position: absolute;
   z-index: 8;
@@ -4095,28 +4079,6 @@ textarea {
 @media (max-width: 799px) {
   .pi-workbench.is-mobile .pi-overlay-scrollbar {
     pointer-events: none;
-  }
-
-  .pi-workbench.is-mobile .pi-mobile-sidebar-edge {
-    position: fixed;
-    z-index: 18;
-    top: var(--pi-topbar-height);
-    bottom: max(76px, env(safe-area-inset-bottom));
-    left: 0;
-    display: block;
-    width: 44px;
-    touch-action: pan-y;
-  }
-
-  .pi-workbench.is-mobile .pi-mobile-anchor-edge {
-    position: absolute;
-    z-index: 4;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    display: block;
-    width: 44px;
-    touch-action: none;
   }
 
   .pi-message-anchors.is-desktop {
