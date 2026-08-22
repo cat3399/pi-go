@@ -3961,7 +3961,6 @@ textarea {
   right: 28px;
   display: grid;
   width: min(278px, calc(100vw - 64px));
-  height: 76px;
   grid-template-columns: 24px minmax(0, 1fr);
   gap: 7px;
   padding: 9px 10px;
@@ -3971,7 +3970,7 @@ textarea {
   box-shadow: rgba(0, 0, 0, 0.14) 0 12px 34px;
   opacity: 0;
   pointer-events: none;
-  transform: translate3d(0, var(--pi-anchor-scrub-top, calc(50vh - 38px)), 0);
+  transform: translate3d(0, var(--pi-anchor-scrub-top, 0), 0);
   visibility: hidden;
   contain: layout;
   transition: opacity 80ms ease, visibility 0s linear 80ms;

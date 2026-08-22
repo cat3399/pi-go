@@ -50,7 +50,6 @@ interface AnchorGesture {
 const MOBILE_EDGE_SIZE = 44;
 const TOUCH_SLOP = 8;
 const ANCHOR_PREVIEW_DWELL_MS = 160;
-const ANCHOR_PREVIEW_HALF_HEIGHT = 38;
 
 async function writeClipboardText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -1009,15 +1008,16 @@ export function MessageList({
   const hideAnchorPreview = () => {
     clearAnchorPreviewTimer();
     anchorPreviewVisibleRef.current = false;
-    messageAnchorsRef.current?.setPreviewTop(null);
+    messageAnchorsRef.current?.setPreviewPosition(null);
     messageAnchorsRef.current?.setPreviewIndex(null);
   };
 
   const positionAnchorPreview = (gesture: AnchorGesture, clientY: number) => {
-    const minimumCenter = gesture.stageTop + ANCHOR_PREVIEW_HALF_HEIGHT;
-    const maximumCenter = Math.max(minimumCenter, gesture.stageBottom - ANCHOR_PREVIEW_HALF_HEIGHT);
-    const previewCenter = Math.max(minimumCenter, Math.min(maximumCenter, clientY));
-    messageAnchorsRef.current?.setPreviewTop(previewCenter - ANCHOR_PREVIEW_HALF_HEIGHT);
+    messageAnchorsRef.current?.setPreviewPosition({
+      clientY,
+      stageTop: gesture.stageTop,
+      stageBottom: gesture.stageBottom,
+    });
   };
 
   const scheduleAnchorPreview = (index: number) => {
@@ -1138,7 +1138,7 @@ export function MessageList({
     clearAnchorPreviewTimer();
     anchorPreviewVisibleRef.current = false;
     messageAnchorsRef.current?.setPreviewIndex(null);
-    messageAnchorsRef.current?.setPreviewTop(null);
+    messageAnchorsRef.current?.setPreviewPosition(null);
     setAnchorOpen(false);
     setActiveAnchorIndex(Math.max(0, turns.length - 1));
     const frame = requestAnimationFrame(() => {

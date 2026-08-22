@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -23,23 +24,40 @@ interface MessageAnchorsProps {
 export interface MessageAnchorsHandle {
   setGestureIndex(index: number | null): void;
   setPreviewIndex(index: number | null): void;
-  setPreviewTop(top: number | null): void;
+  setPreviewPosition(position: AnchorPreviewPosition | null): void;
+}
+
+interface AnchorPreviewPosition {
+  clientY: number;
+  stageTop: number;
+  stageBottom: number;
+}
+
+function positionPreview(element: HTMLDivElement | null, position: AnchorPreviewPosition | null): void {
+  if (!element) return;
+  if (!position) {
+    element.style.removeProperty("--pi-anchor-scrub-top");
+    return;
+  }
+  const halfHeight = element.getBoundingClientRect().height / 2;
+  const minimumCenter = position.stageTop + halfHeight;
+  const maximumCenter = Math.max(minimumCenter, position.stageBottom - halfHeight);
+  const previewCenter = Math.max(minimumCenter, Math.min(maximumCenter, position.clientY));
+  element.style.setProperty("--pi-anchor-scrub-top", `${previewCenter - halfHeight}px`);
 }
 
 export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsProps>(function MessageAnchors(props, ref) {
   const [gestureIndex, setGestureIndex] = useState<number | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+  const previewPositionRef = useRef<AnchorPreviewPosition | null>(null);
 
   useImperativeHandle(ref, () => ({
     setGestureIndex,
     setPreviewIndex,
-    setPreviewTop(top) {
-      if (top === null) {
-        previewRef.current?.style.removeProperty("--pi-anchor-scrub-top");
-      } else {
-        previewRef.current?.style.setProperty("--pi-anchor-scrub-top", `${top}px`);
-      }
+    setPreviewPosition(position) {
+      previewPositionRef.current = position;
+      positionPreview(previewRef.current, position);
     },
   }), []);
   useEffect(() => {
@@ -49,14 +67,17 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
     }
   }, [props.open]);
 
-  if (props.items.length === 0) return null;
   const displayedActiveIndex = gestureIndex === null
     ? props.activeIndex
     : Math.max(0, Math.min(gestureIndex, props.items.length - 1));
-  const displayedPreviewIndex = previewIndex === null
+  const displayedPreviewIndex = previewIndex === null || props.items.length === 0
     ? null
     : Math.max(0, Math.min(previewIndex, props.items.length - 1));
   const preview = displayedPreviewIndex === null ? null : props.items[displayedPreviewIndex];
+  useLayoutEffect(() => {
+    positionPreview(previewRef.current, previewPositionRef.current);
+  }, [displayedPreviewIndex, preview?.label]);
+  if (props.items.length === 0) return null;
   const desktopHeight = Math.min(320, 16 + props.items.length * 18);
   const mobileHeight = Math.max(40, 16 + props.items.length * 24);
   const mobileDotSize = props.items.length > 120 ? 3 : props.items.length > 80 ? 4 : props.items.length > 60 ? 5 : 6;
