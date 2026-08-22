@@ -1,4 +1,4 @@
-import { forwardRef, KeyboardEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, KeyboardEvent, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
@@ -66,6 +66,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const slashMenuId = useId();
   const imagesRef = useRef(images);
   const composingRef = useRef(false);
   const compositionEndedAtRef = useRef(0);
@@ -320,7 +321,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         </div>
       )}
       {slashMenuOpen && (
-        <div className="pi-slash-menu" role="listbox" aria-label="斜杠命令">
+        <div id={slashMenuId} className="pi-slash-menu" role="listbox" aria-label="斜杠命令">
           {slashCommands.length === 0 ? (
             <div className="pi-slash-empty">没有匹配的命令</div>
           ) : slashGroups.map((group) => (
@@ -330,6 +331,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 const index = orderedSlashCommands.indexOf(command);
                 return (
                   <button
+                    id={`${slashMenuId}-option-${index}`}
                     key={`${command.source}:${command.name}`}
                     ref={(element) => {
                       slashItemRefs.current[index] = element;
@@ -391,6 +393,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ? (props.streamingInputBehavior === "steer" ? "输入消息以插入当前运行" : "输入消息以排到当前运行之后")
           : (props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行")}
         aria-label="消息"
+        aria-haspopup="listbox"
+        aria-expanded={slashMenuOpen}
+        aria-controls={slashMenuOpen ? slashMenuId : undefined}
+        aria-activedescendant={slashMenuOpen && orderedSlashCommands[slashActiveIndex]
+          ? `${slashMenuId}-option-${slashActiveIndex}`
+          : undefined}
         enterKeyHint={props.mobile ? "enter" : "send"}
         onChange={(event) => {
           setText(event.target.value);

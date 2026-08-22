@@ -88,7 +88,12 @@ function TreeNode(props: {
   const Icon = props.node.isDir ? (open ? FolderOpen : Folder) : File;
 
   return (
-    <div className="pi-file-node" role="treeitem" aria-expanded={props.node.isDir ? open : undefined}>
+    <div
+      className="pi-file-node"
+      role="treeitem"
+      aria-expanded={props.node.isDir ? open : undefined}
+      aria-selected={selected}
+    >
       <div
         className={`pi-file-row ${selected ? "is-selected" : ""}`}
         style={{ "--pi-file-indent": `${8 + props.depth * 14}px` } as CSSProperties}

@@ -1,4 +1,4 @@
-import { MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Check, FileText, Folder, FolderOpen, MessageSquare, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { FileList, SessionInfo } from "../contracts";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
@@ -49,7 +49,6 @@ function SessionRow({
   onDelete(): Promise<void>;
   running: boolean;
 }) {
-  const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -145,6 +144,7 @@ function SessionRow({
       className={`pi-session-item ${active ? "is-active" : ""}`}
       role="button"
       tabIndex={0}
+      aria-current={active ? "true" : undefined}
       title={sessionTitle(session)}
       onClick={onSelect}
       onKeyDown={(event) => {
@@ -153,28 +153,24 @@ function SessionRow({
           onSelect();
         }
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
       <span>{sessionTitle(session)}</span>
-      {running && !hovered && <span className="pi-session-running-dot" aria-label="运行中" />}
-      {hovered && (
-        <span className="pi-session-actions">
-          <button type="button" aria-label="重命名会话" onClick={startRename}>
-            <Pencil size={13} />
-          </button>
-          <button
-            type="button"
-            aria-label="删除会话"
-            onClick={(event) => {
-              event.stopPropagation();
-              setConfirmDelete(true);
-            }}
-          >
-            <Trash2 size={13} />
-          </button>
-        </span>
-      )}
+      {running && <span className="pi-session-running-dot" aria-label="运行中" />}
+      <span className="pi-session-actions">
+        <button type="button" aria-label="重命名会话" onClick={startRename}>
+          <Pencil size={13} />
+        </button>
+        <button
+          type="button"
+          aria-label="删除会话"
+          onClick={(event) => {
+            event.stopPropagation();
+            setConfirmDelete(true);
+          }}
+        >
+          <Trash2 size={13} />
+        </button>
+      </span>
     </div>
   );
 }
@@ -244,10 +240,27 @@ function ProjectSessions(props: {
 }
 
 export function Sidebar(props: SidebarProps) {
-  const [profileOpen, setProfileOpen] = useState(false);
   const sidebarRef = useRef<HTMLElement>(null);
-  const profileRef = useRef<HTMLDivElement>(null);
   const sessionListRef = useRef<HTMLElement>(null);
+  const selectSection = (section: "sessions" | "files", focus = false) => {
+    props.onSectionChange(section);
+    if (focus) {
+      requestAnimationFrame(() => document.getElementById(`pi-sidebar-${section}-tab`)?.focus());
+    }
+  };
+  const onTabKeyDown = (event: KeyboardEvent, section: "sessions" | "files") => {
+    let next: "sessions" | "files" | null = null;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      next = section === "sessions" ? "files" : "sessions";
+    } else if (event.key === "Home") {
+      next = "sessions";
+    } else if (event.key === "End") {
+      next = "files";
+    }
+    if (!next) return;
+    event.preventDefault();
+    selectSection(next, true);
+  };
   const projects = useMemo(() => {
     const groups = new Map<string, SessionInfo[]>();
     for (const session of props.sessions) {
@@ -269,15 +282,6 @@ export function Sidebar(props: SidebarProps) {
       .sort((left, right) => right.modified.localeCompare(left.modified));
   }, [props.sessions]);
   const runningSessionIds = useMemo(() => new Set(props.runningSessionIds), [props.runningSessionIds]);
-
-  useEffect(() => {
-    if (!profileOpen) return;
-    const close = (event: globalThis.MouseEvent) => {
-      if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [profileOpen]);
 
   useEffect(() => {
     if (!props.open) return;
@@ -306,6 +310,8 @@ export function Sidebar(props: SidebarProps) {
         id="pi-workbench-sidebar"
         className={`pi-sidebar ${props.open ? "is-open" : ""}`}
         aria-label="会话"
+        aria-hidden={!props.open}
+        inert={!props.open}
       >
         <div className="pi-sidebar-titlebar" />
         <header className="pi-sidebar-header">
@@ -321,28 +327,41 @@ export function Sidebar(props: SidebarProps) {
           </button>
           <div className="pi-sidebar-tabs" role="tablist" aria-label="侧栏内容">
             <button
+              id="pi-sidebar-sessions-tab"
               type="button"
               role="tab"
               aria-selected={props.section === "sessions"}
+              aria-controls="pi-sidebar-panel"
+              tabIndex={props.section === "sessions" ? 0 : -1}
               className={props.section === "sessions" ? "is-active" : ""}
-              onClick={() => props.onSectionChange("sessions")}
+              onClick={() => selectSection("sessions")}
+              onKeyDown={(event) => onTabKeyDown(event, "sessions")}
             >
               <MessageSquare size={13} />
               会话
             </button>
             <button
+              id="pi-sidebar-files-tab"
               type="button"
               role="tab"
               aria-selected={props.section === "files"}
+              aria-controls="pi-sidebar-panel"
+              tabIndex={props.section === "files" ? 0 : -1}
               className={props.section === "files" ? "is-active" : ""}
-              onClick={() => props.onSectionChange("files")}
+              onClick={() => selectSection("files")}
+              onKeyDown={(event) => onTabKeyDown(event, "files")}
             >
               <FileText size={13} />
               文件
             </button>
           </div>
         </div>
-        <div className="pi-session-scroll pi-overlay-scroll-host">
+        <div
+          id="pi-sidebar-panel"
+          className="pi-session-scroll pi-overlay-scroll-host"
+          role="tabpanel"
+          aria-labelledby={`pi-sidebar-${props.section}-tab`}
+        >
           {props.section === "sessions" ? (
             <>
               <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
@@ -370,30 +389,10 @@ export function Sidebar(props: SidebarProps) {
             />
           )}
         </div>
-        <div className="pi-sidebar-profile" ref={profileRef}>
-          {profileOpen && (
-            <div className="pi-profile-menu">
-              <div className="pi-profile-menu-header">
-                <span className="pi-sidebar-avatar">π</span>
-                <strong>pi</strong>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setProfileOpen(false);
-                  props.onOpenSettings();
-                }}
-              >
-                <Settings size={16} />
-                <span>设置</span>
-              </button>
-            </div>
-          )}
-          <button className="pi-sidebar-settings" type="button" onClick={() => setProfileOpen((value) => !value)}>
-            <span className="pi-sidebar-avatar">π</span>
-            <span className="pi-sidebar-identity"><strong>pi</strong></span>
-          </button>
-        </div>
+        <button className="pi-sidebar-settings" type="button" onClick={props.onOpenSettings}>
+          <Settings size={16} />
+          <span>设置</span>
+        </button>
       </aside>
     </>
   );

@@ -1,7 +1,8 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronUp, Folder, HardDrive, X } from "lucide-react";
 import type { DirectoryView } from "../contracts";
+import { useDialogFocus } from "../primitives/useDialogFocus";
 
 interface DirectoryPickerProps {
   initialPath: string;
@@ -28,6 +29,10 @@ export function DirectoryPicker({
   const [loading, setLoading] = useState(true);
   const [selecting, setSelecting] = useState(false);
   const [error, setError] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useDialogFocus(true, dialogRef, inputRef);
 
   const navigate = useCallback(async (path?: string) => {
     setLoading(true);
@@ -82,10 +87,12 @@ export function DirectoryPicker({
 
   return createPortal(
     <div
+      ref={dialogRef}
       className="pi-directory-backdrop"
       role="dialog"
       aria-modal="true"
       aria-label="选择工作目录"
+      tabIndex={-1}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !selecting) onCancel();
       }}
@@ -107,10 +114,10 @@ export function DirectoryPicker({
             <ChevronUp size={17} />
           </button>
           <input
+            ref={inputRef}
             value={pathInput}
             aria-label="目录路径"
             placeholder="/path/to/project or ~/project"
-            autoFocus
             autoComplete="off"
             spellCheck={false}
             onChange={(event) => {

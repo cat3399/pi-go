@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { PiWorkbench, RemoteApplicationClient } from "@cat3399/pi-workbench";
 import type { ApplicationClient } from "@cat3399/pi-workbench";
 import { WailsRemoteTransport } from "./wails-remote-transport";
@@ -15,7 +16,30 @@ function setAndroidEdgeGesturesEnabled(enabled: boolean): void {
   bridge?.setEdgeGesturesEnabled?.(enabled);
 }
 
+function useMobileViewportHeight() {
+  useEffect(() => {
+    const root = document.documentElement;
+    const viewport = window.visualViewport;
+    const update = () => {
+      root.style.setProperty("--pi-mobile-viewport-height", `${Math.round(viewport?.height ?? window.innerHeight)}px`);
+    };
+
+    update();
+    window.addEventListener("resize", update);
+    viewport?.addEventListener("resize", update);
+    viewport?.addEventListener("scroll", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      viewport?.removeEventListener("resize", update);
+      viewport?.removeEventListener("scroll", update);
+      root.style.removeProperty("--pi-mobile-viewport-height");
+    };
+  }, []);
+}
+
 export default function App() {
+  useMobileViewportHeight();
+
   return (
     <PiWorkbench
       localAvailable={false}

@@ -79,8 +79,7 @@ func main() {
 		BackgroundColour: wails.NewRGB(255, 255, 255),
 		URL:              "/",
 		Mac: wails.MacWindow{
-			TitleBar:                wails.MacTitleBarHiddenInset,
-			InvisibleTitleBarHeight: 38,
+			TitleBar: wails.MacTitleBarHiddenInset,
 		},
 	})
 

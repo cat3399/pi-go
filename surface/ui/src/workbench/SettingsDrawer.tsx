@@ -1,6 +1,7 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Radio, Settings } from "lucide-react";
 import type { ClientKind } from "../contracts";
+import { useDialogFocus } from "../primitives/useDialogFocus";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 
 interface SettingsDrawerProps {
@@ -22,6 +23,10 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   const [endpoint, setEndpoint] = useState(props.endpoint);
   const [error, setError] = useState("");
   const [page, setPage] = useState<"connection" | "input" | "about">("connection");
+  const dialogRef = useRef<HTMLElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
+
+  useDialogFocus(props.open, dialogRef, backRef);
 
   useEffect(() => setEndpoint(props.endpoint), [props.endpoint]);
   useEffect(() => {
@@ -41,9 +46,9 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   if (!props.open) return null;
 
   return (
-    <section className="pi-settings-page" role="dialog" aria-label="设置">
+    <section ref={dialogRef} className="pi-settings-page" role="dialog" aria-modal="true" aria-label="设置" tabIndex={-1}>
       <aside className="pi-settings-navigation">
-        <button className="pi-settings-back" type="button" onClick={props.onClose}>
+        <button ref={backRef} className="pi-settings-back" type="button" onClick={props.onClose}>
           <ArrowLeft size={17} />
           <span>返回应用</span>
         </button>

@@ -72,6 +72,7 @@ function activeTitle(
 
 export function PiWorkbench(props: PiWorkbenchProps) {
   const hostKind = props.hostKind ?? "desktop";
+  const mobile = hostKind === "mobile";
   const initialRemote = props.defaultRemoteEndpoint?.trim() || savedRemoteEndpoint();
   const createRemoteClient = props.createRemoteClient ?? ((endpoint: string) => new HTTPApplicationClient(endpoint));
   const [remoteEndpoint, setRemoteEndpoint] = useState(initialRemote);
@@ -81,7 +82,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     if (initialRemote) return createRemoteClient(initialRemote);
     return unavailableClient;
   });
-  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 800);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !mobile && window.innerWidth >= 800);
   const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
   const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
@@ -100,14 +101,14 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       if (event.key === "Escape") {
         setSettingsOpen(false);
         setPointPicker(null);
-        if (window.innerWidth < 800) {
+        if (mobile || window.innerWidth < 800) {
           setSidebarOpen(false);
         }
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [mobile]);
 
   const sessions = controller.snapshot?.sessions ?? [];
   const title = useMemo(
@@ -115,7 +116,6 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     [controller.activeSessionId, sessions],
   );
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
-  const mobile = hostKind === "mobile";
   const mobileGesturesEnabled = mobile
     && controller.status === "ready"
     && !settingsOpen

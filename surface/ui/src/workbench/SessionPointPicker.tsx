@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { GitFork, Search, Waypoints, X } from "lucide-react";
 import type { AgentMessage, SessionTreeNode } from "../contracts";
+import { useDialogFocus } from "../primitives/useDialogFocus";
 import { messageText } from "./message";
 
 interface SessionPointPickerProps {
@@ -59,7 +60,9 @@ export function SessionPointPicker(props: SessionPointPickerProps) {
   const [query, setQuery] = useState("");
   const [submitting, setSubmitting] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const open = props.mode !== null;
+  useDialogFocus(open, dialogRef, inputRef);
   const points = useMemo(() => props.mode === "tree"
     ? treePoints(props.tree, props.activeLeafId)
     : props.messages.flatMap((message, index): SessionPoint[] => {
@@ -92,13 +95,11 @@ export function SessionPointPicker(props: SessionPointPickerProps) {
       setSubmitting("");
       return;
     }
-    const frame = requestAnimationFrame(() => inputRef.current?.focus());
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") props.onClose();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      cancelAnimationFrame(frame);
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [open, props.onClose]);
@@ -122,7 +123,7 @@ export function SessionPointPicker(props: SessionPointPickerProps) {
     <div className="pi-command-picker-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) props.onClose();
     }}>
-      <section className="pi-command-picker" role="dialog" aria-modal="true" aria-label={fork ? "选择分支起点" : "选择会话位置"}>
+      <section ref={dialogRef} className="pi-command-picker" role="dialog" aria-modal="true" aria-label={fork ? "选择分支起点" : "选择会话位置"} tabIndex={-1}>
         <header>
           <span><Icon size={15} />{fork ? "从消息创建分支" : "定位到会话位置"}</span>
           <button type="button" aria-label="关闭" onClick={props.onClose}><X size={15} /></button>
