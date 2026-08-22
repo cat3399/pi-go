@@ -10,6 +10,7 @@
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:enforceNavigationBarContrast">true</item>
         <!-- Window background -->
         <item name="android:windowBackground">@color/wails_background</item>
     </style>

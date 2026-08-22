@@ -122,7 +122,9 @@ public class MainActivity extends AppCompatActivity {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             getWindow().setStatusBarContrastEnforced(false);
-            getWindow().setNavigationBarContrastEnforced(false);
+            // Keep Android's standard translucent protection for three-button
+            // navigation. Gesture navigation stays transparent regardless.
+            getWindow().setNavigationBarContrastEnforced(true);
         }
 
         WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(

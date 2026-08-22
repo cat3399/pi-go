@@ -3304,7 +3304,7 @@ textarea {
 
 .pi-workbench.is-mobile .pi-sidebar {
   padding-top: var(--pi-safe-area-top);
-  padding-bottom: max(10px, var(--pi-safe-area-bottom));
+  padding-bottom: 0;
 }
 
 .pi-workbench.is-mobile .pi-sidebar-header {
@@ -3329,7 +3329,11 @@ textarea {
 }
 
 .pi-workbench.is-mobile .pi-composer-wrap {
-  padding-bottom: max(8px, var(--pi-safe-area-bottom));
+  padding-bottom: calc(8px + var(--pi-safe-area-bottom));
+}
+
+.pi-workbench.is-mobile .pi-sidebar-profile {
+  margin-bottom: calc(10px + var(--pi-safe-area-bottom));
 }
 
 .pi-workbench.is-mobile .pi-attach-button {
@@ -4165,7 +4169,7 @@ textarea {
   .pi-command-picker-backdrop {
     align-items: end;
     padding: 10px;
-    padding-bottom: max(10px, var(--pi-safe-area-bottom));
+    padding-bottom: calc(10px + var(--pi-safe-area-bottom));
   }
 
   .pi-command-picker {
