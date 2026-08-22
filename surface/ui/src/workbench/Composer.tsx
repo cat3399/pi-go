@@ -1,5 +1,5 @@
 import { forwardRef, KeyboardEvent, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { ArrowUp, LoaderCircle, Plus, Square, X } from "lucide-react";
+import { Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
@@ -20,6 +20,7 @@ import {
 } from "./slash-commands";
 import type { ToolPreset } from "../tool-presets";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
+import { ComposerInput, ComposerSendButton } from "./ComposerInput";
 import type { SendBehavior } from "./useApplicationController";
 
 interface ComposerProps {
@@ -354,55 +355,57 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ))}
         </div>
       )}
-      <div className="pi-composer">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          multiple
-          disabled={props.busy}
-          hidden
-          onChange={(event) => {
-            void addImages(Array.from(event.target.files ?? []));
-            event.target.value = "";
-          }}
-        />
-        {images.length > 0 && (
-          <div className="pi-composer-images">
-            {images.map((image, index) => (
-              <div key={`${image.previewUrl}-${index}`}>
-                <img src={image.previewUrl} alt="" />
-                <button type="button" aria-label="移除图片" onClick={() => removeImage(index)}>
-                  <X size={10} />
-                </button>
+      <ComposerInput
+        ref={textareaRef}
+        leading={(
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              disabled={props.busy}
+              hidden
+              onChange={(event) => {
+                void addImages(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            {images.length > 0 && (
+              <div className="pi-composer-images">
+                {images.map((image, index) => (
+                  <div key={`${image.previewUrl}-${index}`}>
+                    <img src={image.previewUrl} alt="" />
+                    <button type="button" aria-label="移除图片" onClick={() => removeImage(index)}>
+                      <X size={10} />
+                    </button>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={text}
-          placeholder={props.busy
-            ? (props.streamingInputBehavior === "steer" ? "输入消息以插入当前运行" : "输入消息以排到当前运行之后")
-            : (props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行")}
-          aria-label="消息"
-          enterKeyHint={props.mobile ? "enter" : "send"}
-          onChange={(event) => {
-            setText(event.target.value);
-            setSlashDismissed(false);
-          }}
-          onKeyDown={onKeyDown}
-          onCompositionStart={() => {
-            composingRef.current = true;
-          }}
-          onCompositionEnd={() => {
-            composingRef.current = false;
-            compositionEndedAtRef.current = Date.now();
-          }}
-        />
-        <div className="pi-composer-toolbar">
-          <div className="pi-composer-left">
+        rows={1}
+        value={text}
+        placeholder={props.busy
+          ? (props.streamingInputBehavior === "steer" ? "输入消息以插入当前运行" : "输入消息以排到当前运行之后")
+          : (props.mobile ? "输入消息，回车换行" : "输入消息 · / 命令 · Shift+Enter 换行")}
+        aria-label="消息"
+        enterKeyHint={props.mobile ? "enter" : "send"}
+        onChange={(event) => {
+          setText(event.target.value);
+          setSlashDismissed(false);
+        }}
+        onKeyDown={onKeyDown}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+          compositionEndedAtRef.current = Date.now();
+        }}
+        toolbarLeft={(
+          <>
             <button
               className="pi-attach-button"
               type="button"
@@ -412,8 +415,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             >
               <Plus size={18} />
             </button>
-          </div>
-          <div className="pi-composer-meta">
+          </>
+        )}
+        toolbarRight={(
+          <>
             <ContextUsageIndicator usage={props.contextUsage} />
             {!props.busy && (
               <>
@@ -449,21 +454,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 <Square size={11} fill="currentColor" />
               </button>
             ) : (
-              <button
-                className={`pi-send-button ${props.busy ? "is-queue" : ""}`}
-                type="button"
+              <ComposerSendButton
+                className={props.busy ? "is-queue" : ""}
                 aria-label={props.busy
                   ? (props.streamingInputBehavior === "steer" ? "插入消息" : "稍后发送")
                   : "发送"}
                 disabled={!text.trim() || submitting}
+                submitting={submitting}
                 onClick={() => void send()}
-              >
-                {submitting ? <LoaderCircle className="pi-submit-loading" size={17} /> : <ArrowUp size={18} strokeWidth={2.1} />}
-              </button>
+              />
             )}
-          </div>
-        </div>
-      </div>
+          </>
+        )}
+      />
     </div>
   );
 });

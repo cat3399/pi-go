@@ -62,6 +62,8 @@ func encodeResult(result application.CommandResult) (any, error) {
 	switch value := result.(type) {
 	case application.PromptStartedResult:
 		return map[string]any{"operationId": value.OperationID}, nil
+	case application.EditAndResendStartedResult:
+		return map[string]any{"operationId": value.OperationID}, nil
 	case application.AbortResult, application.SteerResult, application.FollowUpResult,
 		application.SetThinkingLevelResult, application.AbortCompactionResult, application.AbortBranchSummaryResult,
 		application.SetSessionNameResult, application.SetSteeringModeResult, application.SetFollowUpModeResult,

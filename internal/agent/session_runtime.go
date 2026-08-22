@@ -1822,7 +1822,7 @@ func (s *AgentSession) RunMessages(ctx context.Context, messages []agentmsg.Mess
 		initial := agentmsg.Clone(messages)
 		prompt, images := promptTextAndImages(initial)
 		return sessionPromptInput{Text: prompt, Messages: agentmsg.Clone(initial), Images: images}, nil
-	}, nil, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
+	}, nil, nil, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
 		return s.loop.RunAgentMessages(run, append(agentmsg.Clone(input.Messages), extra...))
 	})
 }
@@ -1880,10 +1880,16 @@ type sessionPromptInput struct {
 	Images   []llm.ImageBlock
 }
 
+// sessionRunTransition performs a durable context transition after prompt
+// validation but before compaction and Agent hooks run. The returned rollback
+// is used only when prompt admission fails before the Agent run begins.
+type sessionRunTransition func(*sessionRun) (rollback func() error, err error)
+
 func (s *AgentSession) runSession(
 	ctx context.Context,
 	prePromptCheck bool,
 	prepare func() (sessionPromptInput, error),
+	transition sessionRunTransition,
 	beforeBegin func(),
 	begin func(context.Context, sessionPromptInput, []agentmsg.Message) (Result, error),
 ) (result Result, runErr error) {
@@ -1901,6 +1907,13 @@ func (s *AgentSession) runSession(
 	}
 	defer func() {
 		runErr = joinBashSettlementError(runErr, s.settleSessionRun(run))
+	}()
+	var rollback func() error
+	transitionCommitted := false
+	defer func() {
+		if runErr != nil && !transitionCommitted && rollback != nil {
+			runErr = errors.Join(runErr, rollback())
+		}
 	}()
 	// A prior run normally flushes these in its settlement path. Retrying here
 	// preserves coding-agent's explicit pre-prompt flush after a transient
@@ -1929,6 +1942,12 @@ func (s *AgentSession) runSession(
 	}
 	if cause := context.Cause(run.ctx); cause != nil {
 		return Result{}, cause
+	}
+	if transition != nil {
+		rollback, err = transition(run)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	if prePromptCheck {
 		s.checkPrePromptCompaction(run)
@@ -1979,6 +1998,7 @@ func (s *AgentSession) runSession(
 	if prePromptCheck {
 		s.setSessionPhase(run, PhaseProvider)
 	}
+	transitionCommitted = true
 	if beforeBegin != nil {
 		beforeBegin()
 	}
@@ -3089,7 +3109,7 @@ func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
 	if s.loop == nil {
 		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	return s.runSession(ctx, false, nil, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
+	return s.runSession(ctx, false, nil, nil, nil, func(run context.Context, _ sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.Continue(run)
 	})
 }
@@ -3793,9 +3813,18 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		return NavigateTreeResult{}, err
 	}
 	defer s.finishSessionRun(run)
+	return s.navigateTreeWithRun(run, targetID, options, false)
+}
+
+func (s *AgentSession) navigateTreeWithRun(
+	run *sessionRun,
+	targetID string,
+	options NavigateTreeOptions,
+	reopenEditableTarget bool,
+) (NavigateTreeResult, error) {
 	manager := s.sessionManager
 	oldLeaf, _ := manager.LeafID()
-	if oldLeaf == targetID {
+	if oldLeaf == targetID && !reopenEditableTarget {
 		return NavigateTreeResult{}, nil
 	}
 	if options.Summarize && !s.hasSelectedModel() {
@@ -3966,6 +3995,104 @@ func (s *AgentSession) NavigateTree(ctx context.Context, targetID string, option
 		_ = hook(branchCtx, SessionTreeEvent{NewLeafID: actualNewLeaf, OldLeafID: optionalString(oldLeaf), SummaryEntry: summaryEntry, FromExtension: fromHook})
 	}
 	return NavigateTreeResult{EditorText: editorText, SummaryEntry: summaryEntry}, nil
+}
+
+// EditAndResendWithOptions starts a new branch by replacing one historical user
+// turn. The branch stays unchanged until the edited prompt has passed normal
+// prompt validation and acquired the single AgentSession run admission. If a
+// later preflight stage rejects the prompt, the original leaf is restored before
+// the session becomes idle again.
+func (s *AgentSession) EditAndResendWithOptions(
+	ctx context.Context,
+	targetID string,
+	prompt string,
+	options PromptOptions,
+) (Result, error) {
+	if s == nil || s.sessionManager == nil {
+		return Result{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
+	}
+	target, ok := s.sessionManager.Entry(targetID)
+	if !ok {
+		return Result{}, treeEntryNotFoundError{id: targetID}
+	}
+	images, editable := editableUserMessageImages(target)
+	if !editable {
+		return Result{}, fmt.Errorf("%w: entry %s is not an editable user message", ErrInvalidRun, targetID)
+	}
+
+	// Historical messages are resent literally. In particular, a leading slash
+	// remains message content instead of unexpectedly invoking a current command.
+	expand := false
+	options.ExpandPromptTemplates = &expand
+	options.StreamingBehavior = ""
+	options.Images = images
+	return s.runTextWithOptionsAndTransition(ctx, prompt, options, func(run *sessionRun) (func() error, error) {
+		oldLeafID, hasOldLeaf := s.sessionManager.LeafID()
+		var oldLeaf *string
+		if hasOldLeaf {
+			oldLeaf = optionalString(oldLeafID)
+		}
+		rollback := func() error {
+			return s.restoreSelectedTreeLeaf(context.WithoutCancel(run.ctx), oldLeaf)
+		}
+		navigation, err := s.navigateTreeWithRun(run, targetID, NavigateTreeOptions{}, true)
+		if err != nil {
+			return rollback, err
+		}
+		if navigation.Cancelled {
+			if navigation.Aborted {
+				return rollback, fmt.Errorf("%w: edit-and-resend navigation aborted", ErrAgentAborted)
+			}
+			return rollback, fmt.Errorf("%w: edit-and-resend navigation cancelled", ErrAgentAborted)
+		}
+		if navigation.EditorText == nil {
+			return rollback, fmt.Errorf("%w: entry %s is not editable", ErrInvalidRun, targetID)
+		}
+		return rollback, nil
+	})
+}
+
+func editableUserMessageImages(entry session.Entry) ([]llm.ImageBlock, bool) {
+	message, ok := entry.Message()
+	if !ok || message.Role() != llm.RoleUser {
+		return nil, false
+	}
+	switch message := message.(type) {
+	case llm.UserTextMessage:
+		return nil, true
+	case llm.UserContentMessage:
+		var images []llm.ImageBlock
+		for _, block := range message.Content() {
+			if image, ok := block.(llm.ImageBlock); ok {
+				images = append(images, image)
+			}
+		}
+		return images, true
+	default:
+		return nil, false
+	}
+}
+
+func (s *AgentSession) restoreSelectedTreeLeaf(ctx context.Context, leafID *string) error {
+	manager := s.sessionManager
+	currentLeafID, hasCurrentLeaf := manager.LeafID()
+	if (leafID == nil && !hasCurrentLeaf) || (leafID != nil && hasCurrentLeaf && currentLeafID == *leafID) {
+		return nil
+	}
+	if _, err := manager.NavigateTreePosition(ctx, leafID, "", nil); err != nil {
+		return err
+	}
+	if err := s.reloadAgentMessagesFromSession(); err != nil {
+		return err
+	}
+	if hook := s.hooks.SessionTree; hook != nil {
+		var currentLeaf *string
+		if hasCurrentLeaf {
+			currentLeaf = optionalString(currentLeafID)
+		}
+		_ = hook(ctx, SessionTreeEvent{NewLeafID: cloneStringPointer(leafID), OldLeafID: currentLeaf})
+	}
+	return nil
 }
 
 func optionalStringPreserveEmpty(value string) *string { return &value }

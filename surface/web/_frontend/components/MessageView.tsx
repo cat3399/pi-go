@@ -2,6 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useMemo } from "react";
 import { MarkdownBody } from "./MarkdownBody";
+import { ChatPrimaryAction, ChatSecondaryAction, ChatTextInput } from "./ChatTextInput";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
@@ -63,9 +64,12 @@ interface Props {
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => void;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  editing?: boolean;
+  editAvailable?: boolean;
+  editEnabled?: boolean;
+  onEditStart?: (entryId: string) => void;
+  onEditCancel?: () => void;
+  onEdit?: (entryId: string, text: string) => Promise<void>;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -98,9 +102,9 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, editing, editAvailable, editEnabled, onEditStart, onEditCancel, onEdit, showTimestamp, prevTimestamp, sessionId }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} editing={editing} editAvailable={editAvailable} editEnabled={editEnabled} onEditStart={onEditStart} onEditCancel={onEditCancel} onEdit={onEdit} />;
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} />;
@@ -129,28 +133,37 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.entryId === next.entryId
     && prev.onFork === next.onFork
     && prev.forking === next.forking
-    && prev.onNavigate === next.onNavigate
-    && prev.prevAssistantEntryId === next.prevAssistantEntryId
-    && prev.onEditContent === next.onEditContent
+    && prev.editing === next.editing
+    && prev.editAvailable === next.editAvailable
+    && prev.editEnabled === next.editEnabled
+    && prev.onEditStart === next.onEditStart
+    && prev.onEditCancel === next.onEditCancel
+    && prev.onEdit === next.onEdit
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId;
 });
 
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, editing = false, editAvailable = false, editEnabled = false, onEditStart, onEditCancel, onEdit }: {
   message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => void;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  editing?: boolean;
+  editAvailable?: boolean;
+  editEnabled?: boolean;
+  onEditStart?: (entryId: string) => void;
+  onEditCancel?: () => void;
+  onEdit?: (entryId: string, text: string) => Promise<void>;
 }) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const content =
     typeof message.content === "string"
@@ -167,7 +180,30 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
   const time = formatTime(message.timestamp);
   const canFork = !!entryId && !!onFork;
-  const canNavigate = !!prevAssistantEntryId && !!onNavigate;
+  const canEdit = !!entryId && editAvailable && !!onEditStart;
+  const canSubmit = editEnabled && !submitting && (draft.trim().length > 0 || imageBlocks.length > 0);
+
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(content);
+    setSubmitting(false);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(content.length, content.length);
+      textarea.style.height = "auto";
+      textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 72), 200)}px`;
+    });
+  }, [content, editing]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 72), 200)}px`;
+  }, [draft, editing]);
 
   const copyContent = () => {
     copyText(content).then(() => {
@@ -176,21 +212,40 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
     });
   };
 
+  const cancelEdit = () => {
+    if (submitting) return;
+    setDraft(content);
+    onEditCancel?.();
+  };
+
+  const submitEdit = async () => {
+    if (!entryId || !onEdit || !canSubmit) return;
+    setSubmitting(true);
+    try {
+      await onEdit(entryId, draft);
+    } catch {
+      // The command error is shown by the session hook. Keep this editor open
+      // so the user can adjust or retry the draft.
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div
       style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, maxWidth: "85%" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, maxWidth: "85%", width: editing ? "min(620px, 85%)" : undefined }}>
         <div
           style={{
             flex: 1,
             minWidth: 0,
-            background: "var(--user-bg)",
-            border: "1px solid rgba(59,130,246,0.2)",
-            borderRadius: 12,
-            padding: "8px 12px",
+            background: editing ? "transparent" : "var(--user-bg)",
+            border: editing ? "none" : "1px solid rgba(59,130,246,0.2)",
+            borderRadius: editing ? 14 : 12,
+            padding: editing ? 0 : "8px 12px",
             fontSize: 14,
             lineHeight: 1.6,
             color: "var(--text)",
@@ -198,7 +253,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           }}
         >
           {imageBlocks.length > 0 && (
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content ? 8 : 0 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: content || editing ? 8 : 0 }}>
               {imageBlocks.map((img, i) => {
                 // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
                 // pi-ai on-disk format uses flat {data, mimeType} — handle both
@@ -222,21 +277,63 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               })}
             </div>
           )}
-          {content && <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>}
+          {editing ? (
+            <ChatTextInput
+              ref={textareaRef}
+              frameClassName="is-inline-editor"
+              value={draft}
+              disabled={submitting}
+              rows={1}
+              aria-label={t("i18n.editFromHere")}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape" && !submitting) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  cancelEdit();
+                  return;
+                }
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void submitEdit();
+                }
+              }}
+              action={(
+                <div className="chat-inline-editor-actions">
+                  <ChatSecondaryAction
+                    label={t("i18n.cancel")}
+                    disabled={submitting}
+                    aria-label={t("i18n.cancel")}
+                    onClick={cancelEdit}
+                  />
+                  <ChatPrimaryAction
+                    active={canSubmit || submitting}
+                    pending={submitting}
+                    label={t("chat.send")}
+                    disabled={!canSubmit}
+                    aria-label={t("chat.send")}
+                    onClick={() => void submitEdit()}
+                  />
+                </div>
+              )}
+            />
+          ) : content ? (
+            <MarkdownBody className="markdown-user-message" cwd={cwd} onOpenFile={onOpenFile}>{content}</MarkdownBody>
+          ) : null}
         </div>
 
       </div>
 
       {/* Bottom row: action buttons + timestamp */}
-      {(time || canFork || canNavigate || true) && (
+      {!editing && (time || canFork || canEdit || true) && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "flex-end",
           gap: 6, marginTop: 3,
         }}>
           <div style={{
             display: "flex", gap: 3,
-            opacity: hovered ? 1 : 0,
-            pointerEvents: hovered ? "auto" : "none",
+            opacity: hovered || forking ? 1 : 0,
+            pointerEvents: hovered || forking ? "auto" : "none",
             transition: "opacity 0.12s",
           }}>
             <button
@@ -268,17 +365,9 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               )}
                {copied ? t("i18n.copied") : t("i18n.copy")}
             </button>
-          </div>
-          {(canFork || canNavigate) && (
-            <div style={{
-              display: "flex", gap: 3,
-              opacity: (hovered || forking) ? 1 : 0,
-              pointerEvents: (hovered || forking) ? "auto" : "none",
-              transition: "opacity 0.12s",
-            }}>
-              {canNavigate && (
+              {canEdit && (
                 <button
-                  onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
+                  onClick={() => onEditStart!(entryId!)}
                    title={t("i18n.editFromHereTitle")}
                   style={{
                     display: "flex", alignItems: "center", gap: 4,
@@ -295,8 +384,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                   onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="15 10 20 15 15 20" />
-                    <path d="M4 4v7a4 4 0 0 0 4 4h12" />
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z" />
                   </svg>
                    {t("i18n.editFromHere")}
                 </button>
@@ -329,8 +418,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                    {forking ? t("i18n.creating") : t("i18n.newSession")}
                 </button>
               )}
-            </div>
-          )}
+          </div>
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
         </div>
       )}

@@ -98,6 +98,17 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 		decoded.command = application.PromptCommand{
 			Message: message, Images: images, StreamingBehavior: behavior, Source: promptSource,
 		}
+	case string(application.CommandEditAndResend):
+		entryID, err := requiredString(input.EntryID, "entryId")
+		if err != nil {
+			return decoded, err
+		}
+		if input.Message == nil {
+			return decoded, fmt.Errorf("message is required")
+		}
+		decoded.command = application.EditAndResendCommand{
+			EntryID: entryID, Message: *input.Message, Source: promptSource,
+		}
 	case string(application.CommandSteer):
 		images, err := decodeImages(input.Images)
 		if err != nil {

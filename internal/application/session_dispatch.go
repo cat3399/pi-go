@@ -20,6 +20,8 @@ func (s *ApplicationSession) Dispatch(ctx context.Context, command Command) (Com
 	switch command := command.(type) {
 	case PromptCommand:
 		return s.dispatchPrompt(ctx, command)
+	case EditAndResendCommand:
+		return s.dispatchEditAndResend(ctx, command)
 	case AbortCommand:
 		session, _, err := s.currentSession()
 		if err != nil {
@@ -141,6 +143,56 @@ func (s *ApplicationSession) dispatchPrompt(ctx context.Context, command PromptC
 	if !source.Valid() {
 		return nil, fmt.Errorf("%w: invalid prompt source %q", ErrInvalidCommand, source)
 	}
+	return s.dispatchPromptOperation(
+		ctx,
+		CommandPrompt,
+		func(operationID uint64) CommandResult {
+			return PromptStartedResult{OperationID: operationID}
+		},
+		func(runCtx context.Context, session *agent.AgentSession, preflight func(bool)) error {
+			_, err := session.PromptWithOptions(runCtx, command.Message, agent.PromptOptions{
+				Images:            command.Images,
+				StreamingBehavior: command.StreamingBehavior,
+				Source:            source,
+				PreflightResult:   preflight,
+			})
+			return err
+		},
+	)
+}
+
+func (s *ApplicationSession) dispatchEditAndResend(ctx context.Context, command EditAndResendCommand) (CommandResult, error) {
+	source := command.Source
+	if source == "" {
+		source = agent.InputInteractive
+	}
+	if !source.Valid() {
+		return nil, fmt.Errorf("%w: invalid prompt source %q", ErrInvalidCommand, source)
+	}
+	return s.dispatchPromptOperation(
+		ctx,
+		CommandEditAndResend,
+		func(operationID uint64) CommandResult {
+			return EditAndResendStartedResult{OperationID: operationID}
+		},
+		func(runCtx context.Context, session *agent.AgentSession, preflight func(bool)) error {
+			_, err := session.EditAndResendWithOptions(runCtx, command.EntryID, command.Message, agent.PromptOptions{
+				Source:          source,
+				PreflightResult: preflight,
+			})
+			return err
+		},
+	)
+}
+
+type promptOperation func(context.Context, *agent.AgentSession, func(bool)) error
+
+func (s *ApplicationSession) dispatchPromptOperation(
+	ctx context.Context,
+	commandType CommandType,
+	startedResult func(uint64) CommandResult,
+	run promptOperation,
+) (CommandResult, error) {
 	operationID, session, err := s.beginPrompt()
 	if err != nil {
 		return nil, err
@@ -151,20 +203,15 @@ func (s *ApplicationSession) dispatchPrompt(ctx context.Context, command PromptC
 	go func() {
 		defer s.operations.Done()
 		accepted := false
-		_, promptErr := session.PromptWithOptions(s.ctx, command.Message, agent.PromptOptions{
-			Images:            command.Images,
-			StreamingBehavior: command.StreamingBehavior,
-			Source:            source,
-			PreflightResult: func(success bool) {
-				accepted = success
-				preflight <- success
-			},
+		promptErr := run(s.ctx, session, func(success bool) {
+			accepted = success
+			preflight <- success
 		})
 		s.finishPromptState()
 		if accepted {
 			operation := OperationEvent{
 				OperationID: operationID,
-				Command:     CommandPrompt,
+				Command:     commandType,
 				Status:      OperationCompleted,
 			}
 			if promptErr != nil {
@@ -179,12 +226,12 @@ func (s *ApplicationSession) dispatchPrompt(ctx context.Context, command PromptC
 	select {
 	case accepted := <-preflight:
 		if accepted {
-			return PromptStartedResult{OperationID: operationID}, nil
+			return startedResult(operationID), nil
 		}
 		select {
 		case promptErr := <-outcome:
 			if promptErr == nil {
-				return nil, fmt.Errorf("%w: prompt preflight failed without an error", ErrInvalidCommand)
+				return nil, fmt.Errorf("%w: %s preflight failed without an error", ErrInvalidCommand, commandType)
 			}
 			return nil, promptErr
 		case <-ctx.Done():
@@ -192,7 +239,7 @@ func (s *ApplicationSession) dispatchPrompt(ctx context.Context, command PromptC
 		}
 	case promptErr := <-outcome:
 		if promptErr == nil {
-			return nil, fmt.Errorf("%w: prompt completed without preflight acknowledgement", ErrInvalidCommand)
+			return nil, fmt.Errorf("%w: %s completed without preflight acknowledgement", ErrInvalidCommand, commandType)
 		}
 		return nil, promptErr
 	case <-ctx.Done():

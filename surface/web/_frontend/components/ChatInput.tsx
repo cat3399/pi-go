@@ -15,6 +15,7 @@ import {
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
+import { ChatPrimaryAction, ChatTextInput } from "./ChatTextInput";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 
@@ -1617,24 +1618,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </div>
             );
           })()}
-          <div
-            style={{
-              minWidth: 0,
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              background: "var(--bg)",
-              border: `1px solid ${bashMode ? "var(--tool-bg)" : isStreaming && (onSteer || onFollowUp)
-                ? "rgba(234,179,8,0.4)"
-                : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: 14,
-              padding: "10px 10px 10px 14px",
-              boxShadow: "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-              transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
-            } as React.CSSProperties}
-          >
-          <textarea
+          <ChatTextInput
             ref={textareaRef}
+            frameClassName={bashMode
+              ? "is-bash"
+              : isStreaming && (onSteer || onFollowUp) ? "is-streaming" : ""}
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
@@ -1664,85 +1652,46 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 : t("chat.messagePlaceholder")
             }
             rows={1}
-            style={{
-              flex: 1,
-              minWidth: 0,
-              width: "100%",
-              background: "none",
-              border: "none",
-              outline: "none",
-              resize: "none",
-              color: "var(--text)",
-              fontSize: 14,
-              lineHeight: 1.6,
-              fontFamily: "inherit",
-              minHeight: 24,
-              maxHeight: 200,
-              overflow: "auto",
-            }}
+            action={isStreaming && (!canQueueStreamingMessage || (!onSteer && !onFollowUp)) ? (
+              <button
+                type="button"
+                onClick={onAbort}
+                title={t("chat.stopAgent")}
+                aria-label={t("chat.stopAgent")}
+                style={{
+                  flexShrink: 0,
+                  alignSelf: "flex-end",
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "7px 14px",
+                  background: "rgba(239,68,68,0.08)",
+                  border: "1px solid rgba(239,68,68,0.3)",
+                  borderRadius: 8,
+                  color: "#ef4444",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  transition: "background 0.15s",
+                }}
+              >
+                <svg width="12" height="12" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                </svg>
+                {t("chat.stop")}
+              </button>
+            ) : (
+              <ChatPrimaryAction
+                active={Boolean(isStreaming || value.trim() || attachedImages.length)}
+                onClick={isStreaming ? () => sendQueued(preferredQueueMode) : handleSend}
+                disabled={!isStreaming && !value.trim() && !attachedImages.length}
+                title={isStreaming
+                  ? t(streamingInputBehavior === "steer" ? "settings.steerDescription" : "settings.followUpDescription")
+                  : t("chat.send")}
+                aria-label={t("chat.send")}
+                label={t("chat.send")}
+              />
+            )}
           />
-
-          {isStreaming && (!canQueueStreamingMessage || (!onSteer && !onFollowUp)) ? (
-            <button
-              type="button"
-              onClick={onAbort}
-              title={t("chat.stopAgent")}
-              aria-label={t("chat.stopAgent")}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 14px",
-                background: "rgba(239,68,68,0.08)",
-                border: "1px solid rgba(239,68,68,0.3)",
-                borderRadius: 8,
-                color: "#ef4444",
-                cursor: "pointer",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                transition: "background 0.15s",
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-              </svg>
-              {t("chat.stop")}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={isStreaming ? () => sendQueued(preferredQueueMode) : handleSend}
-              disabled={!isStreaming && !value.trim() && !attachedImages.length}
-              title={isStreaming
-                ? t(streamingInputBehavior === "steer" ? "settings.steerDescription" : "settings.followUpDescription")
-                : t("chat.send")}
-              aria-label={t("chat.send")}
-              style={{
-                flexShrink: 0,
-                alignSelf: "flex-end",
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "7px 14px",
-                background: (isStreaming || value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
-                border: "none",
-                borderRadius: 8,
-                color: (isStreaming || value.trim() || attachedImages.length) ? "#fff" : "var(--text-dim)",
-                cursor: (isStreaming || value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "-0.01em",
-                boxShadow: (isStreaming || value.trim() || attachedImages.length) ? "0 1px 3px rgba(37,99,235,0.25)" : "none",
-                transition: "background 0.15s, box-shadow 0.15s",
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
-              </svg>
-              {t("chat.send")}
-            </button>
-          )}
-          </div>
         </div>
 
         {/* Bash mode status label */}

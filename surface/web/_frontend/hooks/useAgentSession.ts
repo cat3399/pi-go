@@ -919,7 +919,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "operation":
-        if (event.command === "prompt") {
+        if (event.command === "prompt" || event.command === "edit_and_resend") {
           if (event.status === "failed") {
             addNotice({
               type: "error",
@@ -1232,6 +1232,56 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setActiveLeafId(entryId);
     await loadContext(sid, entryId);
   }, [loadContext]);
+
+  const handleEditMessage = useCallback(async (entryId: string, message: string) => {
+    if (bashRunningRef.current || agentRunningRef.current) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+
+    const promptRunId = promptRunIdRef.current + 1;
+    promptOperationPendingRef.current = true;
+    promptRunIdRef.current = promptRunId;
+    optimisticUserMessageKeyRef.current = null;
+    agentRunActiveRef.current = false;
+    agentRunningRef.current = true;
+    setAgentRunning(true);
+    setAgentPhase({ kind: "waiting_model" });
+    setRetryInfo(null);
+    dispatch({ type: "start" });
+    pendingScrollToUserRef.current = true;
+    completionScrollAllowedRef.current = true;
+
+    let requestStarted = false;
+    try {
+      await ensureEventsConnected(sid);
+      requestStarted = true;
+      await sendSessionCommand(sid, {
+        type: "edit_and_resend",
+        entryId,
+        message,
+      });
+      await loadSession(sid).catch(() => {
+        setTimeout(() => void reconcileAgentState(sid), 1_000);
+      });
+    } catch (editError) {
+      console.error("Failed to edit message:", editError);
+      if (requestStarted && !(editError instanceof ApplicationRequestError)) {
+        setTimeout(() => void reconcileAgentState(sid), 1_000);
+        return;
+      }
+      promptOperationPendingRef.current = false;
+      agentRunningRef.current = false;
+      setAgentRunning(false);
+      setAgentPhase(null);
+      dispatch({ type: "end" });
+      await loadSession(sid).catch(() => undefined);
+      addNotice({
+        type: "error",
+        message: editError instanceof Error ? editError.message : "Failed to edit message",
+      });
+      throw editError;
+    }
+  }, [addNotice, ensureEventsConnected, loadSession, reconcileAgentState]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current) return;
@@ -1673,7 +1723,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, handleFork, handleNavigate, handleEditMessage, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,

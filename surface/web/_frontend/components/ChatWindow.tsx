@@ -193,11 +193,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     onAgentEnd?.();
   }, [onAgentEnd]);
 
-  // 稳定化 onEditContent 引用，配合 React.memo 防止历史消息重渲染
-  const handleEditContent = useCallback((content: string) => {
-    chatInputRef?.current?.insertIfEmpty(content);
-  }, [chatInputRef]);
-
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -210,7 +205,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, handleFork, handleEditMessage, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
@@ -220,6 +215,30 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
   const sessionBusy = agentRunning || bashRunning;
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEditingEntryId(null);
+  }, [session?.id, newSessionCwd]);
+
+  useEffect(() => {
+    if (editingEntryId && !entryIds.includes(editingEntryId)) {
+      setEditingEntryId(null);
+    }
+  }, [editingEntryId, entryIds]);
+
+  const beginMessageEdit = useCallback((entryId: string) => {
+    setEditingEntryId(entryId);
+  }, []);
+
+  const cancelMessageEdit = useCallback(() => {
+    setEditingEntryId(null);
+  }, []);
+
+  const submitMessageEdit = useCallback(async (entryId: string, text: string) => {
+    await handleEditMessage(entryId, text);
+    setEditingEntryId(null);
+  }, [handleEditMessage]);
 
   useEffect(() => {
     if (!extensionDialog || soundedExtensionDialogIdRef.current === extensionDialog.id) return;
@@ -552,10 +571,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
-                const prevAssistantEntryId =
-                  msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
-                    ? entryIds[idx - 1]
-                    : undefined;
                 const isVisible = msg.role === "user" || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
@@ -584,9 +599,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     entryId={entryIds[idx]}
                     onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
-                    onNavigate={sessionBusy ? undefined : handleNavigate}
-                    prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
-                    onEditContent={handleEditContent}
+                    editing={editingEntryId === entryIds[idx]}
+                    editAvailable={!sessionBusy && !isCompacting && editingEntryId === null}
+                    editEnabled={!sessionBusy && !isCompacting}
+                    onEditStart={beginMessageEdit}
+                    onEditCancel={cancelMessageEdit}
+                    onEdit={submitMessageEdit}
                     showTimestamp={showTimestamp}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}

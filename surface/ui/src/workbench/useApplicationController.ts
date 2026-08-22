@@ -64,6 +64,7 @@ export interface ApplicationController {
   copyLastAssistant(): Promise<void>;
   fork(entryId: string): Promise<void>;
   forkBefore(entryId: string): Promise<void>;
+  editAndResend(entryId: string, text: string): Promise<void>;
   clone(): Promise<void>;
   navigateTree(entryId: string): Promise<void>;
   openSessionStats(): Promise<void>;
@@ -362,7 +363,7 @@ export function useApplicationController(client: ApplicationClient): Application
         void refreshSnapshot();
         break;
       case "operation":
-        if (event.command === "prompt" && event.status === "failed") {
+        if ((event.command === "prompt" || event.command === "edit_and_resend") && event.status === "failed") {
           setBusy(false);
           setRuntimeState((current) => ({ ...current, isPromptRunning: false, isStreaming: false }));
           setError(typeof event.errorMessage === "string" ? event.errorMessage : "指令执行失败");
@@ -1076,6 +1077,34 @@ export function useApplicationController(client: ApplicationClient): Application
     }
   }, [client, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
 
+  const editAndResend = useCallback(async (entryId: string, text: string): Promise<void> => {
+    const sessionID = activeSessionRef.current;
+    if (!sessionID || !entryId || busy || runtimeState?.isBashRunning) return;
+    setError("");
+    setBusy(true);
+    setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
+    try {
+      await client.dispatch(sessionID, {
+        type: "edit_and_resend",
+        entryId,
+        message: text,
+      });
+    } catch (editError) {
+      setBusy(false);
+      setRuntimeState((current) => ({ ...current, isPromptRunning: false, isStreaming: false }));
+      await Promise.allSettled([
+        loadSession(sessionID),
+        loadSessionStats(sessionID),
+      ]);
+      setError(errorMessage(editError));
+      throw editError;
+    }
+    await Promise.allSettled([
+      loadSession(sessionID),
+      loadSessionStats(sessionID),
+    ]);
+  }, [busy, client, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
+
   const openSessionStats = useCallback(async () => {
     const sessionID = activeSessionRef.current;
     if (!sessionID) return;
@@ -1182,6 +1211,7 @@ export function useApplicationController(client: ApplicationClient): Application
     copyLastAssistant,
     fork,
     forkBefore,
+    editAndResend,
     clone,
     navigateTree,
     openSessionStats,

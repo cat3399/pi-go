@@ -473,11 +473,94 @@ textarea {
   background: #f3f3f3;
 }
 
-.pi-user-message-copy {
+.pi-message-user.is-editing {
+  display: block;
+  width: min(76%, 620px);
+  padding: 0;
+  background: transparent;
+}
+
+.pi-inline-message-composer {
+  width: 100%;
+  border-radius: 18px;
+}
+
+.pi-composer.pi-inline-message-composer textarea {
+  min-height: 72px;
+  max-height: 180px;
+  padding: 15px 13px 7px;
+  resize: none;
+}
+
+.pi-inline-message-composer-media {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 13px 0;
+}
+
+.pi-inline-message-composer-media .pi-message-image {
+  max-width: min(100%, 300px);
+  max-height: 220px;
+  margin: 0;
+}
+
+.pi-inline-message-composer .pi-composer-toolbar {
+  min-height: 42px;
+  padding: 4px 6px 7px 10px;
+}
+
+.pi-composer-cancel-button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--pi-text-secondary);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pi-composer-cancel-button:hover:not(:disabled) {
+  color: var(--pi-text);
+  background: var(--pi-hover);
+}
+
+.pi-composer-cancel-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.pi-user-message-actions {
   position: absolute;
   z-index: 2;
   top: calc(100% + 7px);
   right: 3px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 110ms ease,
+    transform 110ms ease,
+    visibility 0s linear 120ms;
+}
+
+.pi-message-user.is-actions-visible .pi-user-message-actions,
+.pi-user-message-actions:focus-within {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+
+.pi-user-message-actions button {
   display: grid;
   width: 28px;
   height: 28px;
@@ -490,33 +573,16 @@ textarea {
   box-shadow: none;
   outline: 0;
   -webkit-tap-highlight-color: transparent;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transform: translateY(-2px);
-  transition:
-    opacity 110ms ease,
-    transform 110ms ease,
-    visibility 0s linear 120ms;
 }
 
-.pi-message-user.is-copy-visible .pi-user-message-copy,
-.pi-user-message-copy:focus-visible {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transform: translateY(0);
-  transition-delay: 0s;
-}
-
-.pi-user-message-copy:hover {
+.pi-user-message-actions button:hover {
   color: var(--pi-text-secondary);
   background: var(--pi-hover-strong);
 }
 
-.pi-user-message-copy:focus,
-.pi-user-message-copy:focus-visible,
-.pi-user-message-copy:active {
+.pi-user-message-actions button:focus,
+.pi-user-message-actions button:focus-visible,
+.pi-user-message-actions button:active {
   outline: 0;
   box-shadow: none;
 }
@@ -1560,6 +1626,10 @@ textarea {
 
   .pi-message-user {
     max-width: 88%;
+  }
+
+  .pi-message-user.is-editing {
+    width: 88%;
   }
 
   .pi-composer-context span {

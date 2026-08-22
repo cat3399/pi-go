@@ -7,11 +7,12 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Search, SquareTerminal } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
+import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
@@ -25,6 +26,7 @@ interface MessageListProps {
   mobile: boolean;
   anchorsEnabled: boolean;
   onFork(entryId: string): Promise<void>;
+  onEdit(entryId: string, text: string): Promise<void>;
 }
 
 interface AnchorTrackMetrics {
@@ -510,6 +512,12 @@ function Message({
   toolResults,
   entryId,
   onFork,
+  editing = false,
+  editAvailable = false,
+  editEnabled = false,
+  onEditStart,
+  onEditCancel,
+  onEdit,
   process = false,
 }: {
   message: AgentMessage;
@@ -517,21 +525,52 @@ function Message({
   toolResults: Map<string, AgentMessage>;
   entryId?: string;
   onFork(entryId: string): Promise<void>;
+  editing?: boolean;
+  editAvailable?: boolean;
+  editEnabled?: boolean;
+  onEditStart?(entryId: string): void;
+  onEditCancel?(): void;
+  onEdit?(entryId: string, text: string): Promise<void>;
   process?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
-  const [userCopyVisible, setUserCopyVisible] = useState(false);
-  const copyHideTimerRef = useRef<number | null>(null);
+  const [userActionsVisible, setUserActionsVisible] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const actionsHideTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const blocks = contentBlocks(message);
+  const text = messageText(message);
 
   useEffect(() => () => {
-    if (copyHideTimerRef.current !== null) window.clearTimeout(copyHideTimerRef.current);
+    if (actionsHideTimerRef.current !== null) window.clearTimeout(actionsHideTimerRef.current);
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
   }, []);
 
+  useEffect(() => {
+    if (!editing) return;
+    setDraft(text);
+    setSubmitting(false);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(text.length, text.length);
+      textarea.style.height = "auto";
+      textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 76), 180)}px`;
+    });
+  }, [editing, text]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 76), 180)}px`;
+  }, [draft, editing]);
+
   if (!visibleMessage(message)) return null;
-  const blocks = contentBlocks(message);
-  const text = messageText(message);
   const role = message.role === "user"
     ? "user"
     : message.role === "custom"
@@ -566,7 +605,7 @@ function Message({
       );
       continue;
     }
-    if (block.type === "text" && typeof block.text === "string" && block.text) {
+    if (block.type === "text" && typeof block.text === "string" && block.text && !(message.role === "user" && editing)) {
       renderedBlocks.push(<MarkdownBody key={index} isStreaming={streaming}>{block.text}</MarkdownBody>);
     } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
       renderedBlocks.push(<ThinkingBlock key={index} block={block} streaming={streaming} />);
@@ -593,74 +632,161 @@ function Message({
     }, 1500);
   };
 
-  const clearCopyHideTimer = () => {
-    if (copyHideTimerRef.current === null) return;
-    window.clearTimeout(copyHideTimerRef.current);
-    copyHideTimerRef.current = null;
+  const clearActionsHideTimer = () => {
+    if (actionsHideTimerRef.current === null) return;
+    window.clearTimeout(actionsHideTimerRef.current);
+    actionsHideTimerRef.current = null;
   };
 
-  const showUserCopy = () => {
-    clearCopyHideTimer();
-    setUserCopyVisible(true);
+  const showUserActions = () => {
+    clearActionsHideTimer();
+    setUserActionsVisible(true);
   };
 
-  const hideUserCopyAfter = (delay: number) => {
-    clearCopyHideTimer();
-    copyHideTimerRef.current = window.setTimeout(() => {
-      copyHideTimerRef.current = null;
-      setUserCopyVisible(false);
+  const hideUserActionsAfter = (delay: number) => {
+    clearActionsHideTimer();
+    actionsHideTimerRef.current = window.setTimeout(() => {
+      actionsHideTimerRef.current = null;
+      setUserActionsVisible(false);
     }, delay);
   };
 
   const userCopyAvailable = message.role === "user" && !streaming && Boolean(text);
+  const userEditAvailable = message.role === "user" && !streaming && editAvailable && Boolean(entryId && onEditStart);
+  const userActionsAvailable = !editing && (userCopyAvailable || userEditAvailable);
+  const hasImages = blocks.some((block) => block.type === "image");
+  const canSubmitEdit = editEnabled && !submitting && (draft.trim().length > 0 || hasImages);
+
+  const cancelEdit = () => {
+    if (submitting) return;
+    setDraft(text);
+    onEditCancel?.();
+  };
+
+  const submitEdit = async () => {
+    if (!entryId || !onEdit || !canSubmitEdit) return;
+    setSubmitting(true);
+    try {
+      await onEdit(entryId, draft);
+    } catch {
+      // The controller owns error presentation. Keep the draft in place.
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <article
-      className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userCopyVisible ? "is-copy-visible" : ""}`}
+      className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userActionsVisible ? "is-actions-visible" : ""} ${editing ? "is-editing" : ""}`}
       onPointerEnter={(event) => {
-        if (userCopyAvailable && event.pointerType === "mouse") showUserCopy();
+        if (userActionsAvailable && event.pointerType === "mouse") showUserActions();
       }}
       onPointerLeave={(event) => {
-        if (userCopyAvailable && event.pointerType === "mouse") hideUserCopyAfter(420);
+        if (userActionsAvailable && event.pointerType === "mouse") hideUserActionsAfter(420);
       }}
       onClick={(event) => {
-        if (!userCopyAvailable) return;
+        if (!userActionsAvailable) return;
         const target = event.target;
         if (target instanceof Element && target.closest("button, a")) return;
-        showUserCopy();
-        hideUserCopyAfter(3200);
+        showUserActions();
+        hideUserActionsAfter(3200);
       }}
     >
       {message.role === "bashExecution" && typeof message.command === "string" && (
         <div className="pi-bash-command">$ {message.command}</div>
       )}
-      {typeof message.content === "string" && text && (
-        role === "bash"
-          ? <pre className="pi-bash-output">{text}</pre>
-          : <MarkdownBody isStreaming={streaming}>{text}</MarkdownBody>
+      {message.role === "user" && editing ? (
+        <ComposerInput
+          ref={textareaRef}
+          className="pi-inline-message-composer"
+          leading={renderedBlocks.length > 0 ? (
+            <div className="pi-inline-message-composer-media">{renderedBlocks}</div>
+          ) : undefined}
+          rows={1}
+          value={draft}
+          disabled={submitting}
+          aria-label="编辑消息"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !submitting) {
+              event.preventDefault();
+              event.stopPropagation();
+              cancelEdit();
+              return;
+            }
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              void submitEdit();
+            }
+          }}
+          toolbarLeft={(
+            <ComposerCancelButton
+              disabled={submitting}
+              aria-label="取消编辑"
+              title="取消编辑"
+              onClick={cancelEdit}
+            />
+          )}
+          toolbarRight={(
+            <ComposerSendButton
+              disabled={!canSubmitEdit}
+              submitting={submitting}
+              aria-label="发送"
+              title="发送"
+              onClick={() => void submitEdit()}
+            />
+          )}
+        />
+      ) : (
+        <>
+          {typeof message.content === "string" && text && (
+            role === "bash"
+              ? <pre className="pi-bash-output">{text}</pre>
+              : <MarkdownBody isStreaming={streaming}>{text}</MarkdownBody>
+          )}
+          {renderedBlocks}
+        </>
       )}
-      {renderedBlocks}
       {message.role === "assistant" && message.stopReason === "error" && (
         <div className="pi-message-error">
           {typeof message.errorMessage === "string" ? message.errorMessage : "模型返回错误"}
         </div>
       )}
-      {userCopyAvailable && (
-        <button
-          className="pi-user-message-copy"
-          type="button"
-          aria-label={copied ? "消息已复制" : "复制消息"}
-          title={copied ? "已复制" : "复制消息"}
-          onPointerEnter={showUserCopy}
-          onPointerLeave={() => hideUserCopyAfter(420)}
-          onClick={(event) => {
-            event.stopPropagation();
-            event.currentTarget.blur();
-            void copy().catch(() => undefined).finally(() => hideUserCopyAfter(1200));
-          }}
+      {userActionsAvailable && (
+        <div
+          className="pi-user-message-actions"
+          onPointerEnter={showUserActions}
+          onPointerLeave={() => hideUserActionsAfter(420)}
         >
-          {copied ? <Check size={14} /> : <Copy size={14} />}
-        </button>
+          {userCopyAvailable && (
+            <button
+              type="button"
+              aria-label={copied ? "消息已复制" : "复制消息"}
+              title={copied ? "已复制" : "复制消息"}
+              onClick={(event) => {
+                event.stopPropagation();
+                event.currentTarget.blur();
+                void copy().catch(() => undefined).finally(() => hideUserActionsAfter(1200));
+              }}
+            >
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          )}
+          {entryId && onEditStart && (
+            <button
+              type="button"
+              aria-label="编辑消息"
+              title="编辑消息"
+              onClick={(event) => {
+                event.stopPropagation();
+                event.currentTarget.blur();
+                onEditStart(entryId);
+              }}
+            >
+              <Pencil size={14} />
+            </button>
+          )}
+        </div>
       )}
       {message.role === "assistant" && !process && !streaming && (text || entryId || messageTimestamp(message) !== null) && (
         <div className="pi-message-actions">
@@ -800,6 +926,12 @@ function Turn(props: {
   busy: boolean;
   active: boolean;
   onFork(entryId: string): Promise<void>;
+  editingEntryId: string | null;
+  editAvailable: boolean;
+  editEnabled: boolean;
+  onEditStart(entryId: string): void;
+  onEditCancel(): void;
+  onEdit(entryId: string, text: string): Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(props.active && props.busy);
   const [now, setNow] = useState(() => Date.now());
@@ -848,6 +980,12 @@ function Turn(props: {
           entryId={entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          editing={props.editingEntryId === entryId}
+          editAvailable={props.editAvailable}
+          editEnabled={props.editEnabled}
+          onEditStart={props.onEditStart}
+          onEditCancel={props.onEditCancel}
+          onEdit={props.onEdit}
           streaming={message === props.streamingMessage}
           process
         />
@@ -862,6 +1000,12 @@ function Turn(props: {
         entryId={props.turn.anchor.entryId}
         toolResults={props.toolResults}
         onFork={props.onFork}
+        editing={props.editingEntryId === props.turn.anchor.entryId}
+        editAvailable={props.editAvailable}
+        editEnabled={props.editEnabled}
+        onEditStart={props.onEditStart}
+        onEditCancel={props.onEditCancel}
+        onEdit={props.onEdit}
       />
       {(processVisible || (props.active && props.busy)) && processLabel && (
         <div className={`pi-turn-process ${expanded ? "is-open" : ""}`}>
@@ -879,6 +1023,12 @@ function Turn(props: {
           entryId={finalAnswer.entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          editing={props.editingEntryId === finalAnswer.entryId}
+          editAvailable={props.editAvailable}
+          editEnabled={props.editEnabled}
+          onEditStart={props.onEditStart}
+          onEditCancel={props.onEditCancel}
+          onEdit={props.onEdit}
         />
       )}
       {trailingMessages.map(({ message, entryId }, index) => (
@@ -888,6 +1038,12 @@ function Turn(props: {
           entryId={entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          editing={props.editingEntryId === entryId}
+          editAvailable={props.editAvailable}
+          editEnabled={props.editEnabled}
+          onEditStart={props.onEditStart}
+          onEditCancel={props.onEditCancel}
+          onEdit={props.onEdit}
         />
       ))}
     </section>
@@ -904,6 +1060,7 @@ export function MessageList({
   mobile,
   anchorsEnabled,
   onFork,
+  onEdit,
 }: MessageListProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -915,6 +1072,7 @@ export function MessageList({
   const anchorPreviewVisibleRef = useRef(false);
   const [activeAnchorIndex, setActiveAnchorIndex] = useState(0);
   const [anchorOpen, setAnchorOpen] = useState(false);
+  const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const toolResults = useMemo(() => {
     const values = new Map<string, AgentMessage>();
     for (const message of messages) {
@@ -945,6 +1103,29 @@ export function MessageList({
     id: turn.anchor.entryId || String(turn.anchor.message.id ?? `turn-${index}`),
     label: messageText(turn.anchor.message).replace(/\s+/g, " ").trim(),
   })), [turns]);
+
+  useEffect(() => {
+    setEditingEntryId(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (editingEntryId && !entryIds.includes(editingEntryId)) {
+      setEditingEntryId(null);
+    }
+  }, [editingEntryId, entryIds]);
+
+  const beginMessageEdit = (entryId: string) => {
+    setEditingEntryId(entryId);
+  };
+
+  const cancelMessageEdit = () => {
+    setEditingEntryId(null);
+  };
+
+  const submitMessageEdit = async (entryId: string, text: string) => {
+    await onEdit(entryId, text);
+    setEditingEntryId(null);
+  };
 
   const syncActiveAnchor = () => {
     const transcript = transcriptRef.current;
@@ -1218,6 +1399,12 @@ export function MessageList({
                 toolResults={toolResults}
                 entryId={entryId}
                 onFork={onFork}
+                editing={editingEntryId === entryId}
+                editAvailable={!busy && editingEntryId === null}
+                editEnabled={!busy}
+                onEditStart={beginMessageEdit}
+                onEditCancel={cancelMessageEdit}
+                onEdit={submitMessageEdit}
               />
             ))}
             {turns.map((turn, index) => (
@@ -1235,6 +1422,12 @@ export function MessageList({
                   busy={index === activeTurnIndex && busy}
                   active={index === activeTurnIndex}
                   onFork={onFork}
+                  editingEntryId={editingEntryId}
+                  editAvailable={!busy && editingEntryId === null}
+                  editEnabled={!busy}
+                  onEditStart={beginMessageEdit}
+                  onEditCancel={cancelMessageEdit}
+                  onEdit={submitMessageEdit}
                 />
               </div>
             ))}

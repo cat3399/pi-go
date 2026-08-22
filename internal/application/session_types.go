@@ -26,6 +26,7 @@ type CommandType string
 
 const (
 	CommandPrompt               CommandType = "prompt"
+	CommandEditAndResend        CommandType = "edit_and_resend"
 	CommandAbort                CommandType = "abort"
 	CommandGetState             CommandType = "get_state"
 	CommandClearQueue           CommandType = "clear_queue"
@@ -68,6 +69,11 @@ type PromptCommand struct {
 	Images            []llm.ImageBlock
 	StreamingBehavior agent.StreamingBehavior
 	Source            agent.InputSource
+}
+type EditAndResendCommand struct {
+	EntryID string
+	Message string
+	Source  agent.InputSource
 }
 type AbortCommand struct{}
 type GetStateCommand struct{}
@@ -117,6 +123,7 @@ type AbortBashCommand struct{}
 type GetCommandsCommand struct{}
 
 func (PromptCommand) Type() CommandType             { return CommandPrompt }
+func (EditAndResendCommand) Type() CommandType      { return CommandEditAndResend }
 func (AbortCommand) Type() CommandType              { return CommandAbort }
 func (GetStateCommand) Type() CommandType           { return CommandGetState }
 func (ClearQueueCommand) Type() CommandType         { return CommandClearQueue }
@@ -151,6 +158,7 @@ func (AbortBashCommand) Type() CommandType            { return CommandAbortBash 
 func (GetCommandsCommand) Type() CommandType          { return CommandGetCommands }
 
 func (PromptCommand) applicationCommand()                     {}
+func (EditAndResendCommand) applicationCommand()              {}
 func (AbortCommand) applicationCommand()                      {}
 func (GetStateCommand) applicationCommand()                   {}
 func (ClearQueueCommand) applicationCommand()                 {}
@@ -191,6 +199,7 @@ type CommandResult interface {
 // Agent operation continues asynchronously and remains observable through the
 // ordered ApplicationSession event stream and State.IsPromptRunning/IsStreaming.
 type PromptStartedResult struct{ OperationID uint64 }
+type EditAndResendStartedResult struct{ OperationID uint64 }
 type AbortResult struct{}
 type GetStateResult struct{ State State }
 type ClearQueueResult struct{ Queue agent.QueueState }
@@ -257,7 +266,10 @@ type SlashCommandInfo struct {
 }
 type GetCommandsResult struct{ Commands []SlashCommandInfo }
 
-func (PromptStartedResult) CommandType() CommandType      { return CommandPrompt }
+func (PromptStartedResult) CommandType() CommandType { return CommandPrompt }
+func (EditAndResendStartedResult) CommandType() CommandType {
+	return CommandEditAndResend
+}
 func (AbortResult) CommandType() CommandType              { return CommandAbort }
 func (GetStateResult) CommandType() CommandType           { return CommandGetState }
 func (ClearQueueResult) CommandType() CommandType         { return CommandClearQueue }
@@ -292,6 +304,7 @@ func (AbortBashResult) CommandType() CommandType            { return CommandAbor
 func (GetCommandsResult) CommandType() CommandType          { return CommandGetCommands }
 
 func (PromptStartedResult) applicationCommandResult()              {}
+func (EditAndResendStartedResult) applicationCommandResult()       {}
 func (AbortResult) applicationCommandResult()                      {}
 func (GetStateResult) applicationCommandResult()                   {}
 func (ClearQueueResult) applicationCommandResult()                 {}

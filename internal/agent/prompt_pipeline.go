@@ -340,6 +340,7 @@ func (s *AgentSession) runOrQueuePrompt(
 	behavior StreamingBehavior,
 	prepare func() (sessionPromptInput, error),
 	preflight *promptPreflightNotifier,
+	transition sessionRunTransition,
 ) (Result, error) {
 	var cached sessionPromptInput
 	var cachedErr error
@@ -375,7 +376,7 @@ func (s *AgentSession) runOrQueuePrompt(
 			}
 			continue
 		}
-		result, err := s.runSession(ctx, true, prepareOnce, func() {
+		result, err := s.runSession(ctx, true, prepareOnce, transition, func() {
 			preflight.notify(true)
 		}, func(run context.Context, input sessionPromptInput, extra []agentmsg.Message) (Result, error) {
 			messages := append(agentmsg.Clone(input.Messages), extra...)
@@ -393,7 +394,16 @@ func (s *AgentSession) runOrQueuePrompt(
 	}
 }
 
-func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, options PromptOptions) (result Result, resultErr error) {
+func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, options PromptOptions) (Result, error) {
+	return s.runTextWithOptionsAndTransition(ctx, prompt, options, nil)
+}
+
+func (s *AgentSession) runTextWithOptionsAndTransition(
+	ctx context.Context,
+	prompt string,
+	options PromptOptions,
+	transition sessionRunTransition,
+) (result Result, resultErr error) {
 	preflight := &promptPreflightNotifier{callback: options.PreflightResult}
 	defer func() {
 		if resultErr != nil {
@@ -427,7 +437,7 @@ func (s *AgentSession) runTextWithOptions(ctx context.Context, prompt string, op
 			return sessionPromptInput{}, err
 		}
 		return s.prepareUserPrompt(content)
-	}, preflight)
+	}, preflight, transition)
 }
 
 func promptContentTextAndImages(content []llm.UserContentBlock) (string, []llm.ImageBlock) {
@@ -489,7 +499,7 @@ func (s *AgentSession) runContentWithOptions(ctx context.Context, content []llm.
 			}
 		}
 		return s.prepareUserPrompt(prepared)
-	}, preflight)
+	}, preflight, nil)
 }
 
 // PromptWithOptions is the canonical coding-agent-style prompt entry point.
@@ -666,7 +676,7 @@ func (s *AgentSession) queueCustomIfRunning(message agentmsg.Custom, delivery Cu
 func (s *AgentSession) runCustomMessage(ctx context.Context, message agentmsg.Custom) (Result, error) {
 	return s.runSession(ctx, false, func() (sessionPromptInput, error) {
 		return sessionPromptInput{Messages: []agentmsg.Message{message}}, nil
-	}, nil, func(run context.Context, input sessionPromptInput, _ []agentmsg.Message) (Result, error) {
+	}, nil, nil, func(run context.Context, input sessionPromptInput, _ []agentmsg.Message) (Result, error) {
 		return s.loop.RunAgentMessages(run, agentmsg.Clone(input.Messages))
 	})
 }

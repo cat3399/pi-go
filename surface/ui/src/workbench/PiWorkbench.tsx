@@ -418,6 +418,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               mobile={mobile}
               anchorsEnabled={!mobile || anchorGesturesEnabled}
               onFork={controller.fork}
+              onEdit={controller.editAndResend}
             />
           ) : null}
           {!controller.sessionLoading && (
