@@ -2,6 +2,11 @@
 
 SURFACE ?= terminal
 ARGS ?=
+VERSION ?= 0.1.0-dev
+OUTPUT_DIR ?=
+
+export PI_GO_VERSION = $(VERSION)
+export OUTPUT_DIR
 
 help:
 	@./scripts/surface.sh help

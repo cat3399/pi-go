@@ -33,9 +33,14 @@ Surfaces:
   gui       Desktop GUI, output: bin/pi-go-gui
   mobile    Android app, output: surface/mobile/bin/pi-go-mobile.apk
 
+Build variables:
+  VERSION     Version embedded in the artifact (default: 0.1.0-dev)
+  OUTPUT_DIR  Override the artifact output directory
+
 Examples:
   make build
   make build SURFACE=web
+  make build SURFACE=terminal VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build SURFACE=web
   make dev SURFACE=web ARGS='--cwd /path/to/project'
   make e2e-core
@@ -103,9 +108,11 @@ case "$action:$surface" in
 		;;
 	build:terminal)
 		require_no_args "$@"
-		mkdir -p "$repo_dir/bin"
+		output_dir=${OUTPUT_DIR:-"$repo_dir/bin"}
+		version=${PI_GO_VERSION:-0.1.0-dev}
+		mkdir -p "$output_dir"
 		cd "$repo_dir"
-		exec go build -trimpath -o "$repo_dir/bin/pi-go" ./cmd/pi-go
+		exec go build -trimpath -ldflags "-X=main.version=$version" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go
 		;;
 	build:web)
 		require_no_args "$@"
@@ -113,11 +120,13 @@ case "$action:$surface" in
 		;;
 	build:gui)
 		require_no_args "$@"
-		exec make -C "$repo_dir/surface/gui" build BIN_DIR="$repo_dir/bin"
+		output_dir=${OUTPUT_DIR:-"$repo_dir/bin"}
+		exec make -C "$repo_dir/surface/gui" build BIN_DIR="$output_dir" VERSION="${PI_GO_VERSION:-0.1.0-dev}"
 		;;
 	build:mobile)
 		require_no_args "$@"
-		exec make -C "$repo_dir/surface/mobile" build BIN_DIR="$repo_dir/surface/mobile/bin"
+		output_dir=${OUTPUT_DIR:-"$repo_dir/surface/mobile/bin"}
+		exec make -C "$repo_dir/surface/mobile" build BIN_DIR="$output_dir" VERSION="${PI_GO_VERSION:-0.1.0-dev}"
 		;;
 	dev:terminal)
 		cd "$repo_dir"

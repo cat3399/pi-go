@@ -1,0 +1,53 @@
+name: Build
+run-name: Build ${{ inputs.surface }} · ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      surface:
+        description: Surface to build (all builds every surface)
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - terminal
+          - web
+          - gui
+          - mobile
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Derive development version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Derive artifact version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version="$(./scripts/next-version.sh patch)-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+  build:
+    name: Build selected surfaces
+    needs: version
+    uses: ./.github/workflows/_build-surfaces.yml
+    with:
+      surface: ${{ inputs.surface }}
+      version: ${{ needs.version.outputs.version }}

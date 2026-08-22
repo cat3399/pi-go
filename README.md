@@ -34,6 +34,12 @@ make build SURFACE=gui
 make build SURFACE=mobile
 ```
 
+构建时可以统一注入版本并指定输出目录；CLI、Web、GUI 和 Android 包都会使用同一个版本：
+
+```sh
+make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
+```
+
 交叉编译带 Web UI 的 Linux AMD64 版本：
 
 ```sh
@@ -63,6 +69,20 @@ make doctor SURFACE=mobile
 make devices SURFACE=mobile
 ```
 
+## GitHub Actions 构建与发布
+
+仓库提供两个手动 workflow，均可在 GitHub 的 **Actions** 页面直接运行：
+
+- **Build**：选择 `terminal`、`web`、`gui`、`mobile` 或 `all`，生成带开发版本号的临时 artifacts，
+  不创建 tag 或 Release；
+- **Release**：选择 surface 和 `patch` / `minor` / `major`，自动计算下一个 SemVer，构建、生成
+  `SHA256SUMS`，并创建对应的 `vX.Y.Z` tag 和 GitHub Release。默认选项是 `all + patch`，通常直接
+  点击运行即可。
+
+首个无历史 tag 的 Release 从 `v0.1.0` 开始，之后以仓库中最高的稳定 SemVer tag 自动递增。
+各 surface 使用独立的原生工具链和缓存；详细产物范围、缓存策略与签名边界见
+[发布说明](docs/RELEASING.md)。
+
 ## 运行
 
 ```sh
@@ -85,3 +105,4 @@ PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
 
 - [核心架构](docs/ARCHITECTURE.md)
 - [Surface 架构](docs/SURFACES.md)
+- [构建与发布](docs/RELEASING.md)

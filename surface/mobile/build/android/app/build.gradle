@@ -2,6 +2,19 @@ plugins {
     id 'com.android.application'
 }
 
+def piGoVersion = System.getenv("PI_GO_VERSION") ?: "0.1.0-dev"
+def piGoVersionMatch = piGoVersion =~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+].*)?$/
+if (!piGoVersionMatch.matches()) {
+    throw new GradleException("PI_GO_VERSION must be a semantic version, got: ${piGoVersion}")
+}
+def piGoVersionMajor = piGoVersionMatch.group(1).toInteger()
+def piGoVersionMinor = piGoVersionMatch.group(2).toInteger()
+def piGoVersionPatch = piGoVersionMatch.group(3).toInteger()
+if (piGoVersionMajor > 2100 || piGoVersionMinor > 999 || piGoVersionPatch > 999) {
+    throw new GradleException("PI_GO_VERSION is too large for Android versionCode: ${piGoVersion}")
+}
+def piGoVersionCode = Math.max(1, piGoVersionMajor * 1000000 + piGoVersionMinor * 1000 + piGoVersionPatch)
+
 android {
     namespace 'com.wails.app'
     compileSdk 35
@@ -15,8 +28,8 @@ android {
         applicationId "com.cat3399.pigo"
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        versionCode piGoVersionCode
+        versionName piGoVersion
 
         // Configure supported ABIs
         ndk {

@@ -71,9 +71,11 @@ tasks:
         export CGO_ENABLED=1
         export GOOS=android
         export GOARCH=arm64
+        version="${PI_GO_VERSION:-0.1.0-dev}"
         mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
         go build -buildmode=c-shared -overlay build/android/overlay.json \
           -tags android,debug -buildvcs=false -gcflags=all="-l" \
+          -ldflags="-X=main.version=$version" \
           -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so .
 
   apk:

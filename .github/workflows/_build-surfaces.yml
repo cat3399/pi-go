@@ -1,0 +1,276 @@
+name: Build surfaces (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      surface:
+        description: Surface to build
+        required: true
+        type: string
+      version:
+        description: Semantic version embedded in artifacts
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate surface and version
+        env:
+          SURFACE: ${{ inputs.surface }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          case "$SURFACE" in
+            all|terminal|web|gui|mobile) ;;
+            *) echo "Unsupported surface: $SURFACE" >&2; exit 2 ;;
+          esac
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version: $VERSION" >&2
+            exit 2
+          fi
+
+  terminal:
+    name: Terminal · portable
+    if: inputs.surface == 'all' || inputs.surface == 'terminal'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go with module and build cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Build and package terminal targets
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/package-portable.sh terminal "$VERSION" dist
+
+      - name: Upload terminal packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-terminal
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  web:
+    name: Web · portable
+    if: inputs.surface == 'all' || inputs.surface == 'web'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go with module and build cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Node with npm cache
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: surface/web/_frontend/package-lock.json
+
+      - name: Restore Next build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: surface/web/_frontend/.next/cache
+          key: web-next-${{ runner.os }}-${{ hashFiles('surface/web/_frontend/package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            web-next-${{ runner.os }}-${{ hashFiles('surface/web/_frontend/package-lock.json') }}-
+
+      - name: Build frontend once and package web targets
+        env:
+          VERSION: ${{ inputs.version }}
+        run: ./scripts/package-portable.sh web "$VERSION" dist
+
+      - name: Upload web packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-web
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  gui:
+    name: GUI · ${{ matrix.target }}
+    if: inputs.surface == 'all' || inputs.surface == 'gui'
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-amd64
+          - runner: windows-2025
+            target: windows-amd64
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go with module and build cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: surface/gui/go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            surface/gui/go.sum
+
+      - name: Set up Node with npm cache
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            surface/ui/package-lock.json
+            surface/gui/frontend/package-lock.json
+
+      - name: Install Linux WebView build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          npm --prefix surface/ui ci
+          npm --prefix surface/gui/frontend ci
+
+      - name: Build and package native GUI
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: ./scripts/package-gui.sh "$VERSION" "$TARGET" dist
+
+      - name: Upload GUI package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-gui-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  mobile:
+    name: Mobile · Android arm64
+    if: inputs.surface == 'all' || inputs.surface == 'mobile'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ANDROID_NDK_VERSION: 26.3.11579264
+      TASK_VERSION: 3.52.0
+      WAILS_VERSION: v3.0.0-beta.8
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go with module and build cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: surface/mobile/go.mod
+          cache: true
+          cache-dependency-path: surface/mobile/go.sum
+
+      - name: Set up Node with npm cache
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            surface/ui/package-lock.json
+            surface/mobile/frontend/package-lock.json
+
+      - name: Set up Java with Gradle cache
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+          cache-dependency-path: |
+            surface/mobile/build/android/*.gradle
+            surface/mobile/build/android/app/*.gradle
+            surface/mobile/build/android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Restore pinned Android NDK
+        id: ndk-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /usr/local/lib/android/sdk/ndk/26.3.11579264
+          key: android-ndk-${{ runner.os }}-26.3.11579264
+
+      - name: Install pinned Android NDK
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ANDROID_NDK_VERSION" > /dev/null
+
+      - name: Restore pinned build tools
+        id: go-tools-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/bin
+          key: go-tools-${{ runner.os }}-${{ runner.arch }}-task-3.52.0-wails-3.0.0-beta.8
+
+      - name: Install Task and Wails
+        run: |
+          tool_bin="$(go env GOPATH)/bin"
+          mkdir -p "$tool_bin"
+          if [[ ! -x "$tool_bin/task" ]]; then
+            go install github.com/go-task/task/v3/cmd/task@v${TASK_VERSION}
+          fi
+          if [[ ! -x "$tool_bin/wails3" ]]; then
+            go install github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_VERSION}
+          fi
+          echo "$tool_bin" >> "$GITHUB_PATH"
+
+      - name: Install frontend dependencies
+        run: make setup SURFACE=mobile
+
+      - name: Build versioned Android APK
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          output_dir="$RUNNER_TEMP/pi-go-mobile"
+          make build SURFACE=mobile VERSION="$VERSION" OUTPUT_DIR="$output_dir"
+          mkdir -p dist
+          cp "$output_dir/pi-go-mobile.apk" "dist/pi-go-mobile_${VERSION}_android_arm64.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "dist/pi-go-mobile_${VERSION}_android_arm64.apk" | head -n 1
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-mobile
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14

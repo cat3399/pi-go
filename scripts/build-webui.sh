@@ -9,9 +9,12 @@ if [ ! -x "$frontend_dir/node_modules/.bin/next" ]; then
 	exit 1
 fi
 
-npm --prefix "$frontend_dir" run build
+if [ "${SKIP_FRONTEND_BUILD:-0}" != "1" ]; then
+	npm --prefix "$frontend_dir" run build
+fi
 output_dir=${OUTPUT_DIR:-"$repo_dir/bin"}
+version=${PI_GO_VERSION:-0.1.0-dev}
 mkdir -p "$output_dir"
 
 cd "$repo_dir"
-go build -trimpath -tags pi_go_webui -o "$output_dir/pi-go" ./cmd/pi-go
+go build -trimpath -tags pi_go_webui -ldflags "-X=main.version=$version" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go
