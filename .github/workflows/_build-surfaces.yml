@@ -231,7 +231,6 @@ jobs:
         with:
           path: /usr/local/lib/android/sdk/ndk/26.3.11579264
           key: android-ndk-${{ runner.os }}-26.3.11579264
-          save-always: true
 
       - name: Install pinned Android NDK
         if: steps.ndk-cache.outputs.cache-hit != 'true'
@@ -247,15 +246,14 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/bin
-          key: go-tool-${{ runner.os }}-${{ runner.arch }}-wails-3.0.0-beta.8
-          save-always: true
+          key: go-tool-${{ runner.os }}-${{ runner.arch }}-wails-server-3.0.0-beta.8
 
       - name: Install Wails
         run: |
           tool_bin="$(go env GOPATH)/bin"
           mkdir -p "$tool_bin"
           if [[ ! -x "$tool_bin/wails3" ]]; then
-            go install github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_VERSION}
+            CGO_ENABLED=0 go install -tags server github.com/wailsapp/wails/v3/cmd/wails3@${WAILS_VERSION}
           fi
           echo "$tool_bin" >> "$GITHUB_PATH"
           task --version
