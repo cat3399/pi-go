@@ -3772,7 +3772,10 @@ textarea {
     touch-action: pan-y;
   }
 
-  .pi-workbench.is-mobile .pi-message-stage {
+  /* Touch-action is resolved at the nearest scrolling element. Keeping the
+   * policy on the transcript lets vertical scrolling stay native while edge
+   * recognizers receive horizontal pointer streams. */
+  .pi-workbench.is-mobile .pi-transcript {
     touch-action: pan-y;
   }
 
