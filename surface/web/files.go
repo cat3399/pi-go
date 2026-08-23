@@ -16,13 +16,14 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/surfacewire"
 	"github.com/fsnotify/fsnotify"
 )
 
 const (
-	textPreviewMaxBytes   = 256 * 1024
-	imagePreviewMaxBytes  = 10 * 1024 * 1024
-	docxPreviewMaxBytes   = 10 * 1024 * 1024
+	textPreviewMaxBytes   = surfacewire.TextPreviewMaxBytes
+	imagePreviewMaxBytes  = surfacewire.ImagePreviewMaxBytes
+	docxPreviewMaxBytes   = surfacewire.DOCXPreviewMaxBytes
 	maxUploadFileBytes    = 25 * 1024 * 1024
 	maxUploadTotalBytes   = 100 * 1024 * 1024
 	maxUploadRequestBytes = maxUploadTotalBytes + 1024*1024
@@ -33,36 +34,6 @@ var fileRequestTypes = map[string]struct{}{
 }
 
 var byteRangePattern = regexp.MustCompile(`^bytes=(\d*)-(\d*)$`)
-
-var fileLanguageByExtension = map[string]string{
-	"ts": "typescript", "tsx": "typescript", "js": "javascript", "jsx": "javascript",
-	"mjs": "javascript", "cjs": "javascript", "py": "python", "rb": "ruby",
-	"go": "go", "rs": "rust", "java": "java", "kt": "kotlin", "swift": "swift",
-	"c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp", "cs": "csharp",
-	"html": "html", "htm": "html", "css": "css", "scss": "css", "less": "css",
-	"json": "json", "jsonl": "json", "yaml": "yaml", "yml": "yaml",
-	"toml": "toml", "xml": "xml", "md": "markdown", "mdx": "markdown",
-	"sh": "bash", "bash": "bash", "zsh": "bash", "fish": "bash",
-	"sql": "sql", "graphql": "graphql", "gql": "graphql",
-	"dockerfile": "dockerfile", "tf": "hcl", "hcl": "hcl",
-	"env": "bash", "gitignore": "bash", "txt": "text", "pdf": "pdf", "docx": "word",
-}
-
-var imageMIMEByExtension = map[string]string{
-	"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
-	"webp": "image/webp", "svg": "image/svg+xml", "bmp": "image/bmp", "ico": "image/x-icon", "avif": "image/avif",
-}
-
-var audioMIMEByExtension = map[string]string{
-	"mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "oga": "audio/ogg",
-	"opus": "audio/ogg", "m4a": "audio/mp4", "aac": "audio/aac", "flac": "audio/flac",
-	"weba": "audio/webm", "webm": "audio/webm",
-}
-
-var documentMIMEByExtension = map[string]string{
-	"pdf":  "application/pdf",
-	"docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-}
 
 func handleFileGet(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
@@ -171,6 +142,7 @@ func streamFileResponse(writer http.ResponseWriter, request *http.Request, resou
 	}
 	writer.Header().Set("Content-Type", contentType)
 	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("Accept-Ranges", "bytes")
 	writer.Header().Set("Content-Disposition", contentDisposition(disposition, resource.Name))
 	rangeHeader := request.Header.Get("Range")
@@ -482,42 +454,19 @@ func filePathFromWildcard(value string) string {
 }
 
 func fileExtension(path string) string {
-	base := strings.ToLower(filepath.Base(path))
-	return strings.TrimPrefix(filepath.Ext(base), ".")
+	return surfacewire.FileExtension(path)
 }
 
 func fileLanguage(path string) string {
-	base := strings.ToLower(filepath.Base(path))
-	if base == "dockerfile" || strings.HasPrefix(base, "dockerfile.") {
-		return "dockerfile"
-	}
-	if base == ".env" || strings.HasPrefix(base, ".env.") {
-		return "bash"
-	}
-	if base == "makefile" || base == "gnumakefile" {
-		return "makefile"
-	}
-	if language := fileLanguageByExtension[fileExtension(path)]; language != "" {
-		return language
-	}
-	return "text"
+	return surfacewire.FileLanguage(path)
 }
 
-func imageMIME(path string) string    { return imageMIMEByExtension[fileExtension(path)] }
-func audioMIME(path string) string    { return audioMIMEByExtension[fileExtension(path)] }
-func documentMIME(path string) string { return documentMIMEByExtension[fileExtension(path)] }
+func imageMIME(path string) string    { return surfacewire.ImageMIME(path) }
+func audioMIME(path string) string    { return surfacewire.AudioMIME(path) }
+func documentMIME(path string) string { return surfacewire.DocumentMIME(path) }
 
 func fileMIME(path string) string {
-	if value := imageMIME(path); value != "" {
-		return value
-	}
-	if value := audioMIME(path); value != "" {
-		return value
-	}
-	if value := documentMIME(path); value != "" {
-		return value
-	}
-	return "application/octet-stream"
+	return surfacewire.FileMIME(path)
 }
 
 func contentDisposition(disposition, fileName string) string {

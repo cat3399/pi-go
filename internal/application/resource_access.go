@@ -11,6 +11,15 @@ var ErrResourceAccessDenied = errors.New("access denied")
 
 func (s *Service) resourceRoots() ([]string, error) {
 	roots := []string{s.paths.WorkingDir}
+	projects, err := s.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	for _, project := range projects {
+		if project.Path != "" {
+			roots = append(roots, project.Path)
+		}
+	}
 	sessions, err := s.ListSessions()
 	if err != nil {
 		return nil, err

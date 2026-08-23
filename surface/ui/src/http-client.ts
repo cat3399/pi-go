@@ -9,7 +9,9 @@ import type {
   EventObserver,
   EventSubscription,
   FileList,
+  FilePreview,
   ModelsView,
+  ProjectInfo,
   SessionView,
 } from "./contracts";
 
@@ -81,6 +83,11 @@ function encodeFilePathForAPI(filePath: string): string {
     .filter(Boolean)
     .map(encodeURIComponent)
     .join("/");
+}
+
+function fileName(filePath: string): string {
+  const parts = filePath.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? filePath;
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -156,6 +163,65 @@ export class RemoteApplicationClient implements ApplicationClient {
     return this.request(`/api/v1/files/${encodeFilePathForAPI(path)}?type=list`);
   }
 
+  async previewFile(path: string): Promise<FilePreview> {
+    const metadata = await this.request<{
+      size: number;
+      language: string;
+      mime: string;
+      previewKind?: "pdf" | "docx" | null;
+    }>(this.filePath(path, "meta"));
+    const base = {
+      path,
+      name: fileName(path),
+      mimeType: metadata.mime,
+      language: metadata.language,
+      size: metadata.size,
+    };
+
+    if (metadata.previewKind === "docx") {
+      return {
+        ...base,
+        kind: "docx",
+        content: await this.requestText(this.filePath(path, "preview")),
+      };
+    }
+    if (metadata.previewKind === "pdf") {
+      return { ...base, kind: "pdf", sourceUrl: this.fileURL(path, "read") };
+    }
+    if (metadata.mime.startsWith("image/")) {
+      return { ...base, kind: "image", sourceUrl: this.fileURL(path, "read") };
+    }
+    if (metadata.mime.startsWith("audio/")) {
+      return { ...base, kind: "audio", sourceUrl: this.fileURL(path, "read") };
+    }
+
+    const data = await this.request<{ content: string; language: string; size: number }>(
+      this.filePath(path, "read"),
+    );
+    return {
+      ...base,
+      kind: "text",
+      content: data.content,
+      language: data.language,
+      size: data.size,
+    };
+  }
+
+  async addProject(path: string): Promise<ProjectInfo> {
+    const response = await this.request<{ project: ProjectInfo }>("/api/v1/projects", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    return response.project;
+  }
+
+  async removeProject(path: string): Promise<void> {
+    await this.request("/api/v1/projects", {
+      method: "DELETE",
+      body: JSON.stringify({ path }),
+    });
+  }
+
   async renameSession(sessionId: string, name: string): Promise<void> {
     await this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
@@ -186,6 +252,31 @@ export class RemoteApplicationClient implements ApplicationClient {
 
   close(): void {
     this.transport.close();
+  }
+
+  private filePath(path: string, type: "read" | "meta" | "preview"): string {
+    return `/api/v1/files/${encodeFilePathForAPI(path)}?type=${type}`;
+  }
+
+  private fileURL(path: string, type: "read"): string {
+    const url = new URL(this.filePath(path, type), this.endpoint);
+    if (this.token) url.searchParams.set("token", this.token);
+    return url.toString();
+  }
+
+  private async requestText(path: string): Promise<string> {
+    const response = await this.transport.request(this.endpoint, path, this.token);
+    if (response.status < 200 || response.status >= 300) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const body = JSON.parse(response.body) as ErrorBody;
+        if (body.error) message = body.error;
+      } catch {
+        // A non-JSON error body still retains the status as its useful message.
+      }
+      throw new ApplicationRequestError(message, response.status, response.retryAfterMs ?? 0);
+    }
+    return response.body;
   }
 
   private async request<T>(

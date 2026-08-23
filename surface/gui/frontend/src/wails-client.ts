@@ -10,7 +10,9 @@ import type {
   EventObserver,
   EventSubscription,
   FileList,
+  FilePreview,
   ModelsView,
+  ProjectInfo,
   SessionView,
 } from "@cat3399/pi-workbench";
 
@@ -87,6 +89,18 @@ export class WailsApplicationClient implements ApplicationClient {
 
   listFiles(path: string): Promise<FileList> {
     return call("ListFiles", path);
+  }
+
+  previewFile(path: string): Promise<FilePreview> {
+    return call("PreviewFile", path);
+  }
+
+  addProject(path: string): Promise<ProjectInfo> {
+    return call("AddProject", path);
+  }
+
+  removeProject(path: string): Promise<void> {
+    return call("RemoveProject", path);
   }
 
   renameSession(sessionId: string, name: string): Promise<void> {

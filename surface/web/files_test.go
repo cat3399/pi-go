@@ -55,7 +55,8 @@ func TestFileGitAndIndexHTTPContracts(t *testing.T) {
 	rangeRequest.Header.Set("Range", "bytes=1-3")
 	rangeResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rangeResponse, rangeRequest)
-	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "ell" || rangeResponse.Header().Get("Content-Range") != "bytes 1-3/14" {
+	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "ell" ||
+		rangeResponse.Header().Get("Content-Range") != "bytes 1-3/14" || rangeResponse.Header().Get("Referrer-Policy") != "no-referrer" {
 		t.Fatalf("range response = %d %q %#v", rangeResponse.Code, rangeResponse.Body.String(), rangeResponse.Header())
 	}
 

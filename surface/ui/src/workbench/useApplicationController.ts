@@ -8,6 +8,7 @@ import type {
   DirectoryView,
   ImageAttachment,
   ModelsView,
+  ProjectInfo,
   QueuedMessages,
   SelectedModel,
   SessionStatsInfo,
@@ -51,6 +52,8 @@ export interface ApplicationController {
   login(password: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   beginNewSession(cwd?: string): void;
+  addProject(path: string): Promise<ProjectInfo>;
+  removeProject(path: string): Promise<void>;
   send(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   abort(): Promise<void>;
   clearQueue(): Promise<string[]>;
@@ -105,6 +108,11 @@ function defaultModel(models: ModelsView | null): SelectedModel | null {
 function defaultThinkingLevel(models: ModelsView | null, model: SelectedModel | null): string {
   if (!models || !model) return "auto";
   return models.thinkingLevelPins[`${model.provider}/${model.modelId}`] ?? "auto";
+}
+
+function sameProjectPath(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalize(left) === normalize(right);
 }
 
 export function useApplicationController(client: ApplicationClient): ApplicationController {
@@ -290,7 +298,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const handleEvent = useCallback((envelope: ApplicationEventEnvelope) => {
     revisionRef.current = Math.max(revisionRef.current, envelope.sequence);
     const event = envelope.event;
-    if (event.type === "session_catalog") {
+    if (event.type === "session_catalog" || event.type === "project_catalog") {
       void refreshSnapshot();
     }
     if (envelope.sessionId !== activeSessionRef.current) return;
@@ -583,7 +591,12 @@ export function useApplicationController(client: ApplicationClient): Application
     setStreamingMessage(null);
     setBusy(false);
     setError("");
-  }, [models, newSessionCwd, sessionView?.info.cwd, snapshot?.defaultCwd]);
+    if (nextCwd) {
+      void loadModels(nextCwd).catch((modelsError) => {
+        if (activeSessionRef.current === null) setError(errorMessage(modelsError));
+      });
+    }
+  }, [loadModels, models, newSessionCwd, sessionView?.info.cwd, snapshot?.defaultCwd]);
 
   const runCompact = useCallback(async (sessionId: string, customInstructions = "") => {
     setBusy(true);
@@ -1005,6 +1018,34 @@ export function useApplicationController(client: ApplicationClient): Application
     return client.browseDirectories(path);
   }, [client]);
 
+  const addProject = useCallback(async (path: string) => {
+    setError("");
+    try {
+      const project = await client.addProject(path);
+      await refreshSnapshot();
+      return project;
+    } catch (projectError) {
+      setError(errorMessage(projectError));
+      throw projectError;
+    }
+  }, [client, refreshSnapshot]);
+
+  const removeProject = useCallback(async (path: string) => {
+    setError("");
+    try {
+      await client.removeProject(path);
+      const value = await refreshSnapshot();
+      if (!activeSessionRef.current && sameProjectPath(newSessionCwd, path)) {
+        const fallback = value?.projects[0]?.path || value?.defaultCwd || "";
+        setNewSessionCwd(fallback);
+        if (fallback) await loadModels(fallback);
+      }
+    } catch (projectError) {
+      setError(errorMessage(projectError));
+      throw projectError;
+    }
+  }, [client, loadModels, newSessionCwd, refreshSnapshot]);
+
   const changeWorkingDirectory = useCallback(async (path: string) => {
     if (activeSessionRef.current) return;
     setError("");
@@ -1230,6 +1271,8 @@ export function useApplicationController(client: ApplicationClient): Application
     login,
     selectSession,
     beginNewSession,
+    addProject,
+    removeProject,
     send,
     abort,
     clearQueue,

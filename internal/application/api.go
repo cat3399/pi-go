@@ -28,6 +28,9 @@ type API interface {
 	LiveState(string) (State, bool, error)
 
 	ListSessions() ([]SessionInfo, error)
+	ListProjects() ([]ProjectInfo, error)
+	AddProject(context.Context, string) (ProjectInfo, error)
+	RemoveProject(context.Context, string) error
 	SnapshotSession(string, string) (SessionSnapshot, error)
 	SessionExists(string) (bool, error)
 	RenameSession(context.Context, string, string) error

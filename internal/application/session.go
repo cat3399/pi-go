@@ -175,6 +175,8 @@ func cloneEventValue(value EventValue) EventValue {
 		return AgentSessionEvent{Event: agent.CloneSessionEvent(value.Event)}
 	case SessionCatalogEvent:
 		return value
+	case ProjectCatalogEvent:
+		return value
 	case OperationEvent:
 		return value
 	default:

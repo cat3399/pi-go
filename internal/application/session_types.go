@@ -375,6 +375,7 @@ const (
 	EventAgentSession   EventType = "agent_session"
 	EventOperation      EventType = "operation"
 	EventSessionCatalog EventType = "session_catalog"
+	EventProjectCatalog EventType = "project_catalog"
 )
 
 type OperationStatus string
@@ -401,6 +402,18 @@ const (
 )
 
 type SessionCatalogEvent struct{ Change SessionCatalogChange }
+
+type ProjectCatalogChange string
+
+const (
+	ProjectAdded   ProjectCatalogChange = "added"
+	ProjectRemoved ProjectCatalogChange = "removed"
+)
+
+type ProjectCatalogEvent struct {
+	Change ProjectCatalogChange
+	Path   string
+}
 type OperationEvent struct {
 	OperationID uint64
 	Command     CommandType
@@ -410,10 +423,12 @@ type OperationEvent struct {
 
 func (AgentSessionEvent) Type() EventType   { return EventAgentSession }
 func (SessionCatalogEvent) Type() EventType { return EventSessionCatalog }
+func (ProjectCatalogEvent) Type() EventType { return EventProjectCatalog }
 func (OperationEvent) Type() EventType      { return EventOperation }
 
 func (AgentSessionEvent) applicationEvent()   {}
 func (SessionCatalogEvent) applicationEvent() {}
+func (ProjectCatalogEvent) applicationEvent() {}
 func (OperationEvent) applicationEvent()      {}
 
 // Event is an immutable application event envelope. ApplicationSession assigns

@@ -33,6 +33,18 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
     if (!props.open) setError("");
   }, [props.open]);
 
+  const remoteOnly = props.hostKind !== "desktop";
+  const remoteLabel = props.hostKind === "mobile"
+    ? "Agent Core 地址"
+    : props.hostKind === "web"
+      ? "Web 服务地址"
+      : "远程桌面端";
+  const remoteDescription = props.hostKind === "web"
+    ? "连接提供当前工作区的 pi-go Web API。"
+    : props.hostKind === "mobile"
+      ? "连接运行 pi-go Web API 的设备。"
+      : "连接另一台 pi-go 桌面端，与 WebUI 使用同一套远程协议。";
+
   const connectRemote = (event: FormEvent) => {
     event.preventDefault();
     try {
@@ -88,7 +100,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
             <section className="pi-settings-content-section">
               <h2>Agent Core</h2>
               <div className="pi-settings-card">
-                {props.hostKind !== "mobile" && (
+                {props.hostKind === "desktop" && (
                   <button
                     className={`pi-connection-row ${props.kind === "local" ? "is-selected" : ""}`}
                     type="button"
@@ -103,18 +115,18 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                     <span className="pi-selection-dot" aria-hidden="true" />
                   </button>
                 )}
-                {props.hostKind !== "mobile" && props.localError && <p className="pi-settings-error">{props.localError}</p>}
-                <form className={`pi-remote-form ${props.hostKind === "mobile" ? "is-remote-only" : ""}`} onSubmit={connectRemote}>
+                {props.hostKind === "desktop" && props.localError && <p className="pi-settings-error">{props.localError}</p>}
+                <form className={`pi-remote-form ${remoteOnly ? "is-remote-only" : ""}`} onSubmit={connectRemote}>
                   <div>
-                    <label htmlFor="pi-remote-endpoint">{props.hostKind === "mobile" ? "Agent Core 地址" : "远程桌面端"}</label>
-                    <p>{props.hostKind === "mobile" ? "连接运行 pi-go Web API 的设备。" : "连接另一台 pi-go 桌面端，与 WebUI 使用同一套远程协议。"}</p>
+                    <label htmlFor="pi-remote-endpoint">{remoteLabel}</label>
+                    <p>{remoteDescription}</p>
                   </div>
                   <div className="pi-remote-controls">
                     <input
                       id="pi-remote-endpoint"
                       type="url"
                       inputMode="url"
-                      placeholder={props.hostKind === "mobile" ? "https://pi.example.com" : "http://192.168.1.10:30141"}
+                      placeholder={remoteOnly ? "https://pi.example.com" : "http://192.168.1.10:30141"}
                       value={endpoint}
                       onChange={(event) => setEndpoint(event.target.value)}
                     />
@@ -171,8 +183,8 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
               <div className="pi-settings-card">
                 <div className="pi-settings-about-row">
                   <span>
-                    <strong>{props.hostKind === "mobile" ? "pi Mobile" : "pi GUI"}</strong>
-                    <small>{props.hostKind === "mobile" ? "连接远程 pi-go Agent Core 的移动端" : "内嵌完整 pi-go Agent Core 的独立桌面端"}</small>
+                    <strong>{props.hostKind === "mobile" ? "pi Mobile" : props.hostKind === "web" ? "pi Web" : "pi GUI"}</strong>
+                    <small>{props.hostKind === "mobile" ? "连接远程 pi-go Agent Core 的移动端" : props.hostKind === "web" ? "浏览器中的 pi-go Agent 工作区" : "内嵌完整 pi-go Agent Core 的独立桌面端"}</small>
                   </span>
                   <code>{props.version}</code>
                 </div>

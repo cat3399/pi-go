@@ -27,6 +27,7 @@ type ApplicationSnapshot struct {
 	Revision          uint64        `json:"revision"`
 	AgentDir          string        `json:"agentDir"`
 	DefaultCWD        string        `json:"defaultCwd"`
+	Projects          []ProjectInfo `json:"projects"`
 	Sessions          []SessionInfo `json:"sessions"`
 	RunningSessionIDs []string      `json:"runningSessionIds"`
 }
@@ -42,10 +43,20 @@ func Snapshot(api application.API) (ApplicationSnapshot, error) {
 	if err != nil {
 		return ApplicationSnapshot{}, err
 	}
+	projects, err := ListProjects(api)
+	if err != nil {
+		return ApplicationSnapshot{}, err
+	}
 	return ApplicationSnapshot{
 		Revision: revision, AgentDir: api.AgentDir(), DefaultCWD: api.DefaultCWD(),
-		Sessions: sessions, RunningSessionIDs: api.RunningIDs(),
+		Projects: projects, Sessions: sessions, RunningSessionIDs: api.RunningIDs(),
 	}, nil
+}
+
+type ProjectInfo struct {
+	Path         string `json:"path"`
+	Modified     string `json:"modified"`
+	SessionCount int    `json:"sessionCount"`
 }
 
 type CreateSessionRequest struct {
@@ -184,6 +195,51 @@ func NormalizeUserCWD(value string) (string, error) {
 		}
 	}
 	return application.ValidateCWD(value)
+}
+
+func ListProjects(api application.API) ([]ProjectInfo, error) {
+	if api == nil {
+		return nil, errors.New("application API is required")
+	}
+	values, err := api.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ProjectInfo, 0, len(values))
+	for _, value := range values {
+		result = append(result, ProjectInfo{
+			Path: value.Path, Modified: formatWebTime(value.Modified), SessionCount: value.SessionCount,
+		})
+	}
+	return result, nil
+}
+
+func AddProject(ctx context.Context, api application.API, requested string) (ProjectInfo, error) {
+	if api == nil {
+		return ProjectInfo{}, errors.New("application API is required")
+	}
+	path, err := NormalizeUserCWD(requested)
+	if err != nil {
+		return ProjectInfo{}, invalidRequest(err)
+	}
+	project, err := api.AddProject(ctx, path)
+	if err != nil {
+		return ProjectInfo{}, err
+	}
+	return ProjectInfo{
+		Path: project.Path, Modified: formatWebTime(project.Modified), SessionCount: project.SessionCount,
+	}, nil
+}
+
+func RemoveProject(ctx context.Context, api application.API, requested string) error {
+	if api == nil {
+		return errors.New("application API is required")
+	}
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return invalidRequest(errors.New("project path is required"))
+	}
+	return api.RemoveProject(ctx, requested)
 }
 
 func RenameSession(ctx context.Context, api application.API, sessionID, name string) error {

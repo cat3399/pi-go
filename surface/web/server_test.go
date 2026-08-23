@@ -423,6 +423,74 @@ func postJSON(t *testing.T, client *http.Client, url string, value any) map[stri
 	return result
 }
 
+func TestWebProjectCatalogAddAndRemove(t *testing.T) {
+	cwd := t.TempDir()
+	project := t.TempDir()
+	service := testService(t, app.ProductionConfig{
+		WorkingDir:  cwd,
+		AgentDir:    filepath.Join(t.TempDir(), "agent"),
+		Environment: []string{},
+	}, nil)
+	surface, err := New(Options{Version: "test", Application: service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(surface.Handler())
+	t.Cleanup(httpServer.Close)
+
+	added := postJSON(t, httpServer.Client(), httpServer.URL+"/api/v1/projects", map[string]any{"path": project})
+	projectBody, ok := added["project"].(map[string]any)
+	if !ok || projectBody["path"] != project {
+		t.Fatalf("add project response = %#v", added)
+	}
+
+	snapshotResponse, err := httpServer.Client().Get(httpServer.URL + "/api/v1/snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshotResponse.Body.Close()
+	var snapshot struct {
+		Projects []struct {
+			Path string `json:"path"`
+		} `json:"projects"`
+	}
+	if err := json.NewDecoder(snapshotResponse.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotResponse.StatusCode != http.StatusOK || len(snapshot.Projects) != 1 || snapshot.Projects[0].Path != project {
+		t.Fatalf("project snapshot = %d %#v", snapshotResponse.StatusCode, snapshot)
+	}
+
+	body, err := json.Marshal(map[string]any{"path": project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodDelete, httpServer.URL+"/api/v1/projects", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(response.Body)
+		t.Fatalf("remove project = %d: %s", response.StatusCode, data)
+	}
+	projects, err := service.ListProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("projects after HTTP remove = %#v", projects)
+	}
+	if _, err := os.Stat(project); err != nil {
+		t.Fatalf("project directory was changed: %v", err)
+	}
+}
+
 func readSSEEvent(t *testing.T, reader *bufio.Reader) map[string]any {
 	t.Helper()
 	for {

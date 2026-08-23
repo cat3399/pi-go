@@ -6,6 +6,8 @@ import { useDialogFocus } from "../primitives/useDialogFocus";
 
 interface DirectoryPickerProps {
   initialPath: string;
+  title?: string;
+  selectLabel?: string;
   load(path?: string): Promise<DirectoryView>;
   onCancel(): void;
   onSelect(path: string): Promise<void>;
@@ -17,6 +19,8 @@ function isWindowsDriveRoot(directory: string): boolean {
 
 export function DirectoryPicker({
   initialPath,
+  title = "选择工作目录",
+  selectLabel = "选择此文件夹",
   load,
   onCancel,
   onSelect,
@@ -91,7 +95,7 @@ export function DirectoryPicker({
       className="pi-directory-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="选择工作目录"
+      aria-label={title}
       tabIndex={-1}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !selecting) onCancel();
@@ -99,7 +103,7 @@ export function DirectoryPicker({
     >
       <section className="pi-directory-picker">
         <header>
-          <h2>选择工作目录</h2>
+          <h2>{title}</h2>
           <button type="button" aria-label="关闭" disabled={selecting} onClick={onCancel}>
             <X size={17} />
           </button>
@@ -157,7 +161,7 @@ export function DirectoryPicker({
         <footer>
           <button type="button" disabled={selecting} onClick={onCancel}>取消</button>
           <button type="button" disabled={!canSelect} onClick={() => void choose()}>
-            {selecting ? "正在选择…" : "选择此文件夹"}
+            {selecting ? "正在选择…" : selectLabel}
           </button>
         </footer>
       </section>

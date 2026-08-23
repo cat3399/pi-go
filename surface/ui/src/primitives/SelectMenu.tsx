@@ -1,6 +1,7 @@
 import {
   type CSSProperties,
   type KeyboardEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useId,
@@ -22,8 +23,9 @@ interface SelectMenuProps {
   options: SelectMenuOption[];
   placeholder?: string;
   disabled?: boolean;
-  variant?: "model" | "compact";
+  variant?: "model" | "compact" | "project";
   showChevron?: boolean;
+  leadingIcon?: ReactNode;
   onChange(value: string): void;
 }
 
@@ -43,6 +45,7 @@ export function SelectMenu({
   disabled = false,
   variant = "compact",
   showChevron = true,
+  leadingIcon,
   onChange,
 }: SelectMenuProps) {
   const [open, setOpen] = useState(false);
@@ -204,6 +207,7 @@ export function SelectMenu({
         }}
         onKeyDown={onTriggerKeyDown}
       >
+        {leadingIcon && <span className="pi-select-trigger-icon">{leadingIcon}</span>}
         <span className="pi-select-trigger-label">{selected?.label ?? placeholder}</span>
         {showChevron && <ChevronDown className="pi-select-chevron" size={13} strokeWidth={1.7} />}
       </button>

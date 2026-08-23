@@ -14,7 +14,8 @@ flowchart LR
     LocalClient --> GUIBridge["pi-go-gui bridge"]
     GUIBridge --> API
     RemoteClient --> Web["surface/web adapter"]
-    ExistingWeb["Existing full WebUI"] --> Web
+    Workbench --> WebClient["Browser HTTP/SSE client"]
+    WebClient --> Web
     Web --> API
     RPC["JSONL automation"] --> Protocol["protocol/v1 adapter"]
     Protocol --> Session["ApplicationSession"]
@@ -44,6 +45,7 @@ flowchart LR
 - typed command 与 command result；
 - 权威 live state 和 durable session snapshot；
 - session discovery、打开去重、identity replacement 与生命周期；
+- 可持久化的项目目录、显式添加/移除和项目变更事件；
 - 应用级单调 revision、有限事件回放和 cursor subscription。
 
 `application.Service` 管理多个彼此独立的 `ApplicationSession`。每个会话仍由自己的
@@ -54,8 +56,11 @@ flowchart LR
 - durable conversation/tree 只在 SessionManager/store；
 - active model/tools/messages/queue/run 只在 Agent/AgentSession；
 - ApplicationSession 只负责单会话命令、snapshot 和有序事件；
-- Service 只负责多会话发现、生命周期和应用级事件总序；
+- Service 只负责多会话发现、项目目录、生命周期和应用级事件总序；
 - surface 只保留选中标签、面板尺寸、滚动位置、输入草稿等呈现状态。
+
+从项目目录移除项目只影响列表可见性和资源授权，不删除源目录或已有会话；再次添加同一路径
+即可恢复。项目目录因此可以独立保存尚未产生会话的空项目，而不需要 surface 伪造 session。
 
 ## Web 适配器
 
@@ -65,6 +70,8 @@ flowchart LR
 - `GET /api/v1/snapshot`：应用会话与运行状态快照；
 - `GET /api/v1/sessions/{id}`：单会话 durable + live 快照；
 - `POST /api/v1/sessions/{id}/commands`：命令；
+- `POST /api/v1/projects`：添加已有项目目录；
+- `DELETE /api/v1/projects`：从项目列表移除目录；
 - `GET /api/v1/events`：所有会话共用的一条 SSE。
 
 SSE 使用 `id: <revision>` 和 `Last-Event-ID`。Service 保留有限历史；游标过期时服务器发送
@@ -80,12 +87,15 @@ SSE 使用 `id: <revision>` 和 `Last-Event-ID`。Service 保留有限历史；�
 ## 共享 Workbench 与迁移原则
 
 `surface/ui` 是可读的 React/TypeScript 源码包，包含统一的工作区布局、展示状态和两种
-`ApplicationClient`。它不持有 Agent 策略。GUI 前端只是 Wails 宿主适配器；未来 WebUI
-和移动宿主也消费同一包。
+`ApplicationClient`。它不持有 Agent 策略。GUI、WebUI 和移动宿主都只保留各自的宿主与
+transport 适配，共用同一个 Workbench；WebUI 使用当前页面 origin 上的 HTTP/SSE client。
+文件树的引用操作和单文件右侧预览也属于这层共享状态；文本、Markdown、图片、音频、PDF
+与 DOCX 使用同一份文件类型判断，只由本地 IPC 或远程 HTTP 适配读取内容。
+项目标题栏的添加入口、项目行的移除菜单以及新对话输入框中的项目选择器同样只实现一次；
+项目选择器只在尚未绑定 durable session 的全新对话中出现，历史会话沿用其既有工作目录。
 
-现有 `surface/web/_frontend` 的功能已经完整，因此不会为了尽快统一样式而直接替换。
-迁移按能力清单逐项完成；只有 Workbench 覆盖原能力并通过 Web 和 GUI 两侧验收后，才切换
-WebUI 入口。迁移期间允许新 GUI 能力不完整，但不以兼容旧页面为由污染共享协议或复制核心逻辑。
+旧 WebUI 组件源码暂时作为迁移材料保留，但不再由页面入口挂载。后续能力继续进入共享
+Workbench，不在 Web surface 重建第二套交互状态或独立样式。
 
 视觉实现只复用有清晰许可证、可维护的源代码。OpenCodex 的已编译 renderer、提取产物和
 混淆 bundle 不进入仓库；已复用的源文件和许可证在各 surface 的 notice 中记录。

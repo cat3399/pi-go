@@ -1,20 +1,25 @@
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, FileText, Folder, FolderOpen, MessageSquare, Pencil, Settings, SquarePen, Trash2, X } from "lucide-react";
-import type { FileList, SessionInfo } from "../contracts";
+import { Check, Ellipsis, FileText, Folder, FolderOpen, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
+import type { FileList, ProjectInfo, SessionInfo } from "../contracts";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { FileTree } from "./FileTree";
 
 interface SidebarProps {
   open: boolean;
   section: "sessions" | "files";
+  projects: ProjectInfo[];
   sessions: SessionInfo[];
   runningSessionIds: string[];
   activeSessionId: string | null;
+  activePreviewPath: string;
   workingDirectory: string;
   listFiles(path: string): Promise<FileList>;
   onMentionFile(value: string): void;
+  onPreviewFile(path: string): void;
   onSectionChange(section: "sessions" | "files"): void;
   onClose(): void;
+  onAddProject(): void;
+  onRemoveProject(path: string): Promise<void>;
   onNewSession(cwd?: string): void;
   onSelect(sessionId: string): void;
   onRename(sessionId: string, name: string): Promise<void>;
@@ -32,6 +37,10 @@ function sessionTitle(session: SessionInfo): string {
 function pathName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path || "项目";
+}
+
+function projectKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
 function SessionRow({
@@ -187,16 +196,49 @@ function ProjectSessions(props: {
   activeSessionId: string | null;
   runningSessionIds: Set<string>;
   onNewSession(cwd: string): void;
+  onRemoveProject(path: string): Promise<void>;
   onSelect(sessionId: string): void;
   onRename(sessionId: string, name: string): Promise<void>;
   onDelete(sessionId: string): Promise<void>;
 }) {
   const containsActive = props.project.sessions.some((session) => session.id === props.activeSessionId);
   const [open, setOpen] = useState(containsActive);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (containsActive) setOpen(true);
   }, [containsActive]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && !menuRef.current?.contains(target)) setMenuOpen(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menuOpen]);
+
+  const removeProject = async () => {
+    setRemoving(true);
+    setRemoveError("");
+    try {
+      await props.onRemoveProject(props.project.root);
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : String(error));
+      setRemoving(false);
+    }
+  };
 
   return (
     <div className={`pi-project ${open ? "is-open" : ""}`}>
@@ -211,14 +253,47 @@ function ProjectSessions(props: {
           {open ? <FolderOpen size={16} /> : <Folder size={16} />}
           <span>{props.project.name}</span>
         </button>
-        <button
-          className="pi-project-new-session"
-          type="button"
-          aria-label={`在 ${props.project.name} 中新建对话`}
-          onClick={() => props.onNewSession(props.project.root)}
-        >
-          <SquarePen size={15} />
-        </button>
+        <div ref={menuRef} className="pi-project-actions">
+          <button
+            className="pi-project-new-session"
+            type="button"
+            aria-label={`在 ${props.project.name} 中新建对话`}
+            onClick={() => props.onNewSession(props.project.root)}
+          >
+            <SquarePen size={15} />
+          </button>
+          <button
+            className="pi-project-more"
+            type="button"
+            aria-label={`${props.project.name} 项目菜单`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title={removeError || undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              setMenuOpen((value) => !value);
+            }}
+          >
+            <Ellipsis size={16} />
+          </button>
+          {menuOpen && (
+            <div className="pi-project-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                disabled={removing}
+                title="仅从项目列表移除，不会删除项目文件或历史会话"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeProject();
+                }}
+              >
+                <Trash2 size={14} />
+                <span>{removing ? "正在删除…" : "删除项目"}</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       {open && (
         <div className="pi-project-sessions">
@@ -264,23 +339,26 @@ export function Sidebar(props: SidebarProps) {
   const projects = useMemo(() => {
     const groups = new Map<string, SessionInfo[]>();
     for (const session of props.sessions) {
-      const root = session.projectRoot || session.cwd || "未归类";
-      const values = groups.get(root) ?? [];
+      const root = session.projectRoot || session.cwd;
+      const key = projectKey(root);
+      const values = groups.get(key) ?? [];
       values.push(session);
-      groups.set(root, values);
+      groups.set(key, values);
     }
-    return [...groups.entries()]
-      .map(([root, sessions]): ProjectGroup => {
+    return (props.projects ?? [])
+      .map((project): ProjectGroup => {
+        const root = project.path;
+        const sessions = groups.get(projectKey(root)) ?? [];
         const ordered = [...sessions].sort((left, right) => right.modified.localeCompare(left.modified));
         return {
           root,
           name: pathName(root),
-          modified: ordered[0]?.modified ?? "",
+          modified: project.modified,
           sessions: ordered,
         };
       })
       .sort((left, right) => right.modified.localeCompare(left.modified));
-  }, [props.sessions]);
+  }, [props.projects, props.sessions]);
   const runningSessionIds = useMemo(() => new Set(props.runningSessionIds), [props.runningSessionIds]);
 
   useEffect(() => {
@@ -365,7 +443,12 @@ export function Sidebar(props: SidebarProps) {
           {props.section === "sessions" ? (
             <>
               <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
-                {projects.length > 0 && <div className="pi-sidebar-section-title">项目</div>}
+                <div className="pi-sidebar-section-heading">
+                  <span>项目</span>
+                  <button type="button" aria-label="添加项目" onClick={props.onAddProject}>
+                    <Plus size={16} />
+                  </button>
+                </div>
                 {projects.map((project) => (
                   <ProjectSessions
                     key={project.root}
@@ -373,6 +456,7 @@ export function Sidebar(props: SidebarProps) {
                     activeSessionId={props.activeSessionId}
                     runningSessionIds={runningSessionIds}
                     onNewSession={props.onNewSession}
+                    onRemoveProject={props.onRemoveProject}
                     onSelect={props.onSelect}
                     onRename={props.onRename}
                     onDelete={props.onDelete}
@@ -384,8 +468,10 @@ export function Sidebar(props: SidebarProps) {
           ) : (
             <FileTree
               cwd={props.workingDirectory}
+              activePreviewPath={props.activePreviewPath}
               listFiles={props.listFiles}
               onMention={props.onMentionFile}
+              onPreview={props.onPreviewFile}
             />
           )}
         </div>

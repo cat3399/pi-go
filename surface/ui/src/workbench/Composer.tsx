@@ -1,9 +1,10 @@
 import { forwardRef, KeyboardEvent, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { Plus, Square, X } from "lucide-react";
+import { Folder, Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
   ModelsView,
+  ProjectInfo,
   SelectedModel,
   SessionInfo,
   SessionStatsInfo,
@@ -38,12 +39,15 @@ interface ComposerProps {
   busy: boolean;
   streamingInputBehavior: StreamingInputBehavior;
   sessions: SessionInfo[];
+  projects: ProjectInfo[];
+  workingDirectory: string;
   toolPreset: ToolPreset;
   slashCommands: SlashCommandInfo[];
   onSend(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
   onAbort(): Promise<void>;
   onModelChange(model: SelectedModel): Promise<void>;
   onThinkingLevelChange(level: string): Promise<void>;
+  onProjectChange(path: string): Promise<void>;
 }
 
 export interface ComposerHandle {
@@ -57,6 +61,11 @@ const MAX_ATTACHED_IMAGES = 10;
 
 function thinkingLevelLabel(level: string): string {
   return level === "max" ? "最高" : level;
+}
+
+function projectName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
 }
 
 const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "prompt", "skill"];
@@ -97,6 +106,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const thinkingOptions = thinkingLevels.map((level) => ({
     value: level,
     label: thinkingLevelLabel(level),
+  }));
+  const projectOptions = (props.projects ?? []).map((project) => ({
+    value: project.path,
+    label: projectName(project.path),
   }));
 
   const query = useMemo(() => slashQuery(text), [text]);
@@ -427,6 +440,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             >
               <Plus size={18} />
             </button>
+            {!props.active && (
+              <SelectMenu
+                ariaLabel="选择项目"
+                value={props.workingDirectory}
+                options={projectOptions}
+                placeholder="选择项目"
+                variant="project"
+                leadingIcon={<Folder size={15} />}
+                disabled={props.busy || projectOptions.length === 0}
+                onChange={(value) => void props.onProjectChange(value)}
+              />
+            )}
           </>
         )}
         toolbarRight={(

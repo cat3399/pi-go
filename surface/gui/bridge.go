@@ -173,6 +173,30 @@ func (b *GUIBridge) ListFiles(path string) (surfacewire.FileList, error) {
 	return surfacewire.ListFiles(b.context(), api, path)
 }
 
+func (b *GUIBridge) PreviewFile(path string) (surfacewire.FilePreview, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.FilePreview{}, err
+	}
+	return surfacewire.PreviewFile(b.context(), api, path)
+}
+
+func (b *GUIBridge) AddProject(path string) (surfacewire.ProjectInfo, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.ProjectInfo{}, err
+	}
+	return surfacewire.AddProject(b.context(), api, path)
+}
+
+func (b *GUIBridge) RemoveProject(path string) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	return surfacewire.RemoveProject(b.context(), api, path)
+}
+
 func (b *GUIBridge) RenameSession(sessionID, name string) error {
 	api, err := b.localAPI()
 	if err != nil {

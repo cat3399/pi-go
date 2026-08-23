@@ -3,7 +3,8 @@
 This directory contains the browser frontend owned by `surface/web`. It is a presentation layer above the
 Go Application API; it does not own Agent, Runtime, or durable Session state.
 
-The browser uses versioned `/api/v1` command, query, and snapshot endpoints plus one page-wide SSE connection.
+The browser mounts the shared `surface/ui` Workbench used by the GUI and mobile surfaces. It uses versioned
+`/api/v1` command, query, and snapshot endpoints plus one page-wide SSE connection.
 Production exports static assets that are embedded into the unified `pi-go` binary. Node.js and Next.js are
 build-time and development dependencies only.
 

@@ -18,10 +18,17 @@ export interface SessionInfo {
   projectRoot: string;
 }
 
+export interface ProjectInfo {
+  path: string;
+  modified: string;
+  sessionCount: number;
+}
+
 export interface ApplicationSnapshot {
   revision: number;
   agentDir: string;
   defaultCwd: string;
+  projects: ProjectInfo[];
   sessions: SessionInfo[];
   runningSessionIds: string[];
 }
@@ -65,6 +72,19 @@ export interface FileEntry {
 export interface FileList {
   path: string;
   entries: FileEntry[];
+}
+
+export type FilePreviewKind = "text" | "image" | "audio" | "pdf" | "docx";
+
+export interface FilePreview {
+  path: string;
+  name: string;
+  kind: FilePreviewKind;
+  mimeType: string;
+  language: string;
+  size: number;
+  content?: string;
+  sourceUrl?: string;
 }
 
 export interface QueuedMessages {
@@ -244,6 +264,9 @@ export interface ApplicationClient {
   models(cwd: string): Promise<ModelsView>;
   browseDirectories(path?: string): Promise<DirectoryView>;
   listFiles(path: string): Promise<FileList>;
+  previewFile(path: string): Promise<FilePreview>;
+  addProject(path: string): Promise<ProjectInfo>;
+  removeProject(path: string): Promise<void>;
   renameSession(sessionId: string, name: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   dispatch<T = unknown>(sessionId: string, command: Record<string, unknown>): Promise<T>;

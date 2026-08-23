@@ -9,6 +9,8 @@ import {
 } from "../streaming-input-behavior";
 import { AuthGate } from "./AuthGate";
 import { Composer, type ComposerHandle } from "./Composer";
+import { DirectoryPicker } from "./DirectoryPicker";
+import { FilePreviewPanel } from "./FilePreviewPanel";
 import { MessageList } from "./MessageList";
 import { latestAssistantUsage } from "./message";
 import { SessionPointPicker } from "./SessionPointPicker";
@@ -45,6 +47,9 @@ const unavailableClient: ApplicationClient = {
   async models() { throw new Error("请先配置远程地址"); },
   async browseDirectories() { throw new Error("请先配置远程地址"); },
   async listFiles() { throw new Error("请先配置远程地址"); },
+  async previewFile() { throw new Error("请先配置远程地址"); },
+  async addProject() { throw new Error("请先配置远程地址"); },
+  async removeProject() { throw new Error("请先配置远程地址"); },
   async renameSession() { throw new Error("请先配置远程地址"); },
   async deleteSession() { throw new Error("请先配置远程地址"); },
   async dispatch<T = unknown>(): Promise<T> { throw new Error("请先配置远程地址"); },
@@ -85,6 +90,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   });
   const [sidebarOpen, setSidebarOpen] = useState(() => !mobile && window.innerWidth >= 800);
   const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
+  const [previewPath, setPreviewPath] = useState("");
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
   const [streamingInputBehavior, setStreamingInputBehavior] = useState(readStreamingInputBehavior);
@@ -102,6 +109,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       if (event.key === "Escape") {
         setSettingsOpen(false);
         setPointPicker(null);
+        setPreviewPath("");
+        setProjectPickerOpen(false);
         if (mobile || window.innerWidth < 800) {
           setSidebarOpen(false);
         }
@@ -124,10 +133,13 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const mobileGesturesEnabled = mobile
     && controller.status === "ready"
     && !settingsOpen
+    && !previewPath
+    && !projectPickerOpen
     && pointPicker === null
     && !controller.sessionStatsOpen;
   const anchorGesturesEnabled = mobileGesturesEnabled && !sidebarOpen;
   const listFiles = useCallback((path: string) => client.listFiles(path), [client]);
+  const previewFile = useCallback((path: string) => client.previewFile(path), [client]);
   const gestures = useMobilePanelGestures({
     enabled: mobileGesturesEnabled,
     sidebarOpen,
@@ -141,6 +153,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   useEffect(() => () => {
     props.onEdgeGesturesEnabledChange?.(false);
   }, [props.onEdgeGesturesEnabledChange]);
+
+  useEffect(() => {
+    setPreviewPath("");
+  }, [client, controller.workingDirectory]);
 
   const closeMobileSidebar = () => {
     if (mobile || window.innerWidth < 800) setSidebarOpen(false);
@@ -361,17 +377,25 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       <Sidebar
         open={sidebarOpen}
         section={sidebarSection}
+        projects={controller.snapshot?.projects ?? []}
         sessions={sessions}
         runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
         activeSessionId={controller.activeSessionId}
+        activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}
         listFiles={listFiles}
         onMentionFile={(value) => {
           composerRef.current?.insertText(value);
           closeMobileSidebar();
         }}
+        onPreviewFile={(path) => {
+          setPreviewPath(path);
+          closeMobileSidebar();
+        }}
         onSectionChange={setSidebarSection}
         onClose={() => setSidebarOpen(false)}
+        onAddProject={() => setProjectPickerOpen(true)}
+        onRemoveProject={controller.removeProject}
         onNewSession={(cwd) => {
           controller.beginNewSession(cwd);
           closeMobileSidebar();
@@ -398,7 +422,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           aria-valuenow={sidebar.width}
         />
       )}
-      <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""}`}>
+      <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""} ${previewPath ? "has-preview" : ""}`}>
         <header className="pi-topbar">
           <div className="pi-topbar-heading">
             {!mobile && <Folder size={18} />}
@@ -441,17 +465,27 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               busy={controller.busy}
               streamingInputBehavior={streamingInputBehavior}
               sessions={sessions}
+              projects={controller.snapshot?.projects ?? []}
+              workingDirectory={controller.workingDirectory}
               toolPreset={controller.toolPreset}
               slashCommands={controller.slashCommands}
               onSend={send}
               onAbort={controller.abort}
               onModelChange={controller.setModel}
               onThinkingLevelChange={controller.setThinkingLevel}
+              onProjectChange={controller.setWorkingDirectory}
             />
           )}
           {controller.error && <div className="pi-inline-error" role="alert">{controller.error}</div>}
         </section>
       </main>
+      {previewPath && (
+        <FilePreviewPanel
+          path={previewPath}
+          previewFile={previewFile}
+          onClose={() => setPreviewPath("")}
+        />
+      )}
       <SessionPointPicker
         mode={pointPicker}
         messages={controller.messages}
@@ -466,6 +500,21 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         stats={controller.sessionStats}
         onClose={controller.closeSessionStats}
       />
+      {projectPickerOpen && (
+        <DirectoryPicker
+          initialPath={controller.workingDirectory || controller.snapshot?.defaultCwd || ""}
+          title="添加项目"
+          selectLabel="添加此文件夹"
+          load={controller.browseDirectories}
+          onCancel={() => setProjectPickerOpen(false)}
+          onSelect={async (path) => {
+            await controller.addProject(path);
+            controller.beginNewSession(path);
+            setProjectPickerOpen(false);
+            closeMobileSidebar();
+          }}
+        />
+      )}
       {settings}
     </div>
   );

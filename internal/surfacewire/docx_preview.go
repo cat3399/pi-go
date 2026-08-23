@@ -1,4 +1,4 @@
-package web
+package surfacewire
 
 import (
 	"archive/zip"
@@ -12,8 +12,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-
-	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
 const maxDOCXExpandedPartBytes = 20 * 1024 * 1024
@@ -31,8 +29,29 @@ type docxRun struct {
 	strikethrough bool
 }
 
-func renderDOCXPreview(filePath, fileName string) (string, error) {
-	return surfacewire.RenderDOCXPreview(filePath, fileName)
+func RenderDOCXPreview(filePath, fileName string) (string, error) {
+	archive, err := zip.OpenReader(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer archive.Close()
+	parts := make(map[string]*zip.File, len(archive.File))
+	for _, file := range archive.File {
+		parts[path.Clean(strings.TrimPrefix(file.Name, "/"))] = file
+	}
+	document := parts["word/document.xml"]
+	if document == nil {
+		return "", errors.New("DOCX document.xml is missing")
+	}
+	relationships, err := readDOCXRelationships(parts["word/_rels/document.xml.rels"])
+	if err != nil {
+		return "", err
+	}
+	body, err := convertDOCXDocument(document, parts, relationships)
+	if err != nil {
+		return "", err
+	}
+	return wrapDOCXPreviewHTML(body, fileName), nil
 }
 
 func readDOCXRelationships(file *zip.File) (map[string]docxRelationship, error) {
@@ -57,7 +76,9 @@ func readDOCXRelationships(file *zip.File) (map[string]docxRelationship, error) 
 		if !ok || start.Name.Local != "Relationship" {
 			continue
 		}
-		id, target, targetMode := xmlAttribute(start.Attr, "Id"), xmlAttribute(start.Attr, "Target"), xmlAttribute(start.Attr, "TargetMode")
+		id := xmlAttribute(start.Attr, "Id")
+		target := xmlAttribute(start.Attr, "Target")
+		targetMode := xmlAttribute(start.Attr, "TargetMode")
 		if id != "" && target != "" {
 			result[id] = docxRelationship{target: target, external: strings.EqualFold(targetMode, "External")}
 		}
@@ -200,15 +221,15 @@ func convertDOCXDocument(document *zip.File, parts map[string]*zip.File, relatio
 					continue
 				}
 				part := parts[partName]
-				if part == nil || totalImageBytes+int64(part.UncompressedSize64) > imagePreviewMaxBytes {
+				if part == nil || totalImageBytes+int64(part.UncompressedSize64) > ImagePreviewMaxBytes {
 					continue
 				}
-				imageData, readErr := readDOCXPart(part, imagePreviewMaxBytes-totalImageBytes)
+				imageData, readErr := readDOCXPart(part, ImagePreviewMaxBytes-totalImageBytes)
 				if readErr != nil {
 					continue
 				}
 				totalImageBytes += int64(len(imageData))
-				mimeType := imageMIME(partName)
+				mimeType := ImageMIME(partName)
 				if mimeType == "" {
 					mimeType = "application/octet-stream"
 				}
@@ -247,7 +268,7 @@ func convertDOCXDocument(document *zip.File, parts map[string]*zip.File, relatio
 
 func readDOCXPart(file *zip.File, limit int64) ([]byte, error) {
 	if file == nil {
-		return nil, osErrNotExist("DOCX part")
+		return nil, errors.New("DOCX part not found")
 	}
 	if int64(file.UncompressedSize64) > limit {
 		return nil, fmt.Errorf("DOCX expanded part exceeds %d bytes", limit)
@@ -266,10 +287,6 @@ func readDOCXPart(file *zip.File, limit int64) ([]byte, error) {
 	}
 	return data, nil
 }
-
-type osErrNotExist string
-
-func (err osErrNotExist) Error() string { return string(err) + " not found" }
 
 func xmlAttribute(attributes []xml.Attr, localName string) string {
 	for _, attribute := range attributes {

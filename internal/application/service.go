@@ -142,6 +142,7 @@ type Service struct {
 	modelCatalogMu      sync.Mutex
 	modelCatalogEntries []ModelCatalogEntry
 	modelCatalogExpires time.Time
+	projectMu           sync.Mutex
 	allowedRootMu       sync.RWMutex
 	allowedRoots        map[string]struct{}
 	fileIndexMu         sync.Mutex
@@ -315,6 +316,9 @@ func (s *Service) NewSession(ctx context.Context, options NewSessionOptions) (St
 		if _, err := managed.session.Dispatch(ctx, SetThinkingLevelCommand{Level: *options.ThinkingLevel}); err != nil {
 			return State{}, fmt.Errorf("set initial thinking level: %w", err)
 		}
+	}
+	if err := s.activateProject(cwd); err != nil {
+		return State{}, fmt.Errorf("activate project: %w", err)
 	}
 	state, err := managed.session.State()
 	if err != nil {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import {
   AtSign,
   ChevronRight,
+  Eye,
   File,
   Folder,
   FolderOpen,
@@ -11,8 +12,10 @@ import type { FileEntry, FileList } from "../contracts";
 
 interface FileTreeProps {
   cwd: string;
+  activePreviewPath: string;
   listFiles(path: string): Promise<FileList>;
   onMention(value: string): void;
+  onPreview(path: string): void;
 }
 
 interface FileNode extends FileEntry {
@@ -48,10 +51,12 @@ function TreeNode(props: {
   node: FileNode;
   depth: number;
   cwd: string;
+  activePreviewPath: string;
   selectedPath: string;
   onSelect(path: string): void;
   listFiles(path: string): Promise<FileList>;
   onMention(value: string): void;
+  onPreview(path: string): void;
 }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -59,7 +64,7 @@ function TreeNode(props: {
   const [children, setChildren] = useState<FileNode[]>([]);
   const [error, setError] = useState("");
   const [hovered, setHovered] = useState(false);
-  const selected = props.selectedPath === props.node.path;
+  const selected = props.selectedPath === props.node.path || props.activePreviewPath === props.node.path;
 
   const loadChildren = useCallback(async () => {
     if (!props.node.isDir || loading) return;
@@ -119,19 +124,34 @@ function TreeNode(props: {
           <span>{props.node.name}</span>
           {loading && <RefreshCw className="pi-file-loading" size={11} aria-label="正在读取" />}
         </button>
-        <button
-          className={`pi-file-mention ${actionsVisible ? "is-visible" : ""}`}
-          type="button"
-          title={`在输入框中引用 ${props.node.name}`}
-          aria-label={`引用 ${props.node.name}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
-          }}
-        >
-          <AtSign size={12} />
-          <span>引用</span>
-        </button>
+        <div className={`pi-file-actions ${actionsVisible ? "is-visible" : ""}`}>
+          {!props.node.isDir && (
+            <button
+              type="button"
+              title={`预览 ${props.node.name}`}
+              aria-label={`预览 ${props.node.name}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onPreview(props.node.path);
+              }}
+            >
+              <Eye size={12} />
+              <span>预览</span>
+            </button>
+          )}
+          <button
+            type="button"
+            title={`在输入框中引用 ${props.node.name}`}
+            aria-label={`引用 ${props.node.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
+            }}
+          >
+            <AtSign size={12} />
+            <span>引用</span>
+          </button>
+        </div>
       </div>
       {error && (
         <button className="pi-file-inline-error" type="button" onClick={() => void loadChildren()}>
@@ -155,7 +175,7 @@ function TreeNode(props: {
   );
 }
 
-export function FileTree({ cwd, listFiles, onMention }: FileTreeProps) {
+export function FileTree({ cwd, activePreviewPath, listFiles, onMention, onPreview }: FileTreeProps) {
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -212,10 +232,12 @@ export function FileTree({ cwd, listFiles, onMention }: FileTreeProps) {
               node={node}
               depth={0}
               cwd={cwd}
+              activePreviewPath={activePreviewPath}
               selectedPath={selectedPath}
               onSelect={setSelectedPath}
               listFiles={listFiles}
               onMention={onMention}
+              onPreview={onPreview}
             />
           ))}
         </div>

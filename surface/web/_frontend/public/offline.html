@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#1a1a1a" />
-    <title>Pi Web is offline</title>
+    <meta name="theme-color" content="#ffffff" />
+    <title>pi 暂时离线</title>
     <style>
       :root {
-        color-scheme: dark;
+        color-scheme: light;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #1a1a1a;
-        color: #e8e8e8;
+        background: #ffffff;
+        color: #1a1c1f;
       }
 
       * {
@@ -45,7 +45,7 @@
 
       p {
         margin: 0;
-        color: #9ca3af;
+        color: #6b7280;
         font-size: 14px;
         line-height: 1.6;
       }
@@ -54,20 +54,20 @@
         margin-top: 24px;
         min-height: 40px;
         padding: 0 18px;
-        border: 1px solid #3a3a3a;
-        border-radius: 6px;
-        background: #242424;
-        color: #e8e8e8;
+        border: 1px solid rgba(26, 28, 31, 0.12);
+        border-radius: 10px;
+        background: #f7f7f7;
+        color: #1a1c1f;
         font: inherit;
         cursor: pointer;
       }
 
       button:hover {
-        background: #2e2e2e;
+        background: rgba(26, 28, 31, 0.095);
       }
 
       button:focus-visible {
-        outline: 2px solid #60a5fa;
+        outline: 2px solid #0a84ff;
         outline-offset: 3px;
       }
     </style>
@@ -75,9 +75,9 @@
   <body>
     <main>
       <img src="/icons/icon-192.png" alt="" />
-      <h1>Pi Web is offline</h1>
-      <p>Reconnect to the local Pi Web server, then try again.</p>
-      <button type="button" onclick="location.reload()">Try again</button>
+      <h1>pi 暂时离线</h1>
+      <p>请重新连接 pi Web 服务，然后再试一次。</p>
+      <button type="button" onclick="location.reload()">重新加载</button>
     </main>
   </body>
 </html>
