@@ -381,6 +381,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelOverrideRef = useRef<Exclude<ThinkingLevelOption, "auto"> | null>(null);
   const promptRunIdRef = useRef(0);
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  const turnStateRequestRef = useRef(0);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -838,6 +839,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [finishPromptWithoutStream]);
 
+  const refreshTurnState = useCallback(async (sid: string) => {
+    const request = ++turnStateRequestRef.current;
+    try {
+      const state = await sendSessionCommand<AgentStateResponse>(sid, { type: "get_state" });
+      if (
+        request !== turnStateRequestRef.current
+        || sessionIdRef.current !== sid
+      ) return;
+      setContextUsage(state.contextUsage ?? null);
+    } catch {
+      // agent_settled performs the final authoritative reconciliation.
+    }
+  }, []);
+
   handleEventResetRef.current = (sid: string) => {
     void loadSession(sid, false, true).then((snapshot) => {
       if (!snapshot || sessionIdRef.current !== sid) return;
@@ -904,7 +919,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void loadSession(sessionIdRef.current, false, true);
         }
         break;
+      case "turn_end":
+        if (sessionIdRef.current) {
+          void refreshTurnState(sessionIdRef.current);
+        }
+        break;
       case "agent_settled": {
+        turnStateRequestRef.current += 1;
         const agentWasActive = agentRunActiveRef.current;
         agentRunActiveRef.current = false;
         if (!agentWasActive || promptOperationPendingRef.current) break;
@@ -1049,7 +1070,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as ExtensionUiRequest);
         break;
     }
-  }, [addNotice, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, settleUiStage]);
+  }, [addNotice, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, refreshTurnState, settleUiStage]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {

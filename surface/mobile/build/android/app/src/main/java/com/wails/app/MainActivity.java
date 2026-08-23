@@ -23,6 +23,7 @@ import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
+import android.view.View;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -48,7 +49,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * MainActivity hosts the WebView and manages the Wails application lifecycle.
@@ -61,13 +61,13 @@ public class MainActivity extends AppCompatActivity {
     private static final String WAILS_SCHEME = "https";
     private static final String WAILS_HOST = "wails.localhost";
     private static final int FILE_PICKER_REQUEST = 7001;
+    private static final int CONTENT_INSET_TYPES =
+            WindowInsetsCompat.Type.systemBars()
+                    | WindowInsetsCompat.Type.displayCutout()
+                    | WindowInsetsCompat.Type.ime();
 
     private WebView webView;
     private WailsBridge bridge;
-    private int safeInsetTop;
-    private int safeInsetRight;
-    private int safeInsetBottom;
-    private int safeInsetLeft;
     // Battery: system-event receivers are registered only while the activity is
     // in the foreground (onStart) and torn down in onStop, so background battery/
     // network/screen broadcasts don't wake the app.
@@ -96,6 +96,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         configureEdgeToEdge();
         setContentView(R.layout.activity_main);
+        configureContentInsets();
 
         // Initialize the native Go library
         bridge = new WailsBridge(this);
@@ -108,11 +109,7 @@ public class MainActivity extends AppCompatActivity {
         loadApplication();
     }
 
-    /**
-     * The workbench owns its system-bar spacing through CSS safe-area variables,
-     * so the native window only needs to draw edge-to-edge and keep the system
-     * icons legible over the workbench's light background.
-     */
+    /** Draw behind system bars while keeping their icons legible. */
     private void configureEdgeToEdge() {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
@@ -135,27 +132,34 @@ public class MainActivity extends AppCompatActivity {
         controller.setAppearanceLightNavigationBars(true);
     }
 
+    /**
+     * Give the WebView one authoritative usable rectangle. This includes the
+     * IME, so a focused field follows the normal WebView resize/scroll path even
+     * on WebView versions whose visual viewport does not react to the keyboard.
+     * The handled inset types are zeroed for children to prevent double spacing.
+     */
+    private void configureContentInsets() {
+        View container = findViewById(R.id.main_container);
+        ViewCompat.setOnApplyWindowInsetsListener(container, (view, windowInsets) -> {
+            Insets insets = windowInsets.getInsets(CONTENT_INSET_TYPES);
+            if (view.getPaddingLeft() != insets.left
+                    || view.getPaddingTop() != insets.top
+                    || view.getPaddingRight() != insets.right
+                    || view.getPaddingBottom() != insets.bottom) {
+                view.setPadding(insets.left, insets.top, insets.right, insets.bottom);
+            }
+
+            return new WindowInsetsCompat.Builder(windowInsets)
+                    .setInsets(CONTENT_INSET_TYPES, Insets.NONE)
+                    .build();
+        });
+        ViewCompat.requestApplyInsets(container);
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         webView = findViewById(R.id.webview);
         bridge.setWebView(webView);
-
-        // WebView versions that predate native CSS safe-area forwarding still
-        // receive the same insets through our custom properties. Returning the
-        // original insets also keeps modern WebView viewport/IME handling intact.
-        ViewCompat.setOnApplyWindowInsetsListener(webView, (view, windowInsets) -> {
-            Insets insets = windowInsets.getInsets(
-                    WindowInsetsCompat.Type.systemBars()
-                            | WindowInsetsCompat.Type.displayCutout()
-            );
-            safeInsetTop = insets.top;
-            safeInsetRight = insets.right;
-            safeInsetBottom = insets.bottom;
-            safeInsetLeft = insets.left;
-            applySafeAreaInsets();
-            return windowInsets;
-        });
-        ViewCompat.requestApplyInsets(webView);
 
         // Configure WebView settings
         WebSettings settings = webView.getSettings();
@@ -244,7 +248,6 @@ public class MainActivity extends AppCompatActivity {
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
                 if (DEBUG) Log.d(TAG, "Page loaded: " + url);
-                applySafeAreaInsets();
                 bridge.onPageFinished(url);
                 // Now that JS listeners are mounted, push a snapshot of the
                 // current battery / network / theme so the UI starts populated.
@@ -254,23 +257,6 @@ public class MainActivity extends AppCompatActivity {
 
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
-    }
-
-    private void applySafeAreaInsets() {
-        if (webView == null) return;
-        float density = getResources().getDisplayMetrics().density;
-        String script = String.format(
-                Locale.US,
-                "document.documentElement.style.setProperty('--pi-safe-area-top','%.3fpx');"
-                        + "document.documentElement.style.setProperty('--pi-safe-area-right','%.3fpx');"
-                        + "document.documentElement.style.setProperty('--pi-safe-area-bottom','%.3fpx');"
-                        + "document.documentElement.style.setProperty('--pi-safe-area-left','%.3fpx');",
-                safeInsetTop / density,
-                safeInsetRight / density,
-                safeInsetBottom / density,
-                safeInsetLeft / density
-        );
-        webView.evaluateJavascript(script, null);
     }
 
     private void loadApplication() {

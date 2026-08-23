@@ -441,6 +441,17 @@ func TestOutOfOrderCommandCompletionCannotRollProjectionBack(t *testing.T) {
 	}
 }
 
+func TestTurnEndRefreshesAuthoritativeState(t *testing.T) {
+	model := newModelForTest(t)
+	commands := model.applyAgentEvent(agent.TurnEndEvent{})
+	if len(commands) != 1 || commands[0] == nil {
+		t.Fatalf("turn_end commands = %#v, want one state refresh", commands)
+	}
+	if model.projectionGeneration != 1 {
+		t.Fatalf("projection generation = %d, want 1", model.projectionGeneration)
+	}
+}
+
 func TestModelToolLifecycleUsesOneStableVirtualItem(t *testing.T) {
 	model := newModelForTest(t)
 	start := agent.ToolExecutionStartEvent{

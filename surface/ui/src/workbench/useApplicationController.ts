@@ -141,6 +141,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const newSessionModelOverriddenRef = useRef(false);
   const newSessionThinkingOverriddenRef = useRef(false);
   const sessionStatsOpenRef = useRef(false);
+  const turnProjectionRequestRef = useRef(0);
 
   messagesRef.current = messages;
 
@@ -210,6 +211,31 @@ export function useApplicationController(client: ApplicationClient): Application
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return null;
     setSessionStats(value);
     return value;
+  }, [client]);
+
+  const refreshTurnProjection = useCallback(async (
+    sessionId: string,
+    generation = generationRef.current,
+  ) => {
+    const request = ++turnProjectionRequestRef.current;
+    const [stateResult, statsResult] = await Promise.allSettled([
+      client.dispatch<SessionRuntimeState>(sessionId, { type: "get_state" }),
+      client.dispatch<SessionStatsInfo>(sessionId, { type: "get_session_stats" }),
+    ]);
+    if (
+      request !== turnProjectionRequestRef.current
+      || generation !== generationRef.current
+      || activeSessionRef.current !== sessionId
+    ) return;
+    if (stateResult.status === "fulfilled") {
+      const state = stateResult.value;
+      setRuntimeState((current) => current
+        ? { ...current, contextUsage: state.contextUsage ?? null }
+        : state);
+    }
+    if (statsResult.status === "fulfilled") {
+      setSessionStats(statsResult.value);
+    }
   }, [client]);
 
   const loadSession = useCallback(async (
@@ -308,10 +334,16 @@ export function useApplicationController(client: ApplicationClient): Application
         setStreamingMessage(null);
         break;
       }
+      case "turn_end":
+        if (activeSessionRef.current) {
+          void refreshTurnProjection(activeSessionRef.current);
+        }
+        break;
       case "agent_end":
         setStreamingMessage(null);
         break;
       case "agent_settled":
+        turnProjectionRequestRef.current += 1;
         setBusy(false);
         setRuntimeState((current) => ({
           ...current,
@@ -372,7 +404,7 @@ export function useApplicationController(client: ApplicationClient): Application
       default:
         break;
     }
-  }, [loadSession, loadSessionStats, refreshSnapshot, removeDeliveredPendingMessage]);
+  }, [loadSession, loadSessionStats, refreshSnapshot, refreshTurnProjection, removeDeliveredPendingMessage]);
 
   const subscribe = useCallback((after: number, generation: number) => {
     subscriptionRef.current?.close();

@@ -65,6 +65,8 @@ func (m *Model) applyAgentEvent(event agent.SessionEvent) []tea.Cmd { //nolint:g
 		m.upsertAssistant(value.RunID, value.Turn, value.Message, true)
 	case agent.MessageEndEvent:
 		m.upsertAssistant(value.RunID, value.Turn, value.Message, false)
+	case agent.TurnEndEvent:
+		refreshState = true
 	case agent.ToolExecutionStartEvent:
 		m.upsertToolStart(value.RunID, value.Turn, value.ToolCallID, value.ToolName, value.Arguments)
 		m.state.Phase = agent.PhaseTool

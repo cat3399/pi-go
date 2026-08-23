@@ -204,7 +204,7 @@ input:-webkit-autofill:focus {
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
   width: var(--pi-sidebar-width);
-  padding: 0 10px 10px;
+  padding: 0 10px 6px;
   background: var(--pi-panel);
   visibility: hidden;
   transform: translateX(-100%);
@@ -2014,16 +2014,17 @@ input:-webkit-autofill:focus {
   grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  min-height: 46px;
-  margin-top: 0;
+  min-height: 36px;
+  margin-top: 6px;
   padding: 0 7px;
   border-top: 0;
+  border-radius: var(--pi-radius-md);
 }
 
 .pi-sidebar-settings::before {
   content: "";
   position: absolute;
-  top: 0;
+  top: -6px;
   right: -10px;
   left: -10px;
   height: 1px;
@@ -3490,10 +3491,13 @@ input:-webkit-autofill:focus {
 }
 
 .pi-workbench.is-mobile {
-  --pi-topbar-height: calc(44px + var(--pi-safe-area-top));
+  /* The Android host has already constrained the WebView to the usable area. */
+  --pi-safe-area-top: 0px;
+  --pi-safe-area-right: 0px;
+  --pi-safe-area-bottom: 0px;
+  --pi-safe-area-left: 0px;
+  --pi-topbar-height: 44px;
   --pi-sidebar-titlebar-height: 0px;
-  height: var(--pi-mobile-viewport-height, 100dvh);
-  max-height: 100%;
   touch-action: pan-y;
 }
 
@@ -3556,9 +3560,10 @@ input:-webkit-autofill:focus {
 }
 
 .pi-workbench.is-mobile .pi-sidebar {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   width: min(310px, 86vw);
   padding-top: var(--pi-safe-area-top);
-  padding-bottom: 0;
+  padding-bottom: 6px;
   box-shadow: rgba(0, 0, 0, 0.08) 0 2px 18px;
 }
 
@@ -3613,10 +3618,6 @@ input:-webkit-autofill:focus {
 
 .pi-workbench.is-mobile .pi-composer-wrap {
   padding-bottom: calc(8px + var(--pi-safe-area-bottom));
-}
-
-.pi-workbench.is-mobile .pi-sidebar-settings {
-  margin-bottom: calc(10px + var(--pi-safe-area-bottom));
 }
 
 .pi-workbench.is-mobile .pi-attach-button {
