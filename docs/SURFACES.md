@@ -94,8 +94,8 @@ transport 适配，共用同一个 Workbench；WebUI 使用当前页面 origin �
 项目标题栏的添加入口、项目行的移除菜单以及新对话输入框中的项目选择器同样只实现一次；
 项目选择器只在尚未绑定 durable session 的全新对话中出现，历史会话沿用其既有工作目录。
 
-旧 WebUI 组件源码暂时作为迁移材料保留，但不再由页面入口挂载。后续能力继续进入共享
-Workbench，不在 Web surface 重建第二套交互状态或独立样式。
+Web frontend 只保留 Next 构建壳、PWA 注册和共享 Workbench 入口，不保留第二套组件、hooks、
+客户端状态或独立样式。后续能力继续进入共享 Workbench，不在 Web surface 重建交互实现。
 
 视觉实现只复用有清晰许可证、可维护的源代码。OpenCodex 的已编译 renderer、提取产物和
 混淆 bundle 不进入仓库；已复用的源文件和许可证在各 surface 的 notice 中记录。

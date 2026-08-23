@@ -5,6 +5,8 @@ Go Application API; it does not own Agent, Runtime, or durable Session state.
 
 The browser mounts the shared `surface/ui` Workbench used by the GUI and mobile surfaces. It uses versioned
 `/api/v1` command, query, and snapshot endpoints plus one page-wide SSE connection.
+This package intentionally contains only the Next/PWA host and the shared Workbench entry; product components,
+client state, and styling belong to `surface/ui` and must not be duplicated here.
 Production exports static assets that are embedded into the unified `pi-go` binary. Node.js and Next.js are
 build-time and development dependencies only.
 
