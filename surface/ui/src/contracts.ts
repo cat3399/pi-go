@@ -78,6 +78,23 @@ export interface ContextUsage {
   tokens: number | null;
 }
 
+export interface TokenCostInfo {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
+export interface TokenUsageInfo {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens?: number;
+  cost?: TokenCostInfo;
+}
+
 export interface SessionRuntimeState {
   sessionId?: string;
   cwd?: string;
@@ -248,5 +265,7 @@ export interface AgentMessage {
   content?: string | MessageContentBlock[];
   customType?: string;
   display?: boolean;
+  usage?: TokenUsageInfo;
+  stopReason?: string;
   [key: string]: unknown;
 }

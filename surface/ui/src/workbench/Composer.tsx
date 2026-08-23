@@ -6,7 +6,9 @@ import type {
   ModelsView,
   SelectedModel,
   SessionInfo,
+  SessionStatsInfo,
   SlashCommandInfo,
+  TokenUsageInfo,
 } from "../contracts";
 import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
 import { SelectMenu } from "../primitives/SelectMenu";
@@ -31,6 +33,8 @@ interface ComposerProps {
   model: SelectedModel | null;
   thinkingLevel: string;
   contextUsage: ContextUsage | null;
+  latestUsage: TokenUsageInfo | null;
+  sessionStats: SessionStatsInfo | null;
   busy: boolean;
   streamingInputBehavior: StreamingInputBehavior;
   sessions: SessionInfo[];
@@ -427,7 +431,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         )}
         toolbarRight={(
           <>
-            <ContextUsageIndicator usage={props.contextUsage} />
+            <ContextUsageIndicator
+              usage={props.contextUsage}
+              latestUsage={props.latestUsage}
+              sessionStats={props.sessionStats}
+            />
             {!props.busy && (
               <>
                 <SelectMenu

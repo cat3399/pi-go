@@ -10,6 +10,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { Composer, type ComposerHandle } from "./Composer";
 import { MessageList } from "./MessageList";
+import { latestAssistantUsage } from "./message";
 import { SessionPointPicker } from "./SessionPointPicker";
 import { SessionStatsPanel } from "./SessionStatsPanel";
 import { SettingsDrawer } from "./SettingsDrawer";
@@ -114,6 +115,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const title = useMemo(
     () => activeTitle(controller.activeSessionId, sessions),
     [controller.activeSessionId, sessions],
+  );
+  const latestUsage = useMemo(
+    () => latestAssistantUsage(controller.messages, controller.streamingMessage),
+    [controller.messages, controller.streamingMessage],
   );
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
   const mobileGesturesEnabled = mobile
@@ -431,6 +436,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               model={controller.selectedModel}
               thinkingLevel={controller.thinkingLevel}
               contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
+              latestUsage={latestUsage}
+              sessionStats={controller.sessionStats}
               busy={controller.busy}
               streamingInputBehavior={streamingInputBehavior}
               sessions={sessions}

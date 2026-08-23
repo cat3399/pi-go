@@ -2978,13 +2978,13 @@ input:-webkit-autofill:focus {
 }
 
 .pi-context-ring-track {
-  stroke: rgba(26, 28, 31, 0.13);
-  stroke: color-mix(in srgb, var(--pi-text) 13%, transparent);
+  stroke: currentColor;
+  stroke-opacity: 0.13;
 }
 
 .pi-context-ring-value {
-  stroke: rgba(26, 28, 31, 0.6);
-  stroke: color-mix(in srgb, var(--pi-text) 60%, transparent);
+  stroke: currentColor;
+  stroke-opacity: 0.6;
   stroke-linecap: round;
   transition: stroke-dasharray 180ms ease;
 }
@@ -2993,13 +2993,12 @@ input:-webkit-autofill:focus {
   position: fixed;
   z-index: 210;
   width: max-content;
-  min-width: 202px;
+  min-width: 244px;
   max-width: calc(100vw - 16px);
-  padding: 8px 10px;
+  padding: 10px 12px;
   border: 1px solid var(--pi-border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.97);
-  background: color-mix(in srgb, var(--pi-bg) 97%, transparent);
+  background: var(--pi-bg);
   box-shadow: rgba(0, 0, 0, 0.13) 0 10px 28px;
   color: var(--pi-text-secondary);
   pointer-events: none;
@@ -3008,27 +3007,46 @@ input:-webkit-autofill:focus {
   animation: pi-context-tooltip-enter 100ms ease-out;
 }
 
-.pi-context-tooltip > div {
+.pi-context-tooltip-summary,
+.pi-context-tooltip dl > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
+  gap: 24px;
   font-size: 12px;
   line-height: 17px;
 }
 
-.pi-context-tooltip strong {
+.pi-context-tooltip strong,
+.pi-context-tooltip dd {
   color: var(--pi-text);
   font-weight: 580;
   font-variant-numeric: tabular-nums;
 }
 
-.pi-context-tooltip small {
-  display: block;
-  margin-top: 2px;
+.pi-context-tooltip section {
+  margin-top: 9px;
+}
+
+.pi-context-tooltip h3 {
+  margin: 0 0 3px;
   color: var(--pi-text-tertiary);
   font-size: 11px;
   line-height: 16px;
+  font-weight: 500;
+}
+
+.pi-context-tooltip dl,
+.pi-context-tooltip dt,
+.pi-context-tooltip dd {
+  margin: 0;
+}
+
+.pi-context-tooltip dl > div + div {
+  margin-top: 1px;
+}
+
+.pi-context-tooltip dd {
   font-variant-numeric: tabular-nums;
 }
 
