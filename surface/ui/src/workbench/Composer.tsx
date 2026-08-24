@@ -24,6 +24,7 @@ import {
 import type { ToolPreset } from "../tool-presets";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import { ComposerInput, ComposerSendButton } from "./ComposerInput";
+import { ModelConfigControl, thinkingLevelLabel } from "./ModelConfigControl";
 import type { SendBehavior } from "./useApplicationController";
 
 interface ComposerProps {
@@ -59,10 +60,6 @@ export interface ComposerHandle {
 const MAX_ATTACHED_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHED_IMAGES = 10;
 
-function thinkingLevelLabel(level: string): string {
-  return level === "max" ? "最高" : level;
-}
-
 function projectName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path;
@@ -85,9 +82,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const compositionEndedAtRef = useRef(0);
   imagesRef.current = images;
 
-  const selectedModelKey = props.model
-    ? `${props.model.provider}\u0000${props.model.modelId}`
-    : "";
   const modelCapabilityKey = props.model
     ? `${props.model.provider}:${props.model.modelId}`
     : "";
@@ -99,14 +93,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     thinkingLevels.unshift(props.thinkingLevel);
   }
   const modelNotice = props.models?.modelError || props.models?.modelScopeWarnings?.join("\n") || "";
-  const modelOptions = props.models?.modelList.map((model) => ({
-    value: `${model.provider}\u0000${model.id}`,
-    label: model.name || model.id,
-  })) ?? [];
-  const thinkingOptions = thinkingLevels.map((level) => ({
-    value: level,
-    label: thinkingLevelLabel(level),
-  }));
   const projectOptions = (props.projects ?? []).map((project) => ({
     value: project.path,
     label: projectName(project.path),
@@ -456,35 +442,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         )}
         toolbarRight={(
           <>
-            <ContextUsageIndicator
-              usage={props.contextUsage}
-              latestUsage={props.latestUsage}
-              sessionStats={props.sessionStats}
-            />
-            {!props.busy && (
-              <>
-                <SelectMenu
-                  ariaLabel="模型"
-                  value={selectedModelKey}
-                  options={modelOptions}
-                  placeholder="未选择模型"
-                  variant="model"
-                  showChevron={false}
-                  disabled={!props.models || props.models.modelList.length === 0}
-                  onChange={(value) => {
-                    const [provider, modelId] = value.split("\u0000");
-                    if (provider && modelId) void props.onModelChange({ provider, modelId });
-                  }}
-                />
-                <SelectMenu
-                  ariaLabel="思考等级"
-                  value={props.thinkingLevel}
-                  options={thinkingOptions}
-                  disabled={thinkingLevels.length === 0}
-                  onChange={(value) => void props.onThinkingLevelChange(value)}
-                />
-              </>
+            {props.active && (
+              <ContextUsageIndicator
+                usage={props.contextUsage}
+                latestUsage={props.latestUsage}
+                sessionStats={props.sessionStats}
+              />
             )}
+            <ModelConfigControl
+              active={props.active}
+              models={props.models}
+              model={props.model}
+              thinkingLevel={props.thinkingLevel}
+              disabled={props.busy}
+              onModelChange={props.onModelChange}
+              onThinkingLevelChange={props.onThinkingLevelChange}
+            />
             {props.busy && (!text.trim() || images.length > 0) ? (
               <button
                 className="pi-stop-button"

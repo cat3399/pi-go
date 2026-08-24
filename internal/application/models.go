@@ -32,6 +32,7 @@ type ModelSelection struct {
 
 type AvailableModel struct {
 	Provider         string
+	ProviderName     string
 	ID               string
 	Name             string
 	ThinkingLevels   []provider.ThinkingLevel
@@ -123,6 +124,10 @@ func (s *Service) ListModels(ctx context.Context, cwd string) (ModelsSnapshot, e
 		}
 	}
 	snapshot := runtime.Snapshot()
+	providerNames := make(map[string]string)
+	for _, candidate := range runtime.GetProviders() {
+		providerNames[candidate.ID()] = candidate.Name()
+	}
 	pins := make(map[string]provider.ThinkingLevel)
 	warnings := []string{}
 	if len(snapshot.Settings.EnabledModels) != 0 {
@@ -160,7 +165,8 @@ func (s *Service) ListModels(ctx context.Context, cwd string) (ModelsSnapshot, e
 	}
 	for _, candidate := range visible {
 		entry := AvailableModel{
-			Provider: candidate.Provider, ID: candidate.ID, Name: candidate.Name,
+			Provider: candidate.Provider, ProviderName: providerNames[candidate.Provider],
+			ID: candidate.ID, Name: candidate.Name,
 			ThinkingLevelMap: cloneApplicationThinkingMap(candidate.ThinkingLevelMap),
 		}
 		if ref, refErr := candidate.Ref(); refErr == nil {

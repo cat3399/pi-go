@@ -1,5 +1,4 @@
 import {
-  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
   useCallback,
@@ -9,8 +8,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
+import { AnchoredPopover } from "./AnchoredPopover";
+import { useInputModality } from "./useInputModality";
 
 export interface SelectMenuOption {
   value: string;
@@ -29,14 +29,6 @@ interface SelectMenuProps {
   onChange(value: string): void;
 }
 
-interface MenuPosition extends CSSProperties {
-  maxHeight: number;
-  minWidth: number;
-}
-
-const VIEWPORT_GUTTER = 8;
-const MENU_GAP = 6;
-
 export function SelectMenu({
   ariaLabel,
   value,
@@ -50,44 +42,34 @@ export function SelectMenu({
 }: SelectMenuProps) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [position, setPosition] = useState<MenuPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const {
+    modality,
+    modalityRef,
+    markKeyboard,
+    markPointer,
+    suppressPointerFocus,
+  } = useInputModality();
   const menuId = useId();
   const selectedIndex = options.findIndex((option) => option.value === value);
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
 
-  const updatePosition = useCallback(() => {
-    const trigger = triggerRef.current;
-    if (!trigger) return;
-
-    const rect = trigger.getBoundingClientRect();
-    const spaceAbove = rect.top - VIEWPORT_GUTTER;
-    const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_GUTTER;
-    const placeAbove = spaceAbove >= 148 || spaceAbove >= spaceBelow;
-    const available = Math.max(96, (placeAbove ? spaceAbove : spaceBelow) - MENU_GAP);
-    const common = {
-      right: Math.max(VIEWPORT_GUTTER, window.innerWidth - rect.right),
-      maxHeight: Math.min(320, available),
-      minWidth: rect.width,
-    };
-
-    setPosition(placeAbove
-      ? { ...common, bottom: window.innerHeight - rect.top + MENU_GAP }
-      : { ...common, top: rect.bottom + MENU_GAP });
+  const focusMenu = useCallback(() => {
+    requestAnimationFrame(() => menuRef.current?.focus({ preventScroll: true }));
   }, []);
 
-  const openMenu = (preferredIndex?: number) => {
+  const openMenu = (preferredIndex?: number, moveFocus = false) => {
     if (disabled || options.length === 0) return;
     const nextIndex = preferredIndex ?? (selectedIndex >= 0 ? selectedIndex : 0);
     setActiveIndex(Math.max(0, Math.min(nextIndex, options.length - 1)));
     setOpen(true);
+    if (open && moveFocus) focusMenu();
   };
 
   const closeMenu = useCallback((restoreFocus = false) => {
     setOpen(false);
-    setPosition(null);
     if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
   }, []);
 
@@ -95,33 +77,14 @@ export function SelectMenu({
     const option = options[index];
     if (!option) return;
     if (option.value !== value) onChange(option.value);
-    closeMenu(true);
+    closeMenu(modalityRef.current === "keyboard");
   };
 
   useLayoutEffect(() => {
-    if (!open) return;
-    updatePosition();
+    if (!open || modality !== "keyboard") return;
     const frame = requestAnimationFrame(() => menuRef.current?.focus({ preventScroll: true }));
     return () => cancelAnimationFrame(frame);
-  }, [open, updatePosition]);
-
-  useEffect(() => {
-    if (!open) return;
-
-    const closeOnOutsideClick = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) closeMenu();
-    };
-    const reposition = () => updatePosition();
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    window.addEventListener("resize", reposition);
-    window.addEventListener("scroll", reposition, true);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      window.removeEventListener("resize", reposition);
-      window.removeEventListener("scroll", reposition, true);
-    };
-  }, [closeMenu, open, updatePosition]);
+  }, [modality, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -133,32 +96,37 @@ export function SelectMenu({
   }, [closeMenu, disabled, options.length]);
 
   const onTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    markKeyboard();
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        openMenu(selectedIndex >= 0 ? selectedIndex : 0);
+        openMenu(selectedIndex >= 0 ? selectedIndex : 0, true);
         break;
       case "ArrowUp":
         event.preventDefault();
-        openMenu(selectedIndex >= 0 ? selectedIndex : options.length - 1);
+        openMenu(selectedIndex >= 0 ? selectedIndex : options.length - 1, true);
         break;
       case "Home":
         event.preventDefault();
-        openMenu(0);
+        openMenu(0, true);
         break;
       case "End":
         event.preventDefault();
-        openMenu(options.length - 1);
+        openMenu(options.length - 1, true);
         break;
       case "Enter":
       case " ":
         event.preventDefault();
-        if (open) closeMenu(); else openMenu();
+        if (open) closeMenu(); else openMenu(undefined, true);
+        break;
+      case "Tab":
+        if (open) closeMenu();
         break;
     }
   };
 
   const onMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    markKeyboard();
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
@@ -201,7 +169,9 @@ export function SelectMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
+        title={selected?.label ?? placeholder}
         disabled={disabled || options.length === 0}
+        onPointerDown={markPointer}
         onClick={() => {
           if (open) closeMenu(); else openMenu();
         }}
@@ -211,41 +181,44 @@ export function SelectMenu({
         <span className="pi-select-trigger-label">{selected?.label ?? placeholder}</span>
         {showChevron && <ChevronDown className="pi-select-chevron" size={13} strokeWidth={1.7} />}
       </button>
-      {open && position && createPortal(
-        <div
-          ref={menuRef}
-          id={menuId}
-          className={`pi-select-popover is-${variant}`}
-          role="listbox"
-          tabIndex={-1}
-          aria-label={ariaLabel}
-          aria-activedescendant={`${menuId}-option-${activeIndex}`}
-          style={position}
-          onKeyDown={onMenuKeyDown}
-        >
-          {options.map((option, index) => {
-            const selectedOption = option.value === value;
-            return (
-              <button
-                ref={(element) => { optionRefs.current[index] = element; }}
-                id={`${menuId}-option-${index}`}
-                className={`${index === activeIndex ? "is-active" : ""} ${selectedOption ? "is-selected" : ""}`}
-                type="button"
-                role="option"
-                tabIndex={-1}
-                aria-selected={selectedOption}
-                key={option.value}
-                onMouseMove={() => setActiveIndex(index)}
-                onClick={() => choose(index)}
-              >
-                <span>{option.label}</span>
-                {selectedOption && <Check size={14} strokeWidth={1.8} />}
-              </button>
-            );
-          })}
-        </div>,
-        document.body,
-      )}
+      <AnchoredPopover
+        ref={menuRef}
+        anchorRef={triggerRef}
+        open={open}
+        id={menuId}
+        className={`pi-select-popover is-${variant}`}
+        role="listbox"
+        tabIndex={-1}
+        data-focus-modality={modality}
+        aria-label={ariaLabel}
+        aria-activedescendant={`${menuId}-option-${activeIndex}`}
+        minWidth="anchor"
+        onDismiss={() => closeMenu()}
+        onPointerDownCapture={markPointer}
+        onMouseDownCapture={suppressPointerFocus}
+        onKeyDown={onMenuKeyDown}
+      >
+        {options.map((option, index) => {
+          const selectedOption = option.value === value;
+          return (
+            <button
+              ref={(element) => { optionRefs.current[index] = element; }}
+              id={`${menuId}-option-${index}`}
+              className={`${index === activeIndex ? "is-active" : ""} ${selectedOption ? "is-selected" : ""}`}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              aria-selected={selectedOption}
+              key={option.value}
+              onMouseMove={() => setActiveIndex(index)}
+              onClick={() => choose(index)}
+            >
+              <span>{option.label}</span>
+              {selectedOption && <Check size={14} strokeWidth={1.8} />}
+            </button>
+          );
+        })}
+      </AnchoredPopover>
     </>
   );
 }

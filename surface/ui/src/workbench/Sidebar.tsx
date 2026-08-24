@@ -1,6 +1,8 @@
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Check, Ellipsis, FileText, Folder, FolderOpen, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { FileList, ProjectInfo, SessionInfo } from "../contracts";
+import { AnchoredPopover } from "../primitives/AnchoredPopover";
+import { IconAction, InlineActions } from "../primitives/InlineActions";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { FileTree } from "./FileTree";
 
@@ -109,12 +111,11 @@ function SessionRow({
     return (
       <div className="pi-session-item pi-session-confirm" title={error || undefined}>
         <span>{error || "删除这个会话？"}</span>
-        <button type="button" disabled={working} aria-label="确认删除" onClick={(event) => void remove(event)}>
+        <IconAction label="确认删除" disabled={working} onClick={(event) => void remove(event)}>
           <Check size={14} />
-        </button>
-        <button
-          type="button"
-          aria-label="取消删除"
+        </IconAction>
+        <IconAction
+          label="取消删除"
           onClick={(event) => {
             event.stopPropagation();
             setConfirmDelete(false);
@@ -122,7 +123,7 @@ function SessionRow({
           }}
         >
           <X size={14} />
-        </button>
+        </IconAction>
       </div>
     );
   }
@@ -165,21 +166,20 @@ function SessionRow({
     >
       <span>{sessionTitle(session)}</span>
       {running && <span className="pi-session-running-dot" aria-label="运行中" />}
-      <span className="pi-session-actions">
-        <button type="button" aria-label="重命名会话" onClick={startRename}>
-          <Pencil size={13} />
-        </button>
-        <button
-          type="button"
-          aria-label="删除会话"
+      <InlineActions className="pi-sidebar-row-actions pi-session-actions">
+        <IconAction label="重命名会话" onClick={startRename}>
+          <Pencil size={15} />
+        </IconAction>
+        <IconAction
+          label="删除会话"
           onClick={(event) => {
             event.stopPropagation();
             setConfirmDelete(true);
           }}
         >
-          <Trash2 size={13} />
-        </button>
-      </span>
+          <Trash2 size={15} />
+        </IconAction>
+      </InlineActions>
     </div>
   );
 }
@@ -206,28 +206,11 @@ function ProjectSessions(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
-  const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (containsActive) setOpen(true);
   }, [containsActive]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const closeOutside = (event: PointerEvent) => {
-      const target = event.target instanceof Node ? event.target : null;
-      if (target && !menuRef.current?.contains(target)) setMenuOpen(false);
-    };
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOutside, true);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside, true);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [menuOpen]);
 
   const removeProject = async () => {
     setRemoving(true);
@@ -253,19 +236,18 @@ function ProjectSessions(props: {
           {open ? <FolderOpen size={16} /> : <Folder size={16} />}
           <span>{props.project.name}</span>
         </button>
-        <div ref={menuRef} className="pi-project-actions">
-          <button
+        <InlineActions className="pi-sidebar-row-actions pi-project-actions" visible={menuOpen}>
+          <IconAction
             className="pi-project-new-session"
-            type="button"
-            aria-label={`在 ${props.project.name} 中新建对话`}
+            label={`在 ${props.project.name} 中新建对话`}
             onClick={() => props.onNewSession(props.project.root)}
           >
             <SquarePen size={15} />
-          </button>
-          <button
+          </IconAction>
+          <IconAction
+            ref={menuButtonRef}
             className="pi-project-more"
-            type="button"
-            aria-label={`${props.project.name} 项目菜单`}
+            label={`${props.project.name} 项目菜单`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
             title={removeError || undefined}
@@ -275,25 +257,30 @@ function ProjectSessions(props: {
             }}
           >
             <Ellipsis size={16} />
-          </button>
-          {menuOpen && (
-            <div className="pi-project-menu" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                disabled={removing}
-                title="仅从项目列表移除，不会删除项目文件或历史会话"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void removeProject();
-                }}
-              >
-                <Trash2 size={14} />
-                <span>{removing ? "正在删除…" : "删除项目"}</span>
-              </button>
-            </div>
-          )}
-        </div>
+          </IconAction>
+          <AnchoredPopover
+            anchorRef={menuButtonRef}
+            open={menuOpen}
+            className="pi-project-menu"
+            role="menu"
+            minWidth={132}
+            onDismiss={() => setMenuOpen(false)}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              disabled={removing}
+              title="仅从项目列表移除，不会删除项目文件或历史会话"
+              onClick={(event) => {
+                event.stopPropagation();
+                void removeProject();
+              }}
+            >
+              <Trash2 size={14} />
+              <span>{removing ? "正在删除…" : "删除项目"}</span>
+            </button>
+          </AnchoredPopover>
+        </InlineActions>
       </div>
       {open && (
         <div className="pi-project-sessions">
@@ -445,9 +432,9 @@ export function Sidebar(props: SidebarProps) {
               <nav ref={sessionListRef} className="pi-session-list pi-overlay-scroll-viewport">
                 <div className="pi-sidebar-section-heading">
                   <span>项目</span>
-                  <button type="button" aria-label="添加项目" onClick={props.onAddProject}>
+                  <IconAction label="添加项目" onClick={props.onAddProject}>
                     <Plus size={16} />
-                  </button>
+                  </IconAction>
                 </div>
                 {projects.map((project) => (
                   <ProjectSessions

@@ -444,6 +444,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               entryIds={controller.sessionView?.context.entryIds ?? []}
               streamingMessage={controller.streamingMessage}
               busy={controller.busy}
+              compacting={Boolean(controller.runtimeState?.isCompacting)}
               mobile={mobile}
               anchorsEnabled={!mobile || anchorGesturesEnabled}
               onFork={controller.fork}

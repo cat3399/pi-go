@@ -9,6 +9,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { FileEntry, FileList } from "../contracts";
+import { IconAction, InlineActions } from "../primitives/InlineActions";
 
 interface FileTreeProps {
   cwd: string;
@@ -124,12 +125,11 @@ function TreeNode(props: {
           <span>{props.node.name}</span>
           {loading && <RefreshCw className="pi-file-loading" size={11} aria-label="正在读取" />}
         </button>
-        <div className={`pi-file-actions ${actionsVisible ? "is-visible" : ""}`}>
+        <InlineActions className="pi-file-actions" visible={actionsVisible}>
           {!props.node.isDir && (
-            <button
-              type="button"
+            <IconAction
+              label={`预览 ${props.node.name}`}
               title={`预览 ${props.node.name}`}
-              aria-label={`预览 ${props.node.name}`}
               onClick={(event) => {
                 event.stopPropagation();
                 props.onPreview(props.node.path);
@@ -137,12 +137,11 @@ function TreeNode(props: {
             >
               <Eye size={12} />
               <span>预览</span>
-            </button>
+            </IconAction>
           )}
-          <button
-            type="button"
+          <IconAction
+            label={`引用 ${props.node.name}`}
             title={`在输入框中引用 ${props.node.name}`}
-            aria-label={`引用 ${props.node.name}`}
             onClick={(event) => {
               event.stopPropagation();
               props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
@@ -150,8 +149,8 @@ function TreeNode(props: {
           >
             <AtSign size={12} />
             <span>引用</span>
-          </button>
-        </div>
+          </IconAction>
+        </InlineActions>
       </div>
       {error && (
         <button className="pi-file-inline-error" type="button" onClick={() => void loadChildren()}>
@@ -211,9 +210,9 @@ export function FileTree({ cwd, activePreviewPath, listFiles, onMention, onPrevi
     <section className="pi-file-tree" aria-label="文件树">
       <header className="pi-file-tree-header">
         <span title={cwd}>{cwd ? normalizedPath(cwd).split("/").pop() || cwd : "未选择文件夹"}</span>
-        <button type="button" aria-label="刷新文件树" disabled={!cwd || loading} onClick={() => setRefreshKey((value) => value + 1)}>
+        <IconAction label="刷新文件树" disabled={!cwd || loading} onClick={() => setRefreshKey((value) => value + 1)}>
           <RefreshCw className={loading ? "pi-file-loading" : ""} size={13} />
-        </button>
+        </IconAction>
       </header>
       {error ? (
         <div className="pi-file-tree-error" role="alert">

@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Pencil, Search, SquareTerminal } from "lucide-react";
+import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
@@ -23,6 +23,7 @@ interface MessageListProps {
   entryIds: string[];
   streamingMessage: AgentMessage | null;
   busy: boolean;
+  compacting: boolean;
   mobile: boolean;
   anchorsEnabled: boolean;
   onFork(entryId: string): Promise<void>;
@@ -844,6 +845,32 @@ function elapsedLabel(start: AgentMessage, endTime: number | null): string | nul
   return minutes > 0 ? `耗时 ${minutes}分钟 ${remainder}秒` : `耗时 ${seconds}秒`;
 }
 
+function compactingElapsedLabel(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `耗时 ${minutes} 分 ${remainder} 秒` : `耗时 ${seconds} 秒`;
+}
+
+function CompactionStatus() {
+  const [startedAt] = useState(() => Date.now());
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    const update = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <div className="pi-compaction-status" role="status" aria-live="polite">
+      <LoaderCircle size={15} aria-hidden="true" />
+      <span>正在压缩上下文</span>
+      <time aria-hidden="true" dateTime={`PT${elapsed}S`}>· {compactingElapsedLabel(elapsed)}</time>
+    </div>
+  );
+}
+
 function displayableAssistantBlocks(message: AgentMessage): MessageContentBlock[] {
   return contentBlocks(message).filter((block) => !(
     block.type === "thinking"
@@ -1057,6 +1084,7 @@ export function MessageList({
   entryIds,
   streamingMessage,
   busy,
+  compacting,
   mobile,
   anchorsEnabled,
   onFork,
@@ -1332,7 +1360,7 @@ export function MessageList({
     const transcript = transcriptRef.current;
     if (!transcript || !atBottomRef.current) return;
     transcript.scrollTop = transcript.scrollHeight;
-  }, [messages.length, pendingMessages.length, streamingMessage, busy]);
+  }, [messages.length, pendingMessages.length, streamingMessage, busy, compacting]);
 
   useEffect(() => {
     if (!mobile || anchorsEnabled) return;
@@ -1419,7 +1447,7 @@ export function MessageList({
                   turn={turn}
                   toolResults={toolResults}
                   streamingMessage={index === activeTurnIndex ? streamingMessage : null}
-                  busy={index === activeTurnIndex && busy}
+                  busy={index === activeTurnIndex && busy && !compacting}
                   active={index === activeTurnIndex}
                   onFork={onFork}
                   editingEntryId={editingEntryId}
@@ -1434,13 +1462,14 @@ export function MessageList({
             {turns.length === 0 && streamingMessage && (
               <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
             )}
-            {turns.length === 0 && busy && !streamingMessage && (
+            {turns.length === 0 && busy && !compacting && !streamingMessage && (
               <div className="pi-working" role="status">
                 <span />
                 <span />
                 <span />
               </div>
             )}
+            {compacting && <CompactionStatus />}
             {pendingMessages.map((message, index) => (
               <Message
                 key={String(message.id ?? `pending-${index}`)}

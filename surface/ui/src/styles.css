@@ -198,6 +198,50 @@ input:-webkit-autofill:focus {
   background: var(--pi-hover);
 }
 
+.pi-icon-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--pi-text-secondary);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.pi-icon-action:hover:not(:disabled),
+.pi-icon-action:focus-visible {
+  background: var(--pi-hover);
+  box-shadow: none;
+  color: var(--pi-text);
+}
+
+.pi-icon-action:active:not(:disabled) {
+  background: var(--pi-selected);
+}
+
+.pi-icon-action:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.pi-inline-actions {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.pi-inline-actions.is-visible,
+.pi-inline-actions:focus-within {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
 .pi-sidebar {
   position: fixed;
   z-index: 20;
@@ -332,22 +376,26 @@ input:-webkit-autofill:focus {
   box-shadow: inset 0 0 0 1px var(--pi-border-heavy);
 }
 
-.pi-session-actions {
+.pi-sidebar-row-actions {
   position: absolute;
-  z-index: 1;
+  z-index: 2;
   top: 50%;
-  right: 3px;
+  right: 4px;
   display: flex;
+  align-items: center;
   gap: 2px;
-  padding-left: 10px;
-  background: linear-gradient(to right, transparent, var(--pi-panel) 10px);
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
+  padding-left: 12px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--pi-text) 5.5%, var(--pi-panel)) 12px
+  );
   transform: translateY(-50%);
   transition: opacity 100ms ease, visibility 0s linear 100ms;
 }
 
+.pi-project-row:hover .pi-sidebar-row-actions,
+.pi-project-row:focus-within .pi-sidebar-row-actions,
 .pi-session-item:hover .pi-session-actions,
 .pi-session-item:focus-within .pi-session-actions {
   opacity: 1;
@@ -370,23 +418,11 @@ input:-webkit-autofill:focus {
   );
 }
 
-.pi-session-actions button,
-.pi-session-confirm button {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--pi-radius-sm);
-  background: var(--pi-panel);
-  color: var(--pi-text-secondary);
-  cursor: pointer;
-}
-
-.pi-session-actions button:hover {
-  background: var(--pi-selected);
-  color: var(--pi-text);
+.pi-sidebar-row-actions .pi-icon-action,
+.pi-session-confirm .pi-icon-action {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
 }
 
 .pi-session-confirm {
@@ -396,7 +432,7 @@ input:-webkit-autofill:focus {
   color: var(--pi-error);
 }
 
-.pi-session-confirm button:first-of-type {
+.pi-session-confirm .pi-icon-action:first-of-type {
   background: var(--pi-error);
   color: #fff;
 }
@@ -1239,6 +1275,27 @@ input:-webkit-autofill:focus {
   animation-delay: 240ms;
 }
 
+.pi-compaction-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  margin: 0 0 28px;
+  color: var(--pi-text-secondary);
+  font-size: 13px;
+}
+
+.pi-compaction-status svg {
+  flex: 0 0 auto;
+  animation: pi-spin 850ms linear infinite;
+}
+
+.pi-compaction-status time {
+  color: var(--pi-text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 @keyframes pi-pulse {
   0%,
   70%,
@@ -2071,6 +2128,10 @@ input:-webkit-autofill:focus {
   .pi-working span {
     animation: none;
   }
+
+  .pi-compaction-status svg {
+    animation: none;
+  }
 }
 
 /* Screenshot baseline: shared desktop/web Workbench shell. */
@@ -2112,22 +2173,9 @@ input:-webkit-autofill:focus {
   font-weight: 560;
 }
 
-.pi-sidebar-section-heading button {
-  display: grid;
-  place-items: center;
+.pi-sidebar-section-heading .pi-icon-action {
   width: 28px;
   height: 28px;
-  padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--pi-text-secondary);
-  cursor: pointer;
-}
-
-.pi-sidebar-section-heading button:hover {
-  background: var(--pi-hover);
-  color: var(--pi-text);
 }
 
 .pi-project + .pi-project {
@@ -2181,56 +2229,11 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
 }
 
-.pi-project-actions {
-  position: absolute;
-  z-index: 2;
-  top: 4px;
-  right: 4px;
-  display: flex;
-  align-items: center;
-  padding-left: 12px;
-  opacity: 0;
-  pointer-events: none;
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--pi-text) 5.5%, var(--pi-panel)) 12px
-  );
-  transition: opacity 100ms ease;
-}
-
-.pi-project-row:hover .pi-project-actions,
-.pi-project-row:focus-within .pi-project-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.pi-project-new-session,
-.pi-project-more {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--pi-text-secondary);
-  cursor: pointer;
-  transition: background-color 100ms ease, color 100ms ease;
-}
-
-.pi-project-new-session:hover,
-.pi-project-more:hover {
-  background: var(--pi-selected);
-  color: var(--pi-text);
-}
-
 .pi-project-menu {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 4px);
-  right: 0;
+  position: fixed;
+  z-index: 205;
+  right: auto;
+  bottom: auto;
   width: max-content;
   min-width: 132px;
   padding: 5px;
@@ -3273,7 +3276,7 @@ input:-webkit-autofill:focus {
   box-shadow: rgba(0, 0, 0, 0.13) 0 10px 28px;
   color: var(--pi-text-secondary);
   pointer-events: none;
-  transform: translateX(-50%);
+  transform: none;
   backdrop-filter: blur(16px) saturate(1.1);
   animation: pi-context-tooltip-enter 100ms ease-out;
 }
@@ -3324,11 +3327,11 @@ input:-webkit-autofill:focus {
 @keyframes pi-context-tooltip-enter {
   from {
     opacity: 0;
-    transform: translate(-50%, 2px);
+    transform: translateY(2px);
   }
   to {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translateY(0);
   }
 }
 
@@ -3376,6 +3379,241 @@ input:-webkit-autofill:focus {
   padding: 0 7px;
   color: var(--pi-text-secondary);
   font-size: 13px;
+}
+
+.pi-model-config-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(360px, 46vw);
+  height: 30px;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease, opacity 100ms ease;
+}
+
+.pi-model-config-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.pi-model-config-trigger:hover:not(:disabled),
+.pi-model-config-trigger.is-open {
+  background: var(--pi-hover);
+  color: var(--pi-text);
+}
+
+.pi-model-config-trigger:disabled {
+  cursor: default;
+  opacity: 0.46;
+}
+
+.pi-model-config-model,
+.pi-model-config-thinking {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-model-config-thinking,
+.pi-model-config-chevron {
+  flex: 0 0 auto;
+}
+
+/* DeepSeek V4 Flash is the display-width baseline. Longer names may ellipsize. */
+.pi-model-config-model {
+  max-width: 18ch;
+  flex: 0 1 18ch;
+  color: var(--pi-text);
+  font-size: 13px;
+}
+
+.pi-model-config-thinking {
+  max-width: 5ch;
+  color: var(--pi-text-tertiary);
+  font-size: 12px;
+}
+
+.pi-model-config-chevron {
+  color: var(--pi-text-tertiary);
+  transition: transform 120ms ease;
+}
+
+.pi-model-config-trigger.is-open .pi-model-config-chevron {
+  transform: rotate(180deg);
+}
+
+.pi-model-config-popover {
+  z-index: 205;
+  width: 320px;
+  padding: 5px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  border: 1px solid var(--pi-border);
+  border-radius: 13px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.97);
+  background: color-mix(in srgb, var(--pi-bg) 97%, transparent);
+  box-shadow: rgba(0, 0, 0, 0.14) 0 12px 34px, rgba(0, 0, 0, 0.05) 0 2px 7px;
+  backdrop-filter: blur(18px) saturate(1.15);
+  animation: pi-select-enter 110ms ease-out;
+}
+
+.pi-model-config-popover::-webkit-scrollbar,
+.pi-model-config-popover::-webkit-scrollbar-track,
+.pi-model-config-popover::-webkit-scrollbar-thumb {
+  display: none;
+  width: 0;
+  height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pi-model-config-popover[data-focus-modality="pointer"] [data-pi-menu-item]:focus,
+.pi-select-popover[data-focus-modality="pointer"] > button:focus {
+  outline: 0;
+  box-shadow: none;
+}
+
+.pi-model-config-root {
+  display: grid;
+  gap: 2px;
+}
+
+.pi-model-config-root > button {
+  display: grid;
+  width: 100%;
+  min-height: 38px;
+  grid-template-columns: 76px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 9px;
+  outline: 0;
+  background: transparent;
+  color: var(--pi-text);
+  text-align: left;
+}
+
+.pi-model-config-root > button > span {
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.pi-model-config-root > button strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--pi-text-tertiary);
+  font-size: 13px;
+  font-weight: 450;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-model-config-root > button {
+  cursor: pointer;
+}
+
+.pi-model-config-root > button:hover:not(:disabled),
+.pi-model-config-root > button:focus-visible {
+  outline: 0;
+  background: var(--pi-hover);
+  box-shadow: none;
+}
+
+.pi-model-config-root > button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.pi-model-config-root > button > svg {
+  color: var(--pi-text-tertiary);
+}
+
+.pi-model-config-options > section + section {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--pi-border);
+}
+
+.pi-model-config-options h3 {
+  margin: 2px 7px 3px;
+  color: var(--pi-text-tertiary);
+  font-size: 10px;
+  font-weight: 620;
+  letter-spacing: 0.02em;
+}
+
+.pi-model-config-options section > button,
+.pi-model-config-back {
+  display: grid;
+  width: 100%;
+  min-height: 36px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pi-model-config-options section > button:hover,
+.pi-model-config-options section > button:focus-visible,
+.pi-model-config-options section > button[aria-current="true"],
+.pi-model-config-back:hover,
+.pi-model-config-back:focus-visible {
+  background: var(--pi-hover);
+  box-shadow: none;
+  color: var(--pi-text);
+}
+
+.pi-model-config-options section > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-model-config-options section > button > svg {
+  justify-self: end;
+}
+
+.pi-model-config-back {
+  position: sticky;
+  z-index: 1;
+  top: -5px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  margin-bottom: 4px;
+  background: var(--pi-bg);
+  color: var(--pi-text);
+  font-weight: 560;
+}
+
+.pi-model-config-back:hover,
+.pi-model-config-back:focus-visible {
+  background: color-mix(in srgb, var(--pi-text) 5.5%, var(--pi-bg));
 }
 
 .pi-select-trigger-icon {
@@ -3777,12 +4015,36 @@ input:-webkit-autofill:focus {
   }
 
   .pi-composer-left {
-    max-width: 48%;
+    flex: 0 0 auto;
+    max-width: 60px;
+  }
+
+  .pi-attach-button {
+    display: none;
+  }
+
+  .pi-composer-toolbar {
+    gap: 6px;
   }
 
   .pi-select-trigger.is-model,
   .pi-composer-context span {
     max-width: 84px;
+  }
+
+  .pi-select-trigger.is-project {
+    max-width: 60px;
+    padding: 0 4px;
+  }
+
+  .pi-select-trigger.is-project .pi-select-trigger-icon {
+    display: none;
+  }
+
+  .pi-model-config-trigger {
+    max-width: min(190px, calc(100vw - 120px));
+    height: 38px;
+    flex: 0 0 auto;
   }
 
   .pi-settings-page {
@@ -3944,20 +4206,12 @@ input:-webkit-autofill:focus {
   height: 40px;
 }
 
-.pi-workbench.is-mobile .pi-project-actions {
-  top: 2px;
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.pi-workbench.is-mobile .pi-project-new-session,
-.pi-workbench.is-mobile .pi-project-more {
+.pi-workbench.is-mobile .pi-sidebar-row-actions .pi-icon-action {
   width: 36px;
   height: 36px;
 }
 
-.pi-workbench.is-mobile .pi-session-actions button,
-.pi-workbench.is-mobile .pi-session-confirm button {
+.pi-workbench.is-mobile .pi-session-confirm .pi-icon-action {
   width: 34px;
   height: 34px;
 }
@@ -4015,6 +4269,21 @@ input:-webkit-autofill:focus {
 
 .pi-workbench.is-mobile .pi-select-trigger {
   height: 38px;
+}
+
+.pi-workbench.is-mobile .pi-select-trigger.is-project {
+  max-width: 60px;
+  padding: 0 4px;
+}
+
+.pi-workbench.is-mobile .pi-select-trigger.is-project .pi-select-trigger-icon {
+  display: none;
+}
+
+.pi-workbench.is-mobile .pi-model-config-trigger {
+  max-width: min(190px, calc(100vw - 120px));
+  height: 38px;
+  flex: 0 0 auto;
 }
 
 .pi-workbench.is-mobile .pi-context-ring {
@@ -4291,9 +4560,9 @@ input:-webkit-autofill:focus {
   gap: 3px;
   height: 20px;
   padding: 0 6px;
-  border: 1px solid var(--pi-border);
+  border: 0;
   border-radius: 5px;
-  background: var(--pi-panel);
+  background: transparent;
   color: var(--pi-text-secondary);
   font-size: 10px;
   cursor: pointer;
@@ -4301,6 +4570,7 @@ input:-webkit-autofill:focus {
 
 .pi-file-actions button:hover,
 .pi-file-actions button:focus-visible {
+  background: var(--pi-hover);
   color: var(--pi-focus);
 }
 

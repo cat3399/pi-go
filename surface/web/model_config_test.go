@@ -56,7 +56,8 @@ func TestAPIKeyAndAvailableModelsContract(t *testing.T) {
 	}
 	var modelBody struct {
 		ModelList []struct {
-			Provider string `json:"provider"`
+			Provider     string `json:"provider"`
+			ProviderName string `json:"providerName"`
 		} `json:"modelList"`
 	}
 	if err := json.Unmarshal(models.Body.Bytes(), &modelBody); err != nil {
@@ -68,6 +69,9 @@ func TestAPIKeyAndAvailableModelsContract(t *testing.T) {
 	for _, candidate := range modelBody.ModelList {
 		if candidate.Provider != "deepseek" {
 			t.Fatalf("unconfigured model provider returned: %q", candidate.Provider)
+		}
+		if candidate.ProviderName != "DeepSeek" {
+			t.Fatalf("model provider name = %q, want DeepSeek", candidate.ProviderName)
 		}
 	}
 

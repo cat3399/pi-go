@@ -41,6 +41,9 @@ func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T)
 		if candidate.Provider != "deepseek" {
 			t.Fatalf("unconfigured provider leaked into available models: %#v", candidate)
 		}
+		if candidate.ProviderName != "DeepSeek" {
+			t.Fatalf("available model provider name = %q, want DeepSeek", candidate.ProviderName)
+		}
 	}
 }
 

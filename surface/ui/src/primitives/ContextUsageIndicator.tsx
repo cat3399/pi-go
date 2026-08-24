@@ -1,13 +1,12 @@
 import {
-  type CSSProperties,
   useCallback,
   useEffect,
   useId,
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import type { ContextUsage, SessionStatsInfo, TokenUsageInfo } from "../contracts";
+import { AnchoredPopover } from "./AnchoredPopover";
 
 interface ContextUsageIndicatorProps {
   usage: ContextUsage | null;
@@ -62,7 +61,6 @@ export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: Cont
     ? "上下文占用未知"
     : `上下文占用 ${rawPercent.toFixed(1)}%`;
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<CSSProperties | null>(null);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const openTimerRef = useRef<number | null>(null);
   const tooltipId = useId();
@@ -73,26 +71,14 @@ export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: Cont
     openTimerRef.current = null;
   }, []);
 
-  const updatePosition = useCallback(() => {
-    const trigger = triggerRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    setPosition({
-      left: Math.max(132, Math.min(window.innerWidth - 132, rect.left + rect.width / 2)),
-      bottom: window.innerHeight - rect.top + 7,
-    });
-  }, []);
-
   const show = (immediate = false) => {
     clearOpenTimer();
     if (immediate) {
-      updatePosition();
       setOpen(true);
       return;
     }
     openTimerRef.current = window.setTimeout(() => {
       openTimerRef.current = null;
-      updatePosition();
       setOpen(true);
     }, 140);
   };
@@ -100,19 +86,7 @@ export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: Cont
   const hide = () => {
     clearOpenTimer();
     setOpen(false);
-    setPosition(null);
   };
-
-  useEffect(() => {
-    if (!open) return;
-    const reposition = () => updatePosition();
-    window.addEventListener("resize", reposition);
-    window.addEventListener("scroll", reposition, true);
-    return () => {
-      window.removeEventListener("resize", reposition);
-      window.removeEventListener("scroll", reposition, true);
-    };
-  }, [open, updatePosition]);
 
   useEffect(() => () => clearOpenTimer(), [clearOpenTimer]);
 
@@ -160,23 +134,29 @@ export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: Cont
           />
         </svg>
       </span>
-      {open && position && createPortal(
-        <div id={tooltipId} className="pi-context-tooltip" role="tooltip" style={position}>
-          <div className="pi-context-tooltip-summary">
-            <span>上下文</span>
-            <strong>{contextDetail}</strong>
-          </div>
-          <section>
-            <h3>最近一轮</h3>
-            <DetailRows rows={latestRows} />
-          </section>
-          <section>
-            <h3>会话累计</h3>
-            <DetailRows rows={cumulativeRows} />
-          </section>
-        </div>,
-        document.body,
-      )}
+      <AnchoredPopover
+        anchorRef={triggerRef}
+        open={open}
+        id={tooltipId}
+        className="pi-context-tooltip"
+        role="tooltip"
+        align="center"
+        placement="above"
+        gap={7}
+      >
+        <div className="pi-context-tooltip-summary">
+          <span>上下文</span>
+          <strong>{contextDetail}</strong>
+        </div>
+        <section>
+          <h3>最近一轮</h3>
+          <DetailRows rows={latestRows} />
+        </section>
+        <section>
+          <h3>会话累计</h3>
+          <DetailRows rows={cumulativeRows} />
+        </section>
+      </AnchoredPopover>
     </>
   );
 }

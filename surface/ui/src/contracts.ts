@@ -37,6 +37,7 @@ export interface ModelListItem {
   id: string;
   name: string;
   provider: string;
+  providerName?: string;
 }
 
 export interface ModelsView {
