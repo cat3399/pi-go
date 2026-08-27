@@ -75,10 +75,11 @@ type AgentLoopAfterToolCallHook func(context.Context, AgentLoopAfterToolCallCont
 // AgentLoopTurnContext is supplied after turn_end. Every field is an immutable
 // snapshot; callbacks cannot mutate the loop by retaining or editing slices.
 type AgentLoopTurnContext struct {
-	Message     llm.AssistantTerminal
-	ToolResults []agentmsg.Message
-	Context     AgentLoopContext
-	NewMessages []agentmsg.Message
+	Message      llm.AssistantTerminal
+	ToolResults  []agentmsg.Message
+	Context      AgentLoopContext
+	NewMessages  []agentmsg.Message
+	willContinue bool
 }
 
 // AgentLoopTurnUpdate replaces selected runtime values before another provider
@@ -379,6 +380,7 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 			}
 
 			turnContext := cloneAgentLoopTurnContext(terminal, toolResults, current, newMessages)
+			turnContext.willContinue = hasMoreToolCalls
 			if l.config.PrepareNextTurn != nil {
 				update, prepareErr := l.config.PrepareNextTurn(ctx, turnContext)
 				if prepareErr != nil {
@@ -401,6 +403,7 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 			}
 			if l.config.ShouldStopAfterTurn != nil {
 				stopContext := cloneAgentLoopTurnContext(terminal, toolResults, current, newMessages)
+				stopContext.willContinue = hasMoreToolCalls
 				stop, stopErr := l.config.ShouldStopAfterTurn(ctx, stopContext)
 				if stopErr != nil {
 					return result, stopErr

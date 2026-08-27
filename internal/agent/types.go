@@ -239,8 +239,9 @@ type Config struct {
 	// context update is visible to ShouldStopAfterTurn. When combined with
 	// PrepareTurn, its non-nil fields override the legacy snapshot update for an
 	// actual following provider request.
-	PrepareNextTurn AgentLoopPrepareNextTurn
-	Now             func() time.Time
+	PrepareNextTurn     AgentLoopPrepareNextTurn
+	ShouldStopAfterTurn AgentLoopShouldStopAfterTurn
+	Now                 func() time.Time
 }
 
 type runtimeConfig struct {
@@ -251,6 +252,7 @@ type runtimeConfig struct {
 	messageEnd            MessageEndHook
 	prepareTurn           PrepareTurn
 	prepareNextTurn       AgentLoopPrepareNextTurn
+	shouldStopAfterTurn   AgentLoopShouldStopAfterTurn
 	now                   func() time.Time
 	toolExecution         ToolExecutionMode
 	transformContext      ContextTransform
@@ -417,7 +419,8 @@ func validateConfig(config Config) (validatedConfig, error) {
 			provider: config.Provider, stream: provider.CloneStreamOptions(config.Stream),
 			beforeToolCall: config.BeforeToolCall, afterToolCall: config.AfterToolCall,
 			messageEnd: config.MessageEnd, prepareTurn: config.PrepareTurn, prepareNextTurn: config.PrepareNextTurn,
-			now: now, toolExecution: toolExecution,
+			shouldStopAfterTurn: config.ShouldStopAfterTurn,
+			now:                 now, toolExecution: toolExecution,
 			transformContext: config.TransformContext, transformAgentContext: config.TransformAgentContext,
 			convertToLLM: config.ConvertToLLM, getAPIKey: config.GetAPIKey,
 			steeringMode: steeringMode, followUpMode: followUpMode,

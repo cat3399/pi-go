@@ -1660,6 +1660,88 @@ func TestAgentSessionOverflowCompactsAndContinuesWithoutRuntimeFailure(t *testin
 	}
 }
 
+func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testing.T) {
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "mid-turn-compaction",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 100, MaxTokens: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := provider.NewToolDefinition("read", "read", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("call-read", "read", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolTurn, err := newAssistantToolUseMessage(
+		[]llm.AssistantBlock{mustTextBlock(t, "reading"), call}, mustUsage(t, 70, 5), agentTestEpoch,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var summaries atomic.Uint32
+	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return agentTestEpoch }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := provider.FixedResponseStep(toolTurn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := provider.FactoryResponseStep(func(context.Context, provider.Request, uint64) (llm.AssistantTerminal, error) {
+		if summaries.Load() != 1 {
+			t.Errorf("next provider request started before compaction: summaries=%d", summaries.Load())
+		}
+		return mustTextTerminal(t, "done"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := implementation.SetResponses([]provider.ScriptStep{first, second}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Tool: &fakeTool{name: "read", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+			return agent.ToolOutput{Text: "12345678901234567890123456789012"}, nil
+		}},
+		Tools: []provider.ToolDefinition{definition}, ContextReserve: 20, ContextReserveSet: true,
+		KeepRecentTokens: 10, KeepRecentTokensSet: true,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			summaries.Add(1)
+			return session.SummaryOutput{Text: "mid-turn checkpoint"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compactions []agent.CompactionEndEvent
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if ended, ok := event.(agent.CompactionEndEvent); ok {
+			compactions = append(compactions, ended)
+		}
+	})
+
+	result, err := runtime.Run(context.Background(), "start")
+	if err != nil || !result.Succeeded() {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	if implementation.CallCount() != 2 || result.ProviderTurns() != 2 || result.ToolExecutions() != 1 {
+		t.Fatalf("calls/turns/tools = %d/%d/%d", implementation.CallCount(), result.ProviderTurns(), result.ToolExecutions())
+	}
+	if summaries.Load() != 1 {
+		t.Fatalf("summaries = %d, want 1", summaries.Load())
+	}
+	if len(compactions) != 1 || compactions[0].Reason != agent.CompactionThreshold || !compactions[0].WillRetry || compactions[0].Aborted {
+		t.Fatalf("compaction = %#v", compactions)
+	}
+}
+
 func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{

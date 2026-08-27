@@ -679,7 +679,8 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 		ToolExecution: a.config.toolExecution, BeforeToolCall: bridgeAgentLoopBeforeHook(a.config.beforeToolCall),
 		AfterToolCall: bridgeAgentLoopAfterHook(a.config.afterToolCall), Now: a.config.now,
 		ConvertToLLM: a.agentLoopConvertToLLM(), TransformContext: a.agentLoopTransformContext(), GetAPIKey: a.config.getAPIKey,
-		Emit: func(ctx context.Context, event AgentEvent) error { return a.processEvent(active, ctx, event) },
+		ShouldStopAfterTurn: a.config.shouldStopAfterTurn,
+		Emit:                func(ctx context.Context, event AgentEvent) error { return a.processEvent(active, ctx, event) },
 	}
 	if a.config.messageEnd != nil {
 		config.ProcessMessage = func(ctx context.Context, message agentmsg.Message) (agentmsg.Message, error) {
