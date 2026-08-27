@@ -10,6 +10,7 @@ import {
 import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
+import { ImagePreview } from "../primitives/ImagePreview";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
 import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./ComposerInput";
@@ -537,6 +538,7 @@ function Message({
   const [copied, setCopied] = useState(false);
   const [userActionsVisible, setUserActionsVisible] = useState(false);
   const [draft, setDraft] = useState("");
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const actionsHideTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
@@ -617,7 +619,21 @@ function Message({
       );
     } else if (block.type === "image") {
       const src = imageSource(block);
-      if (src) renderedBlocks.push(<img className="pi-message-image" key={index} src={src} alt="" />);
+      if (src) {
+        const alt = `消息图片 ${index + 1}`;
+        renderedBlocks.push(
+          <button
+            className="pi-message-image-button"
+            key={index}
+            type="button"
+            aria-label={`预览${alt}`}
+            title="预览图片"
+            onClick={() => setPreviewImage({ src, alt })}
+          >
+            <img className="pi-message-image" src={src} alt="" />
+          </button>,
+        );
+      }
     }
     index += 1;
   }
@@ -677,22 +693,23 @@ function Message({
   };
 
   return (
-    <article
-      className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userActionsVisible ? "is-actions-visible" : ""} ${editing ? "is-editing" : ""}`}
-      onPointerEnter={(event) => {
-        if (userActionsAvailable && event.pointerType === "mouse") showUserActions();
-      }}
-      onPointerLeave={(event) => {
-        if (userActionsAvailable && event.pointerType === "mouse") hideUserActionsAfter(420);
-      }}
-      onClick={(event) => {
-        if (!userActionsAvailable) return;
-        const target = event.target;
-        if (target instanceof Element && target.closest("button, a")) return;
-        showUserActions();
-        hideUserActionsAfter(3200);
-      }}
-    >
+    <>
+      <article
+        className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userActionsVisible ? "is-actions-visible" : ""} ${editing ? "is-editing" : ""}`}
+        onPointerEnter={(event) => {
+          if (userActionsAvailable && event.pointerType === "mouse") showUserActions();
+        }}
+        onPointerLeave={(event) => {
+          if (userActionsAvailable && event.pointerType === "mouse") hideUserActionsAfter(420);
+        }}
+        onClick={(event) => {
+          if (!userActionsAvailable) return;
+          const target = event.target;
+          if (target instanceof Element && target.closest("button, a")) return;
+          showUserActions();
+          hideUserActionsAfter(3200);
+        }}
+      >
       {message.role === "bashExecution" && typeof message.command === "string" && (
         <div className="pi-bash-command">$ {message.command}</div>
       )}
@@ -804,7 +821,15 @@ function Message({
           {messageTimestamp(message) !== null && <time>{formatClock(messageTimestamp(message)!)}</time>}
         </div>
       )}
-    </article>
+      </article>
+      {previewImage && (
+        <ImagePreview
+          src={previewImage.src}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
+    </>
   );
 }
 

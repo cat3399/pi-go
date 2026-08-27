@@ -12,6 +12,7 @@ import type {
   TokenUsageInfo,
 } from "../contracts";
 import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
+import { ImagePreview } from "../primitives/ImagePreview";
 import { SelectMenu } from "../primitives/SelectMenu";
 import {
   matchSlashCommands,
@@ -70,6 +71,7 @@ const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -223,6 +225,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setText("");
     try {
       await props.onSend(value, props.busy ? props.streamingInputBehavior : "prompt", images);
+      setPreviewImage(null);
       for (const image of images) {
         if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
       }
@@ -308,12 +311,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const removeImage = (index: number) => {
-    setImages((current) => {
-      const next = [...current];
-      const [removed] = next.splice(index, 1);
-      if (removed?.previewUrl.startsWith("blob:")) URL.revokeObjectURL(removed.previewUrl);
-      return next;
-    });
+    const removed = imagesRef.current[index];
+    if (!removed) return;
+    if (removed.previewUrl === previewImage?.src) setPreviewImage(null);
+    if (removed.previewUrl.startsWith("blob:")) URL.revokeObjectURL(removed.previewUrl);
+    setImages((current) => current.filter((_, currentIndex) => currentIndex !== index));
   };
 
   return (
@@ -380,8 +382,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <div className="pi-composer-images">
                 {images.map((image, index) => (
                   <div key={`${image.previewUrl}-${index}`}>
-                    <img src={image.previewUrl} alt="" />
-                    <button type="button" aria-label="移除图片" onClick={() => removeImage(index)}>
+                    <button
+                      className="pi-composer-image-preview"
+                      type="button"
+                      aria-label={`预览附件图片 ${index + 1}`}
+                      title="预览图片"
+                      onClick={() => setPreviewImage({ src: image.previewUrl, alt: `附件图片 ${index + 1}` })}
+                    >
+                      <img src={image.previewUrl} alt="" />
+                    </button>
+                    <button
+                      className="pi-composer-image-remove"
+                      type="button"
+                      aria-label="移除图片"
+                      onClick={() => removeImage(index)}
+                    >
                       <X size={10} />
                     </button>
                   </div>
@@ -481,6 +496,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </>
         )}
       />
+      {previewImage && (
+        <ImagePreview
+          src={previewImage.src}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 });
