@@ -44,7 +44,7 @@ jobs:
           else
             latest=$(./scripts/latest-version.sh)
             base_version=$(./scripts/next-version.sh patch)
-            if [[ -n "$latest" ]]; then
+            if [[ -n "$latest" && "$SURFACE" != all ]]; then
               assets_file="$RUNNER_TEMP/release-assets.txt"
               if ! gh release view "v$latest" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$assets_file"; then
                 : > "$assets_file"

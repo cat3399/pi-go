@@ -5,8 +5,7 @@
 在 GitHub 仓库的 **Actions** 页面中：
 
 1. 日常取包选择 **Build**，再选择需要的 surface；
-2. 正式发布选择 **Release**。默认的 `all` 会补齐当前版本缺少的 surface；如果当前版本已经包含全部
-   surface，`patch` 才会创建下一个补丁版本；
+2. 正式发布选择 **Release**。默认的 `all + patch` 会创建下一个补丁版本并构建全部 surface；
 3. 只在不兼容变更或新增能力时把升级级别改为 `major` 或 `minor`。
 
 不需要手工修改源码版本、创建 tag、整理压缩包或计算校验和。Release 必须从默认分支运行，多个
@@ -16,11 +15,12 @@ Release workflow 会串行执行，避免并发任务同时修改同一个版本
 
 - 只把精确匹配 `vMAJOR.MINOR.PATCH` 的 tag 视为稳定版本；
 - 仓库没有稳定 tag 时，首个自动发布版本为 `v0.1.0`；
-- 所有 surface 共用同一个版本。若所选 surface 尚未出现在最高稳定版本中，Release 会把它追加到
-  现有 tag 和 GitHub Release，不递增版本；
-- 只有所选 surface 已经完整存在于最高稳定版本中，才按照 `patch`、`minor` 或 `major` 创建新版本；
-- 选择 `all` 时只补建当前版本缺少的 surface；当前版本四个 surface 都完整时才递增并重新构建全部；
-- **Build** 不占用版本号。其 SemVer 基准使用同一套 surface 判断，并追加 `-dev.<commit>`；
+- 所有 surface 共用同一个版本。选择 `all` 时不检查最高稳定版本的资产是否齐全，始终按照 `patch`、
+  `minor` 或 `major` 创建新版本并重新构建全部 surface；
+- 单独选择 surface 时，若它尚未完整出现在最高稳定版本中，Release 会把它追加到现有 tag 和
+  GitHub Release，不递增版本；已经完整存在时才按照所选级别创建新版本；
+- **Build** 不占用版本号。选择 `all` 时使用下一补丁版本作为 SemVer 基准；单独选择 surface 时使用
+  同一套缺失判断，最后统一追加 `-dev.<commit>`；
 - 同一版本会注入 Go CLI、内嵌 Web UI、GUI bridge、移动端 Go 库，以及 Android 的
   `versionName`。Android `versionCode` 由 SemVer 单调映射生成。
 

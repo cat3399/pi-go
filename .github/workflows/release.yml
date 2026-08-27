@@ -16,7 +16,7 @@ on:
           - gui
           - mobile
       bump:
-        description: Version increment when the selected surface already exists
+        description: Version increment for all, or when the selected surface already exists
         required: true
         default: patch
         type: choice
@@ -71,6 +71,13 @@ jobs:
           if [[ -z "$latest" ]]; then
             version=0.1.0
             surfaces=$SURFACE
+          elif [[ "$SURFACE" == all ]]; then
+            version=$(./scripts/next-version.sh "$BUMP")
+            surfaces=all
+            if git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null; then
+              echo "Tag already exists: v$version" >&2
+              exit 1
+            fi
           else
             assets_file="$RUNNER_TEMP/release-assets.txt"
             if gh release view "v$latest" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > "$assets_file"; then
@@ -202,6 +209,7 @@ jobs:
 
       - name: Publish version tag and GitHub release
         env:
+          GH_DEBUG: api
           GH_TOKEN: ${{ github.token }}
           RELEASE_EXISTS: ${{ needs.version.outputs.release_exists }}
           TAG: ${{ needs.version.outputs.tag }}

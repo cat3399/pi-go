@@ -75,9 +75,9 @@ make devices SURFACE=mobile
 
 - **Build**：选择 `terminal`、`web`、`gui`、`mobile` 或 `all`，生成带开发版本号的临时 artifacts，
   不创建 tag 或 Release；
-- **Release**：选择 surface 和 `patch` / `minor` / `major`，构建并生成 `SHA256SUMS`。所选 surface
-  尚未包含在当前版本时会补充到同一 Release；已经存在时才递增 SemVer。默认选项是 `all + patch`，
-  通常直接点击运行即可。
+- **Release**：选择 surface 和 `patch` / `minor` / `major`，构建并生成 `SHA256SUMS`。选择 `all` 时
+  始终递增 SemVer 并构建全部 surface；单独选择 surface 时，若当前版本尚未包含它则补充到同一
+  Release，否则递增 SemVer。默认选项是 `all + patch`，通常直接点击运行即可。
 
 首个无历史 tag 的 Release 从 `v0.1.0` 开始，所有 surface 共用版本号。
 各 surface 使用独立的原生工具链和缓存；详细产物范围、缓存策略与签名边界见
