@@ -434,7 +434,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 		return s.httpStatusFailure(response)
 	}
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if contentTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+	if response.Header.Get("Content-Type") != "" && (contentTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream")) {
 		cause := fmt.Errorf(
 			"%w: response content type %q is not text/event-stream",
 			ErrOpenAIResponsesStream,
