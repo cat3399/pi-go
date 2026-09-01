@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +23,8 @@ const (
 	mobileRemoteEvent      = "pi:mobile-remote-event"
 	mobileRemoteErrorEvent = "pi:mobile-remote-error"
 	maxRemoteResponseBytes = 64 << 20
+	maxRemoteUploadFile    = 25 << 20
+	maxRemoteUploadTotal   = 100 << 20
 )
 
 type RemoteResponse struct {
@@ -45,8 +49,19 @@ type RemoteStreamError struct {
 	Terminal bool   `json:"terminal"`
 }
 
+type encodedRemoteUploadFile struct {
+	Name string `json:"name"`
+	Data string `json:"data"`
+}
+
+type remoteUploadFile struct {
+	name string
+	data []byte
+}
+
 type RemoteBridge struct {
 	requestClient *http.Client
+	uploadClient  *http.Client
 	streamClient  *http.Client
 	credentials   remoteCredentialStore
 	requestMu     sync.Mutex
@@ -80,6 +95,7 @@ type remoteEventStream struct {
 func NewRemoteBridge() *RemoteBridge {
 	return &RemoteBridge{
 		requestClient:    &http.Client{Timeout: 60 * time.Second},
+		uploadClient:     &http.Client{Timeout: 5 * time.Minute},
 		streamClient:     &http.Client{},
 		credentials:      newPlatformCredentialStore(),
 		requests:         make(map[string]context.CancelFunc),
@@ -139,26 +155,11 @@ func (b *RemoteBridge) request(requestID, method, endpoint, requestPath, token, 
 	if err != nil {
 		return RemoteResponse{}, err
 	}
-	requestContext, cancel := context.WithTimeout(b.context(), 60*time.Second)
-	defer cancel()
-	if requestID != "" {
-		b.requestMu.Lock()
-		if _, cancelled := b.cancelled[requestID]; cancelled {
-			delete(b.cancelled, requestID)
-			b.requestMu.Unlock()
-			return RemoteResponse{}, fmt.Errorf("remote request cancelled: %w", context.Canceled)
-		}
-		if previous := b.requests[requestID]; previous != nil {
-			previous()
-		}
-		b.requests[requestID] = cancel
-		b.requestMu.Unlock()
-		defer func() {
-			b.requestMu.Lock()
-			delete(b.requests, requestID)
-			b.requestMu.Unlock()
-		}()
+	requestContext, finishRequest, err := b.beginRequest(requestID, 60*time.Second)
+	if err != nil {
+		return RemoteResponse{}, err
 	}
+	defer finishRequest()
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
@@ -190,6 +191,128 @@ func (b *RemoteBridge) request(requestID, method, endpoint, requestPath, token, 
 	}
 	b.captureAuthentication(endpoint, requestPath, &result)
 	return result, nil
+}
+
+func (b *RemoteBridge) UploadFilesWithID(requestID, endpoint, requestPath, token, filesJSON string) (RemoteResponse, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return RemoteResponse{}, errors.New("remote request ID is required")
+	}
+	target, err := remoteAPIURL(endpoint, requestPath)
+	if err != nil {
+		return RemoteResponse{}, err
+	}
+	files, err := decodeRemoteUploadFiles(filesJSON)
+	if err != nil {
+		return RemoteResponse{}, err
+	}
+	requestContext, finishRequest, err := b.beginRequest(requestID, 5*time.Minute)
+	if err != nil {
+		return RemoteResponse{}, err
+	}
+	defer finishRequest()
+
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, target.String(), reader)
+	if err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return RemoteResponse{}, fmt.Errorf("create remote upload request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	if token = b.tokenForEndpoint(endpoint, token); token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	go writeRemoteUploadBody(writer, multipartWriter, files)
+
+	response, err := b.uploadClient.Do(request)
+	if err != nil {
+		_ = reader.CloseWithError(err)
+		return RemoteResponse{}, fmt.Errorf("remote upload failed: %w", err)
+	}
+	defer response.Body.Close()
+	data, err := readLimited(response.Body, maxRemoteResponseBytes)
+	if err != nil {
+		return RemoteResponse{}, err
+	}
+	result := RemoteResponse{
+		Status: response.StatusCode, Body: string(data),
+		RetryAfterMS: retryAfterMilliseconds(response.Header.Get("Retry-After")),
+	}
+	b.captureAuthentication(endpoint, requestPath, &result)
+	return result, nil
+}
+
+func (b *RemoteBridge) beginRequest(requestID string, timeout time.Duration) (context.Context, func(), error) {
+	requestContext, cancel := context.WithTimeout(b.context(), timeout)
+	if requestID == "" {
+		return requestContext, cancel, nil
+	}
+	b.requestMu.Lock()
+	if _, cancelled := b.cancelled[requestID]; cancelled {
+		delete(b.cancelled, requestID)
+		b.requestMu.Unlock()
+		cancel()
+		return nil, nil, fmt.Errorf("remote request cancelled: %w", context.Canceled)
+	}
+	if previous := b.requests[requestID]; previous != nil {
+		previous()
+	}
+	b.requests[requestID] = cancel
+	b.requestMu.Unlock()
+	return requestContext, func() {
+		cancel()
+		b.requestMu.Lock()
+		delete(b.requests, requestID)
+		b.requestMu.Unlock()
+	}, nil
+}
+
+func decodeRemoteUploadFiles(payload string) ([]remoteUploadFile, error) {
+	var encoded []encodedRemoteUploadFile
+	if err := json.Unmarshal([]byte(payload), &encoded); err != nil {
+		return nil, fmt.Errorf("decode remote upload files: %w", err)
+	}
+	if len(encoded) == 0 {
+		return nil, errors.New("no files selected")
+	}
+	files := make([]remoteUploadFile, 0, len(encoded))
+	var total int64
+	for _, input := range encoded {
+		if len(input.Data) > base64.StdEncoding.EncodedLen(maxRemoteUploadFile) {
+			return nil, fmt.Errorf("upload file %q exceeds 25MB", input.Name)
+		}
+		data, err := base64.StdEncoding.DecodeString(input.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode remote upload file %q: %w", input.Name, err)
+		}
+		if total += int64(len(data)); total > maxRemoteUploadTotal {
+			return nil, errors.New("uploads exceed 100MB total")
+		}
+		files = append(files, remoteUploadFile{name: input.Name, data: data})
+	}
+	return files, nil
+}
+
+func writeRemoteUploadBody(pipe *io.PipeWriter, writer *multipart.Writer, files []remoteUploadFile) {
+	var writeErr error
+	for _, file := range files {
+		part, err := writer.CreateFormFile("files", file.name)
+		if err != nil {
+			writeErr = err
+			break
+		}
+		if _, err = part.Write(file.data); err != nil {
+			writeErr = err
+			break
+		}
+	}
+	if closeErr := writer.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	_ = pipe.CloseWithError(writeErr)
 }
 
 func (b *RemoteBridge) CancelRequest(requestID string) {

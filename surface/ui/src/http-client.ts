@@ -13,7 +13,11 @@ import type {
   ModelsView,
   ProjectInfo,
   SessionView,
+  UploadConflictStrategy,
+  UploadResult,
+  UploadTargetInspection,
 } from "./contracts";
+import { validateUploadFiles } from "./upload-files";
 
 type ErrorBody = {
   error?: string;
@@ -37,6 +41,12 @@ export interface RemoteApplicationTransport {
     path: string,
     token: string,
     init?: RemoteRequestInit,
+  ): Promise<RemoteTransportResponse>;
+  upload(
+    endpoint: string,
+    path: string,
+    token: string,
+    files: File[],
   ): Promise<RemoteTransportResponse>;
   subscribe(
     endpoint: string,
@@ -88,6 +98,16 @@ function encodeFilePathForAPI(filePath: string): string {
 function fileName(filePath: string): string {
   const parts = filePath.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? filePath;
+}
+
+function normalizedUploadResult(value: Partial<UploadResult> = {}): UploadResult {
+  return {
+    uploaded: value.uploaded ?? [],
+    skipped: value.skipped ?? [],
+    errors: value.errors ?? [],
+    ...(value.conflicts ? { conflicts: value.conflicts } : {}),
+    ...(value.nonReplaceable ? { nonReplaceable: value.nonReplaceable } : {}),
+  };
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -205,6 +225,56 @@ export class RemoteApplicationClient implements ApplicationClient {
       language: data.language,
       size: data.size,
     };
+  }
+
+  async deleteFile(path: string): Promise<void> {
+    await this.request<{ ok: boolean }>(`/api/v1/files/${encodeFilePathForAPI(path)}`, {
+      method: "DELETE",
+    });
+  }
+
+  inspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection> {
+    return this.request(`/api/v1/files/${encodeFilePathForAPI(directory)}?type=upload-check`, {
+      method: "POST",
+      body: JSON.stringify({ fileNames }),
+    });
+  }
+
+  async uploadFiles(
+    directory: string,
+    files: File[],
+    strategy: UploadConflictStrategy,
+  ): Promise<UploadResult> {
+    validateUploadFiles(files);
+    const query = new URLSearchParams({ type: "upload", conflict: strategy });
+    const response = await this.transport.upload(
+      this.endpoint,
+      `/api/v1/files/${encodeFilePathForAPI(directory)}?${query.toString()}`,
+      this.token,
+      files,
+    );
+    let body: (Partial<UploadResult> & ErrorBody) | null = null;
+    if (response.body.trim()) {
+      try {
+        body = JSON.parse(response.body) as Partial<UploadResult> & ErrorBody;
+      } catch {
+        if (response.status >= 200 && response.status < 300) {
+          throw new Error("远程返回了无效 JSON");
+        }
+      }
+    }
+    if (response.status === 409 && body?.conflicts?.length) {
+      return normalizedUploadResult(body);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new ApplicationRequestError(
+        body?.error || `HTTP ${response.status}`,
+        response.status,
+        body?.retryAfterMs ?? response.retryAfterMs ?? 0,
+      );
+    }
+    if (body === null) throw new Error("远程返回了无效 JSON");
+    return normalizedUploadResult(body);
   }
 
   async addProject(path: string): Promise<ProjectInfo> {
@@ -330,6 +400,38 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
       const response = await fetch(new URL(path, endpoint), {
         method: init.method ?? "GET",
         body: init.body,
+        headers,
+        cache: "no-store",
+        credentials: "include",
+        signal: controller.signal,
+      });
+      const retryAfterSeconds = Number.parseInt(response.headers.get("Retry-After") ?? "", 10);
+      return {
+        status: response.status,
+        body: await response.text(),
+        retryAfterMs: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : undefined,
+      };
+    } finally {
+      this.requests.delete(controller);
+    }
+  }
+
+  async upload(
+    endpoint: string,
+    path: string,
+    token: string,
+    files: File[],
+  ): Promise<RemoteTransportResponse> {
+    const controller = new AbortController();
+    this.requests.add(controller);
+    const form = new FormData();
+    for (const file of files) form.append("files", file, file.name);
+    const headers = new Headers({ Accept: "application/json" });
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    try {
+      const response = await fetch(new URL(path, endpoint), {
+        method: "POST",
+        body: form,
         headers,
         cache: "no-store",
         credentials: "include",

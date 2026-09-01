@@ -1,8 +1,9 @@
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Ellipsis, FileText, Folder, FolderOpen, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { Ellipsis, FileText, Folder, FolderOpen, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { FileList, ProjectInfo, SessionInfo } from "../contracts";
 import { AnchoredPopover } from "../primitives/AnchoredPopover";
 import { IconAction, InlineActions } from "../primitives/InlineActions";
+import { InlineConfirmation } from "../primitives/InlineConfirmation";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { FileTree } from "./FileTree";
 
@@ -15,9 +16,12 @@ interface SidebarProps {
   activeSessionId: string | null;
   activePreviewPath: string;
   workingDirectory: string;
+  fileRefreshKey: number;
   listFiles(path: string): Promise<FileList>;
+  deleteFile(path: string): Promise<void>;
   onMentionFile(value: string): void;
   onPreviewFile(path: string): void;
+  onFileDeleted(path: string): void;
   onSectionChange(section: "sessions" | "files"): void;
   onClose(): void;
   onAddProject(): void;
@@ -109,22 +113,16 @@ function SessionRow({
 
   if (confirmDelete) {
     return (
-      <div className="pi-session-item pi-session-confirm" title={error || undefined}>
-        <span>{error || "删除这个会话？"}</span>
-        <IconAction label="确认删除" disabled={working} onClick={(event) => void remove(event)}>
-          <Check size={14} />
-        </IconAction>
-        <IconAction
-          label="取消删除"
-          onClick={(event) => {
-            event.stopPropagation();
-            setConfirmDelete(false);
-            setError("");
-          }}
-        >
-          <X size={14} />
-        </IconAction>
-      </div>
+      <InlineConfirmation
+        className="pi-session-item pi-session-confirm"
+        message={error || "删除这个会话？"}
+        working={working}
+        onConfirm={(event) => void remove(event)}
+        onCancel={() => {
+          setConfirmDelete(false);
+          setError("");
+        }}
+      />
     );
   }
 
@@ -455,10 +453,13 @@ export function Sidebar(props: SidebarProps) {
           ) : (
             <FileTree
               cwd={props.workingDirectory}
+              refreshKey={props.fileRefreshKey}
               activePreviewPath={props.activePreviewPath}
               listFiles={props.listFiles}
+              deleteFile={props.deleteFile}
               onMention={props.onMentionFile}
               onPreview={props.onPreviewFile}
+              onDeleted={props.onFileDeleted}
             />
           )}
         </div>

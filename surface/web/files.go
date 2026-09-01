@@ -24,8 +24,8 @@ const (
 	textPreviewMaxBytes   = surfacewire.TextPreviewMaxBytes
 	imagePreviewMaxBytes  = surfacewire.ImagePreviewMaxBytes
 	docxPreviewMaxBytes   = surfacewire.DOCXPreviewMaxBytes
-	maxUploadFileBytes    = 25 * 1024 * 1024
-	maxUploadTotalBytes   = 100 * 1024 * 1024
+	maxUploadFileBytes    = application.MaxUploadFileBytes
+	maxUploadTotalBytes   = application.MaxUploadTotalBytes
 	maxUploadRequestBytes = maxUploadTotalBytes + 1024*1024
 )
 
@@ -86,6 +86,17 @@ func handleFileGet(api application.API) http.HandlerFunc {
 		case "watch":
 			handleFileWatch(writer, request, resource)
 		}
+	}
+}
+
+func handleFileDelete(api application.API) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		filePath := filePathFromWildcard(request.PathValue("path"))
+		if err := api.DeleteFile(request.Context(), filePath); err != nil {
+			writeFileDeleteError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 	}
 }
 
@@ -408,7 +419,7 @@ func readMultipartFile(header *multipart.FileHeader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > maxUploadFileBytes {
+	if int64(len(data)) > maxUploadFileBytes {
 		return nil, errors.New("Each upload must be 25MB or smaller")
 	}
 	return data, nil
@@ -425,6 +436,23 @@ func writeUploadError(writer http.ResponseWriter, err error) {
 	case errors.Is(err, application.ErrInvalidFileName):
 		message := strings.TrimPrefix(err.Error(), application.ErrInvalidFileName.Error()+": ")
 		writeAPIError(writer, http.StatusBadRequest, errors.New(message))
+	default:
+		writeAPIError(writer, http.StatusInternalServerError, err)
+	}
+}
+
+func writeFileDeleteError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, application.ErrResourceAccessDenied):
+		writeAPIError(writer, http.StatusForbidden, errors.New("Access denied"))
+	case errors.Is(err, os.ErrNotExist):
+		writeAPIError(writer, http.StatusNotFound, errors.New("File or directory not found"))
+	case errors.Is(err, application.ErrDirectoryNotEmpty):
+		writeAPIError(writer, http.StatusConflict, errors.New("Directory is not empty"))
+	case errors.Is(err, application.ErrProtectedResourceRoot):
+		writeAPIError(writer, http.StatusConflict, errors.New("Workspace roots cannot be deleted"))
+	case errors.Is(err, application.ErrInvalidFileName), errors.Is(err, application.ErrPathNotDirectory):
+		writeAPIError(writer, http.StatusBadRequest, err)
 	default:
 		writeAPIError(writer, http.StatusInternalServerError, err)
 	}

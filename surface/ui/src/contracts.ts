@@ -88,6 +88,26 @@ export interface FilePreview {
   sourceUrl?: string;
 }
 
+export type UploadConflictStrategy = "error" | "overwrite" | "skip";
+
+export interface UploadTargetInspection {
+  conflicts: string[];
+  nonReplaceable: string[];
+}
+
+export interface UploadFileError {
+  name: string;
+  error: string;
+}
+
+export interface UploadResult {
+  uploaded: string[];
+  skipped: string[];
+  errors: UploadFileError[];
+  conflicts?: string[];
+  nonReplaceable?: string[];
+}
+
 export interface QueuedMessages {
   steering: string[];
   followUp: string[];
@@ -266,6 +286,9 @@ export interface ApplicationClient {
   browseDirectories(path?: string): Promise<DirectoryView>;
   listFiles(path: string): Promise<FileList>;
   previewFile(path: string): Promise<FilePreview>;
+  deleteFile(path: string): Promise<void>;
+  inspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection>;
+  uploadFiles(directory: string, files: File[], strategy: UploadConflictStrategy): Promise<UploadResult>;
   addProject(path: string): Promise<ProjectInfo>;
   removeProject(path: string): Promise<void>;
   renameSession(sessionId: string, name: string): Promise<void>;

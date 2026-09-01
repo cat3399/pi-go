@@ -14,7 +14,11 @@ import type {
   ModelsView,
   ProjectInfo,
   SessionView,
+  UploadConflictStrategy,
+  UploadResult,
+  UploadTargetInspection,
 } from "@cat3399/pi-workbench";
+import { encodeUploadFiles } from "@cat3399/pi-workbench";
 
 const bridge = "main.GUIBridge";
 const applicationEventName = "pi:application-event";
@@ -93,6 +97,23 @@ export class WailsApplicationClient implements ApplicationClient {
 
   previewFile(path: string): Promise<FilePreview> {
     return call("PreviewFile", path);
+  }
+
+  deleteFile(path: string): Promise<void> {
+    return call("DeleteFile", path);
+  }
+
+  inspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection> {
+    return call("InspectUploadTargets", directory, fileNames);
+  }
+
+  async uploadFiles(
+    directory: string,
+    files: File[],
+    strategy: UploadConflictStrategy,
+  ): Promise<UploadResult> {
+    const encoded = await encodeUploadFiles(files);
+    return call("UploadFiles", directory, JSON.stringify(encoded), strategy);
   }
 
   addProject(path: string): Promise<ProjectInfo> {

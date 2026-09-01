@@ -48,6 +48,9 @@ const unavailableClient: ApplicationClient = {
   async browseDirectories() { throw new Error("请先配置远程地址"); },
   async listFiles() { throw new Error("请先配置远程地址"); },
   async previewFile() { throw new Error("请先配置远程地址"); },
+  async deleteFile() { throw new Error("请先配置远程地址"); },
+  async inspectUploadTargets() { throw new Error("请先配置远程地址"); },
+  async uploadFiles() { throw new Error("请先配置远程地址"); },
   async addProject() { throw new Error("请先配置远程地址"); },
   async removeProject() { throw new Error("请先配置远程地址"); },
   async renameSession() { throw new Error("请先配置远程地址"); },
@@ -91,6 +94,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const [sidebarOpen, setSidebarOpen] = useState(() => !mobile && window.innerWidth >= 800);
   const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
   const [previewPath, setPreviewPath] = useState("");
+  const [fileRefreshKey, setFileRefreshKey] = useState(0);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(hostKind === "mobile" && !initialRemote);
@@ -383,7 +387,9 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         activeSessionId={controller.activeSessionId}
         activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}
+        fileRefreshKey={fileRefreshKey}
         listFiles={listFiles}
+        deleteFile={(path) => client.deleteFile(path)}
         onMentionFile={(value) => {
           composerRef.current?.insertText(value);
           closeMobileSidebar();
@@ -391,6 +397,15 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         onPreviewFile={(path) => {
           setPreviewPath(path);
           closeMobileSidebar();
+        }}
+        onFileDeleted={(path) => {
+          const normalizedDeleted = path.replace(/\\/g, "/").replace(/\/+$/, "");
+          const normalizedPreview = previewPath.replace(/\\/g, "/").replace(/\/+$/, "");
+          if (normalizedPreview === normalizedDeleted || normalizedPreview.startsWith(`${normalizedDeleted}/`)) {
+            setPreviewPath("");
+          }
+          composerRef.current?.removeWorkspaceFile(path);
+          setFileRefreshKey((value) => value + 1);
         }}
         onSectionChange={setSidebarSection}
         onClose={() => setSidebarOpen(false)}
@@ -475,6 +490,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               onModelChange={controller.setModel}
               onThinkingLevelChange={controller.setThinkingLevel}
               onProjectChange={controller.setWorkingDirectory}
+              onInspectUploadTargets={(directory, fileNames) => client.inspectUploadTargets(directory, fileNames)}
+              onUploadFiles={(directory, files, strategy) => client.uploadFiles(directory, files, strategy)}
+              onPreviewFile={setPreviewPath}
+              onFilesUploaded={() => setFileRefreshKey((value) => value + 1)}
             />
           )}
           {controller.error && <div className="pi-inline-error" role="alert">{controller.error}</div>}
@@ -482,6 +501,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       </main>
       {previewPath && (
         <FilePreviewPanel
+          key={`${previewPath}:${fileRefreshKey}`}
           path={previewPath}
           previewFile={previewFile}
           onClose={() => setPreviewPath("")}

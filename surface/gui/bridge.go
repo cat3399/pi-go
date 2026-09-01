@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -42,6 +44,19 @@ type GUIStreamReset struct {
 	StreamID uint64 `json:"streamId"`
 	Revision uint64 `json:"revision"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+type UploadResponse struct {
+	Uploaded       []string                          `json:"uploaded"`
+	Skipped        []string                          `json:"skipped"`
+	Errors         []coreapplication.UploadFileError `json:"errors"`
+	Conflicts      []string                          `json:"conflicts,omitempty"`
+	NonReplaceable []string                          `json:"nonReplaceable,omitempty"`
+}
+
+type encodedUploadFile struct {
+	Name string `json:"name"`
+	Data string `json:"data"`
 }
 
 type GUIBridge struct {
@@ -181,12 +196,77 @@ func (b *GUIBridge) PreviewFile(path string) (surfacewire.FilePreview, error) {
 	return surfacewire.PreviewFile(b.context(), api, path)
 }
 
+func (b *GUIBridge) DeleteFile(path string) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	return api.DeleteFile(b.context(), path)
+}
+
+func (b *GUIBridge) InspectUploadTargets(directory string, fileNames []string) (coreapplication.UploadTargetInspection, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return coreapplication.UploadTargetInspection{}, err
+	}
+	return api.InspectUploadTargets(b.context(), directory, fileNames)
+}
+
+func (b *GUIBridge) UploadFiles(directory, filesJSON, strategy string) (UploadResponse, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return UploadResponse{}, err
+	}
+	files, err := decodeUploadFiles(filesJSON)
+	if err != nil {
+		return UploadResponse{}, err
+	}
+	result, err := api.SaveUploads(
+		b.context(), directory, files, coreapplication.UploadConflictStrategy(strategy),
+	)
+	response := UploadResponse{
+		Uploaded: result.Uploaded, Skipped: result.Skipped, Errors: result.Errors,
+	}
+	if errors.Is(err, coreapplication.ErrUploadConflict) {
+		response.Conflicts = result.Inspection.Conflicts
+		response.NonReplaceable = result.Inspection.NonReplaceable
+		return response, nil
+	}
+	return response, err
+}
+
 func (b *GUIBridge) AddProject(path string) (surfacewire.ProjectInfo, error) {
 	api, err := b.localAPI()
 	if err != nil {
 		return surfacewire.ProjectInfo{}, err
 	}
 	return surfacewire.AddProject(b.context(), api, path)
+}
+
+func decodeUploadFiles(payload string) ([]coreapplication.UploadFile, error) {
+	var encoded []encodedUploadFile
+	if err := json.Unmarshal([]byte(payload), &encoded); err != nil {
+		return nil, fmt.Errorf("decode upload files: %w", err)
+	}
+	if len(encoded) == 0 {
+		return nil, errors.New("no files selected")
+	}
+	files := make([]coreapplication.UploadFile, 0, len(encoded))
+	var total int64
+	for _, input := range encoded {
+		if len(input.Data) > base64.StdEncoding.EncodedLen(int(coreapplication.MaxUploadFileBytes)) {
+			return nil, fmt.Errorf("upload file %q exceeds 25MB", input.Name)
+		}
+		data, err := base64.StdEncoding.DecodeString(input.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode upload file %q: %w", input.Name, err)
+		}
+		if total += int64(len(data)); total > coreapplication.MaxUploadTotalBytes {
+			return nil, errors.New("uploads exceed 100MB total")
+		}
+		files = append(files, coreapplication.UploadFile{Name: input.Name, Data: data})
+	}
+	return files, nil
 }
 
 func (b *GUIBridge) RemoveProject(path string) error {

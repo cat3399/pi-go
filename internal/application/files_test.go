@@ -75,6 +75,67 @@ func TestFileResourcesListAuthorizeAndUpload(t *testing.T) {
 	}
 }
 
+func TestDeleteFileRemovesOnlyOneAuthorizedEntry(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyDirectory := filepath.Join(root, "empty")
+	if err := os.Mkdir(emptyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nonEmptyDirectory := filepath.Join(root, "non-empty")
+	if err := os.Mkdir(nonEmptyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDirectory, "child.txt"), []byte("child"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protectedDirectory := filepath.Join(root, "protected")
+	if err := os.Mkdir(protectedDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service := newFileTestService(t, root)
+	service.allowResourceRoot(protectedDirectory)
+
+	if err := service.DeleteFile(context.Background(), filePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted file still exists: %v", err)
+	}
+	if err := service.DeleteFile(context.Background(), emptyDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(emptyDirectory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted empty directory still exists: %v", err)
+	}
+	if err := service.DeleteFile(context.Background(), nonEmptyDirectory); !errors.Is(err, ErrDirectoryNotEmpty) {
+		t.Fatalf("non-empty directory delete error = %v", err)
+	}
+	if err := service.DeleteFile(context.Background(), protectedDirectory); !errors.Is(err, ErrProtectedResourceRoot) {
+		t.Fatalf("protected directory delete error = %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		outside := filepath.Join(t.TempDir(), "outside.txt")
+		if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(root, "outside-link.txt")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.DeleteFile(context.Background(), link); err != nil {
+			t.Fatal(err)
+		}
+		if content, err := os.ReadFile(outside); err != nil || string(content) != "outside" {
+			t.Fatalf("symbolic-link target changed: %q, %v", content, err)
+		}
+	}
+}
+
 func TestContainsExactPathReferenceMatchesOriginalBoundaries(t *testing.T) {
 	path := "/tmp/report.txt"
 	for _, value := range []string{

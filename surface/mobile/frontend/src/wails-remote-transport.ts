@@ -1,6 +1,7 @@
 import { Call, Events } from "@wailsio/runtime";
 import {
   applyEventData,
+  encodeUploadFiles,
   type EventObserver,
   type EventSubscription,
   type RemoteApplicationTransport,
@@ -55,6 +56,29 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
         path,
         token,
         init.body ?? "",
+      );
+    } finally {
+      this.requests.delete(requestId);
+    }
+  }
+
+  async upload(
+    endpoint: string,
+    path: string,
+    token: string,
+    files: File[],
+  ): Promise<RemoteTransportResponse> {
+    const requestId = `${this.requestPrefix}-${++this.requestSequence}`;
+    this.requests.add(requestId);
+    try {
+      const encoded = await encodeUploadFiles(files);
+      return await call(
+        "UploadFilesWithID",
+        requestId,
+        endpoint,
+        path,
+        token,
+        JSON.stringify(encoded),
       );
     } finally {
       this.requests.delete(requestId);

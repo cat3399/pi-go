@@ -14,6 +14,7 @@ type API interface {
 	BrowseDirectories(context.Context, string) (DirectoryBrowseResult, error)
 	ResolveFile(context.Context, string, string) (FileResource, error)
 	ListFiles(context.Context, string) (FileList, error)
+	DeleteFile(context.Context, string) error
 	InspectUploadTargets(context.Context, string, []string) (UploadTargetInspection, error)
 	SaveUploads(context.Context, string, []UploadFile, UploadConflictStrategy) (UploadResult, error)
 	QueryFileIndex(context.Context, string, string) (FileIndexResult, error)

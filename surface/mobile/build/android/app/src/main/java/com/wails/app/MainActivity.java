@@ -26,6 +26,8 @@ import android.util.Log;
 import android.view.View;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -61,6 +63,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String WAILS_SCHEME = "https";
     private static final String WAILS_HOST = "wails.localhost";
     private static final int FILE_PICKER_REQUEST = 7001;
+    private static final int WEB_FILE_CHOOSER_REQUEST = 7004;
     private static final int CONTENT_INSET_TYPES =
             WindowInsetsCompat.Type.systemBars()
                     | WindowInsetsCompat.Type.displayCutout()
@@ -76,6 +79,8 @@ public class MainActivity extends AppCompatActivity {
 
     // The Go-side dialog ID of the in-flight file picker (-1 when idle)
     private int pendingFilePickerCallbackID = -1;
+    // The WebView callback for an HTML <input type="file"> request.
+    private ValueCallback<Uri[]> pendingWebFilePathCallback;
     private static final int PHOTO_CAPTURE_REQUEST = 7002;
     private static final int VIDEO_CAPTURE_REQUEST = 7003;
     private static final int CAMERA_PERMISSION_REQUEST = 7010;
@@ -255,8 +260,121 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // Android WebView cancels HTML file inputs unless the host handles this
+        // callback. Keep this separate from Wails' Go-side file dialog: the
+        // selected content URIs must be returned to Chromium so it can create
+        // browser File objects and fire the input's change event.
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onShowFileChooser(
+                    WebView view,
+                    ValueCallback<Uri[]> filePathCallback,
+                    FileChooserParams fileChooserParams) {
+                return launchWebFileChooser(filePathCallback, fileChooserParams);
+            }
+        });
+
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
+    }
+
+    /**
+     * Launch the chooser described by Chromium for an HTML file input. Using
+     * FileChooserParams preserves the input's accept and multiple attributes.
+     */
+    private boolean launchWebFileChooser(
+            ValueCallback<Uri[]> callback,
+            WebChromeClient.FileChooserParams params) {
+        if (pendingFilePickerCallbackID != -1 || pendingWebFilePathCallback != null) {
+            callback.onReceiveValue(null);
+            return true;
+        }
+
+        pendingWebFilePathCallback = callback;
+        try {
+            Intent intent = createWebFileChooserIntent(params);
+            startActivityForResult(intent, WEB_FILE_CHOOSER_REQUEST);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to launch HTML file chooser", e);
+            finishWebFileChooser(null);
+        }
+        return true;
+    }
+
+    /**
+     * FileChooserParams#createIntent had incomplete multiple-file support on
+     * older Android WebView releases. Build the open-document intent explicitly
+     * so the Android 11 client keeps both multiple selection and MIME filters.
+     */
+    private Intent createWebFileChooserIntent(WebChromeClient.FileChooserParams params) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.putExtra(
+                Intent.EXTRA_ALLOW_MULTIPLE,
+                params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE);
+
+        List<String> acceptedTypes = new ArrayList<>();
+        String[] requestedTypes = params.getAcceptTypes();
+        if (requestedTypes != null) {
+            for (String requestedType : requestedTypes) {
+                if (requestedType == null) {
+                    continue;
+                }
+                for (String part : requestedType.split(",")) {
+                    String mime = part.trim();
+                    if (mime.contains("/") && !acceptedTypes.contains(mime)) {
+                        acceptedTypes.add(mime);
+                    }
+                }
+            }
+        }
+
+        if (acceptedTypes.size() == 1) {
+            intent.setType(acceptedTypes.get(0));
+        } else {
+            intent.setType("*/*");
+            if (!acceptedTypes.isEmpty()) {
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, acceptedTypes.toArray(new String[0]));
+            }
+        }
+        return intent;
+    }
+
+    private void finishWebFileChooser(@Nullable Uri[] uris) {
+        ValueCallback<Uri[]> callback = pendingWebFilePathCallback;
+        pendingWebFilePathCallback = null;
+        if (callback != null) {
+            callback.onReceiveValue(uris);
+        }
+    }
+
+    /**
+     * Only pass readable content-provider URIs into the WebView. Chooser
+     * results come from another app and therefore must be treated as untrusted.
+     */
+    @Nullable
+    private Uri[] readableContentUris(@Nullable List<Uri> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return null;
+        }
+
+        List<Uri> readable = new ArrayList<>();
+        for (Uri uri : candidates) {
+            if (uri == null || !"content".equals(uri.getScheme())) {
+                continue;
+            }
+            String authority = uri.getAuthority();
+            if (authority == null || authority.equals(getPackageName())
+                    || authority.startsWith(getPackageName() + ".")) {
+                continue;
+            }
+            if (checkCallingOrSelfUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    == PackageManager.PERMISSION_GRANTED) {
+                readable.add(uri);
+            }
+        }
+        return readable.isEmpty() ? null : readable.toArray(new Uri[0]);
     }
 
     private void loadApplication() {
@@ -483,7 +601,7 @@ public class MainActivity extends AppCompatActivity {
      */
     public void launchFilePicker(int callbackID, boolean multiple) {
         synchronized (this) {
-            if (pendingFilePickerCallbackID != -1) {
+            if (pendingFilePickerCallbackID != -1 || pendingWebFilePathCallback != null) {
                 // Only one picker can be in flight
                 bridge.filePickerDone(callbackID);
                 return;
@@ -509,6 +627,25 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == PHOTO_CAPTURE_REQUEST || requestCode == VIDEO_CAPTURE_REQUEST) {
             handleCaptureResult(resultCode, data);
+            return;
+        }
+        if (requestCode == WEB_FILE_CHOOSER_REQUEST) {
+            List<Uri> result = new ArrayList<>();
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                        Uri uri = data.getClipData().getItemAt(i).getUri();
+                        if (uri != null && !result.contains(uri)) {
+                            result.add(uri);
+                        }
+                    }
+                }
+                Uri uri = data.getData();
+                if (uri != null && !result.contains(uri)) {
+                    result.add(uri);
+                }
+            }
+            finishWebFileChooser(readableContentUris(result));
             return;
         }
         if (requestCode != FILE_PICKER_REQUEST) {
@@ -864,6 +1001,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        finishWebFileChooser(null);
         super.onDestroy();
         unregisterSystemEventReceivers();
         if (bridge != null) {

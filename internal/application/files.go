@@ -15,9 +15,16 @@ import (
 )
 
 var (
-	ErrNotFile         = errors.New("not a file")
-	ErrUploadConflict  = errors.New("one or more files already exist")
-	ErrInvalidFileName = errors.New("invalid file name")
+	ErrNotFile               = errors.New("not a file")
+	ErrUploadConflict        = errors.New("one or more files already exist")
+	ErrInvalidFileName       = errors.New("invalid file name")
+	ErrDirectoryNotEmpty     = errors.New("directory is not empty")
+	ErrProtectedResourceRoot = errors.New("cannot delete a workspace root")
+)
+
+const (
+	MaxUploadFileBytes  int64 = 25 * 1024 * 1024
+	MaxUploadTotalBytes int64 = 100 * 1024 * 1024
 )
 
 var webSessionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -140,6 +147,75 @@ func (s *Service) ListFiles(ctx context.Context, target string) (FileList, error
 		return leftName < rightName
 	})
 	return FileList{Path: resource.Path, Entries: entries}, nil
+}
+
+// DeleteFile removes one file-system entry from an authorized resource root.
+// Directories must be empty; recursive removal is intentionally not part of
+// this API. Resolving the parent separately ensures that deleting a symbolic
+// link removes the link itself rather than its target.
+func (s *Service) DeleteFile(ctx context.Context, target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" || !filepath.IsAbs(target) {
+		return ErrResourceAccessDenied
+	}
+	target = filepath.Clean(target)
+	parent := filepath.Dir(target)
+	if parent == target {
+		return ErrResourceAccessDenied
+	}
+	name := filepath.Base(target)
+	if err := validateUploadFileNames([]string{name}); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+	resolvedParent, err := s.authorizeResourcePath(parent, true)
+	if err != nil {
+		return err
+	}
+	parentInfo, err := os.Stat(resolvedParent)
+	if err != nil {
+		return err
+	}
+	if !parentInfo.IsDir() {
+		return ErrPathNotDirectory
+	}
+	destination := filepath.Join(resolvedParent, name)
+	roots, err := s.resourceRoots()
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if sameResourcePath(root, target) || sameResourcePath(root, destination) {
+			return ErrProtectedResourceRoot
+		}
+	}
+	info, err := os.Lstat(destination)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		entries, readErr := os.ReadDir(destination)
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) != 0 {
+			return ErrDirectoryNotEmpty
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return os.Remove(destination)
+}
+
+func sameResourcePath(left, right string) bool {
+	relative, err := filepath.Rel(filepath.Clean(left), filepath.Clean(right))
+	return err == nil && relative == "."
 }
 
 func ignoredFileName(name string) bool {

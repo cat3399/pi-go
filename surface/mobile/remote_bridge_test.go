@@ -82,6 +82,55 @@ func TestRemoteBridgeRequest(t *testing.T) {
 	}
 }
 
+func TestRemoteBridgeUploadsMultipartFiles(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			t.Errorf("method = %q", request.Method)
+		}
+		if request.URL.Path != "/root/api/v1/files/workspace" || request.URL.Query().Get("type") != "upload" {
+			t.Errorf("URL = %q", request.URL.String())
+		}
+		if request.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		if err := request.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		file, header, err := request.FormFile("files")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Filename != "notes.txt" || string(data) != "hello" {
+			t.Errorf("upload = %q %q", header.Filename, data)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"uploaded":["notes.txt"],"skipped":[],"errors":[]}`))
+	}))
+	defer server.Close()
+
+	bridge := NewRemoteBridge()
+	bridge.ctx = context.Background()
+	response, err := bridge.UploadFilesWithID(
+		"upload-1",
+		server.URL+"/root/",
+		"/api/v1/files/workspace?type=upload&conflict=error",
+		"secret",
+		`[{"name":"notes.txt","data":"aGVsbG8="}]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != http.StatusOK || !strings.Contains(response.Body, `"notes.txt"`) {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 func TestRemoteBridgeRequestCanBeCancelled(t *testing.T) {
 	t.Parallel()
 	started := make(chan struct{})

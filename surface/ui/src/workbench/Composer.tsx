@@ -1,5 +1,5 @@
 import { forwardRef, KeyboardEvent, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { Folder, Plus, Square, X } from "lucide-react";
+import { FileText, FileUp, Folder, ImagePlus, LoaderCircle, Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
   ImageAttachment,
@@ -10,10 +10,15 @@ import type {
   SessionStatsInfo,
   SlashCommandInfo,
   TokenUsageInfo,
+  UploadConflictStrategy,
+  UploadResult,
+  UploadTargetInspection,
 } from "../contracts";
+import { AnchoredPopover } from "../primitives/AnchoredPopover";
 import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
 import { ImagePreview } from "../primitives/ImagePreview";
 import { SelectMenu } from "../primitives/SelectMenu";
+import { validateUploadFiles } from "../upload-files";
 import {
   matchSlashCommands,
   slashQuery,
@@ -50,20 +55,52 @@ interface ComposerProps {
   onModelChange(model: SelectedModel): Promise<void>;
   onThinkingLevelChange(level: string): Promise<void>;
   onProjectChange(path: string): Promise<void>;
+  onInspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection>;
+  onUploadFiles(directory: string, files: File[], strategy: UploadConflictStrategy): Promise<UploadResult>;
+  onPreviewFile(path: string): void;
+  onFilesUploaded(): void;
 }
 
 export interface ComposerHandle {
   insertText(value: string): void;
   setDraft(value: string): void;
+  removeWorkspaceFile(path: string): void;
   focus(): void;
 }
 
 const MAX_ATTACHED_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_ATTACHED_IMAGES = 10;
 
+type UploadPhase = "idle" | "checking" | "uploading";
+
+interface UploadedWorkspaceFile {
+  name: string;
+  path: string;
+}
+
+interface PendingUploadConflict {
+  directory: string;
+  files: File[];
+  conflicts: string[];
+  nonReplaceable: string[];
+}
+
 function projectName(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || path;
+}
+
+function joinFilePath(directory: string, name: string): string {
+  const separator = directory.includes("\\") && !directory.includes("/") ? "\\" : "/";
+  return `${directory.replace(/[\\/]+$/, "")}${separator}${name}`;
+}
+
+function normalizedFilePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function fileMention(name: string): string {
+  return name.includes(" ") ? `@"${name}"` : `@${name}`;
 }
 
 const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "prompt", "skill"];
@@ -71,18 +108,31 @@ const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedWorkspaceFile[]>([]);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
+  const [uploadError, setUploadError] = useState("");
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [pendingUploadConflict, setPendingUploadConflict] = useState<PendingUploadConflict | null>(null);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const slashMenuId = useId();
+  const attachmentMenuId = useId();
+  const imageInputId = useId();
+  const uploadInputId = useId();
   const imagesRef = useRef(images);
+  const uploadGenerationRef = useRef(0);
   const composingRef = useRef(false);
   const compositionEndedAtRef = useRef(0);
   imagesRef.current = images;
+  const uploadBusy = uploadPhase !== "idle";
 
   const modelCapabilityKey = props.model
     ? `${props.model.provider}:${props.model.modelId}`
@@ -200,6 +250,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         textareaRef.current?.setSelectionRange(value.length, value.length);
       });
     },
+    removeWorkspaceFile(path) {
+      const deleted = normalizedFilePath(path);
+      setUploadedFiles((current) => current.filter((file) => {
+        const attached = normalizedFilePath(file.path);
+        return attached !== deleted && !attached.startsWith(`${deleted}/`);
+      }));
+    },
     focus() {
       textareaRef.current?.focus();
     },
@@ -212,6 +269,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, []);
 
   useEffect(() => {
+    uploadGenerationRef.current += 1;
+    setUploadedFiles([]);
+    setPendingUploadConflict(null);
+    setUploadResult(null);
+    setUploadError("");
+    setUploadPhase("idle");
+  }, [props.workingDirectory]);
+
+  useEffect(() => {
+    if (props.busy || uploadBusy) setAttachmentMenuOpen(false);
+  }, [props.busy, uploadBusy]);
+
+  useEffect(() => {
     const element = textareaRef.current;
     if (!element) return;
     element.style.height = "0";
@@ -221,15 +291,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const send = async () => {
     const value = text.trim();
     if (!value || submitting || (props.busy && images.length > 0)) return;
+    const mentions = uploadedFiles.map((file) => fileMention(file.name)).join(" ");
+    const prompt = mentions ? `${mentions}\n\n${value}` : value;
     setSubmitting(true);
     setText("");
     try {
-      await props.onSend(value, props.busy ? props.streamingInputBehavior : "prompt", images);
+      await props.onSend(prompt, props.busy ? props.streamingInputBehavior : "prompt", images);
       setPreviewImage(null);
       for (const image of images) {
         if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
       }
       setImages([]);
+      setUploadedFiles([]);
+      setUploadResult(null);
     } catch {
       setText(value);
     } finally {
@@ -318,6 +392,89 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setImages((current) => current.filter((_, currentIndex) => currentIndex !== index));
   };
 
+  const performUpload = async (
+    pending: PendingUploadConflict,
+    strategy: UploadConflictStrategy,
+  ) => {
+    const generation = uploadGenerationRef.current;
+    setPendingUploadConflict(null);
+    setUploadError("");
+    setUploadResult(null);
+    setUploadPhase("uploading");
+    try {
+      const result = await props.onUploadFiles(pending.directory, pending.files, strategy);
+      if (generation !== uploadGenerationRef.current) return;
+      if (result.conflicts?.length) {
+        setPendingUploadConflict({
+          ...pending,
+          conflicts: result.conflicts,
+          nonReplaceable: result.nonReplaceable ?? [],
+        });
+        return;
+      }
+      setUploadResult(result);
+      if (result.uploaded.length > 0) {
+        const next = result.uploaded.map((name) => ({
+          name,
+          path: joinFilePath(pending.directory, name),
+        }));
+        setUploadedFiles((current) => {
+          const byPath = new Map(current.map((file) => [file.path, file]));
+          for (const file of next) byPath.set(file.path, file);
+          return [...byPath.values()];
+        });
+        props.onFilesUploaded();
+      }
+    } catch (error) {
+      if (generation === uploadGenerationRef.current) {
+        setUploadError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === uploadGenerationRef.current) setUploadPhase("idle");
+    }
+  };
+
+  const prepareUpload = async (files: File[]) => {
+    if (props.busy || uploadBusy || files.length === 0) return;
+    const directory = props.workingDirectory.trim();
+    const generation = uploadGenerationRef.current;
+    setAttachmentMenuOpen(false);
+    setPendingUploadConflict(null);
+    setUploadResult(null);
+    setUploadError("");
+    try {
+      if (!directory) throw new Error("请先选择工作区");
+      validateUploadFiles(files);
+      setUploadPhase("checking");
+      const inspection = await props.onInspectUploadTargets(
+        directory,
+        files.map((file) => file.name),
+      );
+      if (generation !== uploadGenerationRef.current) return;
+      const pending = {
+        directory,
+        files,
+        conflicts: inspection.conflicts,
+        nonReplaceable: inspection.nonReplaceable,
+      };
+      if (inspection.conflicts.length > 0) {
+        setPendingUploadConflict(pending);
+        return;
+      }
+      await performUpload(pending, "error");
+    } catch (error) {
+      if (generation === uploadGenerationRef.current) {
+        setUploadError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (generation === uploadGenerationRef.current) setUploadPhase("idle");
+    }
+  };
+
+  const removeUploadedFile = (path: string) => {
+    setUploadedFiles((current) => current.filter((file) => file.path !== path));
+  };
+
   return (
     <div className={`pi-composer-wrap ${props.centered ? "is-centered" : ""}`}>
       {modelNotice && (
@@ -364,20 +521,82 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       )}
       <ComposerInput
         ref={textareaRef}
+        className={!props.active ? "has-project" : ""}
         leading={(
           <>
             <input
-              ref={fileInputRef}
+              id={imageInputId}
+              ref={imageInputRef}
               type="file"
               accept="image/*"
               multiple
               disabled={props.busy}
               hidden
               onChange={(event) => {
+                setAttachmentMenuOpen(false);
                 void addImages(Array.from(event.target.files ?? []));
                 event.target.value = "";
               }}
             />
+            <input
+              id={uploadInputId}
+              ref={uploadInputRef}
+              type="file"
+              multiple
+              disabled={props.busy || uploadBusy}
+              hidden
+              onChange={(event) => {
+                setAttachmentMenuOpen(false);
+                void prepareUpload(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            {Boolean(uploadBusy || pendingUploadConflict || uploadError || uploadResult?.skipped.length || uploadResult?.errors.length) && (
+              <div className="pi-composer-upload-feedback">
+                {uploadBusy && (
+                  <div className="pi-composer-upload-status" role="status">
+                    <LoaderCircle size={14} />
+                    <span>{uploadPhase === "checking" ? "正在检查文件…" : "正在上传文件…"}</span>
+                  </div>
+                )}
+                {pendingUploadConflict && (
+                  <div className="pi-composer-upload-conflict" role="alert">
+                    <p>工作区中已有同名文件：{pendingUploadConflict.conflicts.join("、")}</p>
+                    {pendingUploadConflict.nonReplaceable.length > 0 && (
+                      <small>目录或符号链接不能被替换：{pendingUploadConflict.nonReplaceable.join("、")}</small>
+                    )}
+                    <div>
+                      <button type="button" onClick={() => void performUpload(pendingUploadConflict, "overwrite")}>
+                        替换文件
+                      </button>
+                      <button type="button" onClick={() => void performUpload(pendingUploadConflict, "skip")}>
+                        跳过同名文件
+                      </button>
+                      <button type="button" onClick={() => setPendingUploadConflict(null)}>取消</button>
+                    </div>
+                  </div>
+                )}
+                {uploadError && (
+                  <div className="pi-composer-upload-error" role="alert">
+                    <span>{uploadError}</span>
+                    <button type="button" aria-label="关闭上传错误" onClick={() => setUploadError("")}>
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
+                {uploadResult && (uploadResult.skipped.length > 0 || uploadResult.errors.length > 0) && (
+                  <div className="pi-composer-upload-result" role="status">
+                    {uploadResult.skipped.length > 0 && <span>已跳过：{uploadResult.skipped.join("、")}</span>}
+                    {uploadResult.errors.map((item) => (
+                      <span className="is-error" key={item.name}>{item.name}：{item.error}</span>
+                    ))}
+                    <button type="button" aria-label="关闭上传结果" onClick={() => setUploadResult(null)}>
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {images.length > 0 && (
               <div className="pi-composer-images">
                 {images.map((image, index) => (
@@ -398,6 +617,32 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                       onClick={() => removeImage(index)}
                     >
                       <X size={10} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {uploadedFiles.length > 0 && (
+              <div className="pi-composer-files">
+                {uploadedFiles.map((file) => (
+                  <div className="pi-composer-file" key={file.path}>
+                    <button
+                      className="pi-composer-file-preview"
+                      type="button"
+                      title={`预览 ${file.name}`}
+                      onClick={() => props.onPreviewFile(file.path)}
+                    >
+                      <FileText size={15} />
+                      <span>{file.name}</span>
+                    </button>
+                    <button
+                      className="pi-composer-file-remove"
+                      type="button"
+                      aria-label={`从本次对话移除 ${file.name}`}
+                      title="仅从本次对话移除，工作区文件会保留"
+                      onClick={() => removeUploadedFile(file.path)}
+                    >
+                      <X size={11} />
                     </button>
                   </div>
                 ))}
@@ -433,11 +678,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         toolbarLeft={(
           <>
             <button
+              ref={attachmentButtonRef}
               className="pi-attach-button"
               type="button"
-              aria-label="添加图片"
-              disabled={props.busy || images.length >= MAX_ATTACHED_IMAGES}
-              onClick={() => fileInputRef.current?.click()}
+              aria-label="添加附件"
+              aria-haspopup="menu"
+              aria-expanded={attachmentMenuOpen}
+              aria-controls={attachmentMenuOpen ? attachmentMenuId : undefined}
+              disabled={props.busy || uploadBusy}
+              onClick={() => setAttachmentMenuOpen((open) => !open)}
             >
               <Plus size={18} />
             </button>
@@ -496,6 +745,46 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </>
         )}
       />
+      <AnchoredPopover
+        anchorRef={attachmentButtonRef}
+        open={attachmentMenuOpen}
+        id={attachmentMenuId}
+        className="pi-attachment-menu"
+        role="menu"
+        align="start"
+        placement="above"
+        minWidth={210}
+        onDismiss={() => setAttachmentMenuOpen(false)}
+      >
+        <label
+          htmlFor={images.length >= MAX_ATTACHED_IMAGES ? undefined : imageInputId}
+          role="menuitem"
+          tabIndex={images.length >= MAX_ATTACHED_IMAGES ? -1 : 0}
+          aria-disabled={images.length >= MAX_ATTACHED_IMAGES}
+          onKeyDown={(event) => {
+            if (images.length >= MAX_ATTACHED_IMAGES || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            imageInputRef.current?.click();
+          }}
+        >
+          <ImagePlus size={17} />
+          <span><strong>添加图片</strong><small>作为图片附件发送给模型</small></span>
+        </label>
+        <label
+          htmlFor={!props.workingDirectory.trim() ? undefined : uploadInputId}
+          role="menuitem"
+          tabIndex={!props.workingDirectory.trim() ? -1 : 0}
+          aria-disabled={!props.workingDirectory.trim()}
+          onKeyDown={(event) => {
+            if (!props.workingDirectory.trim() || (event.key !== "Enter" && event.key !== " ")) return;
+            event.preventDefault();
+            uploadInputRef.current?.click();
+          }}
+        >
+          <FileUp size={17} />
+          <span><strong>上传文件</strong><small>保存到当前工作区并添加到对话</small></span>
+        </label>
+      </AnchoredPopover>
       {previewImage && (
         <ImagePreview
           src={previewImage.src}

@@ -3,6 +3,7 @@ package web
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -79,6 +80,14 @@ func TestFileGitAndIndexHTTPContracts(t *testing.T) {
 	upload := serveWebAPIRequest(t, server, http.MethodPost, "/api/v1/files/"+encodedRoot+"?type=upload&conflict=error", uploadBody.Bytes(), multipartWriter.FormDataContentType())
 	if upload.Code != http.StatusOK || !strings.Contains(upload.Body.String(), `"uploaded":["new.txt"]`) {
 		t.Fatalf("upload response = %d %s", upload.Code, upload.Body.String())
+	}
+	deletePath := encodeTestFilePath(filepath.Join(realRoot, "new.txt"))
+	deleted := serveWebAPIRequest(t, server, http.MethodDelete, "/api/v1/files/"+deletePath, nil, "")
+	if deleted.Code != http.StatusOK || !strings.Contains(deleted.Body.String(), `"ok":true`) {
+		t.Fatalf("delete response = %d %s", deleted.Code, deleted.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(realRoot, "new.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted upload still exists: %v", err)
 	}
 
 	statusTarget := "/api/v1/git/status?cwd=" + url.QueryEscape(realRoot)

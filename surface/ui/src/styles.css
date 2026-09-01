@@ -27,6 +27,7 @@
   --pi-focus: #0a84ff;
   --pi-control-focus: rgba(26, 28, 31, 0.36);
   --pi-error: #b42318;
+  --pi-warning: #9a6700;
   --pi-font-regular: 400;
   --pi-font-medium: 500;
   --pi-font-semibold: 600;
@@ -111,13 +112,28 @@ button:disabled {
   cursor: default;
 }
 
+button:focus:not(:focus-visible),
+input:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+[role="button"]:focus:not(:focus-visible) {
+  outline: 0;
+  box-shadow: none;
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
   outline: 1px solid var(--pi-control-focus);
   outline-offset: 2px;
   box-shadow: 0 0 0 3px rgba(26, 28, 31, 0.07);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pi-text) 7%, transparent);
+}
+
+@supports (color: color-mix(in srgb, #000 50%, #fff)) {
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--pi-text) 7%, transparent);
+  }
 }
 
 input,
@@ -466,22 +482,37 @@ input:-webkit-autofill:focus {
 }
 
 .pi-sidebar-row-actions .pi-icon-action,
-.pi-session-confirm .pi-icon-action {
+.pi-inline-confirmation .pi-icon-action {
   flex: 0 0 auto;
   width: 26px;
   height: 26px;
 }
 
-.pi-session-confirm {
+.pi-inline-confirmation {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  height: 31px;
+  align-items: center;
+  min-width: 0;
   color: var(--pi-error);
 }
 
-.pi-session-confirm .pi-icon-action:first-of-type {
+.pi-inline-confirmation > span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-inline-confirmation .pi-icon-action.is-confirm,
+.pi-inline-confirmation .pi-icon-action.is-confirm:hover:not(:disabled),
+.pi-inline-confirmation .pi-icon-action.is-confirm:focus-visible {
   background: var(--pi-error);
   color: #fff;
+}
+
+.pi-session-confirm {
+  height: 31px;
 }
 
 .pi-session-renaming input {
@@ -1522,6 +1553,162 @@ input:-webkit-autofill:focus {
   cursor: pointer;
 }
 
+.pi-composer-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px 14px 0;
+}
+
+.pi-composer-file {
+  display: flex;
+  min-width: 0;
+  max-width: min(240px, 100%);
+  height: 34px;
+  align-items: center;
+  border: 1px solid var(--pi-border);
+  border-radius: var(--pi-radius-sm);
+  background: var(--pi-panel);
+}
+
+.pi-composer-file-preview {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 5px 0 9px;
+  border: 0;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  cursor: pointer;
+}
+
+.pi-composer-file-preview:hover {
+  color: var(--pi-text);
+}
+
+.pi-composer-file-preview svg {
+  flex: 0 0 auto;
+}
+
+.pi-composer-file-preview span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-composer-file-remove,
+.pi-composer-upload-error button,
+.pi-composer-upload-result button {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pi-text-tertiary);
+  cursor: pointer;
+}
+
+.pi-composer-file-remove:hover,
+.pi-composer-upload-error button:hover,
+.pi-composer-upload-result button:hover {
+  background: var(--pi-hover);
+  color: var(--pi-text);
+}
+
+.pi-composer-upload-feedback {
+  display: grid;
+  gap: 7px;
+  padding: 10px 13px 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.pi-composer-upload-status,
+.pi-composer-upload-error,
+.pi-composer-upload-result {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--pi-text-secondary);
+}
+
+.pi-composer-upload-status svg {
+  flex: 0 0 auto;
+  animation: pi-spin 900ms linear infinite;
+}
+
+.pi-composer-upload-error {
+  color: var(--pi-error);
+}
+
+.pi-composer-upload-error > span,
+.pi-composer-upload-result > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pi-composer-upload-error > span {
+  flex: 1 1 auto;
+}
+
+.pi-composer-upload-result {
+  flex-wrap: wrap;
+}
+
+.pi-composer-upload-result .is-error {
+  color: var(--pi-error);
+}
+
+.pi-composer-upload-result button {
+  margin-left: auto;
+}
+
+.pi-composer-upload-conflict {
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--pi-warning) 45%, var(--pi-border));
+  border-radius: var(--pi-radius-sm);
+  background: color-mix(in srgb, var(--pi-warning) 7%, var(--pi-panel));
+}
+
+.pi-composer-upload-conflict p,
+.pi-composer-upload-conflict small {
+  display: block;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.pi-composer-upload-conflict small {
+  margin-top: 3px;
+  color: var(--pi-warning);
+}
+
+.pi-composer-upload-conflict > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.pi-composer-upload-conflict button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--pi-border);
+  border-radius: 6px;
+  background: var(--pi-bg);
+  color: var(--pi-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .pi-composer:focus-within {
   --pi-composer-stroke-color: var(--pi-control-focus);
 }
@@ -1587,6 +1774,76 @@ input:-webkit-autofill:focus {
 .pi-attach-button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.pi-attachment-menu {
+  z-index: 210;
+  display: grid;
+  gap: 2px;
+  padding: 5px;
+  overflow: hidden auto;
+  border-radius: 12px;
+  background: var(--pi-surface-elevated);
+  box-shadow: var(--pi-elevation-popover);
+  -webkit-backdrop-filter: var(--pi-surface-backdrop-filter);
+  backdrop-filter: var(--pi-surface-backdrop-filter);
+}
+
+.pi-attachment-menu > button,
+.pi-attachment-menu > label {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.pi-attachment-menu > button:hover:not(:disabled),
+.pi-attachment-menu > label:hover:not([aria-disabled="true"]),
+.pi-attachment-menu > button:focus-visible,
+.pi-attachment-menu > label:focus-visible {
+  background: var(--pi-hover);
+  color: var(--pi-text);
+}
+
+.pi-attachment-menu > button:disabled,
+.pi-attachment-menu > label[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.pi-attachment-menu > button > svg,
+.pi-attachment-menu > label > svg {
+  justify-self: center;
+}
+
+.pi-attachment-menu > button > span,
+.pi-attachment-menu > label > span,
+.pi-attachment-menu strong,
+.pi-attachment-menu small {
+  display: block;
+  min-width: 0;
+}
+
+.pi-attachment-menu strong {
+  color: var(--pi-text);
+  font-size: 12px;
+  font-weight: var(--pi-font-medium);
+}
+
+.pi-attachment-menu small {
+  margin-top: 1px;
+  color: var(--pi-text-tertiary);
+  font-size: 10px;
+  line-height: 14px;
 }
 
 .pi-composer-context {
@@ -4273,11 +4530,14 @@ input:-webkit-autofill:focus {
 
   .pi-composer-left {
     flex: 0 0 auto;
-    max-width: 60px;
+    max-width: 105px;
   }
 
   .pi-attach-button {
-    display: none;
+    display: grid;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 auto;
   }
 
   .pi-composer-toolbar {
@@ -4302,6 +4562,10 @@ input:-webkit-autofill:focus {
     max-width: min(190px, calc(100vw - 120px));
     height: 38px;
     flex: 0 0 auto;
+  }
+
+  .pi-composer.has-project .pi-model-config-trigger {
+    max-width: min(190px, calc(100vw - 220px));
   }
 
   .pi-settings-page {
@@ -4346,12 +4610,6 @@ input:-webkit-autofill:focus {
 .pi-workbench.is-mobile button,
 .pi-workbench.is-mobile [role="button"] {
   -webkit-tap-highlight-color: transparent;
-}
-
-.pi-workbench.is-mobile button:focus:not(:focus-visible),
-.pi-workbench.is-mobile [role="button"]:focus:not(:focus-visible) {
-  outline: 0;
-  box-shadow: none;
 }
 
 .pi-mobile-fatal {
@@ -4448,7 +4706,9 @@ input:-webkit-autofill:focus {
 }
 
 .pi-workbench.is-mobile .pi-attach-button {
-  display: none;
+  display: grid;
+  width: 40px;
+  height: 40px;
 }
 
 .pi-workbench.is-mobile .pi-settings-page {
@@ -4468,7 +4728,7 @@ input:-webkit-autofill:focus {
   height: 36px;
 }
 
-.pi-workbench.is-mobile .pi-session-confirm .pi-icon-action {
+.pi-workbench.is-mobile .pi-inline-confirmation .pi-icon-action {
   width: 34px;
   height: 34px;
 }
@@ -4541,6 +4801,10 @@ input:-webkit-autofill:focus {
   max-width: min(190px, calc(100vw - 120px));
   height: 38px;
   flex: 0 0 auto;
+}
+
+.pi-workbench.is-mobile .pi-composer.has-project .pi-model-config-trigger {
+  max-width: min(190px, calc(100vw - 224px));
 }
 
 .pi-workbench.is-mobile .pi-context-ring {
@@ -4728,6 +4992,15 @@ input:-webkit-autofill:focus {
   background: var(--pi-hover);
 }
 
+.pi-file-delete-confirm {
+  width: 100%;
+  height: 100%;
+  gap: 2px;
+  padding: 0 4px 0 var(--pi-file-label-indent);
+  border-radius: inherit;
+  font-size: 11px;
+}
+
 .pi-file-tree-content {
   flex: 1 1 auto;
   min-height: 0;
@@ -4737,6 +5010,8 @@ input:-webkit-autofill:focus {
 }
 
 .pi-file-row {
+  --pi-file-label-indent: calc(var(--pi-file-indent) + 36px);
+
   position: relative;
   display: flex;
   align-items: center;
@@ -4746,7 +5021,8 @@ input:-webkit-autofill:focus {
 }
 
 .pi-file-row:hover,
-.pi-file-row.is-selected {
+.pi-file-row.is-selected,
+.pi-file-row.is-confirming-delete {
   background: var(--pi-hover);
 }
 
@@ -4829,6 +5105,11 @@ input:-webkit-autofill:focus {
 .pi-file-actions button:focus-visible {
   background: var(--pi-hover);
   color: var(--pi-focus);
+}
+
+.pi-file-actions button.is-danger:hover,
+.pi-file-actions button.is-danger:focus-visible {
+  color: var(--pi-error);
 }
 
 .pi-file-actions.is-visible,

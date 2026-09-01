@@ -75,6 +75,7 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("DELETE /api/v1/worktrees", handleWorktreeRemove(api))
 	mux.HandleFunc("GET /api/v1/files/{path...}", handleFileGet(api))
 	mux.HandleFunc("POST /api/v1/files/{path...}", handleFileUpload(api))
+	mux.HandleFunc("DELETE /api/v1/files/{path...}", handleFileDelete(api))
 	mux.HandleFunc("GET /api/v1/file-index", handleFileIndex(api))
 	mux.HandleFunc("GET /api/v1/git/status", handleGitStatus(api))
 	mux.HandleFunc("GET /api/v1/git/diff", handleGitDiff(api))
