@@ -4,7 +4,7 @@ function validTokenCount(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function assistantUsage(message: AgentMessage | null | undefined): TokenUsageInfo | null {
+export function assistantUsage(message: AgentMessage | null | undefined): TokenUsageInfo | null {
   if (
     message?.role !== "assistant"
     || message.stopReason === "aborted"
@@ -25,17 +25,43 @@ function assistantUsage(message: AgentMessage | null | undefined): TokenUsageInf
   return reportedTotal > 0 || componentTotal > 0 ? usage : null;
 }
 
+export function assistantResponseKey(message: AgentMessage | null | undefined): string | null {
+  if (message?.role !== "assistant") return null;
+  const timestamp = message.timestamp;
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) return null;
+  return JSON.stringify([
+    timestamp,
+    typeof message.provider === "string" ? message.provider : "",
+    typeof message.api === "string" ? message.api : "",
+    typeof message.model === "string" ? message.model : "",
+  ]);
+}
+
+export interface LatestAssistantUsageInfo {
+  usage: TokenUsageInfo;
+  responseKey: string | null;
+}
+
+export function latestAssistantUsageInfo(
+  messages: AgentMessage[],
+  streamingMessage?: AgentMessage | null,
+): LatestAssistantUsageInfo | null {
+  const streamingUsage = assistantUsage(streamingMessage);
+  if (streamingUsage) {
+    return { usage: streamingUsage, responseKey: assistantResponseKey(streamingMessage) };
+  }
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const usage = assistantUsage(messages[index]);
+    if (usage) return { usage, responseKey: assistantResponseKey(messages[index]) };
+  }
+  return null;
+}
+
 export function latestAssistantUsage(
   messages: AgentMessage[],
   streamingMessage?: AgentMessage | null,
 ): TokenUsageInfo | null {
-  const streamingUsage = assistantUsage(streamingMessage);
-  if (streamingUsage) return streamingUsage;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const usage = assistantUsage(messages[index]);
-    if (usage) return usage;
-  }
-  return null;
+  return latestAssistantUsageInfo(messages, streamingMessage)?.usage ?? null;
 }
 
 export function messageText(message: AgentMessage | null | undefined): string {

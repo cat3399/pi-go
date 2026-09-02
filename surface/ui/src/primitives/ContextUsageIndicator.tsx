@@ -11,6 +11,7 @@ import { AnchoredPopover } from "./AnchoredPopover";
 interface ContextUsageIndicatorProps {
   usage: ContextUsage | null;
   latestUsage: TokenUsageInfo | null;
+  latestTokensPerSecond: number | null;
   sessionStats: SessionStatsInfo | null;
 }
 
@@ -39,6 +40,11 @@ function formatCost(value: number): string {
   return `$${value.toFixed(4)}`;
 }
 
+function formatTokensPerSecond(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value <= 0) return "—";
+  return `${value.toFixed(1)} token/s`;
+}
+
 function DetailRows(props: { rows: Array<[string, string]> }) {
   return (
     <dl>
@@ -52,7 +58,12 @@ function DetailRows(props: { rows: Array<[string, string]> }) {
   );
 }
 
-export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: ContextUsageIndicatorProps) {
+export function ContextUsageIndicator({
+  usage,
+  latestUsage,
+  latestTokensPerSecond,
+  sessionStats,
+}: ContextUsageIndicatorProps) {
   const rawPercent = usage?.percent;
   const percent = typeof rawPercent === "number" && Number.isFinite(rawPercent)
     ? Math.max(0, Math.min(100, rawPercent))
@@ -97,7 +108,8 @@ export function ContextUsageIndicator({ usage, latestUsage, sessionStats }: Cont
     ["输入", formatTokens(promptTokens(latestUsage))],
     ["缓存", cacheRate(latestUsage)],
     ["输出", formatTokens(latestUsage.output)],
-  ] : [["输入", "—"], ["缓存", "—"], ["输出", "—"]];
+    ["TPS", formatTokensPerSecond(latestTokensPerSecond)],
+  ] : [["输入", "—"], ["缓存", "—"], ["输出", "—"], ["TPS", "—"]];
   const cumulativeInput = sessionStats
     ? sessionStats.tokens.input + sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite
     : null;

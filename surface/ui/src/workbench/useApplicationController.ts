@@ -22,7 +22,7 @@ import {
   type ToolEntry,
   type ToolPreset,
 } from "../tool-presets";
-import { messageText } from "./message";
+import { assistantResponseKey, assistantUsage, messageText } from "./message";
 
 type ControllerStatus = "connecting" | "auth" | "ready" | "error";
 export type SendBehavior = "prompt" | "steer" | "follow_up";
@@ -48,6 +48,7 @@ export interface ApplicationController {
   messages: AgentMessage[];
   pendingMessages: AgentMessage[];
   streamingMessage: AgentMessage | null;
+  latestGenerationSpeed: AssistantGenerationSpeed | null;
   busy: boolean;
   login(password: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
@@ -93,6 +94,32 @@ interface PendingQueueMessage {
   expectedOccurrence: number;
 }
 
+export interface AssistantGenerationSpeed {
+  responseKey: string;
+  tokensPerSecond: number;
+}
+
+interface ActiveGenerationTiming {
+  sessionId: string;
+  firstOutputAt: number | null;
+}
+
+function generationClockNow(): number {
+  return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function hasEffectiveAssistantDelta(event: ApplicationEventEnvelope["event"]): boolean {
+  const value = event.assistantMessageEvent;
+  if (!value || typeof value !== "object") return false;
+  const update = value as Record<string, unknown>;
+  const type = update.type;
+  return (
+    type === "text_delta"
+    || type === "thinking_delta"
+    || type === "toolcall_delta"
+  ) && typeof update.delta === "string" && update.delta.length > 0;
+}
+
 function userTextCount(messages: AgentMessage[], text: string): number {
   return messages.reduce((count, message) => (
     message.role === "user" && messageText(message) === text ? count + 1 : count
@@ -135,6 +162,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [pendingQueueMessages, setPendingQueueMessages] = useState<PendingQueueMessage[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<AgentMessage | null>(null);
+  const [latestGenerationSpeed, setLatestGenerationSpeed] = useState<AssistantGenerationSpeed | null>(null);
   const [busy, setBusy] = useState(false);
 
   const activeSessionRef = useRef<string | null>(null);
@@ -150,6 +178,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const newSessionThinkingOverriddenRef = useRef(false);
   const sessionStatsOpenRef = useRef(false);
   const turnProjectionRequestRef = useRef(0);
+  const activeGenerationTimingRef = useRef<ActiveGenerationTiming | null>(null);
 
   messagesRef.current = messages;
 
@@ -308,11 +337,36 @@ export function useApplicationController(client: ApplicationClient): Application
         setBusy(true);
         setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
         break;
-      case "message_start":
+      case "message_start": {
+        const message = event.message;
+        if (message && typeof message === "object" && (message as AgentMessage).role !== "user") {
+          const assistant = message as AgentMessage;
+          setStreamingMessage(assistant);
+          if (assistant.role === "assistant") {
+            activeGenerationTimingRef.current = {
+              sessionId: envelope.sessionId,
+              firstOutputAt: null,
+            };
+          }
+        }
+        break;
+      }
       case "message_update": {
         const message = event.message;
         if (message && typeof message === "object" && (message as AgentMessage).role !== "user") {
-          setStreamingMessage(message as AgentMessage);
+          const assistant = message as AgentMessage;
+          setStreamingMessage(assistant);
+          if (assistant.role === "assistant" && hasEffectiveAssistantDelta(event)) {
+            const timing = activeGenerationTimingRef.current;
+            if (!timing || timing.sessionId !== envelope.sessionId) {
+              activeGenerationTimingRef.current = {
+                sessionId: envelope.sessionId,
+                firstOutputAt: generationClockNow(),
+              };
+            } else if (timing.firstOutputAt === null) {
+              timing.firstOutputAt = generationClockNow();
+            }
+          }
         }
         break;
       }
@@ -320,6 +374,26 @@ export function useApplicationController(client: ApplicationClient): Application
         const completed = event.message;
         if (!completed || typeof completed !== "object") break;
         const message = completed as AgentMessage;
+        if (message.role === "assistant") {
+          const timing = activeGenerationTimingRef.current;
+          activeGenerationTimingRef.current = null;
+          const usage = assistantUsage(message);
+          const responseKey = assistantResponseKey(message);
+          if (
+            timing?.sessionId === envelope.sessionId
+            && timing.firstOutputAt !== null
+            && usage
+            && responseKey
+            && usage.output > 0
+          ) {
+            // Tool execution starts after assistant message_end, so command time is outside this window.
+            const durationMs = generationClockNow() - timing.firstOutputAt;
+            const tokensPerSecond = usage.output * 1_000 / durationMs;
+            if (durationMs > 0 && Number.isFinite(tokensPerSecond)) {
+              setLatestGenerationSpeed({ responseKey, tokensPerSecond });
+            }
+          }
+        }
         const currentMessages = messagesRef.current;
         let nextMessages: AgentMessage[];
         if (message.role === "user") {
@@ -348,6 +422,7 @@ export function useApplicationController(client: ApplicationClient): Application
         }
         break;
       case "agent_end":
+        activeGenerationTimingRef.current = null;
         setStreamingMessage(null);
         break;
       case "agent_settled":
@@ -478,6 +553,8 @@ export function useApplicationController(client: ApplicationClient): Application
     messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
+    activeGenerationTimingRef.current = null;
+    setLatestGenerationSpeed(null);
     setBusy(false);
     try {
       const auth = await client.authStatus();
@@ -544,6 +621,8 @@ export function useApplicationController(client: ApplicationClient): Application
     messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
+    activeGenerationTimingRef.current = null;
+    setLatestGenerationSpeed(null);
     setError("");
     try {
       const view = await loadSession(sessionId);
@@ -589,6 +668,8 @@ export function useApplicationController(client: ApplicationClient): Application
     messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
+    activeGenerationTimingRef.current = null;
+    setLatestGenerationSpeed(null);
     setBusy(false);
     setError("");
     if (nextCwd) {
@@ -1267,6 +1348,7 @@ export function useApplicationController(client: ApplicationClient): Application
     messages,
     pendingMessages,
     streamingMessage,
+    latestGenerationSpeed,
     busy,
     login,
     selectSession,

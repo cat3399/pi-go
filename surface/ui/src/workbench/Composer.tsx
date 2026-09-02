@@ -42,6 +42,7 @@ interface ComposerProps {
   thinkingLevel: string;
   contextUsage: ContextUsage | null;
   latestUsage: TokenUsageInfo | null;
+  latestTokensPerSecond: number | null;
   sessionStats: SessionStatsInfo | null;
   busy: boolean;
   streamingInputBehavior: StreamingInputBehavior;
@@ -710,6 +711,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <ContextUsageIndicator
                 usage={props.contextUsage}
                 latestUsage={props.latestUsage}
+                latestTokensPerSecond={props.latestTokensPerSecond}
                 sessionStats={props.sessionStats}
               />
             )}

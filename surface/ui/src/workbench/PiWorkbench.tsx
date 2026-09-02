@@ -12,7 +12,7 @@ import { Composer, type ComposerHandle } from "./Composer";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import { MessageList } from "./MessageList";
-import { latestAssistantUsage } from "./message";
+import { latestAssistantUsageInfo } from "./message";
 import { SessionPointPicker } from "./SessionPointPicker";
 import { SessionStatsPanel } from "./SessionStatsPanel";
 import { SettingsDrawer } from "./SettingsDrawer";
@@ -129,10 +129,15 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     () => activeTitle(controller.activeSessionId, sessions),
     [controller.activeSessionId, sessions],
   );
-  const latestUsage = useMemo(
-    () => latestAssistantUsage(controller.messages, controller.streamingMessage),
+  const latestUsageInfo = useMemo(
+    () => latestAssistantUsageInfo(controller.messages, controller.streamingMessage),
     [controller.messages, controller.streamingMessage],
   );
+  const latestUsage = latestUsageInfo?.usage ?? null;
+  const latestTokensPerSecond = latestUsageInfo?.responseKey
+    && latestUsageInfo.responseKey === controller.latestGenerationSpeed?.responseKey
+    ? controller.latestGenerationSpeed.tokensPerSecond
+    : null;
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
   const mobileGesturesEnabled = mobile
     && controller.status === "ready"
@@ -477,6 +482,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               thinkingLevel={controller.thinkingLevel}
               contextUsage={controller.runtimeState?.contextUsage ?? controller.sessionStats?.contextUsage ?? null}
               latestUsage={latestUsage}
+              latestTokensPerSecond={latestTokensPerSecond}
               sessionStats={controller.sessionStats}
               busy={controller.busy}
               streamingInputBehavior={streamingInputBehavior}
