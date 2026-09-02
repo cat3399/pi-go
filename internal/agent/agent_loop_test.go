@@ -332,7 +332,7 @@ func TestAgentLoopPrepareStopAndQueuesOrder(t *testing.T) {
 		t.Fatalf("second snapshot = model %s prompt %q thinking %q", requests[1].Model().ID(), requests[1].SystemPrompt(), requests[1].ThinkingLevel())
 	}
 	assertLoopStrings(t, loopRoles(result.Messages), []string{"user", "assistant", "user", "assistant"})
-	assertLoopStrings(t, callbacks, []string{"steering", "prepare", "stop", "steering", "prepare", "stop"})
+	assertLoopStrings(t, callbacks, []string{"steering", "stop", "steering", "prepare", "stop"})
 }
 
 func TestAgentLoopProviderFailureEndsWithoutTurnCallbacksOrQueues(t *testing.T) {

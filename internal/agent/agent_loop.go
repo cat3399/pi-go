@@ -72,14 +72,14 @@ type AgentLoopAfterToolCallResult struct {
 
 type AgentLoopAfterToolCallHook func(context.Context, AgentLoopAfterToolCallContext) (AgentLoopAfterToolCallResult, error)
 
-// AgentLoopTurnContext is supplied after turn_end. Every field is an immutable
-// snapshot; callbacks cannot mutate the loop by retaining or editing slices.
+// AgentLoopTurnContext is an immutable snapshot of a completed turn.
+// ShouldStopAfterTurn receives it after turn_end; PrepareNextTurn receives the
+// same completed-turn state only when another provider turn will start.
 type AgentLoopTurnContext struct {
-	Message      llm.AssistantTerminal
-	ToolResults  []agentmsg.Message
-	Context      AgentLoopContext
-	NewMessages  []agentmsg.Message
-	willContinue bool
+	Message     llm.AssistantTerminal
+	ToolResults []agentmsg.Message
+	Context     AgentLoopContext
+	NewMessages []agentmsg.Message
 }
 
 // AgentLoopTurnUpdate replaces selected runtime values before another provider
@@ -124,7 +124,7 @@ type AgentLoopConfig struct {
 	GetFollowUpMessages AgentLoopMessageSource
 	// prepareProviderTurn refreshes request-scoped runtime values after this
 	// turn's turn_start and queued user delivery, immediately before invoking
-	// the provider. It is distinct from the upstream after-turn
+	// the provider. It is distinct from the upstream next-turn
 	// PrepareNextTurn contract below.
 	prepareProviderTurn agentLoopPrepareProviderTurn
 	PrepareNextTurn     AgentLoopPrepareNextTurn
@@ -292,17 +292,50 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 	if err != nil {
 		return result, err
 	}
-	firstTurn := true
+	var lastCompletedTurn *AgentLoopTurnContext
 	for {
 		hasMoreToolCalls := true
 		for hasMoreToolCalls || len(pending) != 0 {
-			if !firstTurn {
+			if lastCompletedTurn != nil {
+				if l.config.PrepareNextTurn != nil {
+					input := cloneAgentLoopTurnContext(
+						lastCompletedTurn.Message,
+						lastCompletedTurn.ToolResults,
+						lastCompletedTurn.Context,
+						lastCompletedTurn.NewMessages,
+					)
+					update, prepareErr := l.config.PrepareNextTurn(ctx, input)
+					if prepareErr != nil {
+						return result, prepareErr
+					}
+					if update != nil {
+						if update.Context != nil {
+							current = cloneAgentLoopContext(*update.Context)
+						}
+						if update.Model != nil {
+							invocation.model = *update.Model
+						}
+						if update.ThinkingLevel != nil {
+							invocation.thinkingLevel = *update.ThinkingLevel
+						}
+						if update.Stream != nil {
+							invocation.stream = provider.CloneStreamOptions(*update.Stream)
+						}
+					}
+				}
+				// Next-turn preparation may be long-running (for example,
+				// compaction). Pick up steering queued while it ran only when
+				// the earlier poll was empty, preserving one-at-a-time delivery.
+				if len(pending) == 0 {
+					pending, err = l.messagesFrom(ctx, l.config.GetSteeringMessages)
+					if err != nil {
+						return result, err
+					}
+				}
 				turn++
 				if err := l.emit(ctx, TurnStartEvent{RunID: l.config.RunID, Turn: turn}); err != nil {
 					return result, err
 				}
-			} else {
-				firstTurn = false
 			}
 			for _, message := range pending {
 				processed, err := l.emitMessage(ctx, turn, message)
@@ -380,30 +413,9 @@ func (l *AgentLoop) run(ctx context.Context, invocation *agentLoopInvocation, cu
 			}
 
 			turnContext := cloneAgentLoopTurnContext(terminal, toolResults, current, newMessages)
-			turnContext.willContinue = hasMoreToolCalls
-			if l.config.PrepareNextTurn != nil {
-				update, prepareErr := l.config.PrepareNextTurn(ctx, turnContext)
-				if prepareErr != nil {
-					return result, prepareErr
-				}
-				if update != nil {
-					if update.Context != nil {
-						current = cloneAgentLoopContext(*update.Context)
-					}
-					if update.Model != nil {
-						invocation.model = *update.Model
-					}
-					if update.ThinkingLevel != nil {
-						invocation.thinkingLevel = *update.ThinkingLevel
-					}
-					if update.Stream != nil {
-						invocation.stream = provider.CloneStreamOptions(*update.Stream)
-					}
-				}
-			}
+			lastCompletedTurn = &turnContext
 			if l.config.ShouldStopAfterTurn != nil {
 				stopContext := cloneAgentLoopTurnContext(terminal, toolResults, current, newMessages)
-				stopContext.willContinue = hasMoreToolCalls
 				stop, stopErr := l.config.ShouldStopAfterTurn(ctx, stopContext)
 				if stopErr != nil {
 					return result, stopErr

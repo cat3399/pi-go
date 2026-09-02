@@ -1684,6 +1684,7 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 	}
 
 	var summaries atomic.Uint32
+	var compactionEnded atomic.Bool
 	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{Clock: func() time.Time { return agentTestEpoch }})
 	if err != nil {
 		t.Fatal(err)
@@ -1692,9 +1693,19 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := provider.FactoryResponseStep(func(context.Context, provider.Request, uint64) (llm.AssistantTerminal, error) {
-		if summaries.Load() != 1 {
-			t.Errorf("next provider request started before compaction: summaries=%d", summaries.Load())
+	second, err := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
+		if summaries.Load() != 1 || !compactionEnded.Load() {
+			t.Errorf("next provider request started before compaction completed: summaries=%d ended=%t", summaries.Load(), compactionEnded.Load())
+		}
+		queued := false
+		for _, message := range request.Messages() {
+			if message.Role() == llm.RoleUser && messageText(t, message) == "queued during compaction" {
+				queued = true
+				break
+			}
+		}
+		if !queued {
+			t.Errorf("next provider request omitted steering queued during compaction: %#v", request.Messages())
 		}
 		return mustTextTerminal(t, "done"), nil
 	})
@@ -1705,7 +1716,8 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 		t.Fatal(err)
 	}
 
-	runtime, err := agent.NewSession(agent.SessionConfig{
+	var runtime *agent.AgentSession
+	runtime, err = agent.NewSession(agent.SessionConfig{
 		Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
 		Tool: &fakeTool{name: "read", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
 			return agent.ToolOutput{Text: "12345678901234567890123456789012"}, nil
@@ -1714,6 +1726,9 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 		KeepRecentTokens: 10, KeepRecentTokensSet: true,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			summaries.Add(1)
+			if err := runtime.Steer("queued during compaction"); err != nil {
+				return session.SummaryOutput{}, err
+			}
 			return session.SummaryOutput{Text: "mid-turn checkpoint"}, nil
 		}),
 	})
@@ -1721,8 +1736,22 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 		t.Fatal(err)
 	}
 	var compactions []agent.CompactionEndEvent
+	agentStarts, agentEnds := 0, 0
+	secondTurnRestored := false
 	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		if ended, ok := event.(agent.CompactionEndEvent); ok {
+		switch value := event.(type) {
+		case agent.AgentStartEvent:
+			agentStarts++
+		case agent.SessionAgentEndEvent:
+			agentEnds++
+		case agent.TurnStartEvent:
+			if value.Turn == 2 {
+				activity := runtime.Activity()
+				secondTurnRestored = activity.Phase == agent.PhaseProvider && !activity.IsCompacting
+			}
+		case agent.CompactionEndEvent:
+			ended := value
+			compactionEnded.Store(true)
 			compactions = append(compactions, ended)
 		}
 	})
@@ -1737,8 +1766,69 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 	if summaries.Load() != 1 {
 		t.Fatalf("summaries = %d, want 1", summaries.Load())
 	}
-	if len(compactions) != 1 || compactions[0].Reason != agent.CompactionThreshold || !compactions[0].WillRetry || compactions[0].Aborted {
+	if len(compactions) != 1 || compactions[0].Reason != agent.CompactionThreshold || compactions[0].WillRetry || compactions[0].Aborted {
 		t.Fatalf("compaction = %#v", compactions)
+	}
+	if agentStarts != 1 || agentEnds != 1 || !secondTurnRestored {
+		t.Fatalf("same-run lifecycle starts=%d ends=%d secondTurnRestored=%t", agentStarts, agentEnds, secondTurnRestored)
+	}
+}
+
+func TestAgentSessionSkipsMidRunCompactionAfterTerminatingToolWithoutContinuation(t *testing.T) {
+	model, err := newAgentModel(provider.ModelSpec{
+		Provider: "scripted", API: "scripted", ID: "terminating-tool-compaction",
+		Input: []provider.InputKind{provider.InputText}, ContextWindow: 100, MaxTokens: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := provider.NewToolDefinition("finish", "finish", false, []byte(`{"type":"object"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := llm.NewToolCallBlock("call-finish", "finish", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolTurn, err := newAssistantToolUseMessage(
+		[]llm.AssistantBlock{mustTextBlock(t, "finishing"), call}, mustUsage(t, 70, 5), agentTestEpoch,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := newScriptedProvider(t, toolTurn)
+	var summaries atomic.Uint32
+	runtime, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
+		Tool: &fakeTool{name: "finish", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+			return agent.ToolOutput{Text: "12345678901234567890123456789012", Terminate: true}, nil
+		}},
+		Tools: []provider.ToolDefinition{definition}, ContextReserve: 20, ContextReserveSet: true,
+		KeepRecentTokens: 10, KeepRecentTokensSet: true,
+		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
+			summaries.Add(1)
+			return session.SummaryOutput{Text: "unexpected checkpoint"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactions := 0
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		if _, ok := event.(agent.CompactionStartEvent); ok {
+			compactions++
+		}
+	})
+
+	result, err := runtime.Run(context.Background(), "start")
+	if err != nil {
+		t.Fatalf("Run = (%#v, %v)", result, err)
+	}
+	if implementation.CallCount() != 1 || result.ProviderTurns() != 1 || result.ToolExecutions() != 1 {
+		t.Fatalf("calls/turns/tools = %d/%d/%d", implementation.CallCount(), result.ProviderTurns(), result.ToolExecutions())
+	}
+	if summaries.Load() != 0 || compactions != 0 {
+		t.Fatalf("terminating tool triggered compaction: summaries=%d starts=%d", summaries.Load(), compactions)
 	}
 }
 

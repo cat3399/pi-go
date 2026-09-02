@@ -127,7 +127,7 @@ capabilities:
       symbol: AgentLoopPrepareNextTurn
     surfaceExposure: {application: not_applicable, jsonl: not_applicable, http: not_applicable}
     evidence:
-      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain}
+      - {kind: go_test, path: internal/agent/agent_loop_contract_test.go, symbol: TestAgentLoopShouldStopRunsBeforeNextTurnPreparationAndQueueDrain}
       - {kind: upstream_oracle, path: internal/agent/upstream_turn_snapshot_oracle_test.go, symbol: TestUpstreamAgentSessionTurnSnapshotOracle}
     intentionalGoDifference: Request state is an immutable Go value snapshot rather than a mutable TypeScript object graph.
     remainingDifference: none

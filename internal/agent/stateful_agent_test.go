@@ -628,7 +628,7 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 	if !reflect.DeepEqual(legacyTurns, []uint32{1, 2}) {
 		t.Fatalf("legacy PrepareTurn calls = %v", legacyTurns)
 	}
-	if len(callbacks) != 2 {
+	if len(callbacks) != 1 {
 		t.Fatalf("PrepareNextTurn calls = %d", len(callbacks))
 	}
 	toolTurn := callbacks[0]
@@ -649,9 +649,6 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 		messageText(t, secondMessages[len(secondMessages)-1]) != "queued-after-prepare" {
 		t.Fatalf("second request = model %q thinking %q system %q messages %#v", second.Model().ID(), second.ThinkingLevel(), second.SystemPrompt(), secondMessages)
 	}
-	if _, ok := callbacks[1].Message.(llm.AssistantTextMessage); !ok || len(callbacks[1].ToolResults) != 0 {
-		t.Fatalf("terminal callback = %T results %#v", callbacks[1].Message, callbacks[1].ToolResults)
-	}
 	callbacks[0].Context.Messages[0] = nil
 	callbacks[0].NewMessages[0] = nil
 	callbacks[0].ToolResults[0] = nil
@@ -662,16 +659,14 @@ func TestStatefulAgentPrepareNextTurnReceivesFullToolContextAndOverridesLegacySn
 	}
 }
 
-func TestStatefulAgentPrepareNextTurnRunsForPlainTerminalTurn(t *testing.T) {
+func TestStatefulAgentPrepareNextTurnSkipsPlainTerminalTurn(t *testing.T) {
 	model := mustLoopModel(t, "prepare-terminal", provider.CostRates{})
 	providerImpl := mustLoopProvider(t, mustLoopTextMessage(t, model, "done", llm.FinishStop, 2))
-	var callback agent.AgentLoopTurnContext
 	calls := 0
 	runtime, err := agent.New(agent.Config{
 		Provider: providerImpl, Model: model,
-		PrepareNextTurn: func(_ context.Context, input agent.AgentLoopTurnContext) (*agent.AgentLoopTurnUpdate, error) {
+		PrepareNextTurn: func(_ context.Context, _ agent.AgentLoopTurnContext) (*agent.AgentLoopTurnUpdate, error) {
 			calls++
-			callback = input
 			return nil, nil
 		},
 	})
@@ -681,10 +676,7 @@ func TestStatefulAgentPrepareNextTurnRunsForPlainTerminalTurn(t *testing.T) {
 	if result, runErr := runtime.Run(context.Background(), "go"); runErr != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v)", result, runErr)
 	}
-	if calls != 1 || len(callback.ToolResults) != 0 || len(callback.Context.Messages) != 2 || len(callback.NewMessages) != 2 {
-		t.Fatalf("plain terminal callback = calls %d message %T results %d context %d new %d", calls, callback.Message, len(callback.ToolResults), len(callback.Context.Messages), len(callback.NewMessages))
-	}
-	if _, ok := callback.Message.(llm.AssistantTextMessage); !ok {
-		t.Fatalf("plain terminal message = %T", callback.Message)
+	if calls != 0 {
+		t.Fatalf("plain terminal PrepareNextTurn calls = %d", calls)
 	}
 }

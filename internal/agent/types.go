@@ -234,11 +234,11 @@ type Config struct {
 	// fields for every provider request. AgentSession uses this narrower legacy
 	// snapshot seam for its dynamic product configuration.
 	PrepareTurn PrepareTurn
-	// PrepareNextTurn is the stateful Agent's full upstream after-turn boundary.
-	// It runs after turn_end even when no provider request follows, and its
-	// context update is visible to ShouldStopAfterTurn. When combined with
-	// PrepareTurn, its non-nil fields override the legacy snapshot update for an
-	// actual following provider request.
+	// PrepareNextTurn is the stateful Agent's full upstream next-turn boundary.
+	// It runs after ShouldStopAfterTurn and queue checks have established that
+	// another provider request will follow. It does not run after final or
+	// terminating turns. When combined with PrepareTurn, its non-nil fields
+	// override the legacy snapshot update for that following provider request.
 	PrepareNextTurn     AgentLoopPrepareNextTurn
 	ShouldStopAfterTurn AgentLoopShouldStopAfterTurn
 	Now                 func() time.Time

@@ -697,10 +697,9 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 			}
 			owned := cloneAgentLoopTurnUpdate(full)
 			if a.config.prepareTurn != nil {
-				// The public after-turn update is applied immediately by AgentLoop
-				// so ShouldStopAfterTurn observes it. Retain an owned copy only to
-				// reapply its explicitly selected fields after the legacy dynamic
-				// provider snapshot is refreshed for an actual following request.
+				// Retain an owned copy to reapply its explicitly selected fields
+				// after the legacy dynamic provider snapshot is refreshed for the
+				// provider request that this callback is preparing.
 				pendingNextTurnOverride = cloneAgentLoopTurnUpdate(owned)
 			}
 			return owned, nil

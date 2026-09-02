@@ -1191,10 +1191,13 @@ func TestAgentLoopIgnoresContentEventsBeforeNoStartTerminal(t *testing.T) {
 
 func TestAgentLoopCallbackAndEventSinkErrorsRemainRaw(t *testing.T) {
 	model := mustLoopModel(t, "loop", provider.CostRates{})
+	definition := mustLoopDefinition(t, "echo", `{"type":"object"}`)
+	call := mustLoopCall(t, "call-1", "echo", `{}`)
+	tool := &loopContractTool{definition: definition}
 	callbackErr := errors.New("prepare failed")
 	var ended bool
 	loop, err := agent.NewAgentLoop(agent.AgentLoopConfig{
-		Provider: mustLoopProvider(t, mustLoopTextMessage(t, model, "done", llm.FinishStop, 2)), Model: model,
+		Provider: mustLoopProvider(t, mustLoopToolMessage(t, model, llm.FinishToolUse, call)), Model: model,
 		PrepareNextTurn: func(context.Context, agent.AgentLoopTurnContext) (*agent.AgentLoopTurnUpdate, error) {
 			return nil, callbackErr
 		},
@@ -1208,7 +1211,7 @@ func TestAgentLoopCallbackAndEventSinkErrorsRemainRaw(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loop.Run(context.Background(), nil, agent.AgentLoopContext{}); !errors.Is(err, callbackErr) || ended {
+	if _, err := loop.Run(context.Background(), nil, agent.AgentLoopContext{Tools: []agent.AgentLoopTool{tool}}); !errors.Is(err, callbackErr) || ended {
 		t.Fatalf("prepare err=%v agentEnded=%v", err, ended)
 	}
 
@@ -1343,14 +1346,13 @@ func TestAgentLoopTerminateStillRunsTurnCallbacksAndQueuedMessages(t *testing.T)
 	}
 	assertLoopStrings(t, loopRoles(result.Messages), []string{"user", "assistant", "toolResult", "user", "assistant", "user", "assistant"})
 	assertLoopStrings(t, callbackOrder, []string{
-		"steering",
-		"prepare", "stop", "steering",
+		"steering", "stop", "steering",
 		"prepare", "stop", "steering", "followup",
 		"prepare", "stop", "steering", "followup",
 	})
 }
 
-func TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain(t *testing.T) {
+func TestAgentLoopShouldStopRunsBeforeNextTurnPreparationAndQueueDrain(t *testing.T) {
 	model := mustLoopModel(t, "prepare-stop", provider.CostRates{})
 	queued := atomic.Bool{}
 	providerCalls := atomic.Uint32{}
@@ -1376,9 +1378,8 @@ func TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain(t *tes
 		},
 		ShouldStopAfterTurn: func(_ context.Context, input agent.AgentLoopTurnContext) (bool, error) {
 			callbackOrder = append(callbackOrder, "stop")
-			if input.Context.SystemPrompt != "prepared-marker" {
+			if input.Context.SystemPrompt != "initial" {
 				t.Errorf("ShouldStopAfterTurn context = %q", input.Context.SystemPrompt)
-				return false, nil
 			}
 			return true, nil
 		},
@@ -1398,16 +1399,16 @@ func TestAgentLoopPrepareNextTurnUpdatesContextBeforeStopAndSteeringDrain(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if providerCalls.Load() != 1 || prepareCalls != 1 || steeringPolls != 1 {
-		t.Fatalf("provider/prepare/steering = %d/%d/%d, want 1/1/1", providerCalls.Load(), prepareCalls, steeringPolls)
+	if providerCalls.Load() != 1 || prepareCalls != 0 || steeringPolls != 1 {
+		t.Fatalf("provider/prepare/steering = %d/%d/%d, want 1/0/1", providerCalls.Load(), prepareCalls, steeringPolls)
 	}
-	if result.Context.SystemPrompt != "prepared-marker" || len(result.Messages) != 2 {
+	if result.Context.SystemPrompt != "initial" || len(result.Messages) != 2 {
 		t.Fatalf("result context/messages = %q/%#v", result.Context.SystemPrompt, result.Messages)
 	}
-	assertLoopStrings(t, callbackOrder, []string{"steering", "prepare", "stop"})
+	assertLoopStrings(t, callbackOrder, []string{"steering", "stop"})
 }
 
-func TestAgentLoopPrepareNextTurnRunsAfterFinalTurnWithoutContinuation(t *testing.T) {
+func TestAgentLoopPrepareNextTurnSkipsFinalTurnWithoutContinuation(t *testing.T) {
 	model := mustLoopModel(t, "prepare-final", provider.CostRates{})
 	prepareCalls := 0
 	loop, err := agent.NewAgentLoop(agent.AgentLoopConfig{
@@ -1426,7 +1427,7 @@ func TestAgentLoopPrepareNextTurnRunsAfterFinalTurnWithoutContinuation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepareCalls != 1 || result.Context.SystemPrompt != "final-side-effect" {
+	if prepareCalls != 0 || result.Context.SystemPrompt != "initial" {
 		t.Fatalf("final PrepareNextTurn = calls %d context %q", prepareCalls, result.Context.SystemPrompt)
 	}
 }

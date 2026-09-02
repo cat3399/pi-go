@@ -491,7 +491,6 @@ type sessionRun struct {
 	compaction                   *runCancellation
 	overflowCompacted            bool
 	thresholdCompactionAttempted bool
-	midTurnCompactionPending     bool
 	assistantStarted             bool
 	assistantHookStarted         bool
 	committed                    []llm.ConversationMessage
@@ -659,9 +658,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		ConvertToLLM: config.ConvertToLLM, GetAPIKey: config.GetAPIKey,
 		MessageEnd:   s.messageEndTransform,
 		SteeringMode: config.SteeringMode, FollowUpMode: config.FollowUpMode,
-		Now:                 config.Now,
-		PrepareTurn:         s.prepareTurn,
-		ShouldStopAfterTurn: s.shouldStopForMidTurnCompaction,
+		Now:             config.Now,
+		PrepareTurn:     s.prepareTurn,
+		PrepareNextTurn: s.compactBeforeNextAssistantResponse,
 	})
 	if err != nil {
 		return nil, err
@@ -1119,6 +1118,7 @@ func retryFinalError(event AgentEndEvent) string {
 func (s *AgentSession) resetSessionTurn(_ agentRuntimeEvent) {
 	s.lifecycleMu.Lock()
 	if s.run != nil {
+		s.run.phase = PhaseProvider
 		s.run.assistantStarted = false
 		s.run.assistantHookStarted = false
 		s.run.toolResults = nil
@@ -2211,64 +2211,48 @@ func (s *AgentSession) checkPrePromptCompaction(run *sessionRun) {
 	_ = s.checkCompaction(run, terminal, false)
 }
 
-// shouldStopForMidTurnCompaction checks the complete context after a tool
-// batch, including the tool results that were absent from the provider usage.
-// Compaction itself remains a post-run AgentSession concern.
-func (s *AgentSession) shouldStopForMidTurnCompaction(ctx context.Context, turn AgentLoopTurnContext) (bool, error) {
-	if s == nil || context.Cause(ctx) != nil || !turn.willContinue || len(turn.ToolResults) == 0 {
-		return false, nil
+// compactBeforeNextAssistantResponse checks the complete message context after
+// a turn has settled and only when AgentLoop has established that another
+// provider request will follow. A successful compaction replaces the private
+// low-loop context while preserving the surrounding Agent run.
+func (s *AgentSession) compactBeforeNextAssistantResponse(ctx context.Context, turn AgentLoopTurnContext) (*AgentLoopTurnUpdate, error) {
+	if s == nil || context.Cause(ctx) != nil || s.sessionManager == nil || !s.compactionAvailable() || !s.AutoCompactionEnabled() {
+		return nil, nil
 	}
-	if _, ok := turn.Message.(llm.AssistantToolUseMessage); !ok {
-		return false, nil
+	state := s.State()
+	window, reserve := s.compactionLimitsFor(state.Model)
+	if window == 0 {
+		return nil, nil
 	}
-	if s.sessionManager == nil || !s.compactionAvailable() || !s.AutoCompactionEnabled() {
-		return false, nil
+	estimate, err := session.EstimateAgentContextTokens(turn.Context.Messages)
+	if err != nil || !compactionThresholdExceeded(estimate.Tokens, window, reserve) {
+		return nil, nil
 	}
 
 	s.lifecycleMu.Lock()
 	run := s.run
 	s.lifecycleMu.Unlock()
-	if run == nil {
-		return false, nil
-	}
-	terminalModel := s.terminalRunModel(run)
-	currentModel := s.State().Model
-	if terminalModel.ID() != "" && !sameModelIdentity(terminalModel, currentModel) {
-		return false, nil
-	}
-	if terminalModel.ID() == "" {
-		terminalModel = currentModel
-	}
-	window, reserve := s.compactionLimitsFor(terminalModel)
-	if window == 0 {
-		return false, nil
-	}
-	estimate, err := session.EstimateAgentContextTokens(turn.Context.Messages)
-	if err != nil || estimate.LastUsageIndex < 0 || !compactionThresholdExceeded(estimate.Tokens, window, reserve) {
-		return false, nil
+	if run == nil || !s.runCompaction(run, CompactionThreshold, false, "") {
+		return nil, nil
 	}
 
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.run != run || run.midTurnCompactionPending {
-		return false, nil
+	refreshed, executor := s.loop.runtimeSnapshot()
+	tools, err := adaptAgentLoopTools(refreshed.Tools(), executor)
+	if err != nil {
+		return nil, err
 	}
-	run.midTurnCompactionPending = true
-	return true, nil
+	next := turn.Context
+	next.SystemPrompt = refreshed.SystemPrompt()
+	next.Messages = refreshed.Messages()
+	next.Tools = tools
+	return &AgentLoopTurnUpdate{Context: &next}, nil
 }
 
-// checkPostRunCompaction returns true when the caller must Continue from the
-// Agent messages rebuilt by a successful overflow or mid-turn compaction.
+// checkPostRunCompaction returns true only when overflow recovery compacted
+// successfully and the caller must Continue from the Agent messages rebuilt
+// from SessionManager. Threshold/successful-over-window compaction never
+// fabricates a provider continuation.
 func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bool {
-	s.lifecycleMu.Lock()
-	midTurn := s.run == run && run.midTurnCompactionPending
-	if midTurn {
-		run.midTurnCompactionPending = false
-	}
-	s.lifecycleMu.Unlock()
-	if midTurn {
-		return s.runCompaction(run, CompactionThreshold, true, "")
-	}
 	terminal, ok := result.Terminal()
 	if !ok {
 		return false
