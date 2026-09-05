@@ -11,6 +11,7 @@ import (
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/rpc"
+	"github.com/cat3399/pi-go/surface/cli"
 )
 
 func main() {
@@ -33,6 +34,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	case "run":
 		return app.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdout, stderr)
+	case "models":
+		return cli.RunModels(ctx, args[1:], stdout, stderr)
 	case "tui":
 		return runTUI(ctx, args[1:], stdin, stdout, stderr)
 	case "rpc":
@@ -54,6 +57,7 @@ Commands:
   tui      Run the interactive terminal surface
   web      Serve the WebUI and application API
   rpc      Run the JSONL automation adapter
+  models   Update installed built-in model data
   version  Print the version
   help     Show this help`)
 }

@@ -5,7 +5,7 @@ package model
 // custom models.json providers in the custom-provider editor instead of
 // rendering the same provider a second time in the API-key picker.
 func IsBuiltinProvider(id string) bool {
-	for _, candidate := range builtinProviderConfigs() {
+	for _, candidate := range builtinProviderRegistrations() {
 		if candidate.ID == id {
 			return true
 		}

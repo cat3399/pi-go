@@ -30,7 +30,8 @@ type responsesRequestPayload struct {
 }
 
 type responsesPromptCacheMode struct {
-	Mode string `json:"mode"`
+	Mode string `json:"mode,omitempty"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type responsesReasoningOptions struct {
@@ -221,7 +222,11 @@ func encodeOpenAIResponsesRequest(request Request, systemRole string) ([]byte, e
 	}
 	compat := request.Model().Compat().OpenAIResponses
 	if cacheRetention == CacheRetentionLong && (compat == nil || compat.SupportsLongCacheRetention == nil || *compat.SupportsLongCacheRetention) {
-		payloadValue.PromptCacheTTL = "24h"
+		if compat != nil && compat.SupportsExplicitPromptCacheMode != nil && *compat.SupportsExplicitPromptCacheMode {
+			payloadValue.PromptCacheMode = &responsesPromptCacheMode{TTL: "30m"}
+		} else {
+			payloadValue.PromptCacheTTL = "24h"
+		}
 	}
 	if cacheRetention == CacheRetentionNone && compat != nil && compat.SupportsExplicitPromptCacheMode != nil && *compat.SupportsExplicitPromptCacheMode {
 		payloadValue.PromptCacheMode = &responsesPromptCacheMode{Mode: "explicit"}

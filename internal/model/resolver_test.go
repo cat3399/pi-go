@@ -427,19 +427,15 @@ func TestRestoreModelFromSessionExactAvailabilityAndFallback(t *testing.T) {
 }
 
 func TestDefaultModelPreferencesMatchPiAndAreDefensivelyCopied(t *testing.T) {
-	tests := map[string]string{
-		"openai": "gpt-5.5", AzureOpenAIProviderID: DefaultAzureOpenAIModel, "openai-codex": "gpt-5.5", "zai": "glm-5.1",
-		"minimax": "MiniMax-M2.7", "minimax-cn": "MiniMax-M2.7", "cerebras": "zai-glm-4.7",
-		"ant-ling": "Ring-2.6-1T", "vercel-ai-gateway": "zai/glm-5.1",
-	}
-	for providerID, expected := range tests {
-		if got, ok := DefaultModelID(providerID); !ok || got != expected {
-			t.Fatalf("DefaultModelID(%q) = %q, %t", providerID, got, ok)
+	for _, preference := range embeddedBuiltinCatalog().defaults {
+		if got, ok := DefaultModelID(preference.Provider); !ok || got != preference.ModelID {
+			t.Fatalf("default mismatch: %#v, got %q", preference, got)
 		}
 	}
 	preferences := DefaultModelPreferences()
+	original := preferences[0].Provider
 	preferences[0].Provider = "mutated"
-	if DefaultModelPreferences()[0].Provider != "amazon-bedrock" {
+	if DefaultModelPreferences()[0].Provider != original {
 		t.Fatal("default preference storage was exposed")
 	}
 }

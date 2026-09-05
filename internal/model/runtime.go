@@ -22,28 +22,22 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
 const (
-	OpenAIProviderID          = "openai"
-	AzureOpenAIProviderID     = "azure-openai-responses"
-	OpenAICodexProviderID     = "openai-codex"
-	AnthropicProviderID       = "anthropic"
-	OpenAIResponsesAPI        = "openai-responses"
-	AzureOpenAIResponsesAPI   = "azure-openai-responses"
-	OpenAICompletionsAPI      = "openai-completions"
-	OpenAICodexResponsesAPI   = "openai-codex-responses"
-	AnthropicMessagesAPI      = "anthropic-messages"
-	DefaultOpenAIModel        = "gpt-5.5"
-	DefaultAzureOpenAIModel   = "gpt-5.4"
-	DefaultOpenAICodexModel   = "gpt-5.5"
-	DefaultAnthropicModel     = "claude-opus-4-8"
-	defaultOpenAIBaseURL      = "https://api.openai.com/v1"
-	defaultOpenAICodexBaseURL = "https://chatgpt.com/backend-api"
-	defaultAnthropicBaseURL   = "https://api.anthropic.com"
-	maxFileBytes              = 4 << 20
+	OpenAIProviderID        = "openai"
+	AzureOpenAIProviderID   = "azure-openai-responses"
+	OpenAICodexProviderID   = "openai-codex"
+	AnthropicProviderID     = "anthropic"
+	OpenAIResponsesAPI      = "openai-responses"
+	AzureOpenAIResponsesAPI = "azure-openai-responses"
+	OpenAICompletionsAPI    = "openai-completions"
+	OpenAICodexResponsesAPI = "openai-codex-responses"
+	AnthropicMessagesAPI    = "anthropic-messages"
+	maxFileBytes            = 4 << 20
 )
 
 var (
@@ -334,10 +328,12 @@ func (s ProviderRetrySettings) MaxRetryDelayMSOrDefault() uint64 {
 }
 
 type Snapshot struct {
-	Models     []Model
-	Providers  []string
-	Settings   Settings
-	Generation uint64
+	// ProviderDefaults belongs to the selected built-in snapshot; user settings remain separate.
+	ProviderDefaults []ProviderDefault
+	Models           []Model
+	Providers        []string
+	Settings         Settings
+	Generation       uint64
 }
 
 type Options struct {
@@ -349,6 +345,8 @@ type Options struct {
 	// ModelsStorePath is the optional, provider-scoped catalog cache. Registered
 	// dynamic providers may refresh it through Runtime.Refresh.
 	ModelsStorePath string
+	// BuiltinCatalogPath overrides the installed built-in data path. Missing data uses the embedded snapshot.
+	BuiltinCatalogPath string
 	// ProjectTrusted is deliberately opt-in. A project .pi-go/settings.json is not
 	// read merely because it exists; a formal trust decision is deferred.
 	ProjectTrusted bool
@@ -367,19 +365,21 @@ type Options struct {
 }
 
 type Runtime struct {
-	options     Options
-	mu          sync.RWMutex
-	local       chan struct{}
-	snapshot    Snapshot
-	providers   map[string]ProviderConfig
-	registered  map[string]*runtimeProvider
-	adapters    map[string]provider.Streamer
-	auth        ProviderAuthResolver
-	refreshers  map[string]RefreshModelsFunc
-	filters     map[string]ProviderModelFilter
-	storeErrors map[string]error
-	configError error
-	storeError  error
+	options      Options
+	mu           sync.RWMutex
+	local        chan struct{}
+	snapshot     Snapshot
+	providers    map[string]ProviderConfig
+	registered   map[string]*runtimeProvider
+	adapters     map[string]provider.Streamer
+	auth         ProviderAuthResolver
+	refreshers   map[string]RefreshModelsFunc
+	filters      map[string]ProviderModelFilter
+	storeErrors  map[string]error
+	configError  error
+	storeError   error
+	builtins     *builtinCatalog
+	builtinError error
 	// Settings layers retain their last successful projections. A malformed
 	// settings file is a diagnostic source, not a reason to discard a healthy
 	// Agent/runtime: this mirrors SettingsManager's per-layer recovery.
@@ -399,6 +399,9 @@ func NewRuntime(options Options) (*Runtime, error) {
 	}
 	if options.WorkingDir == "" {
 		options.WorkingDir = "."
+	}
+	if options.BuiltinCatalogPath == "" {
+		options.BuiltinCatalogPath = filepath.Join(options.AgentDir, catalog.Filename)
 	}
 	if options.ModelsStorePath == "" {
 		options.ModelsStorePath = filepath.Join(options.AgentDir, "models-store.json")
@@ -505,7 +508,7 @@ func (r *Runtime) settingsErrorLocked() error {
 }
 
 func (r *Runtime) modelSourceErrorLocked() error {
-	values := []error{r.configError, r.storeError}
+	values := []error{r.builtinError, r.configError, r.storeError}
 	ids := make([]string, 0, len(r.composeErrs))
 	for id := range r.composeErrs {
 		ids = append(ids, id)
@@ -578,6 +581,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	r.mu.RLock()
 	globalSettings := cloneSettings(r.globalSettings)
 	projectSettings := cloneSettings(r.projectSettings)
+	previousBuiltins := r.builtins
 	r.mu.RUnlock()
 	loadedGlobal, globalSettingsError := loadSettings(filepath.Join(r.options.AgentDir, "settings.json"), "global settings.json")
 	if globalSettingsError == nil {
@@ -595,26 +599,29 @@ func (r *Runtime) Reload(ctx context.Context) error {
 		projectSettings = Settings{}
 	}
 	settings := mergeSettings(globalSettings, projectSettings)
-	providers, configError := loadModels(filepath.Join(r.options.AgentDir, "models.json"))
+	builtins, builtinError := loadBuiltinCatalog(r.options.BuiltinCatalogPath, previousBuiltins)
+	providers, configError := loadModels(filepath.Join(r.options.AgentDir, "models.json"), builtins)
 	compositionErrors := map[string]error{}
 	if configError != nil {
 		providers = map[string]ProviderConfig{}
 	} else {
-		providers, compositionErrors = validateConfiguredProviders(providers)
+		providers, compositionErrors = validateConfiguredProviders(providers, builtins)
 	}
-	providers = composeProviderConfigs(providers)
+	providers = composeProviderConfigs(providers, builtins)
 	cached, storeErrors, storeError := loadStoreCatalogs(r.options.ModelsStorePath)
 	if storeError != nil {
 		cached = map[string]CachedCatalog{}
 		storeErrors = map[string]error{}
 	}
-	snapshot := buildSnapshot(providers, cached, settings)
+	snapshot := buildSnapshot(providers, cached, settings, builtins)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snapshot.Generation = r.snapshot.Generation + 1
 	r.providers = providers
 	r.storeErrors = storeErrors
 	r.configError = configError
+	r.builtins = builtins
+	r.builtinError = builtinError
 	r.storeError = storeError
 	r.globalSettings = cloneSettings(globalSettings)
 	r.projectSettings = cloneSettings(projectSettings)
@@ -626,8 +633,8 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	return nil
 }
 
-func composeProviderConfigs(configured map[string]ProviderConfig) map[string]ProviderConfig {
-	defaults := builtinProviderConfigs()
+func composeProviderConfigs(configured map[string]ProviderConfig, builtins *builtinCatalog) map[string]ProviderConfig {
+	defaults := builtins.providers
 	result := make(map[string]ProviderConfig, len(configured)+len(defaults))
 	for id, value := range configured {
 		result[id] = cloneProvider(value)
@@ -635,7 +642,7 @@ func composeProviderConfigs(configured map[string]ProviderConfig) map[string]Pro
 	for _, fallback := range defaults {
 		current, exists := result[fallback.ID]
 		if !exists {
-			result[fallback.ID] = fallback
+			result[fallback.ID] = cloneProvider(fallback)
 			continue
 		}
 		if current.Name == "" {
@@ -654,9 +661,9 @@ func composeProviderConfigs(configured map[string]ProviderConfig) map[string]Pro
 	return result
 }
 
-func validateConfiguredProviders(configured map[string]ProviderConfig) (map[string]ProviderConfig, map[string]error) {
+func validateConfiguredProviders(configured map[string]ProviderConfig, builtins *builtinCatalog) (map[string]ProviderConfig, map[string]error) {
 	baselines := make(map[string][]Model)
-	for _, candidate := range builtinModels() {
+	for _, candidate := range builtins.models {
 		baselines[candidate.Provider] = append(baselines[candidate.Provider], candidate)
 	}
 	valid := make(map[string]ProviderConfig, len(configured))
@@ -838,7 +845,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	// uncertainty so callers never observe file-new/snapshot-old divergence.
 	r.mu.Lock()
 	generation := r.snapshot.Generation + 1
-	r.snapshot = buildSnapshot(r.providers, cached, settings)
+	r.snapshot = buildSnapshot(r.providers, cached, settings, r.builtins)
 	r.snapshot.Generation = generation
 	r.storeErrors = storeErrors
 	r.storeError = storeError
@@ -1053,7 +1060,7 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 	s := r.Snapshot()
 	providerID, modelID := strings.TrimSpace(selection.Provider), strings.TrimSpace(selection.Model)
 	if modelID != "" {
-		resolved := ResolveCLIModel(CLIModelOptions{Provider: providerID, Model: modelID, AllModels: s.Models})
+		resolved := ResolveCLIModel(CLIModelOptions{Provider: providerID, Model: modelID, AllModels: s.Models, ProviderDefaults: s.ProviderDefaults})
 		if resolved.Error != "" || resolved.Model == nil {
 			return Resolution{}, fmt.Errorf("%w: %s", ErrNotFound, resolved.Error)
 		}
@@ -1073,7 +1080,7 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 	// whose saved-default semantics remain identical to pi.
 	if len(s.Settings.EnabledModels) == 0 && s.Settings.DefaultProvider != "" && s.Settings.DefaultModel != "" &&
 		exactProviderModel(s.Models, s.Settings.DefaultProvider, s.Settings.DefaultModel) == nil {
-		resolved := ResolveCLIModel(CLIModelOptions{Provider: s.Settings.DefaultProvider, Model: s.Settings.DefaultModel, AllModels: s.Models})
+		resolved := ResolveCLIModel(CLIModelOptions{Provider: s.Settings.DefaultProvider, Model: s.Settings.DefaultModel, AllModels: s.Models, ProviderDefaults: s.ProviderDefaults})
 		if resolved.Model != nil && resolved.Error == "" {
 			return Resolution{Model: r.applyConfiguredOverride(*resolved.Model)}, nil
 		}
@@ -1085,7 +1092,7 @@ func (r *Runtime) Resolve(selection Selection) (Resolution, error) {
 	}
 	initial := ResolveInitialModel(InitialModelOptions{
 		ScopePatterns: s.Settings.EnabledModels, DefaultProvider: s.Settings.DefaultProvider,
-		DefaultModelID: s.Settings.DefaultModel, DefaultThinkingLevel: thinkingPointer, AllModels: s.Models,
+		DefaultModelID: s.Settings.DefaultModel, DefaultThinkingLevel: thinkingPointer, AllModels: s.Models, ProviderDefaults: s.ProviderDefaults,
 		Availability: Availability{HasConfiguredAuth: func(string) bool { return true }, SupportsRoute: func(Model) bool { return true }},
 	})
 	diagnostics := make([]Diagnostic, 0, len(initial.Scope.Diagnostics))
@@ -1117,11 +1124,11 @@ func (r *Runtime) applyConfiguredOverride(selected Model) Model {
 	return result
 }
 
-func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings) Snapshot {
+func buildSnapshot(providers map[string]ProviderConfig, cached map[string]CachedCatalog, settings Settings, builtins *builtinCatalog) Snapshot {
 	byKey := make(map[string]Model)
 	providerSet := make(map[string]struct{})
-	for _, builtin := range builtinModels() {
-		byKey[modelKey(builtin.Provider, builtin.ID)] = builtin
+	for _, builtin := range builtins.models {
+		byKey[modelKey(builtin.Provider, builtin.ID)] = cloneModel(builtin)
 		providerSet[builtin.Provider] = struct{}{}
 	}
 	for id := range providers {
@@ -1180,10 +1187,10 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 				defaults = firstProviderModel
 			}
 			if m.API == "" {
-				m.API = firstNonEmpty(p.API, defaults.API, defaultProviderAPI(p.ID))
+				m.API = firstNonEmpty(p.API, defaults.API, builtins.provider(p.ID).API)
 			}
 			if m.BaseURL == "" {
-				m.BaseURL = firstNonEmpty(p.BaseURL, defaults.BaseURL, defaultProviderBaseURL(p.ID))
+				m.BaseURL = firstNonEmpty(p.BaseURL, defaults.BaseURL, builtins.provider(p.ID).BaseURL)
 			}
 			if m.Name == "" {
 				m.Name = m.ID
@@ -1240,13 +1247,8 @@ func buildSnapshot(providers map[string]ProviderConfig, cached map[string]Cached
 		}
 		return models[left].ID < models[right].ID
 	})
-	return Snapshot{Models: models, Providers: ids, Settings: cloneSettings(settings)}
+	return Snapshot{Models: models, Providers: ids, Settings: cloneSettings(settings), ProviderDefaults: append([]ProviderDefault(nil), builtins.defaults...)}
 }
-
-// builtinModels is generated from the checked-in, scoped upstream pi-ai
-// catalog oracle. The generator and per-file hashes make refreshes
-// reproducible and prevent hand-maintained model subsets from drifting.
-func builtinModels() []Model { return generatedBuiltinModels() }
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
@@ -1255,36 +1257,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func defaultProviderAPI(providerID string) string {
-	switch providerID {
-	case OpenAIProviderID:
-		return OpenAIResponsesAPI
-	case AzureOpenAIProviderID:
-		return AzureOpenAIResponsesAPI
-	case OpenAICodexProviderID:
-		return OpenAICodexResponsesAPI
-	case AnthropicProviderID:
-		return AnthropicMessagesAPI
-	default:
-		return ""
-	}
-}
-
-func defaultProviderBaseURL(providerID string) string {
-	switch providerID {
-	case OpenAIProviderID:
-		return defaultOpenAIBaseURL
-	case OpenAICodexProviderID:
-		return defaultOpenAICodexBaseURL
-	case AnthropicProviderID:
-		return defaultAnthropicBaseURL
-	case AzureOpenAIProviderID:
-		return ""
-	default:
-		return ""
-	}
 }
 
 func applyModelOverride(model Model, override modelOverride) Model {
@@ -1341,7 +1313,7 @@ func applyModelOverride(model Model, override modelOverride) Model {
 	return model
 }
 
-func loadModels(path string) (map[string]ProviderConfig, error) {
+func loadModels(path string, builtins *builtinCatalog) (map[string]ProviderConfig, error) {
 	root, exists, err := readRawObject(path, true, "models.json")
 	if err != nil || !exists {
 		return map[string]ProviderConfig{}, err
@@ -1365,7 +1337,7 @@ func loadModels(path string) (map[string]ProviderConfig, error) {
 		if !validID(id) {
 			return nil, Diagnostic{"models.json", "providers", "provider identifier is invalid"}
 		}
-		p, err := parseProvider(id, data)
+		p, err := parseProvider(id, data, builtins)
 		if err != nil {
 			return nil, err
 		}
@@ -1373,7 +1345,7 @@ func loadModels(path string) (map[string]ProviderConfig, error) {
 	}
 	return result, nil
 }
-func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
+func parseProvider(id string, raw json.RawMessage, builtins *builtinCatalog) (ProviderConfig, error) {
 	var o map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &o); err != nil || o == nil {
 		return ProviderConfig{}, Diagnostic{"models.json", "providers." + id, "must be an object"}
@@ -1394,16 +1366,15 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 	}
 	if raw, ok := o["compat"]; ok {
 		p.compatPresent = true
-		compatAPI := firstNonEmpty(p.API, defaultProviderAPI(id))
+		compatAPI := firstNonEmpty(p.API, builtins.provider(id).API)
 		decoded, decodeErr := decodeCompat(raw, id, compatAPI)
 		if decodeErr != nil {
 			return p, decodeErr
 		}
-		if compatAPI == "" {
-			p.compatRaw = bytes.Clone(raw)
-		} else {
-			p.Compat = decoded
-		}
+		p.Compat = decoded
+		// Preserve provider-level compatibility for projection using each
+		// model's actual dialect, including catalogs with multiple API groups.
+		p.compatRaw = bytes.Clone(raw)
 	}
 	if key, ok, err := optionalSecret(o, "apiKey", id); err != nil {
 		return p, err
@@ -1452,7 +1423,7 @@ func parseProvider(id string, raw json.RawMessage) (ProviderConfig, error) {
 			if !validValue(modelID) {
 				return p, Diagnostic{"models.json", "providers." + id + ".modelOverrides", "contains invalid model id"}
 			}
-			overrideAPI := firstNonEmpty(p.API, defaultProviderAPI(id))
+			overrideAPI := firstNonEmpty(p.API, builtins.provider(id).API)
 			for _, model := range p.Models {
 				if model.ID == modelID && model.API != "" {
 					overrideAPI = model.API
@@ -3131,6 +3102,7 @@ func cloneSnapshot(s Snapshot) Snapshot {
 		s.Models[i] = cloneModel(s.Models[i])
 	}
 	s.Providers = append([]string(nil), s.Providers...)
+	s.ProviderDefaults = append([]ProviderDefault(nil), s.ProviderDefaults...)
 	s.Settings = cloneSettings(s.Settings)
 	return s
 }

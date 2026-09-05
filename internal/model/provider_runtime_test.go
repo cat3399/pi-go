@@ -60,9 +60,9 @@ func TestModelsRuntimeOwnsProviderAuthAvailabilityAndDispatch(t *testing.T) {
 	if _, ok := runtime.GetProvider("OpenAI"); ok {
 		t.Fatal("provider lookup unexpectedly ignored identity casing")
 	}
-	selected, ok := runtime.GetModel(OpenAIProviderID, DefaultOpenAIModel)
+	selected, ok := runtime.GetModel(OpenAIProviderID, testDefaultModelID(t, OpenAIProviderID))
 	if !ok {
-		t.Fatalf("missing builtin %s/%s", OpenAIProviderID, DefaultOpenAIModel)
+		t.Fatalf("missing builtin %s/%s", OpenAIProviderID, testDefaultModelID(t, OpenAIProviderID))
 	}
 	available, err := runtime.GetAvailable(context.Background(), OpenAIProviderID)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestModelsRuntimeOwnsProviderAuthAvailabilityAndDispatch(t *testing.T) {
 	if prepared.Model().BaseURL() != "https://resolved.example/v1" || prepared.Model().Provider() != ref.Provider() || prepared.Model().ID() != ref.ID() {
 		t.Fatalf("prepared model = %s %s/%s", prepared.Model().BaseURL(), prepared.Model().Provider(), prepared.Model().ID())
 	}
-	if len(auth.resolved) != 1 || auth.resolved[0] != OpenAIProviderID+"/"+DefaultOpenAIModel {
+	if len(auth.resolved) != 1 || auth.resolved[0] != OpenAIProviderID+"/"+testDefaultModelID(t, OpenAIProviderID) {
 		t.Fatalf("auth resolutions = %#v", auth.resolved)
 	}
 }
@@ -187,7 +187,7 @@ func TestModelsRuntimeFilterReceivesStoredCredentialMetadata(t *testing.T) {
 				}
 				credential.Extra["availableModelIds"][0] = '{'
 				for _, candidate := range models {
-					if candidate.ID == DefaultOpenAIModel {
+					if candidate.ID == testDefaultModelID(t, OpenAIProviderID) {
 						return []Model{candidate}
 					}
 				}
@@ -199,18 +199,18 @@ func TestModelsRuntimeFilterReceivesStoredCredentialMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	available, err := runtime.GetAvailable(context.Background(), OpenAIProviderID)
-	if err != nil || !filtered || len(available) != 1 || available[0].ID != DefaultOpenAIModel {
+	if err != nil || !filtered || len(available) != 1 || available[0].ID != testDefaultModelID(t, OpenAIProviderID) {
 		t.Fatalf("filtered availability = %#v, %t, %v", available, filtered, err)
 	}
 	if string(auth.credential.Extra["availableModelIds"]) != `["gpt-5.5"]` {
 		t.Fatal("filter mutated the stored credential snapshot")
 	}
-	selected, ok := runtime.GetModel(OpenAIProviderID, DefaultOpenAIModel)
+	selected, ok := runtime.GetModel(OpenAIProviderID, testDefaultModelID(t, OpenAIProviderID))
 	if !ok || !runtime.Availability().Available(selected) {
 		t.Fatalf("filtered model was not synchronously available: %#v, %t", selected, ok)
 	}
 	for _, candidate := range runtime.GetModels(OpenAIProviderID) {
-		if candidate.ID != DefaultOpenAIModel && runtime.Availability().Available(candidate) {
+		if candidate.ID != testDefaultModelID(t, OpenAIProviderID) && runtime.Availability().Available(candidate) {
 			t.Fatalf("credential filter did not constrain synchronous availability: %#v", candidate)
 		}
 	}

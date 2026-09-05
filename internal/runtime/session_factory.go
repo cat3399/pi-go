@@ -22,6 +22,7 @@ type SessionFactoryOptions struct {
 	Provider              provider.Provider
 	SessionManager        *session.SessionManager
 	AllModels             []model.Model
+	ProviderDefaults      []model.ProviderDefault
 	Availability          model.Availability
 	ExplicitModel         *model.Model
 	ExplicitThinkingLevel *provider.ThinkingLevel
@@ -93,6 +94,7 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 			DefaultModelID:       options.Settings.DefaultModel,
 			DefaultThinkingLevel: settingsThinkingPointer(options.Settings.DefaultThinkingLevel),
 			AllModels:            options.AllModels,
+			ProviderDefaults:     options.ProviderDefaults,
 			Availability:         options.Availability,
 		})
 		selected = cloneCatalogModelPointer(resolved.Model)

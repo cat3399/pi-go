@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -13,58 +14,27 @@ const DefaultThinkingLevel = provider.ThinkingMedium
 // ProviderDefault preserves pi's provider preference order. A map alone cannot
 // represent this ordering, which is observable when more than one provider's
 // default model is available.
-type ProviderDefault struct {
-	Provider string
-	ModelID  string
-}
+type ProviderDefault = catalog.Preference
 
-var defaultModelPreferences = []ProviderDefault{
-	{Provider: "amazon-bedrock", ModelID: "us.anthropic.claude-opus-4-6-v1"},
-	{Provider: "ant-ling", ModelID: "Ring-2.6-1T"},
-	{Provider: "anthropic", ModelID: "claude-opus-4-8"},
-	{Provider: "openai", ModelID: "gpt-5.5"},
-	{Provider: AzureOpenAIProviderID, ModelID: DefaultAzureOpenAIModel},
-	{Provider: "openai-codex", ModelID: "gpt-5.5"},
-	{Provider: "radius", ModelID: "auto"},
-	{Provider: "nvidia", ModelID: "nvidia/nemotron-3-super-120b-a12b"},
-	{Provider: "deepseek", ModelID: "deepseek-v4-pro"},
-	{Provider: "google", ModelID: "gemini-3.1-pro-preview"},
-	{Provider: "google-vertex", ModelID: "gemini-3.1-pro-preview"},
-	{Provider: "github-copilot", ModelID: "gpt-5.4"},
-	{Provider: "openrouter", ModelID: "moonshotai/kimi-k2.6"},
-	{Provider: "vercel-ai-gateway", ModelID: "zai/glm-5.1"},
-	{Provider: "xai", ModelID: "grok-4.5"},
-	{Provider: "groq", ModelID: "openai/gpt-oss-120b"},
-	{Provider: "cerebras", ModelID: "zai-glm-4.7"},
-	{Provider: "zai", ModelID: "glm-5.1"},
-	{Provider: "zai-coding-cn", ModelID: "glm-5.1"},
-	{Provider: "mistral", ModelID: "devstral-medium-latest"},
-	{Provider: "minimax", ModelID: "MiniMax-M2.7"},
-	{Provider: "minimax-cn", ModelID: "MiniMax-M2.7"},
-	{Provider: "moonshotai", ModelID: "kimi-k2.6"},
-	{Provider: "moonshotai-cn", ModelID: "kimi-k2.6"},
-	{Provider: "huggingface", ModelID: "moonshotai/Kimi-K2.6"},
-	{Provider: "fireworks", ModelID: "accounts/fireworks/models/kimi-k2p6"},
-	{Provider: "together", ModelID: "moonshotai/Kimi-K2.6"},
-	{Provider: "opencode", ModelID: "kimi-k2.6"},
-	{Provider: "opencode-go", ModelID: "kimi-k2.6"},
-	{Provider: "kimi-coding", ModelID: "kimi-for-coding"},
-	{Provider: "cloudflare-workers-ai", ModelID: "@cf/moonshotai/kimi-k2.6"},
-	{Provider: "cloudflare-ai-gateway", ModelID: "workers-ai/@cf/moonshotai/kimi-k2.6"},
-	{Provider: "qwen-token-plan", ModelID: "qwen3.7-max"},
-	{Provider: "qwen-token-plan-cn", ModelID: "qwen3.7-max"},
-	{Provider: "xiaomi", ModelID: "mimo-v2.5-pro"},
-	{Provider: "xiaomi-token-plan-cn", ModelID: "mimo-v2.5-pro"},
-	{Provider: "xiaomi-token-plan-ams", ModelID: "mimo-v2.5-pro"},
-	{Provider: "xiaomi-token-plan-sgp", ModelID: "mimo-v2.5-pro"},
-}
-
+// DefaultModelPreferences returns the embedded fallback. Runtime consumers pass
+// Snapshot.ProviderDefaults so installed catalog updates are observed as well.
 func DefaultModelPreferences() []ProviderDefault {
-	return append([]ProviderDefault(nil), defaultModelPreferences...)
+	return append([]ProviderDefault(nil), embeddedBuiltinCatalog().defaults...)
 }
 
 func DefaultModelID(providerID string) (string, bool) {
-	for _, preference := range defaultModelPreferences {
+	return defaultModelID(providerID, nil)
+}
+
+func providerDefaults(preferences []ProviderDefault) []ProviderDefault {
+	if preferences == nil {
+		return embeddedBuiltinCatalog().defaults
+	}
+	return preferences
+}
+
+func defaultModelID(providerID string, preferences []ProviderDefault) (string, bool) {
+	for _, preference := range providerDefaults(preferences) {
 		if preference.Provider == providerID {
 			return preference.ModelID, true
 		}
@@ -249,6 +219,7 @@ func ResolveModelScope(patterns []string, availableModels []Model) ScopeResult {
 }
 
 type CLIModelOptions struct {
+	ProviderDefaults       []ProviderDefault
 	Provider               string
 	Model                  string
 	ThinkingLevel          *provider.ThinkingLevel
@@ -359,7 +330,7 @@ func ResolveCLIModel(options CLIModelOptions) CLIModelResult {
 				}
 			}
 		}
-		if fallback := buildFallbackModel(providerID, fallbackPattern, models); fallback != nil {
+		if fallback := buildFallbackModel(providerID, fallbackPattern, models, options.ProviderDefaults); fallback != nil {
 			requestedThinking := options.ThinkingLevel
 			if requestedThinking == nil {
 				requestedThinking = fallbackThinking
@@ -382,6 +353,7 @@ func ResolveCLIModel(options CLIModelOptions) CLIModelResult {
 }
 
 type InitialModelOptions struct {
+	ProviderDefaults     []ProviderDefault
 	CLIProvider          string
 	CLIModel             string
 	CLIThinkingLevel     *provider.ThinkingLevel
@@ -420,7 +392,7 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 		resolved := ResolveCLIModel(CLIModelOptions{
 			Provider: options.CLIProvider, Model: options.CLIModel, ThinkingLevel: options.CLIThinkingLevel,
 			AllModels: options.AllModels, HasConfiguredAuth: options.Availability.HasConfiguredAuth,
-			HasConfiguredModelAuth: options.Availability.HasConfiguredModelAuth,
+			HasConfiguredModelAuth: options.Availability.HasConfiguredModelAuth, ProviderDefaults: options.ProviderDefaults,
 		})
 		thinking := resolveInitialThinking(options.CLIThinkingLevel, resolved.ThinkingLevel, options.DefaultThinkingLevel)
 		if resolved.Model != nil && (options.Availability.SupportsRoute == nil || !options.Availability.SupportsRoute(*resolved.Model)) {
@@ -451,7 +423,7 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 	if !availabilityResolved {
 		available = FilterAvailableModels(options.AllModels, options.Availability)
 	}
-	if selected := preferredAvailableModel(available); selected != nil {
+	if selected := preferredAvailableModel(available, options.ProviderDefaults); selected != nil {
 		return InitialModelResult{
 			Model: selected, ThinkingLevel: resolveInitialThinking(options.CLIThinkingLevel, nil, options.DefaultThinkingLevel), Scope: scope,
 		}
@@ -473,11 +445,12 @@ func resolveInitialThinking(cli, selected, settings *provider.ThinkingLevel) pro
 }
 
 type RestoreModelOptions struct {
-	SavedProvider string
-	SavedModelID  string
-	CurrentModel  *Model
-	AllModels     []Model
-	Availability  Availability
+	ProviderDefaults []ProviderDefault
+	SavedProvider    string
+	SavedModelID     string
+	CurrentModel     *Model
+	AllModels        []Model
+	Availability     Availability
 }
 
 type RestoreModelResult struct {
@@ -504,7 +477,7 @@ func RestoreModelFromSession(options RestoreModelOptions) RestoreModelResult {
 		current := modelPointer(*options.CurrentModel)
 		return RestoreModelResult{Model: current, Reason: reason, FallbackMessage: restoreFallbackMessage(options, reason, current)}
 	}
-	if fallback := preferredAvailableModel(FilterAvailableModels(options.AllModels, options.Availability)); fallback != nil {
+	if fallback := preferredAvailableModel(FilterAvailableModels(options.AllModels, options.Availability), options.ProviderDefaults); fallback != nil {
 		return RestoreModelResult{Model: fallback, Reason: reason, FallbackMessage: restoreFallbackMessage(options, reason, fallback)}
 	}
 	return RestoreModelResult{Reason: reason}
@@ -560,7 +533,7 @@ func isAlias(id string) bool {
 	return false
 }
 
-func buildFallbackModel(providerID, modelID string, models []Model) *Model {
+func buildFallbackModel(providerID, modelID string, models []Model, preferences []ProviderDefault) *Model {
 	providerModels := make([]Model, 0)
 	for _, candidate := range models {
 		if candidate.Provider == providerID {
@@ -571,7 +544,7 @@ func buildFallbackModel(providerID, modelID string, models []Model) *Model {
 		return nil
 	}
 	base := providerModels[0]
-	if defaultID, ok := DefaultModelID(providerID); ok {
+	if defaultID, ok := defaultModelID(providerID, preferences); ok {
 		for _, candidate := range providerModels {
 			if candidate.ID == defaultID {
 				base = candidate
@@ -584,8 +557,8 @@ func buildFallbackModel(providerID, modelID string, models []Model) *Model {
 	return &base
 }
 
-func preferredAvailableModel(available []Model) *Model {
-	for _, preference := range defaultModelPreferences {
+func preferredAvailableModel(available []Model, preferences []ProviderDefault) *Model {
+	for _, preference := range providerDefaults(preferences) {
 		for _, candidate := range available {
 			if candidate.Provider == preference.Provider && candidate.ID == preference.ModelID {
 				return modelPointer(candidate)

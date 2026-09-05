@@ -24,6 +24,8 @@ Actions:
   doctor   Check the Android toolchain
   devices  List connected Android devices
   e2e-core Run deterministic production/Application/transport E2E tests
+  sync-models
+           Sync built-in model data from upstream and show a short diff
   e2e-deepseek
            Run opt-in live DeepSeek E2E tests (requires DEEPSEEK_API_KEY)
 
@@ -44,6 +46,8 @@ Examples:
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build SURFACE=web
   make dev SURFACE=web ARGS='--cwd /path/to/project'
   make e2e-core
+  make sync-models
+  make sync-models ARGS='-version <release>'
   DEEPSEEK_API_KEY='...' make e2e-deepseek
 EOF
 }

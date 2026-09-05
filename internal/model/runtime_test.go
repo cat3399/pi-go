@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -687,10 +687,10 @@ func TestSetGlobalSettingsReplacesNullOptionalObjects(t *testing.T) {
 	}
 }
 
-func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
+func TestOpenAIModelFixturePreservesPiFields(t *testing.T) {
 	var model Model
-	for _, candidate := range builtinModels() {
-		if candidate.Provider == OpenAIProviderID && candidate.ID == DefaultOpenAIModel {
+	for _, candidate := range fixtureBuiltinModels(t) {
+		if candidate.Provider == OpenAIProviderID && candidate.ID == "gpt-5.5" {
 			model = candidate
 			break
 		}
@@ -721,62 +721,31 @@ func TestBuiltinOpenAIModelMatchesPiCatalogBaseline(t *testing.T) {
 	}
 }
 
-func TestGeneratedBuiltinCatalogMatchesUpstreamOracle(t *testing.T) {
-	if generatedCatalogSource != "@earendil-works/pi-ai@0.84.2" {
-		t.Fatalf("catalog source = %q", generatedCatalogSource)
+func TestEmbeddedCatalogProjectsEveryModel(t *testing.T) {
+	doc, err := catalog.Decode(embeddedCatalogJSON)
+	if err != nil {
+		t.Fatal(err)
 	}
-	models := builtinModels()
-	if len(models) != 129 {
-		t.Fatalf("builtin model count = %d, want 129", len(models))
-	}
-	allowedAPIs := map[string]map[string]bool{
-		OpenAIProviderID:      {OpenAIResponsesAPI: true},
-		AzureOpenAIProviderID: {AzureOpenAIResponsesAPI: true},
-		OpenAICodexProviderID: {OpenAICodexResponsesAPI: true},
-		AnthropicProviderID:   {AnthropicMessagesAPI: true},
-		"deepseek":            {OpenAICompletionsAPI: true},
-		"xai":                 {OpenAICompletionsAPI: true, OpenAIResponsesAPI: true},
-		"groq":                {OpenAICompletionsAPI: true},
-		"cerebras":            {OpenAICompletionsAPI: true},
-		"together":            {OpenAICompletionsAPI: true},
-	}
-	ids := make([]string, 0, len(models))
-	byID := make(map[string]Model, len(models))
-	for _, model := range models {
-		allowed, registered := allowedAPIs[model.Provider]
-		if !registered || !allowed[model.API] {
-			t.Fatalf("generated model %s/%s API = %q", model.Provider, model.ID, model.API)
-		}
-		key := model.Provider + "/" + model.ID
-		if _, duplicate := byID[key]; duplicate {
-			t.Fatalf("duplicate generated model %q", key)
-		}
-		byID[key] = model
-		ids = append(ids, key)
-	}
-	sort.Strings(ids)
-	if !reflect.DeepEqual(ids, generatedCatalogModelIDs) {
-		t.Fatalf("generated catalog IDs differ from oracle\n got: %v\nwant: %v", ids, generatedCatalogModelIDs)
-	}
-	for _, required := range []string{
-		"azure-openai-responses/gpt-5.4", "azure-openai-responses/gpt-5.5",
-		"openai/gpt-5.4", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "openai/gpt-5.4-pro",
-		"openai/gpt-5.5-pro", "openai/gpt-5.6-sol", "openai-codex/gpt-5.6-sol",
-		"anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-6", "anthropic/claude-opus-4-8",
-		"anthropic/claude-sonnet-4-6", "anthropic/claude-fable-5",
-		"groq/qwen/qwen3.6-27b", "together/deepseek-ai/DeepSeek-V4-Flash-0731", "xai/grok-4.6",
-	} {
-		if _, ok := byID[required]; !ok {
-			t.Fatalf("catalog is missing required upstream model %q", required)
+	expected := map[string]bool{}
+	for _, p := range doc.Providers {
+		for _, entries := range p.Models {
+			for id := range entries {
+				expected[p.ID+"/"+id] = true
+			}
 		}
 	}
-	opus := byID["anthropic/claude-opus-4-8"]
-	if _, present := opus.ThinkingLevelMap[provider.ThinkingOff]; present {
-		t.Fatalf("Opus 4.8 must use portable off -> disabled: %#v", opus.ThinkingLevelMap)
+	for _, m := range builtinModels() {
+		key := m.Provider + "/" + m.ID
+		if !expected[key] {
+			t.Fatalf("unexpected or duplicate model %s", key)
+		}
+		delete(expected, key)
+		if _, err := m.Ref(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	fable := byID["anthropic/claude-fable-5"]
-	if value, present := fable.ThinkingLevelMap[provider.ThinkingOff]; !present || value != nil {
-		t.Fatalf("Fable 5 must explicitly omit disabled thinking: %#v", fable.ThinkingLevelMap)
+	if len(expected) != 0 {
+		t.Fatalf("missing catalog entries: %v", expected)
 	}
 }
 
@@ -946,7 +915,7 @@ func TestRuntimeCompositionErrorsAreProviderScopedAndKeepBuiltinFallback(t *test
 	if err == nil || !strings.Contains(err.Error(), "providers.openai") || !strings.Contains(err.Error(), "providers.broken") {
 		t.Fatalf("provider-scoped composition errors = %v", err)
 	}
-	if _, ok := r.GetModel(OpenAIProviderID, DefaultOpenAIModel); !ok {
+	if _, ok := r.GetModel(OpenAIProviderID, testDefaultModelID(t, OpenAIProviderID)); !ok {
 		t.Fatal("invalid OpenAI overlay removed the builtin fallback")
 	}
 	if _, ok := r.GetProvider("broken"); ok {
@@ -1105,7 +1074,7 @@ func TestRuntimeProviderAndModelIdentityIsCaseSensitiveLikePiMaps(t *testing.T) 
 	models := `{"providers":{"OpenAI":{"api":"openai-responses","baseUrl":"https://case.example/v1","apiKey":"key","models":[{"id":"MODEL"},{"id":"model"}]},"openai":{"modelOverrides":{"GPT-5.5":{"compat":{"supportsDeveloperRole":false}},"gpt-5.5":{"compat":{"supportsDeveloperRole":true}}}}}}`
 	path := filepath.Join(t.TempDir(), "models.json")
 	writeFile(t, path, models)
-	loaded, err := loadModels(path)
+	loaded, err := loadModels(path, embeddedBuiltinCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1189,7 +1158,7 @@ func TestRuntimeInvalidModelsJSONPublishesBuiltinFallbackAndDiagnostic(t *testin
 	if _, ok := r.GetModel("openai", "first"); ok {
 		t.Fatal("invalid custom config remained published")
 	}
-	if _, ok := r.GetModel(OpenAIProviderID, DefaultOpenAIModel); !ok {
+	if _, ok := r.GetModel(OpenAIProviderID, testDefaultModelID(t, OpenAIProviderID)); !ok {
 		t.Fatal("builtin fallback catalog was not retained")
 	}
 }
@@ -1248,7 +1217,7 @@ func TestRuntimeSettingsTrustPrecedenceScopesAndUnknownPreservation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.ID != DefaultOpenAIModel {
+	if got.Model.ID != testDefaultModelID(t, OpenAIProviderID) {
 		t.Fatalf("untrusted project selected %q", got.Model.ID)
 	}
 	r.options.ProjectTrusted = true
@@ -1448,6 +1417,6 @@ func FuzzLoadModelsDoesNotPanic(f *testing.F) {
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, _ = loadModels(path)
+		_, _ = loadModels(path, embeddedBuiltinCatalog())
 	})
 }

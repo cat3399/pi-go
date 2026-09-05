@@ -1,116 +1,75 @@
 package model
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
+	"github.com/cat3399/pi-go/internal/model/catalog"
+	"os"
 	"reflect"
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
-func TestBuiltinStaticProviderMetadataMatchesPiAI0842(t *testing.T) {
-	want := map[string]ProviderConfig{
-		AzureOpenAIProviderID: {
-			ID: AzureOpenAIProviderID, Name: "Azure OpenAI", API: AzureOpenAIResponsesAPI,
-			APIKeyEnvironment: []string{"AZURE_OPENAI_API_KEY"},
-		},
-		"deepseek": {
-			ID: "deepseek", Name: "DeepSeek", API: OpenAICompletionsAPI,
-			BaseURL: "https://api.deepseek.com", APIKeyEnvironment: []string{"DEEPSEEK_API_KEY"},
-		},
-		"xai": {
-			ID: "xai", Name: "xAI", API: OpenAICompletionsAPI,
-			BaseURL: "https://api.x.ai/v1", APIKeyEnvironment: []string{"XAI_API_KEY"},
-		},
-		"groq": {
-			ID: "groq", Name: "Groq", API: OpenAICompletionsAPI,
-			BaseURL: "https://api.groq.com/openai/v1", APIKeyEnvironment: []string{"GROQ_API_KEY"},
-		},
-		"cerebras": {
-			ID: "cerebras", Name: "Cerebras", API: OpenAICompletionsAPI,
-			BaseURL: "https://api.cerebras.ai/v1", APIKeyEnvironment: []string{"CEREBRAS_API_KEY"},
-		},
-		"together": {
-			ID: "together", Name: "Together", API: OpenAICompletionsAPI,
-			BaseURL: "https://api.together.ai/v1", APIKeyEnvironment: []string{"TOGETHER_API_KEY"},
-		},
+func TestBuiltinProviderMetadataComesFromCatalog(t *testing.T) {
+	doc, err := catalog.Decode(embeddedCatalogJSON)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	got := make(map[string]ProviderConfig)
-	for _, config := range builtinProviderConfigs() {
-		if _, selected := want[config.ID]; selected {
-			got[config.ID] = config
+	providers := map[string]ProviderConfig{}
+	for _, p := range builtinProviderConfigs() {
+		providers[p.ID] = p
+	}
+	for _, entry := range doc.Providers {
+		p, ok := providers[entry.ID]
+		if !ok || p.API != entry.API || p.BaseURL != entry.BaseURL {
+			t.Fatalf("provider %s did not use catalog metadata: %#v", entry.ID, p)
 		}
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("static Provider metadata differs from pi-ai 0.84.2\n got: %#v\nwant: %#v", got, want)
 	}
 }
 
-func TestBuiltinStaticProviderCatalogOracleMatchesPiAI0842(t *testing.T) {
-	want := map[string]catalogOracle{
-		"azure-openai-responses.json": {
-			Provider: AzureOpenAIProviderID, APIs: []string{AzureOpenAIResponsesAPI},
-			SHA256: "96746b29f5901bed871996498a8a902c4bbcc636f334edfbac5cdaa8b7b9fe38", Count: 38,
-		},
-		"cerebras.json": {
-			Provider: "cerebras", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "ff7c257444fa2635864348cbfb8ec51b4a623616bc5c3d2b47758a2d949ff9bb", Count: 3,
-		},
-		"deepseek.json": {
-			Provider: "deepseek", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "d0703aa3d6fbe64f8620cc9c98d9609ab6fcbe1146184dfa7e64531795d5434a", Count: 2,
-		},
-		"groq.json": {
-			Provider: "groq", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "3f5efefbde4a7fab894410a930eb4af63402cf23d2fffa19df8d41acde294573", Count: 6,
-		},
-		"together.json": {
-			Provider: "together", APIs: []string{OpenAICompletionsAPI},
-			SHA256: "2b722f44768912111713d1327b5989c61f9de6c74502e84574e122e6fc2d6317", Count: 18,
-		},
-		"xai.json": {
-			Provider: "xai", APIs: []string{OpenAICompletionsAPI, OpenAIResponsesAPI},
-			SHA256: "14d8273304cd361e8fd7750d47cdf0c913a9fd629890aa919175e831c12c9414", Count: 4,
-		},
+// Frozen upstream examples exercise data projection independently of live
+// catalog churn. Syncing built-ins never rewrites this behavioral fixture.
+func fixtureBuiltinModels(t *testing.T) []Model {
+	t.Helper()
+	raw, err := os.ReadFile("testdata/catalog-models.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for file, expected := range want {
-		actual, ok := generatedCatalogOracle[file]
-		if !ok || !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("oracle %q = %#v, want %#v", file, actual, expected)
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		t.Fatal(err)
+	}
+	var result []Model
+	for _, entry := range entries {
+		var identity struct{ Provider, ID string }
+		if err := json.Unmarshal(entry, &identity); err != nil {
+			t.Fatal(err)
 		}
-		raw, err := generatedCatalogData.ReadFile("catalogdata/" + file)
+		m, err := projectBuiltinModel(identity.Provider, identity.ID, entry)
 		if err != nil {
-			t.Fatalf("read embedded oracle %q: %v", file, err)
+			t.Fatal(err)
 		}
-		digest := sha256.Sum256(raw)
-		if got := hex.EncodeToString(digest[:]); got != expected.SHA256 {
-			t.Fatalf("oracle %q SHA-256 = %q, want %q", file, got, expected.SHA256)
-		}
+		result = append(result, m)
 	}
+	return result
 }
 
-func TestBuiltinStaticProviderModelsPreservePiAI0842Fields(t *testing.T) {
-	wantCounts := map[string]int{AzureOpenAIProviderID: 38, "deepseek": 2, "xai": 4, "groq": 6, "cerebras": 3, "together": 18}
-	counts := make(map[string]int, len(wantCounts))
-	models := make(map[string]Model)
-	for _, candidate := range generatedBuiltinModels() {
-		if _, selected := wantCounts[candidate.Provider]; !selected {
-			continue
-		}
-		counts[candidate.Provider]++
-		models[candidate.Provider+"/"+candidate.ID] = candidate
-		if _, err := candidate.Ref(); err != nil {
-			t.Fatalf("generated model %s/%s is incomplete: %v", candidate.Provider, candidate.ID, err)
-		}
+func testDefaultModelID(t *testing.T, providerID string) string {
+	t.Helper()
+	id, ok := DefaultModelID(providerID)
+	if !ok {
+		t.Fatalf("missing default for %s", providerID)
 	}
-	if !reflect.DeepEqual(counts, wantCounts) {
-		t.Fatalf("static Provider model counts = %#v, want %#v", counts, wantCounts)
+	return id
+}
+
+func TestUpstreamModelFixturesPreserveFields(t *testing.T) {
+	models := make(map[string]Model)
+	for _, candidate := range fixtureBuiltinModels(t) {
+		models[candidate.Provider+"/"+candidate.ID] = candidate
 	}
 
-	azure := models[AzureOpenAIProviderID+"/"+DefaultAzureOpenAIModel]
+	azure := models[AzureOpenAIProviderID+"/"+"gpt-5.4"]
 	azureOff, hasAzureOff := azure.ThinkingLevelMap[provider.ThinkingOff]
 	azureXHigh, hasAzureXHigh := azure.ThinkingLevelMap[provider.ThinkingXHigh]
 	if azure.Name != "GPT-5.4" || azure.API != AzureOpenAIResponsesAPI || azure.BaseURL != "" || !azure.Reasoning ||

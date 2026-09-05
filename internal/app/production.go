@@ -354,7 +354,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	if p.parsed.modelID != "" {
 		resolved := modelcatalog.ResolveCLIModel(modelcatalog.CLIModelOptions{
-			Provider: p.parsed.providerID, Model: p.parsed.modelID, AllModels: snapshot.Models,
+			Provider: p.parsed.providerID, Model: p.parsed.modelID, AllModels: snapshot.Models, ProviderDefaults: snapshot.ProviderDefaults,
 			HasConfiguredAuth: availability.HasConfiguredAuth, HasConfiguredModelAuth: availability.HasConfiguredModelAuth,
 		})
 		if resolved.Warning != "" {
@@ -439,7 +439,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	created, err := agentruntime.CreateAgentSession(ctx, agentruntime.SessionFactoryOptions{
 		Services: services, Provider: catalog, SessionManager: options.SessionManager,
-		AllModels: snapshot.Models, Availability: availability, ExplicitModel: explicit,
+		AllModels: snapshot.Models, ProviderDefaults: snapshot.ProviderDefaults, Availability: availability, ExplicitModel: explicit,
 		ExplicitThinkingLevel: explicitThinking, ScopedModels: scope.ScopedModels, Settings: snapshot.Settings,
 		BaseConfig: agent.SessionConfig{
 			SystemPrompt: resourceSnapshot.SystemPrompt, Tool: executor, Tools: activeDefinitions,

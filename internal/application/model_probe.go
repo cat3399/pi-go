@@ -51,7 +51,11 @@ func (s *Service) TestModel(
 	if err != nil {
 		return ModelProbeResult{}, err
 	}
-	configured, models, err := modelcatalog.ParseProviderDraft(providerName, encodedProvider)
+	runtime, err := s.openModels(ctx, s.paths.WorkingDir)
+	if err != nil {
+		return ModelProbeResult{}, err
+	}
+	configured, models, err := runtime.ParseProviderDraft(providerName, encodedProvider)
 	if err != nil {
 		return ModelProbeResult{}, err
 	}

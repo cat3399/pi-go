@@ -1,4 +1,4 @@
-.PHONY: help setup check build dev run doctor devices e2e-core e2e-deepseek
+.PHONY: help setup check build dev run doctor devices e2e-core e2e-deepseek sync-models
 
 SURFACE ?= terminal
 ARGS ?=
@@ -10,6 +10,9 @@ export OUTPUT_DIR
 
 help:
 	@./scripts/surface.sh help
+
+sync-models:
+	@./scripts/sync-models.sh $(ARGS)
 
 setup check build dev run doctor devices:
 	@./scripts/surface.sh $@ "$(SURFACE)" $(ARGS)
