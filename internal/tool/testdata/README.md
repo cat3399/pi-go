@@ -1,6 +1,6 @@
 # Frozen upstream tool oracle
 
-`upstream_oracle.json` is generated from the pinned `/Users/mac/dev/pi`
+`upstream_oracle.json` is generated from the pinned upstream pi checkout's
 production exports, not from the Go implementation. The corpus and exact Node,
 rg, and fd versions are recorded in `upstream_oracle_corpus.json`. Managed-tool
 inputs are accepted only when the current `platform-arch` has an explicit

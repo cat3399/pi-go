@@ -62,8 +62,8 @@ func TestLiveDeepSeekBinaryToolResumeEndToEnd(t *testing.T) {
 	workingDir, agentDir := t.TempDir(), t.TempDir()
 	sessionPath := filepath.Join(workingDir, "deepseek-live-session.jsonl")
 	environment := deepSeekBinaryLiveEnvironment(os.Environ(), map[string]string{
-		"DEEPSEEK_API_KEY":    apiKey,
-		"PI_CODING_AGENT_DIR": agentDir,
+		"DEEPSEEK_API_KEY": apiKey,
+		"PI_GO_AGENT_DIR":  agentDir,
 	})
 
 	firstPrompt := "This is an end-to-end acceptance test. Call the write tool exactly once with path \"" + toolFile +

@@ -41,7 +41,7 @@ func TestUntrustedProjectConfigIsGatedWhileContextIsIncluded(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "AGENTS.md"), "global rule")
 	write(t, filepath.Join(cwd, "AGENTS.md"), string([]byte{0xff}))
-	write(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "project secret")
+	write(t, filepath.Join(cwd, ".pi-go", "SYSTEM.md"), "project secret")
 	if err := s.Reload(context.Background()); err != nil {
 		t.Fatalf("untrusted Reload() = %v", err)
 	}
@@ -67,8 +67,8 @@ func TestTrustedResourcesPrecedenceCollisionAndAssembly(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "prompts", "review.md"), "---\ndescription: global\n---\nglobal $1")
 	write(t, filepath.Join(agent, "skills", "review", "SKILL.md"), "---\nname: review\ndescription: global skill\n---\nbody")
-	write(t, filepath.Join(cwd, ".pi", "prompts", "review.md"), "---\ndescription: project\nargument-hint: <file>\n---\nproject ${1:-all}")
-	write(t, filepath.Join(cwd, ".pi", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: project skill\n---\nbody")
+	write(t, filepath.Join(cwd, ".pi-go", "prompts", "review.md"), "---\ndescription: project\nargument-hint: <file>\n---\nproject ${1:-all}")
+	write(t, filepath.Join(cwd, ".pi-go", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: project skill\n---\nbody")
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -348,7 +349,7 @@ type Options struct {
 	// ModelsStorePath is the optional, provider-scoped catalog cache. Registered
 	// dynamic providers may refresh it through Runtime.Refresh.
 	ModelsStorePath string
-	// ProjectTrusted is deliberately opt-in. A project .pi/settings.json is not
+	// ProjectTrusted is deliberately opt-in. A project .pi-go/settings.json is not
 	// read merely because it exists; a formal trust decision is deferred.
 	ProjectTrusted bool
 	// Adapters are API-dialect stream implementations. Runtime composes them
@@ -451,7 +452,7 @@ func LoadEffectiveSettings(agentDir, workingDir string, projectTrusted bool) (Se
 	if !projectTrusted {
 		return cloneSettings(global), nil
 	}
-	project, err := loadSettings(filepath.Join(workingDir, ".pi", "settings.json"), "project settings.json")
+	project, err := loadSettings(filepath.Join(workingDir, product.DirectoryName, "settings.json"), "project settings.json")
 	if err != nil {
 		return Settings{}, err
 	}
@@ -584,7 +585,7 @@ func (r *Runtime) Reload(ctx context.Context) error {
 	}
 	var projectSettingsError error
 	if r.options.ProjectTrusted {
-		loadedProject, err := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
+		loadedProject, err := loadSettings(filepath.Join(r.options.WorkingDir, product.DirectoryName, "settings.json"), "project settings.json")
 		if err != nil {
 			projectSettingsError = err
 		} else {
@@ -770,7 +771,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 		r.mu.RLock()
 		projectSettings = cloneSettings(r.projectSettings)
 		r.mu.RUnlock()
-		project, e := loadSettings(filepath.Join(r.options.WorkingDir, ".pi", "settings.json"), "project settings.json")
+		project, e := loadSettings(filepath.Join(r.options.WorkingDir, product.DirectoryName, "settings.json"), "project settings.json")
 		if e != nil {
 			projectSettingsError = e
 		} else {

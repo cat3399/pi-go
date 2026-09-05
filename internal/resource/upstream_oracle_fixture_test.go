@@ -70,7 +70,7 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 	project := filepath.Join(root, "project")
 	additional := filepath.Join(root, "additional")
 	userPath := filepath.Join(agent, "prompts", "user.md")
-	projectPath := filepath.Join(project, ".pi", "prompts", "project.md")
+	projectPath := filepath.Join(project, ".pi-go", "prompts", "project.md")
 	additionalPath := filepath.Join(additional, "additional.md")
 	write(t, userPath, "---\ndescription: user\n---\nuser")
 	write(t, projectPath, "---\ndescription: project\n---\nproject")
@@ -97,6 +97,10 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 		Description, Source, Scope, Origin, BaseDir string
 	}, 0, len(snapshot.Templates))
 	for _, template := range snapshot.Templates {
+		// Namespace is an intentional product difference; compare discovery
+		// order and provenance against the unchanged upstream fixture.
+		baseDir := strings.Replace(template.Source.BaseDir, root, "<root>", 1)
+		baseDir = strings.Replace(baseDir, "/project/.pi-go/", "/project/.pi/", 1)
 		gotSources = append(gotSources, struct {
 			Description, Source, Scope, Origin, BaseDir string
 		}{
@@ -104,7 +108,7 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 			Source:      template.Source.Source,
 			Scope:       string(template.Source.Scope),
 			Origin:      string(template.Source.Origin),
-			BaseDir:     strings.Replace(template.Source.BaseDir, root, "<root>", 1),
+			BaseDir:     baseDir,
 		})
 	}
 	if !reflect.DeepEqual(gotSources, oracle.PromptSources) {

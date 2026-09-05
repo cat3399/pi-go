@@ -17,4 +17,4 @@ version=${PI_GO_VERSION:-0.1.0-dev}
 mkdir -p "$output_dir"
 
 cd "$repo_dir"
-go build -trimpath -tags pi_go_webui -ldflags "-X=main.version=$version" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go
+go build -trimpath -tags pi_go_webui -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go

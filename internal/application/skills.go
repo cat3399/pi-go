@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/resource"
 )
 
@@ -131,7 +132,7 @@ func (s *Service) skillInstallInfo(cwd string, skill resource.Skill, global, pro
 	switch {
 	case pathWithin(file, filepath.Join(s.paths.AgentDir, "skills")), pathWithin(file, s.globalSkillsDirectory()):
 		scope, entries = SkillScopeGlobal, global
-	case pathWithin(file, filepath.Join(cwd, ".pi", "skills")):
+	case pathWithin(file, filepath.Join(cwd, product.DirectoryName, "skills")):
 		scope, entries = SkillScopeProject, project
 	default:
 		return nil

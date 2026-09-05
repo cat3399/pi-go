@@ -20,7 +20,7 @@ import (
 func TestProjectTrustControlsProjectSkillDiscoveryAndToggle(t *testing.T) {
 	cwd := t.TempDir()
 	agentDir := filepath.Join(t.TempDir(), "agent")
-	skillPath := filepath.Join(cwd, ".pi", "skills", "review", "SKILL.md")
+	skillPath := filepath.Join(cwd, ".pi-go", "skills", "review", "SKILL.md")
 	if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
 		t.Fatal(err)
 	}

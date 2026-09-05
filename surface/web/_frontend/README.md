@@ -1,16 +1,12 @@
-# pi-go WebUI frontend
+# pi-go Web UI
 
-This directory contains the browser frontend owned by `surface/web`. It is a presentation layer above the
-Go Application API; it does not own Agent, Runtime, or durable Session state.
+浏览器宿主使用 Next 与 PWA 注册，挂载 `surface/ui` 的共享 Workbench。
+页面通过当前 origin 的 `/api/v1` 访问 command、query、snapshot 和一条全局 SSE。
+产品组件、状态与样式位于共享 UI 包中。
 
-The browser mounts the shared `surface/ui` Workbench used by the GUI and mobile surfaces. It uses versioned
-`/api/v1` command, query, and snapshot endpoints plus one page-wide SSE connection.
-This package intentionally contains only the Next/PWA host and the shared Workbench entry; product components,
-client state, and styling belong to `surface/ui` and must not be duplicated here.
-Production exports static assets that are embedded into the unified `pi-go` binary. Node.js and Next.js are
-build-time and development dependencies only.
+## 开发与构建
 
-Run the normal workflow from the repository root:
+从仓库根目录执行：
 
 ```sh
 make setup SURFACE=web
@@ -20,8 +16,8 @@ make build SURFACE=web
 make run SURFACE=web ARGS='--cwd /path/to/project'
 ```
 
-The generated `out/` directory is ignored by Git. The leading underscore in `_frontend` keeps JavaScript
-dependencies outside Go's recursive package discovery while still allowing explicit `go:embed` of the static
-export.
+开发入口提供 Next HMR 和 Go API 自动重载。生产构建导出静态资源并内嵌到 `pi-go` 二进制，
+Node 与 Next 只在开发和构建时使用。生成的 `out/` 由 Git 忽略；`_frontend` 的前导下划线使
+Go 的递归包发现跳过 JavaScript 依赖。
 
-See [`../../../docs/SURFACES.md`](../../../docs/SURFACES.md) for the transport and state-ownership contract.
+通信与状态职责见 [Surface](../../../docs/SURFACES.md)。

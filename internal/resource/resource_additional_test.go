@@ -53,10 +53,10 @@ func TestUntrustedProjectConfigIsGatedButContextAlwaysLoads(t *testing.T) {
 	write(t, filepath.Join(agent, "SYSTEM.md"), "global")
 	for _, path := range []string{
 		filepath.Join(cwd, "AGENTS.md"),
-		filepath.Join(cwd, ".pi", "SYSTEM.md"),
-		filepath.Join(cwd, ".pi", "APPEND_SYSTEM.md"),
-		filepath.Join(cwd, ".pi", "prompts", "bad.md"),
-		filepath.Join(cwd, ".pi", "skills", "bad", "SKILL.md"),
+		filepath.Join(cwd, ".pi-go", "SYSTEM.md"),
+		filepath.Join(cwd, ".pi-go", "APPEND_SYSTEM.md"),
+		filepath.Join(cwd, ".pi-go", "prompts", "bad.md"),
+		filepath.Join(cwd, ".pi-go", "skills", "bad", "SKILL.md"),
 		filepath.Join(cwd, ".agents", "skills", "bad", "SKILL.md"),
 	} {
 		write(t, path, string([]byte{0xff}))
@@ -159,7 +159,7 @@ func TestTemplatesExpansionAndPrecedenceAreDeterministic(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "prompts", "a.md"), "---\ndescription: A & <global>\n---\n$1|$2|$@|$ARGUMENTS|${1:-one}|${@:2}|${@:2:1}")
 	write(t, filepath.Join(agent, "prompts", "z.md"), "z")
-	write(t, filepath.Join(cwd, ".pi", "prompts", "a.md"), "---\ndescription: project\nargument-hint: <item>\n---\nproject ${1:-fallback}")
+	write(t, filepath.Join(cwd, ".pi-go", "prompts", "a.md"), "---\ndescription: project\nargument-hint: <item>\n---\nproject ${1:-fallback}")
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestTemplatesExpansionAndPrecedenceAreDeterministic(t *testing.T) {
 	if got := substitute("${999999999999999999999999:-x}|${@:999999999999999999999999}", []string{"one"}); got != "x|" {
 		t.Fatalf("overflow substitution = %q", got)
 	}
-	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Resource != "template" || snapshot.Diagnostics[0].WinnerPath != filepath.Join(cwd, ".pi", "prompts", "a.md") {
+	if len(snapshot.Diagnostics) != 1 || snapshot.Diagnostics[0].Resource != "template" || snapshot.Diagnostics[0].WinnerPath != filepath.Join(cwd, ".pi-go", "prompts", "a.md") {
 		t.Fatalf("template collision = %#v", snapshot.Diagnostics)
 	}
 }
@@ -258,8 +258,8 @@ func TestSkillCollisionsWithinAndAcrossScopesHaveOneWinner(t *testing.T) {
 	s, agent, cwd := newService(t)
 	write(t, filepath.Join(agent, "skills", "a", "SKILL.md"), "---\nname: same\ndescription: global first\n---")
 	write(t, filepath.Join(agent, "skills", "b", "SKILL.md"), "---\nname: same\ndescription: global second\n---")
-	write(t, filepath.Join(cwd, ".pi", "skills", "a", "SKILL.md"), "---\nname: same\ndescription: project first\n---")
-	write(t, filepath.Join(cwd, ".pi", "skills", "b", "SKILL.md"), "---\nname: same\ndescription: project second\n---")
+	write(t, filepath.Join(cwd, ".pi-go", "skills", "a", "SKILL.md"), "---\nname: same\ndescription: project first\n---")
+	write(t, filepath.Join(cwd, ".pi-go", "skills", "b", "SKILL.md"), "---\nname: same\ndescription: project second\n---")
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestReloadFailureBeforeFirstSnapshotAndCancellationRetention(t *testing.T) 
 
 func TestReloadGenerationPreventsTrustedStalePublication(t *testing.T) {
 	s, _, cwd := newService(t)
-	write(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "stale trusted prompt")
+	write(t, filepath.Join(cwd, ".pi-go", "SYSTEM.md"), "stale trusted prompt")
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestTrustedProjectResourceParentSymlinkIsFollowed(t *testing.T) {
 	s, _, cwd := newService(t)
 	outside := t.TempDir()
 	write(t, filepath.Join(outside, "SYSTEM.md"), "outside prompt")
-	if err := os.Symlink(outside, filepath.Join(cwd, ".pi")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(cwd, ".pi-go")); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Trust().Set(context.Background(), cwd, true); err != nil {

@@ -738,10 +738,10 @@ func TestProductionRuntimeReplacementRebuildsCwdBoundServices(t *testing.T) {
 		{firstCWD, "first project prompt", "first marker"},
 		{secondCWD, "second project prompt", "second marker"},
 	} {
-		if err := os.MkdirAll(filepath.Join(fixture.cwd, ".pi"), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(fixture.cwd, ".pi-go"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(fixture.cwd, ".pi", "SYSTEM.md"), []byte(fixture.prompt), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(fixture.cwd, ".pi-go", "SYSTEM.md"), []byte(fixture.prompt), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(fixture.cwd, "marker.txt"), []byte(fixture.marker), 0o600); err != nil {
@@ -906,21 +906,19 @@ func TestRunProductionModelLessDoesNotInvokeProvider(t *testing.T) {
 	}
 }
 
-func TestResolveProductionDocsDirUsesExecutableSibling(t *testing.T) {
-	got, err := resolveProductionDocsDir("")
+func TestProductionDocumentationUsesInstalledBuildSources(t *testing.T) {
+	paths := ProductionPaths{WorkingDir: t.TempDir(), AgentDir: filepath.Join(t.TempDir(), "agent")}
+	got, err := productionDocumentation(context.Background(), ProductionConfig{}, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	if got.BuildID == "" || got.DocsPath != filepath.Join(got.SourcePath, "docs") {
+		t.Fatalf("installed documentation = %#v", got)
 	}
-	want, err := filepath.Abs(filepath.Join(filepath.Dir(executable), "docs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != filepath.Clean(want) {
-		t.Fatalf("docs dir = %q, want %q", got, want)
+	for _, name := range []string{got.ReadmePath, filepath.Join(got.SourcePath, "internal", "agent", "agent.go")} {
+		if data, err := os.ReadFile(name); err != nil || len(data) == 0 {
+			t.Fatalf("installed resource %s: %v", name, err)
+		}
 	}
 }
 

@@ -13,8 +13,8 @@ import (
 func TestServiceRebuildsPromptAndExpandsInputFromOneHealthySnapshot(t *testing.T) {
 	cwd := t.TempDir()
 	agentDir := t.TempDir()
-	skillDir := filepath.Join(cwd, ".pi", "skills", "review")
-	promptDir := filepath.Join(cwd, ".pi", "prompts")
+	skillDir := filepath.Join(cwd, ".pi-go", "skills", "review")
+	promptDir := filepath.Join(cwd, ".pi-go", "prompts")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

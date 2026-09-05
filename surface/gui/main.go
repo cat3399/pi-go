@@ -9,6 +9,8 @@ import (
 	"os"
 
 	coreapp "github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/installation"
+	"github.com/cat3399/pi-go/internal/product"
 	wails "github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -16,8 +18,6 @@ import (
 //
 //go:embed all:frontend/dist
 var frontendAssets embed.FS
-
-var version = "0.1.0-dev"
 
 type launchOptions struct {
 	cwd             string
@@ -32,8 +32,8 @@ func parseLaunchOptions(args []string) (launchOptions, error) {
 	flags.SetOutput(os.Stderr)
 	var options launchOptions
 	flags.StringVar(&options.cwd, "cwd", "", "default working directory for the embedded pi-go core")
-	flags.StringVar(&options.agentDir, "agent-dir", "", "pi agent directory")
-	flags.StringVar(&options.docsDir, "docs-dir", "", "pi documentation directory")
+	flags.StringVar(&options.agentDir, "agent-dir", "", "pi-go agent directory")
+	flags.StringVar(&options.docsDir, "docs-dir", "", "pi-go documentation directory override")
 	flags.StringVar(&options.defaultRemote, "remote", "", "initial remote pi-go endpoint")
 	flags.BoolVar(&options.devToolsEnabled, "devtools", false, "enable WebView developer tools")
 	if err := flags.Parse(args); err != nil {
@@ -52,13 +52,14 @@ func main() {
 	}
 
 	bridge := NewGUIBridge(coreapp.ProductionConfig{
-		WorkingDir: options.cwd,
-		AgentDir:   options.agentDir,
-		DocsDir:    options.docsDir,
-	}, options.defaultRemote, version)
+		WorkingDir:    options.cwd,
+		AgentDir:      options.agentDir,
+		DocsDir:       options.docsDir,
+		SourceBundles: []installation.SourceBundle{{Prefix: "surface/gui", Files: guiSources}},
+	}, options.defaultRemote, product.Version)
 
 	application := wails.New(wails.Options{
-		Name:        "pi",
+		Name:        product.Name,
 		Description: "pi-go desktop agent",
 		Services: []wails.Service{
 			wails.NewService(bridge),
@@ -72,7 +73,7 @@ func main() {
 	})
 
 	application.Window.NewWithOptions(wails.WebviewWindowOptions{
-		Title:            "pi",
+		Title:            product.Name,
 		Width:            1253,
 		Height:           760,
 		DevToolsEnabled:  options.devToolsEnabled,

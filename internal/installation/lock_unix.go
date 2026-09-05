@@ -1,0 +1,29 @@
+//go:build darwin || linux || freebsd || openbsd || netbsd || dragonfly
+
+package installation
+
+import (
+	"errors"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+func tryLock(file *os.File) (bool, error) {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func unlock(file *os.File) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }
+
+func syncDirectory(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}

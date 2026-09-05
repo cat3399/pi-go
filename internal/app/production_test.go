@@ -1139,6 +1139,9 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			}
 			if testCase.modelAccess {
 				config.DocsDir = filepath.Join(workingDir, "installed-docs")
+				if err := os.Mkdir(config.DocsDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
@@ -1294,10 +1297,10 @@ func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
 	}
 	workingDir := t.TempDir()
 	agentDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(workingDir, ".pi"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(workingDir, ".pi-go"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workingDir, ".pi", "SYSTEM.md"), []byte("project system prompt"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workingDir, ".pi-go", "SYSTEM.md"), []byte("project system prompt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	resources, err := resource.New(resource.Config{CWD: workingDir, AgentDir: agentDir})
@@ -1332,13 +1335,13 @@ func TestRunProductionRejectsFutureTrustValueBeforeProviderAccess(t *testing.T) 
 	root := t.TempDir()
 	workingDir := filepath.Join(root, "parent", "project")
 	agentDir := filepath.Join(root, "agent")
-	if err := os.MkdirAll(filepath.Join(workingDir, ".pi"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(workingDir, ".pi-go"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workingDir, ".pi", "SYSTEM.md"), []byte("project must stay unauthorized"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workingDir, ".pi-go", "SYSTEM.md"), []byte("project must stay unauthorized"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	trust := fmt.Sprintf("{\n  %q: true,\n  %q: {\"trusted\": false}\n}\n", filepath.Dir(workingDir), workingDir)

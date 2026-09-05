@@ -97,7 +97,7 @@ func TestExplicitAgentDirDiscoveryDoesNotDependOnProcessConfiguration(t *testing
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(root, "different-agent"))
+	t.Setenv("PI_GO_AGENT_DIR", filepath.Join(root, "different-agent"))
 
 	project, err := ListSessionsInAgentDir(cwd, agentDir, nil)
 	if err != nil || len(project) != 1 || project[0].Path != file {

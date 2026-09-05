@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cat3399/pi-go/internal/installation"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/resource"
 )
@@ -22,6 +23,9 @@ type ProjectTrustStatus struct {
 func (s *Service) ProjectTrust(ctx context.Context, cwd string) (ProjectTrustStatus, error) {
 	cwd, err := ValidateCWD(cwd)
 	if err != nil {
+		return ProjectTrustStatus{}, err
+	}
+	if err := installation.InitializeProject(normalizeContext(ctx), cwd); err != nil {
 		return ProjectTrustStatus{}, err
 	}
 	requires := resource.HasTrustRequiringProjectResources(cwd)
@@ -94,6 +98,9 @@ func (s *Service) TrustProject(ctx context.Context, cwd string) (ProjectTrustSta
 func (s *Service) loadResourceSnapshot(ctx context.Context, cwd string) (resource.Snapshot, error) {
 	cwd, err := ValidateCWD(cwd)
 	if err != nil {
+		return resource.Snapshot{}, err
+	}
+	if err := installation.InitializeProject(normalizeContext(ctx), cwd); err != nil {
 		return resource.Snapshot{}, err
 	}
 	bootstrap, err := resource.New(resource.Config{CWD: cwd, AgentDir: s.paths.AgentDir})

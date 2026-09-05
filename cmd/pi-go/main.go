@@ -9,10 +9,9 @@ import (
 	"syscall"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/rpc"
 )
-
-var version = "0.1.0-dev"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -30,7 +29,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		writeUsage(stdout)
 		return 0
 	case "version", "--version":
-		_, _ = fmt.Fprintln(stdout, version)
+		_, _ = fmt.Fprintln(stdout, product.Version)
 		return 0
 	case "run":
 		return app.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdout, stderr)

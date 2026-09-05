@@ -117,7 +117,7 @@ type Config struct {
 	NoContextFiles, NoSkills, NoPromptTemplates bool
 	SystemPromptSource                          string
 	AppendSystemPromptSources                   []string
-	ReadmePath, DocsPath, ExamplesPath          string
+	ReadmePath, DocsPath                        string
 	HomeDir                                     string
 	MaxFileBytes, MaxPromptBytes                int64
 }
@@ -190,7 +190,7 @@ func validateConfig(c Config) (Config, error) {
 		}
 	}
 	for _, item := range []struct{ label, value string }{
-		{"home directory", c.HomeDir}, {"readme path", c.ReadmePath}, {"docs path", c.DocsPath}, {"examples path", c.ExamplesPath},
+		{"home directory", c.HomeDir}, {"readme path", c.ReadmePath}, {"docs path", c.DocsPath},
 	} {
 		if item.value != "" && (!utf8.ValidString(item.value) || strings.IndexByte(item.value, 0) >= 0) {
 			return Config{}, fmt.Errorf("%w: %s is invalid", ErrInvalidConfig, item.label)

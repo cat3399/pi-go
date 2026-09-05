@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cat3399/pi-go/internal/product"
 )
 
 // TrustStore persists explicit trust decisions. Missing is intentionally not
@@ -343,7 +345,7 @@ func HasTrustRequiringProjectResources(cwd string) bool {
 		return false
 	}
 	for _, name := range []string{"settings.json", "extensions", "skills", "prompts", "themes", "SYSTEM.md", "APPEND_SYSTEM.md"} {
-		if _, err := os.Stat(filepath.Join(current, ".pi", name)); err == nil {
+		if _, err := os.Stat(filepath.Join(current, product.DirectoryName, name)); err == nil {
 			return true
 		}
 	}

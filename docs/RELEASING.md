@@ -1,6 +1,6 @@
 # 构建与发布
 
-## 最少操作
+## GitHub Actions
 
 在 GitHub 仓库的 **Actions** 页面中：
 
@@ -43,6 +43,10 @@ make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
 所有发布资产旁会生成 `SHA256SUMS`。向已有版本补充 surface 时，workflow 会保留原资产的校验和、
 合并新资产校验和，并更新发布说明中的完整 surface 列表。
 
+包含 Core 的二进制同时内嵌本次编译的源码和使用文档，普通 `go build` 也具备该能力；GUI
+额外内嵌独立 GUI 模块的源码输入。`internal/product.Version` 是 Core 与 Surface 共用的版本
+注入点。资料安装位置、本地自定义和版本对应关系见[本地源码](self-knowledge.md)。
+
 ## 缓存
 
 构建按照工具链分 job，缓存彼此隔离：
@@ -57,15 +61,15 @@ make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
 
 ## 签名边界
 
-Android 普通 **Build** 生成 debug APK，正式 **Release** 生成 release APK；两者使用同一个固定证书，
-因此本机产物、Action 产物和正式发布包可以相互覆盖升级。当前证书是项目维护者本机的 Android debug
-keystore，SHA-256 指纹为
-`C1:E9:5E:AD:C8:15:E6:B5:41:9F:9F:A1:EF:54:1A:C3:57:71:D2:28:16:B4:98:1A:FE:1D:07:29:B2:BF:65:78`。
-workflow 会在构建前后检查该指纹，防止 Secret 被错误替换。
+Android **Build** 生成 debug APK，**Release** 生成 release APK；CI 两者使用同一个固定证书，
+可以相互覆盖升级。该证书源自 Android debug keystore，release 构建类型不会自动改变签名身份。
+预期的 SHA-256 指纹定义在 `_build-surfaces.yml` 的 `EXPECTED_ANDROID_CERT_SHA256`，
+workflow 在构建前后校验。更换签名证书会影响已有安装的覆盖升级。
 
 GitHub Actions 使用 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS` 和
 `ANDROID_KEY_PASSWORD` 四个仓库 Secret。keystore 本身不得提交到仓库。本机普通构建继续使用 Android
-默认的 `~/.android/debug.keystore`；需要检查 production 构建时可运行：
+默认的 `~/.android/debug.keystore`；本地产物仅在证书与 CI 相同时可以互相覆盖升级。
+需要检查 release 构建时可运行：
 
 ```sh
 PI_GO_ANDROID_BUILD_TYPE=release make build SURFACE=mobile VERSION=1.2.3

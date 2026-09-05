@@ -14,6 +14,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/product"
 )
 
 // SessionManager owns pi's session semantics. Session remains the Store-facing
@@ -913,23 +914,9 @@ func defaultSessionDirPath(cwd, agentDir string) string {
 }
 
 func defaultAgentDir() string {
-	if configured := os.Getenv("PI_CODING_AGENT_DIR"); configured != "" {
-		if configured == "~" || strings.HasPrefix(configured, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				if configured == "~" {
-					configured = home
-				} else {
-					configured = filepath.Join(home, configured[2:])
-				}
-			}
-		}
-		if resolved, err := filepath.Abs(configured); err == nil {
-			return filepath.Clean(resolved)
-		}
-	}
-	home, err := os.UserHomeDir()
+	directory, err := product.ResolveAgentDirectory("", ".", nil)
 	if err != nil {
-		return filepath.Join(".pi", "agent")
+		return filepath.Join(product.DirectoryName, "agent")
 	}
-	return filepath.Join(home, ".pi", "agent")
+	return directory
 }

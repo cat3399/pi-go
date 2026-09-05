@@ -37,7 +37,7 @@ if [[ "$(go env GOOS)" == windows ]]; then
 fi
 (
 	cd "$gui_dir"
-	go build -tags production -trimpath -ldflags "-X=main.version=$version" -o "$binary_dir/$binary_name" .
+	go build -tags production -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version" -o "$binary_dir/$binary_name" .
 )
 
 if [[ "$(go env GOOS)" == windows ]]; then

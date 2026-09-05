@@ -163,7 +163,7 @@ func ListSessions(cwd, sessionDir string, progress SessionListProgress) ([]Sessi
 }
 
 // ListAllSessions lists a custom flat session directory when provided. With an
-// empty argument it scans every cwd directory below ~/.pi/agent/sessions.
+// empty argument it scans every cwd directory below ~/.pi-go/agent/sessions.
 func ListAllSessions(sessionDir string, progress SessionListProgress) ([]SessionInfo, error) {
 	if sessionDir != "" {
 		dir, err := filepath.Abs(sessionDir)
@@ -178,7 +178,7 @@ func ListAllSessions(sessionDir string, progress SessionListProgress) ([]Session
 }
 
 // SessionDirForAgentDir computes the cwd-scoped session directory under one
-// explicit agentDir without consulting PI_CODING_AGENT_DIR or user home.
+// explicit agentDir without consulting PI_GO_AGENT_DIR or user home.
 func SessionDirForAgentDir(cwd, agentDir string) (string, error) {
 	resolvedCwd, err := resolveWorkingDir(cwd)
 	if err != nil {

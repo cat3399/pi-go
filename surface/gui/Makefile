@@ -19,7 +19,7 @@ frontend-build:
 
 build: frontend-build
 	mkdir -p "$(BIN_DIR)"
-	go build -tags production -trimpath -ldflags "-X=main.version=$(VERSION)" -o "$(BIN_DIR)/pi-go-gui$(GOEXE)" .
+	go build -tags production -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$(VERSION)" -o "$(BIN_DIR)/pi-go-gui$(GOEXE)" .
 
 dev:
 	npm --prefix frontend run build:dev

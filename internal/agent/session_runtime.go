@@ -654,7 +654,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	}
 	loop, err := New(Config{
 		Provider: config.Provider, InitialMessages: initialContext.AgentMessages(), Model: config.Model, ThinkingLevel: config.ThinkingLevel, Stream: config.Stream,
-		SystemPrompt: config.SystemPrompt, Tool: config.Tool, Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
+		SystemPrompt: config.SystemPrompt, Tool: s.toolsWithSessionContext(config.Tool), Tools: config.Tools, BeforeToolCall: s.beforeToolCall, AfterToolCall: s.afterToolCall,
 		ToolExecution: config.ToolExecution, TransformContext: config.TransformContext, TransformAgentContext: contextHookTransform(config.Hooks.Context),
 		ConvertToLLM: config.ConvertToLLM, GetAPIKey: config.GetAPIKey,
 		MessageEnd:   s.messageEndTransform,
@@ -1607,7 +1607,7 @@ func (s *AgentSession) publishToolRuntime(
 			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
 		}
 	}
-	if err := s.loop.setPromptAndTools(prompt, executor, selected); err != nil {
+	if err := s.loop.setPromptAndTools(prompt, s.toolsWithSessionContext(executor), selected); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -1743,7 +1743,7 @@ func (s *AgentSession) setActiveToolsByName(names []string) error {
 			return fmt.Errorf("%w: tools: %w", ErrInvalidConfig, err)
 		}
 	}
-	if err := s.loop.setPromptAndTools(prompt, executor, selected); err != nil {
+	if err := s.loop.setPromptAndTools(prompt, s.toolsWithSessionContext(executor), selected); err != nil {
 		return err
 	}
 	s.mu.Lock()

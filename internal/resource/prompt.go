@@ -3,13 +3,13 @@ package resource
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/cat3399/pi-go/internal/product"
 )
 
 func frontmatter(raw string) (map[string]string, string, error) {
@@ -182,7 +182,7 @@ func buildSystemPromptOptions(c Config, snapshot Snapshot) BuildSystemPromptOpti
 		CustomPrompt: custom, SelectedTools: selected, ToolSnippets: snippets, PromptGuidelines: guidelines,
 		AppendSystemPrompt: strings.Join(snapshot.AppendSystem, "\n\n"), CWD: c.CWD,
 		ContextFiles: snapshot.Instructions, Skills: snapshot.Skills,
-		ReadmePath: c.ReadmePath, DocsPath: c.DocsPath, ExamplesPath: c.ExamplesPath,
+		ReadmePath: c.ReadmePath, DocsPath: c.DocsPath,
 	}
 }
 
@@ -197,7 +197,6 @@ type BuildSystemPromptOptions struct {
 	Skills             []Skill
 	ReadmePath         string
 	DocsPath           string
-	ExamplesPath       string
 }
 
 // BuildSystemPrompt is a behavioral port of coding-agent's system prompt
@@ -255,17 +254,7 @@ func BuildSystemPrompt(options BuildSystemPromptOptions) string {
 		guidelines[index] = "- " + guidelines[index]
 	}
 
-	readmePath, docsPath, examplesPath := options.ReadmePath, options.DocsPath, options.ExamplesPath
-	if readmePath == "" {
-		readmePath = filepath.Join(defaultPiPackageRoot(), "README.md")
-	}
-	if docsPath == "" {
-		docsPath = filepath.Join(filepath.Dir(readmePath), "docs")
-	}
-	if examplesPath == "" {
-		examplesPath = filepath.Join(filepath.Dir(readmePath), "examples")
-	}
-	prompt := fmt.Sprintf(`You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+	prompt := fmt.Sprintf(`You are an expert coding assistant operating inside %s, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 %s
@@ -273,34 +262,23 @@ Available tools:
 In addition to the tools above, you may have access to other custom tools depending on the project.
 
 Guidelines:
-%s
+%s`, product.Name, toolsList, strings.Join(guidelines, "\n"))
+	if options.DocsPath != "" {
+		prompt += fmt.Sprintf(`
 
-Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):
+pi-go documentation (read only when the user asks about pi-go itself):
 - Main documentation: %s
 - Additional docs: %s
-- Examples: %s (extensions, custom tools, SDK)
-- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory
-- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)
-- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing
-- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)`, toolsList, strings.Join(guidelines, "\n"), readmePath, docsPath, examplesPath)
+- When reading pi-go docs, resolve docs/... under Additional docs, not the current working directory
+- When asked about: usage and sessions (docs/usage.md), configuration and environment variables (docs/configuration.md), providers and authentication (docs/providers.md), models (docs/models.md), tools, skills, and prompt templates (docs/tools.md), interfaces (docs/SURFACES.md, docs/gui.md, docs/mobile.md), building and releasing (docs/RELEASING.md)
+- When working on pi-go topics, read the docs and follow .md cross-references before implementing
+- Always read pi-go .md files completely and follow links to related docs`, options.ReadmePath, options.DocsPath)
+	}
 	prompt += appendSection + formatContextFiles(options.ContextFiles)
 	if hasRead {
 		prompt += formatSkillsForPrompt(options.Skills)
 	}
 	return prompt + "\nCurrent working directory: " + promptCWD
-}
-
-func defaultPiPackageRoot() string {
-	if _, source, _, ok := runtime.Caller(0); ok {
-		root := filepath.Clean(filepath.Join(filepath.Dir(source), "..", ".."))
-		if _, err := os.Stat(filepath.Join(root, "README.md")); err == nil {
-			return root
-		}
-	}
-	if executable, err := os.Executable(); err == nil {
-		return filepath.Dir(executable)
-	}
-	return "."
 }
 
 func formatContextFiles(files []Instruction) string {

@@ -16,7 +16,7 @@ func TestAssembleUsesOnlySelectedToolGuidelines(t *testing.T) {
 			{Name: "read", Snippet: "Read", PromptGuidelines: []string{"READ-ONLY-GUIDELINE"}},
 			{Name: "bash", Snippet: "Run", PromptGuidelines: []string{"BASH-ONLY-GUIDELINE"}},
 		},
-		ReadmePath: "/pi/README.md", DocsPath: "/pi/docs", ExamplesPath: "/pi/examples",
+		ReadmePath: "/installation/README.md", DocsPath: "/installation/docs",
 	}, Snapshot{})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestResourceFreeProjectIgnoresStoredRejectionUntilGatedResourcesAppear(t *t
 		t.Fatalf("resource-free project remained untrusted: %#v", snapshot)
 	}
 
-	write(t, filepath.Join(cwd, ".pi", "SYSTEM.md"), "gated")
+	write(t, filepath.Join(cwd, ".pi-go", "SYSTEM.md"), "gated")
 	if err := service.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}

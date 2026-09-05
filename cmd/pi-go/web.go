@@ -16,6 +16,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/product"
 	websurface "github.com/cat3399/pi-go/surface/web"
 )
 
@@ -24,8 +25,8 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	listen := flags.String("listen", "127.0.0.1:30141", "HTTP listen address")
 	cwd := flags.String("cwd", "", "default working directory")
-	agentDir := flags.String("agent-dir", "", "pi agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)")
-	docsDir := flags.String("docs-dir", "", "pi documentation directory")
+	agentDir := flags.String("agent-dir", "", "pi-go agent directory (defaults to PI_GO_AGENT_DIR or ~/.pi-go/agent)")
+	docsDir := flags.String("docs-dir", "", "pi-go documentation directory override")
 	password := flags.String("password", os.Getenv("PI_GO_WEB_PASSWORD"), "remote access password (or PI_GO_WEB_PASSWORD)")
 	apiOnly := flags.Bool("api-only", false, "serve only the Go API (for the frontend development server)")
 	assetsDir := flags.String("assets-dir", "", "serve browser assets from a directory instead of the embedded production export")
@@ -76,7 +77,7 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	allowedHosts := append([]string{allowedHost}, extraAllowedHosts...)
 	surface, err := websurface.New(websurface.Options{
-		Version: version, Assets: assets, Application: service, AllowedHosts: allowedHosts,
+		Version: product.Version, Assets: assets, Application: service, AllowedHosts: allowedHosts,
 		Password: *password,
 	})
 	if err != nil {

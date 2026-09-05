@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf16"
+
+	"github.com/cat3399/pi-go/internal/product"
 )
 
 type Service struct {
@@ -417,7 +419,7 @@ func discoverSystemPrompt(ctx context.Context, c Config, trusted bool) (string, 
 		return resolvePromptInput(ctx, c.SystemPromptSource, c.CWD, c.MaxFileBytes)
 	}
 	if trusted {
-		project := filepath.Join(c.CWD, ".pi", "SYSTEM.md")
+		project := filepath.Join(c.CWD, product.DirectoryName, "SYSTEM.md")
 		if resourcePathExists(project) {
 			return resolvePromptInput(ctx, project, c.CWD, c.MaxFileBytes)
 		}
@@ -443,7 +445,7 @@ func discoverAppendSystemPrompts(ctx context.Context, c Config, trusted bool) ([
 	}
 	path := ""
 	if trusted {
-		candidate := filepath.Join(c.CWD, ".pi", "APPEND_SYSTEM.md")
+		candidate := filepath.Join(c.CWD, product.DirectoryName, "APPEND_SYSTEM.md")
 		if resourcePathExists(candidate) {
 			path = candidate
 		}
@@ -595,7 +597,7 @@ func discoverTemplates(ctx context.Context, c Config, trusted bool, diagnostics 
 	rootSet := newCanonicalResourceRootSet()
 	if !c.NoPromptTemplates {
 		if trusted {
-			path := filepath.Join(c.CWD, ".pi", "prompts")
+			path := filepath.Join(c.CWD, product.DirectoryName, "prompts")
 			roots = appendResourceRoot(roots, rootSet, resourceRoot{path: path, source: defaultResourceSource(path, ScopeProject)})
 		}
 		path := filepath.Join(c.AgentDir, "prompts")
@@ -705,7 +707,7 @@ func discoverSkills(ctx context.Context, c Config, trusted bool, diagnostics []D
 	}
 	if !c.NoSkills {
 		if trusted {
-			path := filepath.Join(c.CWD, ".pi", "skills")
+			path := filepath.Join(c.CWD, product.DirectoryName, "skills")
 			appendRoot(skillRoot{path: path, source: defaultResourceSource(path, ScopeProject), includeRootFiles: true})
 			for _, directory := range ancestorAgentSkillDirectories(c.CWD) {
 				if samePath(directory, userAgentSkillsDirectory(c.HomeDir)) {
@@ -918,7 +920,7 @@ func resolveResourcePath(path, cwd, home string) string {
 }
 
 func scopeForPath(path string, c Config) Scope {
-	if pathWithin(path, filepath.Join(c.CWD, ".pi")) || pathWithin(path, filepath.Join(c.CWD, ".agents")) {
+	if pathWithin(path, filepath.Join(c.CWD, product.DirectoryName)) || pathWithin(path, filepath.Join(c.CWD, ".agents")) {
 		return ScopeProject
 	}
 	if pathWithin(path, c.AgentDir) || pathWithin(path, userAgentSkillsDirectory(c.HomeDir)) {

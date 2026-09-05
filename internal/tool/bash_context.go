@@ -43,6 +43,14 @@ func WithBashExecutionContext(ctx context.Context, execution BashExecutionContex
 	return context.WithValue(ctx, bashExecutionContextKey{}, cloneBashExecutionContext(execution))
 }
 
+// WithBashSessionEnvironment supplies AgentSession's live metadata while
+// preserving the caller's working directory and explicit environment overlay.
+func WithBashSessionEnvironment(ctx context.Context, session BashSessionEnvironment) context.Context {
+	execution := bashExecutionContextFromContext(ctx)
+	execution.SessionEnvironment = &session
+	return WithBashExecutionContext(ctx, execution)
+}
+
 func bashExecutionContextFromContext(ctx context.Context) BashExecutionContext {
 	if ctx == nil {
 		return BashExecutionContext{}

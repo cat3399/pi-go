@@ -17,7 +17,9 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/auth"
+	"github.com/cat3399/pi-go/internal/installation"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
+	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
@@ -29,17 +31,17 @@ const (
 	openAIProviderID     = provider.OpenAIProviderID
 	openAIResponsesAPI   = provider.OpenAIResponsesAPI
 	openAICompletionsAPI = provider.OpenAICompletionsAPI
-	agentDirEnvironment  = "PI_CODING_AGENT_DIR"
 )
 
 // ProductionConfig contains process-owned inputs and deterministic adapter
 // seams. Ordinary users select only the documented CLI/config sources; these
 // fields do not create hidden release flags or provider fallbacks.
 type ProductionConfig struct {
-	WorkingDir  string
-	AgentDir    string
-	DocsDir     string
-	Environment []string
+	WorkingDir    string
+	AgentDir      string
+	DocsDir       string
+	Environment   []string
+	SourceBundles []installation.SourceBundle
 
 	OpenAIHTTPClient provider.HTTPDoer
 	OpenAIClock      provider.Clock
@@ -90,7 +92,7 @@ type ProductionPaths struct {
 
 // ResolveProductionPaths exposes production's canonical cwd/agent-dir rules to
 // in-process surfaces such as WebUI. This prevents each surface from inventing
-// its own PI_CODING_AGENT_DIR or relative-path behavior.
+// its own directory or relative-path behavior.
 func ResolveProductionPaths(config ProductionConfig) (ProductionPaths, error) {
 	workingDir, err := resolveWorkingDirectory(config.WorkingDir)
 	if err != nil {
@@ -100,9 +102,9 @@ func ResolveProductionPaths(config ProductionConfig) (ProductionPaths, error) {
 	if environment == nil {
 		environment = os.Environ()
 	}
-	agentDir, err := resolveProductionAgentDir(config.AgentDir, workingDir, environmentMap(environment))
+	agentDir, err := product.ResolveAgentDirectory(config.AgentDir, workingDir, environment)
 	if err != nil {
-		return ProductionPaths{}, err
+		return ProductionPaths{}, fmt.Errorf("%w: agent directory: %w", ErrInvalidProductionConfig, err)
 	}
 	return ProductionPaths{WorkingDir: workingDir, AgentDir: agentDir}, nil
 }
@@ -134,7 +136,7 @@ func assembleProductionRuntime(
 	if cause := context.Cause(ctx); cause != nil {
 		return runtimeDependencies{}, fmt.Errorf("production assembly cancelled: %w", cause)
 	}
-	paths, err := ResolveProductionPaths(config)
+	paths, err := PrepareProduction(ctx, config)
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
@@ -166,12 +168,12 @@ func assembleProductionRuntime(
 		return runtimeDependencies{}, err
 	}
 	defaultPath := productionSessionPathFactory(agentDir, createdAt, sessionID)
-	docsDir, err := resolveProductionDocsDir(config.DocsDir)
+	documentation, err := productionDocumentation(ctx, config, paths)
 	if err != nil {
 		return runtimeDependencies{}, err
 	}
 	plan := productionRuntimePlan{
-		config: config, parsed: parsed, agentDir: agentDir, docsDir: docsDir,
+		config: config, parsed: parsed, agentDir: agentDir, docsDir: documentation.DocsPath, readmePath: documentation.ReadmePath,
 		environment: environment, ambientEnvironment: ambientEnvironment,
 	}
 	return runtimeDependencies{
@@ -186,6 +188,7 @@ type productionRuntimePlan struct {
 	parsed             options
 	agentDir           string
 	docsDir            string
+	readmePath         string
 	environment        []string
 	ambientEnvironment map[string]string
 }
@@ -253,6 +256,9 @@ func resolveProductionShellPath(path string) (string, error) {
 
 func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 	cwd := options.SessionManager.Cwd()
+	if err := installation.InitializeProject(ctx, cwd); err != nil {
+		return agentruntime.CreateResult{}, fmt.Errorf("initialize project directory: %w", err)
+	}
 	bootstrapToolOptions, err := p.toolRuntimeOptions(cwd, modelcatalog.Settings{})
 	if err != nil {
 		return agentruntime.CreateResult{}, err
@@ -264,6 +270,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	activeToolNames := defaultActiveToolNames()
 	bootstrapResources, err := resource.New(resource.Config{
 		CWD: cwd, AgentDir: p.agentDir,
+		ReadmePath: p.readmePath, DocsPath: p.docsDir,
 		Tools: resourceTools, SelectedTools: activeToolNames,
 	})
 	if err != nil {
@@ -301,6 +308,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 	}
 	resources, err := resource.New(resource.Config{
 		CWD: cwd, AgentDir: p.agentDir,
+		ReadmePath: p.readmePath, DocsPath: p.docsDir,
 		Tools: resourceTools, SelectedTools: activeToolNames,
 		SkillPaths:  append([]string(nil), snapshot.Settings.Skills...),
 		PromptPaths: append([]string(nil), snapshot.Settings.Prompts...),
@@ -956,60 +964,6 @@ func validateResolvedAPIKey(value string, description string) (string, error) {
 		return "", fmt.Errorf("%w: %s contains a control character", ErrInvalidProductionConfig, description)
 	}
 	return value, nil
-}
-
-func resolveProductionAgentDir(
-	explicit string,
-	workingDir string,
-	environment map[string]string,
-) (string, error) {
-	path := explicit
-	if path == "" {
-		path = environment[agentDirEnvironment]
-	}
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("%w: resolve home directory: %w", ErrInvalidProductionConfig, err)
-		}
-		path = filepath.Join(home, ".pi", "agent")
-	} else if path == "~" || strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("%w: expand agent directory: %w", ErrInvalidProductionConfig, err)
-		}
-		if path == "~" {
-			path = home
-		} else {
-			path = filepath.Join(home, path[2:])
-		}
-	}
-	if !utf8.ValidString(path) || strings.TrimSpace(path) == "" || strings.IndexByte(path, 0) >= 0 {
-		return "", fmt.Errorf("%w: agent directory must be a non-empty valid path", ErrInvalidProductionConfig)
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(workingDir, path)
-	}
-	return filepath.Clean(path), nil
-}
-
-func resolveProductionDocsDir(explicit string) (string, error) {
-	path := explicit
-	if path == "" {
-		executable, err := os.Executable()
-		if err != nil {
-			return "", fmt.Errorf("%w: resolve executable for docs directory: %w", ErrInvalidProductionConfig, err)
-		}
-		path = filepath.Join(filepath.Dir(executable), "docs")
-	}
-	if !utf8.ValidString(path) || strings.TrimSpace(path) == "" || strings.IndexByte(path, 0) >= 0 {
-		return "", fmt.Errorf("%w: docs directory must be a non-empty valid path", ErrInvalidProductionConfig)
-	}
-	resolved, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("%w: resolve docs directory: %w", ErrInvalidProductionConfig, err)
-	}
-	return filepath.Clean(resolved), nil
 }
 
 func validateProductionSessionID(value string) error {

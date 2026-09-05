@@ -135,7 +135,7 @@ func TestCreateAgentSessionRuntimeControlsUseEffectiveProjectSettingsAndWriteOnl
 	if err := os.WriteFile(globalPath, []byte(`{"queueMode":"all","followUpMode":"one-at-a-time","compaction":{"enabled":false,"future":"keep"},"retry":{"enabled":false,"maxRetries":2,"future":"keep"},"unknown":{"keep":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	projectDir := filepath.Join(manager.Cwd(), ".pi")
+	projectDir := filepath.Join(manager.Cwd(), ".pi-go")
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestCreateAgentSessionReadsEffectiveProjectThinkingOnEveryModelSwitch(t *te
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"defaultProvider":"scripted","defaultModel":"plain","defaultThinkingLevel":"medium"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	projectDir := filepath.Join(cwd, ".pi")
+	projectDir := filepath.Join(cwd, ".pi-go")
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestCreateAgentSessionReadsEffectiveProjectThinkingOnEveryModelSwitch(t *te
 func TestCreateAgentSessionDefiniteTranscriptFailureRestoresExactGlobalDefaults(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	globalPath := filepath.Join(agentDir, "settings.json")
-	projectDir := filepath.Join(cwd, ".pi")
+	projectDir := filepath.Join(cwd, ".pi-go")
 	if err := os.WriteFile(globalPath, []byte(`{"defaultProvider":"global-provider","defaultModel":"global-model","defaultThinkingLevel":"medium"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

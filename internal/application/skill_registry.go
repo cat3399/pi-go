@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/resource"
 	yaml "go.yaml.in/yaml/v3"
 )
@@ -306,7 +307,7 @@ func (s *Service) findInstalledSkill(ctx context.Context, cwd string, scope Skil
 	if parseErr != nil {
 		return SkillInfo{}, ErrInstalledSkillMissing
 	}
-	root := filepath.Join(cwd, ".pi", "skills")
+	root := filepath.Join(cwd, product.DirectoryName, "skills")
 	if scope == SkillScopeGlobal {
 		root = s.globalSkillsDirectory()
 	}
@@ -544,7 +545,7 @@ func (s *Service) publishSkill(ctx context.Context, cwd string, scope SkillInsta
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	root := filepath.Join(cwd, ".pi", "skills")
+	root := filepath.Join(cwd, product.DirectoryName, "skills")
 	lockPath := filepath.Join(cwd, "skills-lock.json")
 	var linkPath string
 	if scope == SkillScopeGlobal {

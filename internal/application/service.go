@@ -165,7 +165,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	paths, err := app.ResolveProductionPaths(options.Production)
+	paths, err := app.PrepareProduction(ctx, options.Production)
 	if err != nil {
 		return nil, fmt.Errorf("resolve application production paths: %w", err)
 	}
@@ -225,6 +225,9 @@ func NewService(options ServiceOptions) (*Service, error) {
 }
 
 func cloneProductionConfig(config app.ProductionConfig) app.ProductionConfig {
+	if config.SourceBundles != nil {
+		config.SourceBundles = append(config.SourceBundles[:0:0], config.SourceBundles...)
+	}
 	if config.Environment != nil {
 		config.Environment = append([]string{}, config.Environment...)
 	}

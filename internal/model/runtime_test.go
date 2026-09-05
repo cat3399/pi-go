@@ -69,7 +69,7 @@ func TestQueueModeSettingsDefaultsMergeLegacyMigrationAndLosslessWrite(t *testin
 	}
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"queueMode":"all","followUpMode":"one-at-a-time","future":{"keep":true}}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"steeringMode":"one-at-a-time","followUpMode":"all"}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"steeringMode":"one-at-a-time","followUpMode":"all"}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +114,7 @@ func TestQueueModeSettingsDefaultsMergeLegacyMigrationAndLosslessWrite(t *testin
 func TestShellAndImageSettingsMergeAndWriteWithoutLosingUnknownFields(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"/global/shell","shellCommandPrefix":"global-prefix","images":{"autoResize":false,"blockImages":true},"future":7}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellPath":"/project/shell","images":{"autoResize":true}}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"shellPath":"/project/shell","images":{"autoResize":true}}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestShellAndImageSettingsMergeAndWriteWithoutLosingUnknownFields(t *testing
 func TestProjectNullImagesResetsGlobalAutoResizeToDefault(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"images":{"autoResize":false,"blockImages":true}}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"images":null}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"images":null}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +182,7 @@ func TestRequestAssemblySettingsMergeCloneAndLosslessWrite(t *testing.T) {
 		"thinkingBudgets":{"minimal":111,"high":444,"future":7},
 		"images":{"blockImages":true}
 	}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{
 		"skills":[],
 		"prompts":["project-prompt"],
 		"thinkingBudgets":{"low":222,"high":0}
@@ -244,7 +244,7 @@ func TestProjectNullRequestAssemblySettingsResetGlobalValues(t *testing.T) {
 		"skills":["global-skill"],"prompts":["global-prompt"],
 		"thinkingBudgets":{"minimal":111,"high":444}
 	}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"skills":null,"prompts":null,"thinkingBudgets":null}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"skills":null,"prompts":null,"thinkingBudgets":null}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +282,7 @@ func TestRequestAssemblySettingsInvalidInitialLayerPublishesDefaultsAndDiagnosti
 func TestProjectEmptyShellSettingsDisableGlobalValues(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"/global/shell","shellCommandPrefix":"global-prefix"}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellPath":"","shellCommandPrefix":null}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"shellPath":"","shellCommandPrefix":null}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -344,7 +344,7 @@ func TestBranchSummarySettingsDefaultMergeAndPersistence(t *testing.T) {
 	}
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"branchSummary":{"reserveTokens":123,"skipPrompt":true,"future":"kept"}}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"branchSummary":{"reserveTokens":0}}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"branchSummary":{"reserveTokens":0}}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -382,7 +382,7 @@ func TestRetrySettingsDefaultsExplicitZerosAndFieldLevelProjectMerge(t *testing.
 	}
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"retry":{"enabled":false,"maxRetries":7,"baseDelayMs":250}}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"retry":{"maxRetries":0,"baseDelayMs":0}}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"retry":{"maxRetries":0,"baseDelayMs":0}}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +405,7 @@ func TestProviderTransportSettingsParseMergeCloneAndPersistPresence(t *testing.T
 	}
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"transport":"websocket","httpIdleTimeoutMs":111,"websocketConnectTimeoutMs":222,"retry":{"provider":{"timeoutMs":333,"maxRetries":4,"maxRetryDelayMs":555}}}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"transport":"sse","httpIdleTimeoutMs":0,"retry":{"provider":{"maxRetries":0}}}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"transport":"sse","httpIdleTimeoutMs":0,"retry":{"provider":{"maxRetries":0}}}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -541,7 +541,7 @@ func TestRetrySettingsPreserveAbsentObjectAndNullOverlayStates(t *testing.T) {
 				globalSettings = global
 			}
 			writeFile(t, filepath.Join(agentDir, "settings.json"), globalSettings)
-			writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), testCase.project)
+			writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), testCase.project)
 			runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 			if err != nil {
 				t.Fatal(err)
@@ -1197,7 +1197,7 @@ func TestRuntimeInvalidModelsJSONPublishesBuiltinFallbackAndDiagnostic(t *testin
 func TestRuntimeSettingsReloadRetainsLastHealthyLayersAndReportsDiagnostics(t *testing.T) {
 	agentDir, cwd := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"global-one","theme":"dark"}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellCommandPrefix":"project-one"}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"shellCommandPrefix":"project-one"}`)
 	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1218,7 +1218,7 @@ func TestRuntimeSettingsReloadRetainsLastHealthyLayersAndReportsDiagnostics(t *t
 	}
 
 	writeFile(t, filepath.Join(agentDir, "settings.json"), `{"shellPath":"global-two"}`)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"skills":"invalid"}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"skills":"invalid"}`)
 	if err := runtime.Reload(context.Background()); err != nil {
 		t.Fatalf("reload with invalid project settings = %v", err)
 	}
@@ -1229,7 +1229,7 @@ func TestRuntimeSettingsReloadRetainsLastHealthyLayersAndReportsDiagnostics(t *t
 		t.Fatalf("project fallback diagnostic = %v", diagnostic)
 	}
 
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"shellCommandPrefix":"project-two"}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"shellCommandPrefix":"project-two"}`)
 	if err := runtime.Reload(context.Background()); err != nil {
 		t.Fatalf("reload with repaired settings = %v", err)
 	}
@@ -1243,7 +1243,7 @@ func TestRuntimeSettingsReloadRetainsLastHealthyLayersAndReportsDiagnostics(t *t
 
 func TestRuntimeSettingsTrustPrecedenceScopesAndUnknownPreservation(t *testing.T) {
 	r, agent, cwd := newTestRuntime(t, `{"providers":{"openai":{"models":[{"id":"project-model","api":"openai-responses"}]}}}`, `{"defaultProvider":"openai","defaultModel":"gpt-5.5","defaultThinkingLevel":"low","unknown":{"keep":1}}`, false)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"defaultModel":"project-model"}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"defaultModel":"project-model"}`)
 	got, err := r.Resolve(Selection{})
 	if err != nil {
 		t.Fatal(err)
@@ -1288,7 +1288,7 @@ func TestRuntimeSettingsDefaultThinkingValidationAndProjectOverride(t *testing.T
 		}
 	}
 	r, _, cwd := newTestRuntime(t, "", `{"defaultThinkingLevel":"low"}`, true)
-	writeFile(t, filepath.Join(cwd, ".pi", "settings.json"), `{"defaultThinkingLevel":"xhigh","future":{"keep":true}}`)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"defaultThinkingLevel":"xhigh","future":{"keep":true}}`)
 	if err := r.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}

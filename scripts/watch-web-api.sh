@@ -7,8 +7,8 @@ server_pid=""
 
 source_fingerprint() {
 	cd "$repo_dir"
-	git ls-files --cached --others --exclude-standard -- '*.go' go.mod go.sum 'internal/model/catalogdata/*.json' |
-		LC_ALL=C sort -u |
+	# The embedded source tree is a build input too, including documentation.
+	go list -f '{{range .EmbedFiles}}{{println .}}{{end}}' . |
 		while IFS= read -r source_file; do
 			if [ -f "$source_file" ]; then
 				cksum "$source_file"
