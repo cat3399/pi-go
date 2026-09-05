@@ -305,7 +305,13 @@ capabilities:
     evidence:
       - {kind: upstream_oracle, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestUpstreamAgentSessionOverflowCompactionOracle}
       - {kind: go_test, path: internal/agent/context_retry_test.go, symbol: TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTranscript}
-    intentionalGoDifference: Compaction cancellation is an owned child context rather than AbortController state.
+      - {kind: go_test, path: internal/agent/session_runtime_test.go, symbol: TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest}
+    intentionalGoDifference: >-
+      Compaction cancellation is an owned child context rather than AbortController state.
+      Go additionally checks the complete context before continuing provider turns and
+      compacts within the same Agent run. The pinned upstream checks before prompts
+      and after agent_end; the public PrepareNextTurn callback retains its upstream
+      after-turn ordering, including final turns and before ShouldStopAfterTurn.
     remainingDifference: Threshold compaction does not yet have its own frozen upstream workflow.
 
   - id: agent_session.model_set_and_scoped_cycle

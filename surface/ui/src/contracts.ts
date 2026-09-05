@@ -312,6 +312,10 @@ export interface AgentMessage {
   content?: string | MessageContentBlock[];
   customType?: string;
   display?: boolean;
+  timestamp?: number;
+  api?: string;
+  provider?: string;
+  model?: string;
   usage?: TokenUsageInfo;
   stopReason?: string;
   [key: string]: unknown;

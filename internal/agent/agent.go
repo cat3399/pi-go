@@ -708,7 +708,9 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 	}
 	if a.config.prepareTurn != nil {
 		config.prepareProviderTurn = func(ctx context.Context, input agentLoopProviderTurnContext) (*AgentLoopTurnUpdate, error) {
-			snapshot, err := a.config.prepareTurn(ctx, TurnContext{RunID: active.id, Turn: input.Turn})
+			snapshot, err := a.config.prepareTurn(ctx, TurnContext{
+				RunID: active.id, Turn: input.Turn, Messages: agentmsg.Clone(input.Context.Messages),
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -719,6 +721,9 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 			next := cloneAgentLoopContext(input.Context)
 			next.SystemPrompt = snapshot.SystemPrompt
 			next.Tools = adapted
+			if snapshot.Messages != nil {
+				next.Messages = agentmsg.Clone(snapshot.Messages)
+			}
 			model := snapshot.Model
 			thinking := snapshot.ThinkingLevel
 			stream := provider.CloneStreamOptions(snapshot.Stream)
@@ -728,11 +733,10 @@ func (a *Agent) newLoop(active *activeRun, skipInitialSteering bool) (*AgentLoop
 			if override := pendingNextTurnOverride; override != nil {
 				if override.Context != nil {
 					// AgentLoop applied the replacement before draining queues, so
-					// input.Context already contains its message replacement plus any
-					// subsequently delivered users. Reapply only the fields the legacy
-					// snapshot refresh overwrote; replacing Messages here would discard
-					// those queued users.
-					context := cloneAgentLoopContext(input.Context)
+					// next already contains its messages and subsequently delivered
+					// users, or their replacement from request preparation. Reapply
+					// only configuration so a committed compaction stays in effect.
+					context := cloneAgentLoopContext(next)
 					context.SystemPrompt = override.Context.SystemPrompt
 					context.Tools = append([]AgentLoopTool(nil), override.Context.Tools...)
 					update.Context = &context

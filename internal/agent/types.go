@@ -130,11 +130,10 @@ type AfterToolCallResult struct {
 type BeforeToolCallHook func(context.Context, BeforeToolCallContext) (BeforeToolCallResult, error)
 type AfterToolCallHook func(context.Context, AfterToolCallContext) (AfterToolCallResult, error)
 
-// TurnSnapshot is the immutable product configuration used for one provider
+// TurnSnapshot is the immutable product context used for one provider
 // turn. Agent obtains a new snapshot before every request, including the
-// request after a tool batch. This is the Go equivalent of pi's
-// prepareNextTurn boundary: a long-lived AgentSession can change its model,
-// thinking level, system prompt, or enabled tools without replacing a run.
+// request after a tool batch. AgentSession can refresh configuration and
+// compact messages here without replacing the surrounding Agent run.
 type TurnSnapshot struct {
 	Model         provider.Model
 	ThinkingLevel provider.ThinkingLevel
@@ -142,6 +141,9 @@ type TurnSnapshot struct {
 	Tool          ToolExecutor
 	Tools         []provider.ToolDefinition
 	Stream        provider.StreamOptions
+	// Messages replaces the request context after preparation, for example
+	// after session compaction. Nil preserves the loop's current messages.
+	Messages []agentmsg.Message
 }
 
 // PrepareTurn is called without the Agent mutex held. Implementations
@@ -151,8 +153,9 @@ type TurnSnapshot struct {
 type PrepareTurn func(context.Context, TurnContext) (TurnSnapshot, error)
 
 type TurnContext struct {
-	RunID uint64
-	Turn  uint32
+	RunID    uint64
+	Turn     uint32
+	Messages []agentmsg.Message
 }
 
 // ToolUpdate is an ephemeral partial AgentToolResult. It is never persisted or
@@ -230,15 +233,14 @@ type Config struct {
 	BeforeToolCall BeforeToolCallHook
 	AfterToolCall  AfterToolCallHook
 	MessageEnd     MessageEndHook
-	// PrepareTurn optionally replaces the static Model/SystemPrompt/Tool/Tools
-	// fields for every provider request. AgentSession uses this narrower legacy
-	// snapshot seam for its dynamic product configuration.
+	// PrepareTurn refreshes the snapshot for every provider request.
+	// AgentSession resolves dynamic configuration and compacts messages here.
 	PrepareTurn PrepareTurn
 	// PrepareNextTurn is the stateful Agent's full upstream after-turn boundary.
 	// It runs after turn_end even when no provider request follows, and its
 	// context update is visible to ShouldStopAfterTurn. When combined with
-	// PrepareTurn, its non-nil fields override the legacy snapshot update for an
-	// actual following provider request.
+	// PrepareTurn, its selected configuration overrides the request snapshot.
+	// Its message replacement precedes queue delivery and request preparation.
 	PrepareNextTurn     AgentLoopPrepareNextTurn
 	ShouldStopAfterTurn AgentLoopShouldStopAfterTurn
 	Now                 func() time.Time
