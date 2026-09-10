@@ -95,7 +95,7 @@ func SessionViewFor(api application.API, id, leafID string, deferThinking, defer
 	if err != nil {
 		return SessionView{}, err
 	}
-	tree, err := ProjectSessionTree(snapshot.Tree)
+	tree, err := projectSessionTree(snapshot.Tree, deferMedia)
 	if err != nil {
 		return SessionView{}, err
 	}
@@ -165,7 +165,7 @@ func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.Raw
 		if !deferThinking && !deferMedia {
 			return normalized, true, nil
 		}
-		deferred, err := DeferHistoryMedia(normalized, deferThinking, deferMedia)
+		deferred, err := DeferHistoryMedia(normalized, deferThinking, deferMedia, entry.ID())
 		return deferred, true, err
 	case "compaction":
 		var payload struct {
@@ -209,7 +209,12 @@ func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.Raw
 		if len(payload.Details) != 0 {
 			value["details"] = payload.Details
 		}
-		return marshalRaw(value)
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, false, err
+		}
+		deferred, err := DeferHistoryMedia(encoded, false, deferMedia, entry.ID())
+		return deferred, true, err
 	default:
 		return nil, false, nil
 	}
@@ -267,7 +272,7 @@ func marshalRaw(value any) (json.RawMessage, bool, error) {
 	return json.RawMessage(encoded), err == nil, err
 }
 
-func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool) (json.RawMessage, error) {
+func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool, entryID string) (json.RawMessage, error) {
 	var value map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(message))
 	decoder.UseNumber()
@@ -286,42 +291,17 @@ func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool) 
 			}
 		}
 	}
-	if deferMedia && role == "toolResult" {
-		filtered := make([]any, 0, len(content)+1)
-		omitted := 0
-		var omittedBytes int64
-		mimes := make([]string, 0)
-		seenMimes := make(map[string]struct{})
-		for _, rawBlock := range content {
+	if deferMedia {
+		for index, rawBlock := range content {
 			block, _ := rawBlock.(map[string]any)
 			imageBytes, mime, ok := historyImageData(block)
 			if !ok {
-				filtered = append(filtered, rawBlock)
 				continue
 			}
-			omitted++
-			omittedBytes += imageBytes
-			if mime != "" {
-				if _, exists := seenMimes[mime]; !exists {
-					seenMimes[mime] = struct{}{}
-					mimes = append(mimes, mime)
-				}
+			content[index] = map[string]any{
+				"type": "image", "mimeType": mime, "byteSize": imageBytes,
+				"imageRef": map[string]any{"entryId": entryID, "blockIndex": index},
 			}
-		}
-		if omitted != 0 {
-			plural := "s"
-			if omitted == 1 {
-				plural = ""
-			}
-			mimeText := ""
-			if len(mimes) != 0 {
-				mimeText = ": " + strings.Join(mimes, ", ")
-			}
-			filtered = append(filtered, map[string]any{
-				"type": "text",
-				"text": fmt.Sprintf("[%d tool result image%s omitted from initial history payload%s, ~%d bytes]", omitted, plural, mimeText, omittedBytes),
-			})
-			value["content"] = filtered
 		}
 	}
 	return json.Marshal(value)
@@ -359,6 +339,10 @@ func historyImageData(block map[string]any) (bytes int64, mime string, ok bool) 
 }
 
 func ProjectSessionTree(forest []session.TreeNode) ([]*TreeNode, error) {
+	return projectSessionTree(forest, false)
+}
+
+func projectSessionTree(forest []session.TreeNode, deferMedia bool) ([]*TreeNode, error) {
 	result := make([]*TreeNode, 0, len(forest))
 	type projectionTask struct {
 		source    *session.TreeNode
@@ -367,7 +351,7 @@ func ProjectSessionTree(forest []session.TreeNode) ([]*TreeNode, error) {
 	}
 	tasks := make([]projectionTask, 0, len(forest))
 	for index := range forest {
-		projected, err := cloneProjectedTreeNode(&forest[index], nil)
+		projected, err := cloneProjectedTreeNode(&forest[index], nil, deferMedia)
 		if err != nil {
 			return nil, err
 		}
@@ -381,7 +365,7 @@ func ProjectSessionTree(forest []session.TreeNode) ([]*TreeNode, error) {
 		for childIndex := range task.source.Children {
 			child := &task.source.Children[childIndex]
 			if task.depth >= MaxProjectedTreeDepth {
-				flattened, err := flattenKeptDescendants(child)
+				flattened, err := flattenKeptDescendants(child, deferMedia)
 				if err != nil {
 					return nil, err
 				}
@@ -393,7 +377,7 @@ func ProjectSessionTree(forest []session.TreeNode) ([]*TreeNode, error) {
 				compressed = append(compressed, child.Entry.ID())
 				child = &child.Children[0]
 			}
-			projected, err := cloneProjectedTreeNode(child, compressed)
+			projected, err := cloneProjectedTreeNode(child, compressed, deferMedia)
 			if err != nil {
 				return nil, err
 			}
@@ -404,10 +388,28 @@ func ProjectSessionTree(forest []session.TreeNode) ([]*TreeNode, error) {
 	return result, nil
 }
 
-func cloneProjectedTreeNode(node *session.TreeNode, compressed []string) (*TreeNode, error) {
+func cloneProjectedTreeNode(node *session.TreeNode, compressed []string, deferMedia bool) (*TreeNode, error) {
 	entry := node.Entry.RawJSON()
 	if !json.Valid(entry) {
 		return nil, fmt.Errorf("session tree entry %s is not valid JSON", node.Entry.ID())
+	}
+	if deferMedia && (node.Entry.Type() == "message" || node.Entry.Type() == "custom_message") {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(entry, &object); err != nil {
+			return nil, err
+		}
+		var err error
+		if node.Entry.Type() == "message" {
+			object["message"], err = DeferHistoryMedia(object["message"], false, true, node.Entry.ID())
+			if err == nil {
+				entry, err = json.Marshal(object)
+			}
+		} else {
+			entry, err = DeferHistoryMedia(entry, false, true, node.Entry.ID())
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	projected := &TreeNode{
 		Entry: append(json.RawMessage(nil), entry...), Children: []*TreeNode{},
@@ -419,7 +421,7 @@ func cloneProjectedTreeNode(node *session.TreeNode, compressed []string) (*TreeN
 	return projected, nil
 }
 
-func flattenKeptDescendants(root *session.TreeNode) ([]*TreeNode, error) {
+func flattenKeptDescendants(root *session.TreeNode, deferMedia bool) ([]*TreeNode, error) {
 	type flattenTask struct {
 		node       *session.TreeNode
 		compressed []string
@@ -432,7 +434,7 @@ func flattenKeptDescendants(root *session.TreeNode) ([]*TreeNode, error) {
 		pending = pending[:last]
 		keep := len(task.node.Children) != 1
 		if keep {
-			projected, err := cloneProjectedTreeNode(task.node, task.compressed)
+			projected, err := cloneProjectedTreeNode(task.node, task.compressed, deferMedia)
 			if err != nil {
 				return nil, err
 			}

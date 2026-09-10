@@ -41,6 +41,7 @@ type API interface {
 	ImportSession(context.Context, string, string, string) (SessionImportResult, error)
 	GenerateSessionTitle(context.Context, string) (GeneratedSessionTitle, error)
 	SessionThinking(context.Context, string, string, int) (string, error)
+	SessionImage(context.Context, string, string, int) (SessionImage, error)
 	OpenBashOutput(context.Context, string, string) (BashOutput, error)
 	RunningIDs() []string
 	ListModels(context.Context, string) (ModelsSnapshot, error)

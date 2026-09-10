@@ -22,8 +22,8 @@ func normalizeHistoryToolCalls(message json.RawMessage) (json.RawMessage, error)
 	return surfacewire.NormalizeHistoryToolCalls(message)
 }
 
-func deferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool) (json.RawMessage, error) {
-	return surfacewire.DeferHistoryMedia(message, deferThinking, deferMedia)
+func deferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool, entryID string) (json.RawMessage, error) {
+	return surfacewire.DeferHistoryMedia(message, deferThinking, deferMedia, entryID)
 }
 
 func listSessions(api application.API) ([]sessionInfoWire, error) {

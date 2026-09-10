@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -17,7 +19,12 @@ import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./Compo
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
+import type { SessionImageCache } from "./session-images";
+
+const ImageCacheContext = createContext<SessionImageCache | null>(null);
+
 interface MessageListProps {
+  imageCache: SessionImageCache;
   sessionId: string;
   messages: AgentMessage[];
   pendingMessages: AgentMessage[];
@@ -81,17 +88,46 @@ function contentBlocks(message: AgentMessage): MessageContentBlock[] {
   return Array.isArray(message.content) ? message.content : [];
 }
 
-function imageSource(block: MessageContentBlock): string {
-  if (typeof block.data === "string" && typeof block.mimeType === "string") {
-    return `data:${block.mimeType};base64,${block.data}`;
-  }
-  const source = block.source;
-  if (!source || typeof source !== "object" || Array.isArray(source)) return "";
-  const value = source as Record<string, unknown>;
-  if (value.type === "base64" && typeof value.data === "string") {
-    return `data:${typeof value.media_type === "string" ? value.media_type : "application/octet-stream"};base64,${value.data}`;
-  }
-  return typeof value.url === "string" ? value.url : "";
+function MessageImage({ block, alt }: { block: MessageContentBlock; alt: string }) {
+  const cache = useContext(ImageCacheContext)!;
+  const src = cache.source(block);
+  const [status, setStatus] = useState<"idle" | "loading" | "loaded" | "error">(
+    block.imageRef && !cache.availableSource(block) ? "idle" : "loaded",
+  );
+  const [preview, setPreview] = useState(false);
+  if (!src) return null;
+  const size = typeof block.byteSize === "number"
+    ? block.byteSize >= 1024 * 1024
+      ? `${(block.byteSize / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(block.byteSize / 1024))} KB`
+    : "";
+  return (
+    <>
+      <button
+        className="pi-message-image-button"
+        type="button"
+        aria-label={status === "loaded" ? `预览${alt}` : `加载${alt}`}
+        aria-busy={status === "loading"}
+        onClick={() => status === "loaded" ? setPreview(true) : setStatus("loading")}
+      >
+        {(status === "loading" || status === "loaded") && (
+          <img className="pi-message-image" src={src} alt={alt}
+            onLoad={() => { cache.rememberLoaded(block, src); setStatus("loaded"); }} onError={() => setStatus("error")} />
+        )}
+        {status !== "loaded" && (
+          <span className="pi-message-image-placeholder" role={status === "error" ? "alert" : "status"}>
+            {status === "loading" ? "图片加载中…" : status === "error" ? "图片加载失败，点击重试" : "点击查看图片"}
+            {size && ` · ${size}`}
+          </span>
+        )}
+      </button>
+      {preview && <ImagePreview src={src} alt={alt} onClose={() => setPreview(false)} />}
+    </>
+  );
+}
+
+function imageBlockKey(block: MessageContentBlock, index: number): string {
+  return block.imageRef ? `${block.imageRef.entryId}:${block.imageRef.blockIndex}` : `inline-${index}`;
 }
 
 function toolCallID(block: MessageContentBlock): string {
@@ -439,6 +475,9 @@ function ToolCall({
               <pre className="pi-tool-output">{output}</pre>
             </ToolDataSection>
           )}
+          {result && contentBlocks(result).map((image, index) => image.type === "image" ? (
+            <MessageImage key={imageBlockKey(image, index)} block={image} alt={`工具结果图片 ${index + 1}`} />
+          ) : null)}
         </div>
       )}
     </div>
@@ -553,7 +592,6 @@ function Message({
   const [copied, setCopied] = useState(false);
   const [userActionsVisible, setUserActionsVisible] = useState(false);
   const [draft, setDraft] = useState("");
-  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const actionsHideTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
@@ -633,22 +671,7 @@ function Message({
         <ToolCall key={id || index} block={block} result={toolResults.get(id)} streaming={streaming} onOpenTerminal={onOpenTerminal} />,
       );
     } else if (block.type === "image") {
-      const src = imageSource(block);
-      if (src) {
-        const alt = `消息图片 ${index + 1}`;
-        renderedBlocks.push(
-          <button
-            className="pi-message-image-button"
-            key={index}
-            type="button"
-            aria-label={`预览${alt}`}
-            title="预览图片"
-            onClick={() => setPreviewImage({ src, alt })}
-          >
-            <img className="pi-message-image" src={src} alt="" />
-          </button>,
-        );
-      }
+      renderedBlocks.push(<MessageImage key={imageBlockKey(block, index)} block={block} alt={`消息图片 ${index + 1}`} />);
     }
     index += 1;
   }
@@ -837,13 +860,6 @@ function Message({
         </div>
       )}
       </article>
-      {previewImage && (
-        <ImagePreview
-          src={previewImage.src}
-          alt={previewImage.alt}
-          onClose={() => setPreviewImage(null)}
-        />
-      )}
     </>
   );
 }
@@ -1122,7 +1138,15 @@ function Turn(props: {
   );
 }
 
-export function MessageList({
+export function MessageList(props: MessageListProps) {
+  return (
+    <ImageCacheContext.Provider value={props.imageCache}>
+      <MessageListContent {...props} />
+    </ImageCacheContext.Provider>
+  );
+}
+
+function MessageListContent({
   sessionId,
   messages,
   pendingMessages,

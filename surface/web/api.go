@@ -40,6 +40,7 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/state", handleSessionState(api))
 	mux.HandleFunc("POST /api/v1/sessions/{id}/commands", handleSessionCommand(api))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/entries/{entryId}/thinking", handleSessionThinking(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/entries/{entryId}/image", handleSessionImage(api))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/bash-output", handleSessionBashOutput(api))
 	mux.HandleFunc("POST /api/v1/projects", handleProjectAdd(api))
 	mux.HandleFunc("DELETE /api/v1/projects", handleProjectRemove(api))

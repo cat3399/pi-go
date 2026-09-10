@@ -12,7 +12,7 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-func TestDeferHistoryMediaMatchesPiWebPlaceholder(t *testing.T) {
+func TestDeferHistoryMediaPreservesImageReferences(t *testing.T) {
 	message := json.RawMessage(`{
 		"role":"toolResult",
 		"content":[
@@ -22,27 +22,33 @@ func TestDeferHistoryMediaMatchesPiWebPlaceholder(t *testing.T) {
 			{"type":"image","source":{"type":"url","url":"https://example.invalid/image.png"}}
 		]
 	}`)
-	deferred, err := deferHistoryMedia(message, false, true)
+	deferred, err := deferHistoryMedia(message, false, true, "entry-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var value struct {
-		Content []struct {
-			Type   string         `json:"type"`
-			Text   string         `json:"text"`
-			Source map[string]any `json:"source"`
-		} `json:"content"`
+		Content []map[string]any `json:"content"`
 	}
 	if err := json.Unmarshal(deferred, &value); err != nil {
 		t.Fatal(err)
 	}
-	if len(value.Content) != 3 || value.Content[0].Text != "kept" || value.Content[1].Source["type"] != "url" {
-		t.Fatalf("deferred content = %#v", value.Content)
+	if len(value.Content) != 4 || value.Content[0]["text"] != "kept" {
+		t.Fatalf("content = %s", deferred)
 	}
-	const want = "[2 tool result images omitted from initial history payload: image/png, image/jpeg, ~7 bytes]"
-	if value.Content[2].Text != want {
-		t.Fatalf("placeholder = %q, want %q", value.Content[2].Text, want)
+	for index, size := range []float64{4, 3} {
+		block := value.Content[index+1]
+		ref, _ := block["imageRef"].(map[string]any)
+		if block["type"] != "image" || block["byteSize"] != size || ref["entryId"] != "entry-1" || ref["blockIndex"] != float64(index+1) {
+			t.Fatalf("reference = %#v", block)
+		}
+		if block["data"] != nil || block["source"] != nil {
+			t.Fatalf("image bytes leaked: %s", deferred)
+		}
 	}
+	if value.Content[3]["source"].(map[string]any)["type"] != "url" {
+		t.Fatalf("URL image changed: %s", deferred)
+	}
+
 }
 
 func TestNormalizeHistoryToolCallsMatchesPiWeb(t *testing.T) {

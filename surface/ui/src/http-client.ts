@@ -157,9 +157,24 @@ export class RemoteApplicationClient implements ApplicationClient {
     return this.request("/api/v1/snapshot");
   }
 
-  sessionView(sessionId: string, leafId = ""): Promise<SessionView> {
-    const query = leafId ? `?leafId=${encodeURIComponent(leafId)}` : "";
-    return this.request(`/api/v1/sessions/${encodeURIComponent(sessionId)}${query}`);
+  async sessionView(sessionId: string, leafId = ""): Promise<SessionView> {
+    const query = new URLSearchParams({ deferMedia: "1" });
+    if (leafId) query.set("leafId", leafId);
+    const view = await this.request<SessionView>(`/api/v1/sessions/${encodeURIComponent(sessionId)}?${query}`);
+    // Resolve transport URLs without fetching any image bytes. The durable
+    // reference remains usable independently of the current endpoint/token.
+    for (const message of view.context.messages) {
+      if (!Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        if (block.type !== "image" || !block.imageRef) continue;
+        const { entryId, blockIndex } = block.imageRef;
+        const url = new URL(`/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/image`, this.endpoint);
+        url.searchParams.set("blockIndex", String(blockIndex));
+        if (this.token) url.searchParams.set("token", this.token);
+        block.url = url.toString();
+      }
+    }
+    return view;
   }
 
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult> {

@@ -299,6 +299,8 @@ export interface ApplicationClient {
 }
 
 export type MessageContentBlock = {
+  imageRef?: { entryId: string; blockIndex: number };
+  byteSize?: number;
   type?: string;
   text?: string;
   thinking?: string;

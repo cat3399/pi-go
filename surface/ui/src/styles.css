@@ -1149,6 +1149,14 @@ input:-webkit-autofill:focus {
   cursor: zoom-in;
 }
 
+.pi-message-image-placeholder {
+  display: block;
+  padding: 14px 18px;
+  color: var(--pi-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .pi-message-image-button:focus-visible {
   box-shadow: 0 0 0 2px var(--pi-control-focus);
 }

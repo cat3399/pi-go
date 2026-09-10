@@ -474,6 +474,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
             </div>
           ) : !empty && controller.activeSessionId ? (
             <MessageList
+              imageCache={controller.imageCache}
               sessionId={controller.activeSessionId}
               messages={controller.messages}
               pendingMessages={controller.pendingMessages}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentMessage,
   ApplicationClient,
@@ -23,11 +23,13 @@ import {
   type ToolPreset,
 } from "../tool-presets";
 import { assistantResponseKey, assistantUsage, messageText } from "./message";
+import { SessionImageCache } from "./session-images";
 
 type ControllerStatus = "connecting" | "auth" | "ready" | "error";
 export type SendBehavior = "prompt" | "steer" | "follow_up";
 
 export interface ApplicationController {
+  imageCache: SessionImageCache;
   status: ControllerStatus;
   error: string;
   snapshot: ApplicationSnapshot | null;
@@ -143,6 +145,7 @@ function sameProjectPath(left: string, right: string): boolean {
 }
 
 export function useApplicationController(client: ApplicationClient): ApplicationController {
+  const imageCache = useMemo(() => new SessionImageCache(), [client]);
   const [status, setStatus] = useState<ControllerStatus>("connecting");
   const [error, setError] = useState("");
   const [snapshot, setSnapshot] = useState<ApplicationSnapshot | null>(null);
@@ -283,6 +286,8 @@ export function useApplicationController(client: ApplicationClient): Application
     const view = await client.sessionView(sessionId, leafId);
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return null;
     revisionRef.current = Math.max(revisionRef.current, view.revision);
+    imageCache.selectSession(sessionId);
+    imageCache.reconcile(messagesRef.current, view.context.messages ?? []);
     setSessionView(view);
     const loadedMessages = view.context.messages ?? [];
     messagesRef.current = loadedMessages;
@@ -298,7 +303,7 @@ export function useApplicationController(client: ApplicationClient): Application
       state.isPromptRunning || state.isStreaming || state.isBashRunning || state.isCompacting
     )));
     return view;
-  }, [client, updatePendingQueueMessages]);
+  }, [client, imageCache, updatePendingQueueMessages]);
 
   const refreshSnapshot = useCallback(async (generation = generationRef.current) => {
     const value = await client.snapshot();
@@ -1326,6 +1331,7 @@ export function useApplicationController(client: ApplicationClient): Application
     : [];
 
   return {
+    imageCache,
     status,
     error,
     snapshot,
