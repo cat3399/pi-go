@@ -82,6 +82,12 @@ func decodeCommand(line []byte, promptSource agent.InputSource) (decodedCommand,
 	}
 
 	switch input.Type {
+	case string(application.CommandTerminal):
+		command, err := decodeTerminal(line)
+		if err != nil {
+			return decoded, err
+		}
+		decoded.command = command
 	case string(application.CommandPrompt):
 		images, err := decodeImages(input.Images)
 		if err != nil {

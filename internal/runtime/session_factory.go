@@ -148,6 +148,9 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	if config.StandaloneBash == nil && options.Services.StandaloneBash != nil {
 		config.StandaloneBash = options.Services.StandaloneBash
 	}
+	if config.Terminals == nil {
+		config.Terminals = options.Services.Terminals
+	}
 	if config.ReloadTools == nil && options.Services.ReloadTools != nil {
 		config.ReloadTools = options.Services.ReloadTools
 	}

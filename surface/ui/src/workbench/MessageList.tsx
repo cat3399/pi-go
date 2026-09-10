@@ -7,7 +7,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
+import { ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
@@ -27,6 +27,7 @@ interface MessageListProps {
   compacting: boolean;
   mobile: boolean;
   anchorsEnabled: boolean;
+  onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
   onEdit(entryId: string, text: string): Promise<void>;
 }
@@ -335,6 +336,8 @@ function toolPresentation(name: string, input: Record<string, unknown>, complete
       return { icon: Search, verb: complete ? "已查找" : "正在查找", target: inputString(input, "pattern"), card: "查找" };
     case "ls":
       return { icon: BookOpen, verb: complete ? "已读取目录" : "正在读取目录", target: inputString(input, "path") || ".", card: "目录" };
+    case "terminal":
+      return { icon: SquareTerminal, verb: "终端", target: inputString(input, "command") || inputString(input, "id"), card: "终端" };
     case "bash":
       return { icon: SquareTerminal, verb: complete ? "已运行" : "正在运行", target: inputString(input, "command"), card: "Shell" };
     default:
@@ -377,7 +380,9 @@ function ToolCall({
   block,
   result,
   streaming,
+  onOpenTerminal,
 }: {
+  onOpenTerminal?(id: string): void;
   block: MessageContentBlock;
   result?: AgentMessage;
   streaming: boolean;
@@ -392,17 +397,25 @@ function ToolCall({
   const Icon = presentation.icon;
   const serializedInput = JSON.stringify(input, null, 2);
   const command = inputString(input, "command");
+  const details = recordValue(result?.details);
+  const terminalId = name === "terminal"
+    ? typeof details?.terminalId === "string" ? details.terminalId : inputString(input, "id")
+    : "";
+  const canOpenTerminal = Boolean(terminalId && onOpenTerminal);
   const inputCopyValue = name === "bash" ? command : serializedInput;
   const hasFileChange = name === "edit" || name === "write";
 
   return (
     <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`}>
-      <button className="pi-tool-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-        <Icon size={15} />
-        <span>{failed ? "调用失败" : presentation.verb}</span>
-        {presentation.target && <code>{presentation.target}</code>}
-        <ChevronRight className="pi-disclosure" size={14} />
-      </button>
+      <div className="pi-tool-heading">
+        <button className="pi-tool-summary" type="button" aria-expanded={canOpenTerminal ? undefined : expanded} title={canOpenTerminal ? "打开终端" : undefined} onClick={() => canOpenTerminal ? onOpenTerminal?.(terminalId) : setExpanded((value) => !value)}>
+          <Icon size={15} />
+          <span>{failed ? "调用失败" : presentation.verb}</span>
+          {presentation.target && <code>{presentation.target}</code>}
+          {canOpenTerminal ? <ArrowUpRight size={14} /> : <ChevronRight className="pi-disclosure" size={14} />}
+        </button>
+        {canOpenTerminal && <button className="pi-icon-button pi-terminal-details" type="button" aria-label="终端调用详情" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}><ChevronRight className="pi-disclosure" size={14} /></button>}
+      </div>
       {expanded && (
         <div className={`pi-tool-body ${hasFileChange ? "is-file-change" : ""}`}>
           {hasFileChange ? (
@@ -514,6 +527,7 @@ function Message({
   toolResults,
   entryId,
   onFork,
+  onOpenTerminal,
   editing = false,
   editAvailable = false,
   editEnabled = false,
@@ -526,6 +540,7 @@ function Message({
   streaming?: boolean;
   toolResults: Map<string, AgentMessage>;
   entryId?: string;
+  onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
   editing?: boolean;
   editAvailable?: boolean;
@@ -615,7 +630,7 @@ function Message({
     } else if (block.type === "toolCall") {
       const id = toolCallID(block);
       renderedBlocks.push(
-        <ToolCall key={id || index} block={block} result={toolResults.get(id)} streaming={streaming} />,
+        <ToolCall key={id || index} block={block} result={toolResults.get(id)} streaming={streaming} onOpenTerminal={onOpenTerminal} />,
       );
     } else if (block.type === "image") {
       const src = imageSource(block);
@@ -977,6 +992,7 @@ function Turn(props: {
   streamingMessage: AgentMessage | null;
   busy: boolean;
   active: boolean;
+  onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
   editingEntryId: string | null;
   editAvailable: boolean;
@@ -1032,6 +1048,7 @@ function Turn(props: {
           entryId={entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          onOpenTerminal={props.onOpenTerminal}
           editing={props.editingEntryId === entryId}
           editAvailable={props.editAvailable}
           editEnabled={props.editEnabled}
@@ -1052,6 +1069,7 @@ function Turn(props: {
         entryId={props.turn.anchor.entryId}
         toolResults={props.toolResults}
         onFork={props.onFork}
+        onOpenTerminal={props.onOpenTerminal}
         editing={props.editingEntryId === props.turn.anchor.entryId}
         editAvailable={props.editAvailable}
         editEnabled={props.editEnabled}
@@ -1075,6 +1093,7 @@ function Turn(props: {
           entryId={finalAnswer.entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          onOpenTerminal={props.onOpenTerminal}
           editing={props.editingEntryId === finalAnswer.entryId}
           editAvailable={props.editAvailable}
           editEnabled={props.editEnabled}
@@ -1090,6 +1109,7 @@ function Turn(props: {
           entryId={entryId}
           toolResults={props.toolResults}
           onFork={props.onFork}
+          onOpenTerminal={props.onOpenTerminal}
           editing={props.editingEntryId === entryId}
           editAvailable={props.editAvailable}
           editEnabled={props.editEnabled}
@@ -1113,6 +1133,7 @@ export function MessageList({
   mobile,
   anchorsEnabled,
   onFork,
+  onOpenTerminal,
   onEdit,
 }: MessageListProps) {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -1452,6 +1473,7 @@ export function MessageList({
                 toolResults={toolResults}
                 entryId={entryId}
                 onFork={onFork}
+                onOpenTerminal={onOpenTerminal}
                 editing={editingEntryId === entryId}
                 editAvailable={!busy && editingEntryId === null}
                 editEnabled={!busy}
@@ -1475,6 +1497,7 @@ export function MessageList({
                   busy={index === activeTurnIndex && busy && !compacting}
                   active={index === activeTurnIndex}
                   onFork={onFork}
+                  onOpenTerminal={onOpenTerminal}
                   editingEntryId={editingEntryId}
                   editAvailable={!busy && editingEntryId === null}
                   editEnabled={!busy}
@@ -1485,7 +1508,7 @@ export function MessageList({
               </div>
             ))}
             {turns.length === 0 && streamingMessage && (
-              <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} streaming />
+              <Message message={streamingMessage} toolResults={toolResults} onFork={onFork} onOpenTerminal={onOpenTerminal} streaming />
             )}
             {turns.length === 0 && busy && !compacting && !streamingMessage && (
               <div className="pi-working" role="status">
@@ -1501,6 +1524,7 @@ export function MessageList({
                 message={message}
                 toolResults={toolResults}
                 onFork={onFork}
+                onOpenTerminal={onOpenTerminal}
               />
             ))}
           </div>

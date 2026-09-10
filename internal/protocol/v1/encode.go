@@ -60,6 +60,8 @@ func errorResponse(id *string, command string, err error) map[string]any {
 
 func encodeResult(result application.CommandResult) (any, error) {
 	switch value := result.(type) {
+	case application.TerminalResult:
+		return terminalResultWire(value.Result), nil
 	case application.PromptStartedResult:
 		return map[string]any{"operationId": value.OperationID}, nil
 	case application.EditAndResendStartedResult:

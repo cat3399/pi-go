@@ -18,6 +18,16 @@ func (s *ApplicationSession) Dispatch(ctx context.Context, command Command) (Com
 		return nil, fmt.Errorf("%w: nil command", ErrInvalidCommand)
 	}
 	switch command := command.(type) {
+	case TerminalCommand:
+		session, _, err := s.currentSession()
+		if err != nil {
+			return nil, err
+		}
+		result, err := session.Terminal(ctx, command.Request)
+		if err != nil {
+			return nil, err
+		}
+		return TerminalResult{Result: result}, nil
 	case PromptCommand:
 		return s.dispatchPrompt(ctx, command)
 	case EditAndResendCommand:

@@ -17,6 +17,7 @@ import (
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/terminal"
 	"github.com/cat3399/pi-go/internal/tool"
 )
 
@@ -143,8 +144,9 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 	factory := func(ctx context.Context, options agentruntime.CreateOptions) (agentruntime.CreateResult, error) {
 		toolOptions := bashOptions
 		toolOptions.WorkingDir = options.SessionManager.Cwd()
+		terminals := terminal.New(terminal.Options{CWD: toolOptions.WorkingDir, Shell: toolOptions.ShellPath, Environment: toolOptions.Environment})
 		executor, definitions, resourceTools, standaloneBash, err := buildProductionToolRuntime(productionToolRuntimeOptions{
-			Bash: toolOptions, Filesystem: tool.FilesystemOptions{WorkingDir: toolOptions.WorkingDir},
+			Bash: toolOptions, Filesystem: tool.FilesystemOptions{WorkingDir: toolOptions.WorkingDir}, Terminals: terminals,
 		})
 		if err != nil {
 			return agentruntime.CreateResult{}, fmt.Errorf("initialize session tool runtime: %w", err)
@@ -162,6 +164,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 		services := &agentruntime.Services{
 			CWD: options.SessionManager.Cwd(), AgentDir: resolvedAgentDir,
 			Provider: deps.Provider, Tool: executor, Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
+			Terminals: terminals,
 		}
 		stream := provider.CloneStreamOptions(deps.Stream)
 		stream.SessionID = options.SessionManager.SessionID()
@@ -223,6 +226,7 @@ func resolveWorkingDirectory(path string) (string, error) {
 type productionToolRuntimeOptions struct {
 	Bash       tool.BashOptions
 	Filesystem tool.FilesystemOptions
+	Terminals  *terminal.Service
 }
 
 func buildProductionToolRuntime(options productionToolRuntimeOptions) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, agent.StandaloneBashExecutor, error) {
@@ -238,7 +242,7 @@ func buildProductionToolRuntime(options productionToolRuntimeOptions) (agent.Too
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	registry, err := tool.NewBuiltInRegistry(bash, filesystem)
+	registry, err := tool.NewBuiltInRegistryWithTerminal(bash, filesystem, options.Terminals)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -279,7 +283,7 @@ func productionToolMetadata(tools []resource.Tool) map[string]agent.ToolMetadata
 }
 
 func defaultActiveToolNames() []string {
-	return []string{tool.ReadToolName, tool.BashToolName, tool.EditToolName, tool.WriteToolName}
+	return []string{tool.ReadToolName, tool.BashToolName, tool.EditToolName, tool.WriteToolName, tool.TerminalToolName}
 }
 
 func selectProductionToolDefinitions(all []provider.ToolDefinition, names []string) []provider.ToolDefinition {

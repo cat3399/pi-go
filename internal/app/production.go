@@ -24,6 +24,7 @@ import (
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/terminal"
 	"github.com/cat3399/pi-go/internal/tool"
 )
 
@@ -217,11 +218,13 @@ func (p productionRuntimePlan) toolRuntimeOptions(cwd string, settings modelcata
 func (p productionRuntimePlan) buildToolRuntime(
 	cwd string,
 	settings modelcatalog.Settings,
+	terminals *terminal.Service,
 ) (agent.ToolExecutor, []provider.ToolDefinition, []resource.Tool, agent.StandaloneBashExecutor, error) {
 	options, err := p.toolRuntimeOptions(cwd, settings)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	options.Terminals = terminals
 	return buildProductionToolRuntime(options)
 }
 
@@ -302,7 +305,11 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: %w", ErrInvalidProductionConfig, err)
 	}
 	snapshot := catalog.Snapshot()
-	executor, definitions, resourceTools, standaloneBash, err := p.buildToolRuntime(cwd, snapshot.Settings)
+	terminals := terminal.New(terminal.Options{Resolve: func() (terminal.Defaults, error) {
+		options, err := p.toolRuntimeOptions(cwd, catalog.Snapshot().Settings)
+		return terminal.Defaults{CWD: cwd, Shell: options.Bash.ShellPath, Environment: options.Bash.Environment}, err
+	}})
+	executor, definitions, resourceTools, standaloneBash, err := p.buildToolRuntime(cwd, snapshot.Settings, terminals)
 	if err != nil {
 		return agentruntime.CreateResult{}, fmt.Errorf("%w: initialize session tool runtime: %w", ErrInvalidProductionConfig, err)
 	}
@@ -399,8 +406,9 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		},
 		AuthRuntime: authResolver.runtime, Provider: catalog, Tool: executor,
 		Tools: append([]provider.ToolDefinition(nil), definitions...), StandaloneBash: standaloneBash,
+		Terminals: terminals,
 		ReloadTools: func(_ context.Context) (agent.ToolRuntime, error) {
-			reloadedExecutor, reloadedDefinitions, reloadedResources, reloadedStandalone, reloadErr := p.buildToolRuntime(cwd, catalog.Snapshot().Settings)
+			reloadedExecutor, reloadedDefinitions, reloadedResources, reloadedStandalone, reloadErr := p.buildToolRuntime(cwd, catalog.Snapshot().Settings, terminals)
 			if reloadErr != nil {
 				return agent.ToolRuntime{}, reloadErr
 			}

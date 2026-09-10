@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { FileText, LoaderCircle, X } from "lucide-react";
+import { FileText, LoaderCircle } from "lucide-react";
 import type { FilePreview } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
+import { SidePanel } from "./SidePanel";
 
 interface FilePreviewPanelProps {
   path: string;
@@ -50,16 +51,15 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
   const markdown = preview?.kind === "text" && preview.language === "markdown";
 
   return (
-    <aside className="pi-file-preview" aria-label={`预览 ${name}`} aria-busy={loading}>
-      <header className="pi-file-preview-tabs">
-        <div className="pi-file-preview-tab" title={path}>
-          <FileText size={14} strokeWidth={1.8} />
-          <span>{name}</span>
-          <button type="button" aria-label="关闭文件预览" title="关闭" onClick={onClose}>
-            <X size={14} />
-          </button>
-        </div>
-        {markdown && (
+    <SidePanel
+      label={`预览 ${name}`}
+      title={name}
+      tooltip={path}
+      icon={<FileText size={14} strokeWidth={1.8} />}
+      loading={loading}
+      closeLabel="关闭文件预览"
+      onClose={onClose}
+      actions={markdown && (
           <button
             className="pi-file-preview-mode"
             type="button"
@@ -67,8 +67,8 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
           >
             {textMode === "preview" ? "查看源代码" : "查看预览"}
           </button>
-        )}
-      </header>
+      )}
+    >
       <div className="pi-file-preview-content">
         {loading ? (
           <div className="pi-file-preview-status" role="status">
@@ -108,6 +108,6 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
           <div className="pi-file-preview-status is-error" role="alert">无法预览这个文件</div>
         )}
       </div>
-    </aside>
+    </SidePanel>
   );
 }

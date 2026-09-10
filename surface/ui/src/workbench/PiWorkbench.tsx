@@ -1,5 +1,5 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Folder, LoaderCircle, PanelLeft, Settings } from "lucide-react";
+import { type CSSProperties, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Folder, LoaderCircle, PanelLeft, Settings, SquareTerminal } from "lucide-react";
 import type { ApplicationClient, ImageAttachment } from "../contracts";
 import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
 import {
@@ -35,6 +35,8 @@ export interface PiWorkbenchProps {
   createRemoteClient?(endpoint: string): ApplicationClient;
   onEdgeGesturesEnabledChange?(enabled: boolean): void;
 }
+
+const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 
 const unavailableClient: ApplicationClient = {
   kind: "remote",
@@ -93,7 +95,12 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   });
   const [sidebarOpen, setSidebarOpen] = useState(() => !mobile && window.innerWidth >= 800);
   const [sidebarSection, setSidebarSection] = useState<"sessions" | "files">("sessions");
-  const [previewPath, setPreviewPath] = useState("");
+  const [sidePanel, setSidePanel] = useState<
+    { kind: "file"; path: string } | { kind: "terminal"; id: string | null } | null
+  >(null);
+  const previewPath = sidePanel?.kind === "file" ? sidePanel.path : "";
+  const openFile = useCallback((path: string) => setSidePanel(path ? { kind: "file", path } : null), []);
+  const openTerminal = useCallback((id: string | null) => setSidePanel({ kind: "terminal", id }), []);
   const [fileRefreshKey, setFileRefreshKey] = useState(0);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [pointPicker, setPointPicker] = useState<"tree" | "fork" | null>(null);
@@ -110,10 +117,10 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   useEffect(() => () => client.close(), [client]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !(event.target instanceof Element && event.target.closest(".pi-terminal-screen"))) {
         setSettingsOpen(false);
         setPointPicker(null);
-        setPreviewPath("");
+        setSidePanel(null);
         setProjectPickerOpen(false);
         if (mobile || window.innerWidth < 800) {
           setSidebarOpen(false);
@@ -142,7 +149,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const mobileGesturesEnabled = mobile
     && controller.status === "ready"
     && !settingsOpen
-    && !previewPath
+    && !sidePanel
     && !projectPickerOpen
     && pointPicker === null
     && !controller.sessionStatsOpen;
@@ -164,8 +171,12 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   }, [props.onEdgeGesturesEnabledChange]);
 
   useEffect(() => {
-    setPreviewPath("");
+    setSidePanel(null);
   }, [client, controller.workingDirectory]);
+
+  useEffect(() => {
+    setSidePanel((current) => current?.kind === "terminal" ? null : current);
+  }, [controller.activeSessionId]);
 
   const closeMobileSidebar = () => {
     if (mobile || window.innerWidth < 800) setSidebarOpen(false);
@@ -400,14 +411,14 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           closeMobileSidebar();
         }}
         onPreviewFile={(path) => {
-          setPreviewPath(path);
+          openFile(path);
           closeMobileSidebar();
         }}
         onFileDeleted={(path) => {
           const normalizedDeleted = path.replace(/\\/g, "/").replace(/\/+$/, "");
           const normalizedPreview = previewPath.replace(/\\/g, "/").replace(/\/+$/, "");
           if (normalizedPreview === normalizedDeleted || normalizedPreview.startsWith(`${normalizedDeleted}/`)) {
-            setPreviewPath("");
+            setSidePanel(null);
           }
           composerRef.current?.removeWorkspaceFile(path);
           setFileRefreshKey((value) => value + 1);
@@ -442,12 +453,17 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           aria-valuenow={sidebar.width}
         />
       )}
-      <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""} ${previewPath ? "has-preview" : ""}`}>
+      <main className={`pi-main ${sidebarOpen ? "has-sidebar" : ""} ${sidePanel ? "has-preview" : ""}`}>
         <header className="pi-topbar">
           <div className="pi-topbar-heading">
             {!mobile && <Folder size={18} />}
             <div className="pi-topbar-title" title={title}>{title}</div>
           </div>
+          {controller.activeSessionId && (
+            <div className="pi-topbar-actions">
+              <button className="pi-icon-button" type="button" aria-label="打开终端" title="终端" aria-pressed={sidePanel?.kind === "terminal"} onClick={() => openTerminal(null)}><SquareTerminal size={17} /></button>
+            </div>
+          )}
         </header>
 
         <section className={`pi-conversation ${empty ? "is-empty" : ""}`}>
@@ -469,6 +485,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               anchorsEnabled={!mobile || anchorGesturesEnabled}
               onFork={controller.fork}
               onEdit={controller.editAndResend}
+              onOpenTerminal={openTerminal}
             />
           ) : null}
           {!controller.sessionLoading && (
@@ -498,7 +515,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               onProjectChange={controller.setWorkingDirectory}
               onInspectUploadTargets={(directory, fileNames) => client.inspectUploadTargets(directory, fileNames)}
               onUploadFiles={(directory, files, strategy) => client.uploadFiles(directory, files, strategy)}
-              onPreviewFile={setPreviewPath}
+              onPreviewFile={openFile}
               onFilesUploaded={() => setFileRefreshKey((value) => value + 1)}
             />
           )}
@@ -510,8 +527,22 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           key={`${previewPath}:${fileRefreshKey}`}
           path={previewPath}
           previewFile={previewFile}
-          onClose={() => setPreviewPath("")}
+          onClose={() => setSidePanel(null)}
         />
+      )}
+      {sidePanel?.kind === "terminal" && controller.activeSessionId && (
+        <Suspense fallback={null}>
+        <TerminalPanel
+          key={controller.activeSessionId}
+          client={client}
+          sessionId={controller.activeSessionId}
+          selectedId={sidePanel.id}
+          readOnly={Boolean(controller.runtimeState?.isPromptRunning || controller.runtimeState?.isStreaming || controller.runtimeState?.isCompacting || controller.runtimeState?.retryWaiting)}
+          onSelect={openTerminal}
+          onClose={() => setSidePanel(null)}
+          onPreviewFile={openFile}
+        />
+        </Suspense>
       )}
       <SessionPointPicker
         mode={pointPicker}

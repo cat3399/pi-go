@@ -22,6 +22,7 @@ import (
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/terminal"
 )
 
 type DiagnosticKind string
@@ -54,6 +55,7 @@ type Services struct {
 	Tool                 agent.ToolExecutor
 	Tools                []provider.ToolDefinition
 	StandaloneBash       agent.StandaloneBashExecutor
+	Terminals            *terminal.Service
 	ReloadTools          func(context.Context) (agent.ToolRuntime, error)
 }
 

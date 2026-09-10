@@ -150,7 +150,7 @@ func TestProductionApplicationToolPersistenceAndReopenEndToEnd(t *testing.T) {
 			t.Fatalf("provider request %d route/auth/model = %#v", index+1, request)
 		}
 		tools, ok := request.payload["tools"].([]any)
-		if !ok || !reflect.DeepEqual(applicationE2EToolNames(tools), []string{"read", "bash", "edit", "write"}) {
+		if !ok || !reflect.DeepEqual(applicationE2EToolNames(tools), []string{"read", "bash", "edit", "write", "terminal"}) {
 			t.Fatalf("provider request %d tools = %#v", index+1, request.payload["tools"])
 		}
 	}

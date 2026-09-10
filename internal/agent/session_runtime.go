@@ -16,6 +16,7 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/terminal"
 )
 
 // SessionConfig supplies the long-lived product state around the in-memory
@@ -62,6 +63,8 @@ type SessionConfig struct {
 	// from Tool because its result is a BashExecution AgentMessage, non-zero exit
 	// codes are data, and output is streamed through session events.
 	StandaloneBash StandaloneBashExecutor
+	// Terminals are session-owned, independent of tool selection and reload.
+	Terminals *terminal.Service
 	// ResolveStandaloneBash mirrors executeBash's live SettingsManager shell
 	// lookup. A custom per-call ExecuteBashOptions.Executor still takes
 	// precedence. Nil uses StandaloneBash as a stable injected fallback.
@@ -399,6 +402,7 @@ type AgentSession struct {
 	reloadRuntime          func(context.Context) error
 	reloadTools            func(context.Context) (ToolRuntime, error)
 	standaloneBash         StandaloneBashExecutor
+	terminals              *terminal.Service
 	resolveStandaloneBash  func(context.Context) (StandaloneBashExecutor, error)
 	bashCommandPrefix      string
 	resolveBashPrefix      func() string
@@ -625,6 +629,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		sessionManager: config.SessionManager, systemOptions: systemOptions,
 		resources: config.Resources, reloadRuntime: config.ReloadRuntime, reloadTools: config.ReloadTools,
 		standaloneBash: config.StandaloneBash, resolveStandaloneBash: config.ResolveStandaloneBash,
+		terminals:         config.Terminals,
 		bashCommandPrefix: config.BashCommandPrefix, resolveBashPrefix: config.ResolveBashCommandPrefix,
 		toolExecutor: config.Tool, toolRegistry: toolRegistry, toolOrder: toolOrder,
 		toolMetadata:   cloneToolMetadataForRegistry(config.ToolMetadata, toolRegistry),
@@ -3569,6 +3574,9 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	// Abort it must stop every session phase, including compaction and branch
 	// summarization, before invalidating the manager.
 	bashDone := s.abortBashExecutions()
+	if err := s.terminals.Shutdown(ctx); err != nil {
+		return err
+	}
 	if cancelRetry != nil {
 		cancelRetry(errRetryCancelled)
 	}

@@ -9,8 +9,8 @@ export interface ToolEntry {
 export type ToolPreset = "none" | "default" | "full";
 
 export const PRESET_NONE: string[] = [];
-export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write"];
-export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls"];
+export const PRESET_DEFAULT: string[] = ["read", "bash", "edit", "write", "terminal"];
+export const PRESET_FULL: string[] = ["bash", "read", "edit", "write", "grep", "find", "ls", "terminal"];
 
 const BUILTIN_TOOL_NAMES = new Set(PRESET_FULL);
 

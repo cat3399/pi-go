@@ -648,7 +648,8 @@ func (s *Service) reapOnce(now time.Time) {
 
 	var expired []*managedSession
 	for _, candidate := range candidates {
-		if candidate.managed.busy() {
+		current := candidate.managed.session.Runtime().Session()
+		if candidate.managed.busy() || current != nil && current.HasLiveTerminals() {
 			candidate.managed.touch()
 			continue
 		}

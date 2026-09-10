@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/cat3399/pi-go/internal/terminal"
 )
 
 var ErrInvalidToolRegistry = errors.New("invalid tool registry")
@@ -287,16 +289,30 @@ func (t bashJSONTool) ExecuteJSON(ctx context.Context, arguments []byte) (ToolRe
 // only tools with schemas and concrete executors; callers never advertise a
 // name that the registry cannot dispatch.
 func NewBuiltInRegistry(bash *Bash, filesystem *FilesystemSuite) (*Registry, error) {
+	return newBuiltInRegistry(bash, filesystem, nil)
+}
+
+// NewBuiltInRegistryWithTerminal adds the session's terminal service to the
+// built-in tool set, independently of whether a surface has a terminal view open.
+func NewBuiltInRegistryWithTerminal(bash *Bash, filesystem *FilesystemSuite, service *terminal.Service) (*Registry, error) {
+	return newBuiltInRegistry(bash, filesystem, service)
+}
+
+func newBuiltInRegistry(bash *Bash, filesystem *FilesystemSuite, service *terminal.Service) (*Registry, error) {
 	if bash == nil || filesystem == nil {
 		return nil, fmt.Errorf("%w: bash and filesystem suite are required", ErrInvalidToolRegistry)
 	}
 	filesystemNames := filesystem.Names()
-	tools := make([]JSONTool, 0, len(filesystemNames)+1)
+	tools := make([]JSONTool, 0, len(filesystemNames)+2)
 	tools = append(tools, bashJSONTool{bash: bash})
 	for _, name := range filesystemNames {
 		tools = append(tools, filesystemTool{suite: filesystem, name: name})
 	}
 	specifications := append([]Specification{bashSpecification()}, filesystemSpecifications()...)
+	if service != nil {
+		tools = append(tools, terminalTool{service: service})
+		specifications = append(specifications, terminalSpecification())
+	}
 	return NewRegistryWithSpecifications(specifications, tools...)
 }
 

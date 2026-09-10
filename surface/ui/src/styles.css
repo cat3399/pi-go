@@ -1,3 +1,5 @@
+@import "@xterm/xterm/css/xterm.css";
+
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
  *
@@ -58,7 +60,7 @@
   --pi-sidebar-width: 275px;
   --pi-sidebar-titlebar-height: 46px;
   --pi-topbar-height: 46px;
-  --pi-file-preview-width: clamp(360px, 34vw, 680px);
+  --pi-side-panel-width: clamp(360px, 34vw, 680px);
   --pi-content-max-width: 800px;
   --pi-safe-area-top: env(safe-area-inset-top, 0px);
   --pi-safe-area-right: env(safe-area-inset-right, 0px);
@@ -612,23 +614,23 @@ input:-webkit-autofill:focus {
 }
 
 .pi-main.has-preview {
-  padding-right: var(--pi-file-preview-width);
+  padding-right: var(--pi-side-panel-width);
 }
 
-.pi-file-preview {
+.pi-side-panel {
   position: fixed;
   z-index: 18;
   inset: 0 0 0 auto;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  width: var(--pi-file-preview-width);
+  width: var(--pi-side-panel-width);
   min-width: 0;
   border-left: 1px solid var(--pi-border-subtle);
   background: var(--pi-bg);
   box-shadow: -10px 0 28px rgba(26, 28, 31, 0.025);
 }
 
-.pi-file-preview-tabs {
+.pi-side-panel-tabs {
   display: flex;
   align-items: end;
   justify-content: space-between;
@@ -640,7 +642,7 @@ input:-webkit-autofill:focus {
   --wails-draggable: drag;
 }
 
-.pi-file-preview-tab {
+.pi-side-panel-tab {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -656,11 +658,11 @@ input:-webkit-autofill:focus {
   --wails-draggable: no-drag;
 }
 
-.pi-file-preview-tab > svg {
+.pi-side-panel-tab > svg {
   flex: 0 0 auto;
 }
 
-.pi-file-preview-tab > span {
+.pi-side-panel-tab > span {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
@@ -668,7 +670,116 @@ input:-webkit-autofill:focus {
   white-space: nowrap;
 }
 
-.pi-file-preview-tab button {
+.pi-side-panel-tab .pi-select-trigger {
+  width: 100%;
+  height: 25px;
+  padding: 0;
+  justify-content: space-between;
+  font-size: inherit;
+}
+
+.pi-terminal-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-bottom: 3px;
+  --wails-draggable: no-drag;
+}
+
+.pi-terminal-actions .pi-icon-button {
+  width: 27px;
+  height: 27px;
+}
+
+.pi-terminal-panel,
+.pi-terminal-view {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pi-terminal-empty {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+  color: var(--pi-text-tertiary);
+}
+
+.pi-terminal-empty button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pi-terminal-screen {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 10px 4px 14px;
+}
+
+.pi-terminal-screen .xterm {
+  height: 100%;
+}
+
+.pi-terminal-screen.is-readonly,
+.pi-terminal-screen.is-readonly .xterm,
+.pi-terminal-screen.is-readonly .xterm * {
+  cursor: not-allowed;
+}
+
+.pi-terminal-status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 29px;
+  padding: 2px 12px;
+  border-top: 1px solid var(--pi-border-subtle);
+  color: var(--pi-text-tertiary);
+  font-size: 10px;
+}
+
+.pi-terminal-status > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pi-terminal-state {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--pi-text-placeholder);
+}
+
+.pi-terminal-state.is-running { background: #43865a; }
+
+.pi-terminal-error {
+  padding: 8px 12px;
+  color: var(--pi-error);
+  font-size: 12px;
+}
+
+.pi-tool-heading {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.pi-tool-heading .pi-tool-summary { flex: 1; min-width: 0; }
+.pi-tool-heading .pi-terminal-details { flex: 0 0 auto; width: 25px; height: 25px; }
+
+.pi-side-panel-tab > button {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
@@ -682,7 +793,7 @@ input:-webkit-autofill:focus {
   cursor: pointer;
 }
 
-.pi-file-preview-tab button:hover {
+.pi-side-panel-tab > button:hover {
   background: var(--pi-hover);
   color: var(--pi-text);
 }
@@ -2435,7 +2546,7 @@ input:-webkit-autofill:focus {
     padding-right: 0;
   }
 
-  .pi-file-preview {
+  .pi-side-panel {
     z-index: 40;
     width: 100%;
     box-shadow: none;

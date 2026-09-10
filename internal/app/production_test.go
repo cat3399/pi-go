@@ -415,10 +415,10 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 			t.Fatalf("request %d sent upstream-absent parallel_tool_calls = %#v", requestIndex+1, payload["parallel_tool_calls"])
 		}
 		tools, ok := payload["tools"].([]any)
-		if !ok || len(tools) != 4 {
+		if !ok || len(tools) != 5 {
 			t.Fatalf("request %d tools = %#v", requestIndex+1, payload["tools"])
 		}
-		wantToolNames := []string{"read", "bash", "edit", "write"}
+		wantToolNames := []string{"read", "bash", "edit", "write", "terminal"}
 		for toolIndex, raw := range tools {
 			tool, ok := raw.(map[string]any)
 			if !ok || tool["name"] != wantToolNames[toolIndex] || tool["strict"] != false {
@@ -606,8 +606,8 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools, ok := snapshot.payload["tools"].([]any)
-	if !ok || len(tools) != 4 {
-		t.Fatalf("tools = %#v, want four default production definitions", snapshot.payload["tools"])
+	if !ok || len(tools) != 5 {
+		t.Fatalf("tools = %#v, want four coding tools and terminal", snapshot.payload["tools"])
 	}
 	encodedPayload, err := json.Marshal(snapshot.payload)
 	if err != nil {
