@@ -3125,7 +3125,8 @@ func providerFailureFromTerminalForSession(result Result) *provider.ProviderFail
 	return providerFailure
 }
 func (s *AgentSession) retryableResult(result Result) bool {
-	return provider.IsTransientFailure(providerFailureFromTerminalForSession(result))
+	terminal, _ := result.Terminal()
+	return provider.IsRetryableAssistantError(terminal)
 }
 func (s *AgentSession) willRetry(terminal llm.AssistantTerminal) bool {
 	if terminal == nil || terminal.FinishReason() != llm.FinishError {

@@ -2,10 +2,9 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -71,7 +70,8 @@ func ProbeProductionModel(
 	request, err := provider.NewRequestWithOptions(selected, "", []llm.ConversationMessage{message}, provider.RequestOptions{
 		ThinkingLevel: provider.ThinkingOff,
 		Stream: provider.StreamOptions{
-			APIKey: resolved.APIKey, Headers: resolved.Headers, Env: resolved.Env,
+			DiagnosticsDir: filepath.Join(paths.AgentDir, "diagnostics", "providers"),
+			APIKey:         resolved.APIKey, Headers: resolved.Headers, Env: resolved.Env,
 			MaxTokens: &maxTokens, TimeoutMS: &timeoutMS, MaxRetries: &maxRetries,
 			CacheRetention: provider.CacheRetentionNone,
 			OnResponse: func(_ provider.Model, response provider.ResponseInfo) error {
@@ -84,37 +84,30 @@ func ProbeProductionModel(
 		return ProductionModelProbeResult{}, err
 	}
 	started := time.Now()
-	stream := adapter.Stream(ctx, request)
-	if stream == nil {
-		return ProductionModelProbeResult{}, errors.New("model adapter returned no stream")
+	settings, err := modelcatalog.LoadEffectiveSettings(paths.AgentDir, paths.WorkingDir, false)
+	if err != nil {
+		return ProductionModelProbeResult{}, err
 	}
-	collector := &llm.StreamCollector{}
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			_ = stream.Close()
-			return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, nextErr
-		}
-		if err := collector.Accept(event); err != nil {
-			_ = stream.Close()
-			return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, err
-		}
+	retryPolicy, err := productionRetryPolicy(settings.Retry)
+	if err != nil {
+		return ProductionModelProbeResult{}, err
 	}
-	if err := stream.Close(); err != nil {
-		return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, err
+	if !settings.Retry.EnabledOrDefault() {
+		retryPolicy.MaxAttempts = 1
 	}
-	if err := collector.Close(); err != nil {
-		return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, err
+	retry, err := provider.NewRetryController(retryPolicy)
+	if err != nil {
+		return ProductionModelProbeResult{}, err
 	}
-	terminal, err := collector.Result()
+	terminal, err := retry.Call(ctx, func() (llm.AssistantTerminal, error) {
+		status = 0
+		return provider.Complete(ctx, adapter, request)
+	})
 	if err != nil {
 		return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, err
 	}
 	if failure, ok := terminal.(llm.AssistantFailureMessage); ok {
-		return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, errors.New(failure.ErrorMessage())
+		return ProductionModelProbeResult{Latency: time.Since(started), Status: status}, failure.Failure()
 	}
 	var text strings.Builder
 	for _, block := range terminal.Blocks() {

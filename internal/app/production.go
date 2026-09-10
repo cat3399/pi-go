@@ -419,6 +419,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		},
 	}
 	stream, err := productionProviderStreamOptions(snapshot.Settings, options.SessionManager.SessionID())
+	stream.DiagnosticsDir = filepath.Join(p.agentDir, "diagnostics", "providers")
 	if err != nil {
 		return agentruntime.CreateResult{}, err
 	}
@@ -475,6 +476,7 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 					return provider.StreamOptions{}, cause
 				}
 				turnStream, streamErr := productionProviderStreamOptions(catalog.Snapshot().Settings, "")
+				turnStream.DiagnosticsDir = filepath.Join(p.agentDir, "diagnostics", "providers")
 				if streamErr != nil {
 					return provider.StreamOptions{}, streamErr
 				}

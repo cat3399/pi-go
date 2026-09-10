@@ -177,7 +177,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 	if options.Fetch != nil {
 		client = options.Fetch
 	}
-	return &openAICompletionsStream{ctx: streamCtx, cancel: cancel, timeoutCancel: timeoutCancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides), configurationFail: p.configurationFail, maxRetries: valueOrZero32(options.MaxRetries), maxRetryDelayMS: cloneUint64(options.MaxRetryDelayMS), grammarProperties: grammarProperties, tools: make(map[int]*completionsToolSlot), toolsByID: make(map[string]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
+	return &openAICompletionsStream{diagnostics: newStreamDiagnostics(options, request.Model(), payload), ctx: streamCtx, cancel: cancel, timeoutCancel: timeoutCancel, endpoint: endpoint, apiKey: requestAPIKey(request, p.apiKey), client: client, clock: clock, timestamp: clock(), payload: payload, model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes, onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides), configurationFail: p.configurationFail, maxRetries: valueOrZero32(options.MaxRetries), maxRetryDelayMS: cloneUint64(options.MaxRetryDelayMS), grammarProperties: grammarProperties, tools: make(map[int]*completionsToolSlot), toolsByID: make(map[string]*completionsToolSlot), pendingReasoningDetails: make(map[string]completionsReasoningDetail)}
 }
 
 func completionsHasAuthorization(groups ...map[string]string) bool {
@@ -1212,6 +1212,7 @@ type completionsToolSlot struct {
 	customClosed     bool
 }
 type openAICompletionsStream struct {
+	diagnostics                            *streamDiagnostics
 	ctx                                    context.Context
 	cancel                                 context.CancelCauseFunc
 	timeoutCancel                          context.CancelFunc
@@ -1352,7 +1353,10 @@ func (s *openAICompletionsStream) settle() (llm.StreamEvent, error) {
 func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 	for retryIndex := uint32(0); ; retryIndex++ {
 		failure := s.initializeAttempt()
-		if failure == nil || retryIndex >= s.maxRetries || !providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry) {
+		if failure != nil {
+			s.diagnostics.failure(failure.kind, failure.message, failure.cause, failure.vendorCode)
+		}
+		if failure == nil || retryIndex >= s.maxRetries || permanentProviderError(failure.message, failure.vendorCode) || !providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry) {
 			return failure
 		}
 		if err := waitProviderRetry(s.ctx, retryIndex, failure.retryAfter, s.maxRetryDelayMS, failure.message); err != nil {
@@ -1367,7 +1371,7 @@ func (s *openAICompletionsStream) initialize() *completionsFailureSpec {
 }
 
 func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
-	req, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
+	req, err := http.NewRequestWithContext(s.diagnostics.begin(s.ctx, s.endpoint), http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
 	if err != nil {
 		return &completionsFailureSpec{kind: FailureInvalidRequest, cause: err, message: "Could not construct OpenAI Chat Completions request"}
 	}
@@ -1394,6 +1398,7 @@ func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
 		}
 	}
 	resp, err := invokeResponsesHTTPDoer(s.client, req)
+	captureResponse(req.Context(), resp)
 	if err != nil {
 		if cause := context.Cause(s.ctx); cause != nil {
 			return s.cancelled(cause)
@@ -1414,6 +1419,7 @@ func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
 	}
 	media, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || !strings.EqualFold(media, "text/event-stream") {
+		drainDiagnosticResponse(resp)
 		_ = resp.Body.Close()
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: response content type %q is not text/event-stream", ErrOpenAICompletionsStream, resp.Header.Get("Content-Type")), message: "OpenAI Chat Completions returned a non-streaming response"}
 	}
@@ -1434,6 +1440,7 @@ func (s *openAICompletionsStream) initializeAttempt() *completionsFailureSpec {
 func (s *openAICompletionsStream) httpFailure(resp *http.Response) *completionsFailureSpec {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(s.maxErrorBodyBytes)+1))
+	drainDiagnosticResponse(resp)
 	if len(body) > s.maxErrorBodyBytes {
 		body = body[:s.maxErrorBodyBytes]
 	}
@@ -1519,7 +1526,7 @@ func (s *openAICompletionsStream) process(data []byte) *completionsFailureSpec {
 		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: decode SSE event: %w", ErrOpenAICompletionsStream, err), message: "OpenAI Chat Completions stream returned invalid JSON"}
 	}
 	if c.Error != nil {
-		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: errors.New(c.Error.Message), message: c.Error.Message}
+		return &completionsFailureSpec{kind: FailureInvalidResponse, cause: errors.New(c.Error.Message), message: c.Error.Message, vendorCode: normalizeResponsesVendorCode(c.Error.Code)}
 	}
 	if s.responseID == "" {
 		s.responseID = completionsOptionalString(c.ID, 256)
@@ -1938,6 +1945,9 @@ func (s *openAICompletionsStream) finishReason() llm.FinishReason {
 	return s.terminalReason
 }
 func (s *openAICompletionsStream) cancelled(cause error) *completionsFailureSpec {
+	if errors.Is(cause, errProviderRequestTimeout) {
+		return &completionsFailureSpec{kind: FailureTransport, cause: cause, message: errProviderRequestTimeout.Error()}
+	}
 	joined := error(ErrOpenAICompletionsAborted)
 	if cause != nil {
 		joined = errors.Join(joined, cause)
@@ -1967,7 +1977,8 @@ func (s *openAICompletionsStream) failure(spec *completionsFailureSpec) (llm.Str
 	if spec.kind == FailureCancelled {
 		reason = llm.FinishAborted
 	}
-	e, err := llm.NewErrorEventWithFailure(reason, terminal, s.usage, s.timestamp, assistantProvenanceForModel(s.model))
+	diagnostics := s.diagnostics.failure(spec.kind, message, spec.cause, spec.vendorCode)
+	e, err := llm.NewErrorEventWithMetadata(reason, terminal, s.usage, s.timestamp, assistantProvenanceForModel(s.model), nil, diagnostics)
 	if err != nil {
 		return nil, closedStreamError(err)
 	}
@@ -1988,6 +1999,7 @@ func (s *openAICompletionsStream) done() bool {
 	return s.closed || s.finished
 }
 func (s *openAICompletionsStream) finish() {
+	defer s.diagnostics.close()
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()
@@ -2009,6 +2021,7 @@ func (s *openAICompletionsStream) Close() error {
 	if s == nil {
 		return nil
 	}
+	defer s.diagnostics.close()
 	s.mu.Lock()
 	s.closed = true
 	b := s.body

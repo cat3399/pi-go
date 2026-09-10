@@ -70,6 +70,7 @@ type responsesDeferredEvent struct {
 }
 
 type openAIResponsesStream struct {
+	diagnostics             *streamDiagnostics
 	ctx                     context.Context
 	cancel                  context.CancelCauseFunc
 	timeoutCancel           context.CancelFunc
@@ -323,6 +324,9 @@ func (s *openAIResponsesStream) Next() (event llm.StreamEvent, err error) {
 func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 	for retryIndex := uint32(0); ; retryIndex++ {
 		failure = s.initializeAttempt()
+		if failure != nil {
+			s.diagnostics.failure(failure.kind, failure.message, failure.cause, failure.vendorCode)
+		}
 		if failure == nil {
 			return nil
 		}
@@ -330,7 +334,7 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 		if s.codexRetry {
 			shouldRetry = codexShouldRetry(failure)
 		}
-		if retryIndex >= s.maxRetries || !shouldRetry {
+		if retryIndex >= s.maxRetries || permanentProviderError(failure.message, failure.vendorCode) || !shouldRetry {
 			return failure
 		}
 		wait := waitProviderRetry
@@ -359,7 +363,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 		}
 	}()
 
-	request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
+	request, err := http.NewRequestWithContext(s.diagnostics.begin(s.ctx, s.endpoint), http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
 	if err != nil {
 		return &responsesFailureSpec{
 			kind:    FailureInvalidRequest,
@@ -399,6 +403,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 	}
 
 	response, err := invokeResponsesHTTPDoer(s.client, request)
+	captureResponse(request.Context(), response)
 	if response != nil && response.Body != nil && !isTypedNil(response.Body) {
 		ownedBody = response.Body
 	}
@@ -435,6 +440,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 	}
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if response.Header.Get("Content-Type") != "" && (contentTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream")) {
+		drainDiagnosticResponse(response)
 		cause := fmt.Errorf(
 			"%w: response content type %q is not text/event-stream",
 			ErrOpenAIResponsesStream,
@@ -458,6 +464,7 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *responsesFailureSpec {
 	limited := io.LimitReader(response.Body, int64(s.maxErrorBodyBytes)+1)
 	body, readErr := io.ReadAll(limited)
+	drainDiagnosticResponse(response)
 	truncated := len(body) > s.maxErrorBodyBytes
 	if truncated {
 		body = body[:s.maxErrorBodyBytes]
@@ -578,6 +585,9 @@ func (s *openAIResponsesStream) finishCancellation(cause error) (llm.StreamEvent
 }
 
 func (s *openAIResponsesStream) cancellationFailure(cause error) *responsesFailureSpec {
+	if errors.Is(cause, errProviderRequestTimeout) {
+		return &responsesFailureSpec{kind: FailureTransport, cause: cause, message: errProviderRequestTimeout.Error()}
+	}
 	joined := error(ErrOpenAIResponsesAborted)
 	if cause != nil {
 		joined = errors.Join(ErrOpenAIResponsesAborted, cause)
@@ -620,7 +630,8 @@ func (s *openAIResponsesStream) finishFailure(spec responsesFailureSpec) (llm.St
 	if s.pendingDone != nil {
 		usage = s.pendingDone.Usage()
 	}
-	event, err := llm.NewErrorEventWithFailure(reason, terminalFailure, usage, s.timestamp, assistantProvenanceForModel(s.model))
+	diagnostics := s.diagnostics.failure(spec.kind, message, spec.cause, spec.vendorCode)
+	event, err := llm.NewErrorEventWithMetadata(reason, terminalFailure, usage, s.timestamp, assistantProvenanceForModel(s.model), nil, diagnostics)
 	if err != nil {
 		s.finishTransport()
 		return nil, closedStreamError(fmt.Errorf("construct OpenAI Responses error event: %w", err))
@@ -631,6 +642,7 @@ func (s *openAIResponsesStream) finishFailure(spec responsesFailureSpec) (llm.St
 }
 
 func (s *openAIResponsesStream) finishTransport() {
+	defer s.diagnostics.close()
 	s.lifecycleMu.Lock()
 	s.finished = true
 	body := s.takeBodyForCloseLocked()
@@ -648,6 +660,7 @@ func (s *openAIResponsesStream) Close() error {
 	if s == nil {
 		return nil
 	}
+	defer s.diagnostics.close()
 	s.lifecycleMu.Lock()
 	s.closed = true
 	body := s.takeBodyForCloseLocked()

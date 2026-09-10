@@ -614,6 +614,9 @@ func cloneUint32(value *uint32) *uint32 {
 // of replacing the complete request contract.
 func MergeStreamOptions(base, overlay StreamOptions) StreamOptions {
 	result := CloneStreamOptions(base)
+	if overlay.DiagnosticsDir != "" {
+		result.DiagnosticsDir = overlay.DiagnosticsDir
+	}
 	if overlay.Temperature != nil {
 		value := *overlay.Temperature
 		result.Temperature = &value
@@ -974,9 +977,13 @@ type RequestOptions struct {
 // properties of an API dialect: a model/provider selection resolves them for
 // each request.
 type StreamOptions struct {
-	Temperature *float64
-	APIKey      string
-	Headers     map[string]string
+	// DiagnosticsDir stores failed request metadata and original response bytes.
+	// Empty disables file recording for embedders. Production supplies its
+	// application-owned diagnostics directory, independently of session storage.
+	DiagnosticsDir string
+	Temperature    *float64
+	APIKey         string
+	Headers        map[string]string
 	// HeaderOverrides has three states per name: absent leaves inherited
 	// headers untouched, non-nil replaces/adds it, and nil explicitly removes
 	// it. Headers remains the ordinary convenient add/replace map.

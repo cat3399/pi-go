@@ -143,3 +143,27 @@ func TestGenerateSessionTitleDoesNotMutateConversation(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionTitleRetriesWithoutPersistingTemporaryConversation(t *testing.T) {
+	implementation := newScriptedProvider(t,
+		mustTextTerminal(t, "initial answer"),
+		sessionHTTPFailure(t, 503),
+		mustTextTerminal(t, "Recovered session title"),
+	)
+	manager := newSessionManager(t)
+	coordinator, err := agent.NewSession(agent.SessionConfig{
+		Provider: implementation, SessionManager: manager, Model: sessionTestModel(t),
+		Retry: provider.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Run(context.Background(), "give this session a title"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(manager.Entries())
+	generated, err := coordinator.GenerateSessionTitle(context.Background())
+	if err != nil || generated.Title != "Recovered session title" || len(manager.Entries()) != before {
+		t.Fatalf("title=%q entries=%d want=%d err=%v", generated.Title, len(manager.Entries()), before, err)
+	}
+}

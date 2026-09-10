@@ -13,6 +13,10 @@ import (
 
 const defaultProviderMaxRetryDelay = 60 * time.Second
 
+// A request deadline is retryable while the owning session is still alive.
+// Keep it distinct from cancellation (including the caller's own deadline).
+var errProviderRequestTimeout = fmt.Errorf("model request timed out: %w", context.DeadlineExceeded)
+
 // OpenAI-compatible gateways may own authentication through Cloudflare's
 // gateway header instead of an SDK-style API key. Empty values remain ordinary
 // headers and never satisfy the authorization boundary.
@@ -161,9 +165,9 @@ func streamContextWithTimeout(parent context.Context, timeoutMS *uint64) (contex
 	timeoutCancel := func() {}
 	if timeoutMS != nil && *timeoutMS > 0 {
 		if *timeoutMS > uint64(math.MaxInt64/int64(time.Millisecond)) {
-			base, timeoutCancel = context.WithTimeout(parent, time.Duration(math.MaxInt64))
+			base, timeoutCancel = context.WithTimeoutCause(parent, time.Duration(math.MaxInt64), errProviderRequestTimeout)
 		} else {
-			base, timeoutCancel = context.WithTimeout(parent, time.Duration(*timeoutMS)*time.Millisecond)
+			base, timeoutCancel = context.WithTimeoutCause(parent, time.Duration(*timeoutMS)*time.Millisecond, errProviderRequestTimeout)
 		}
 	}
 	ctx, cancel := context.WithCancelCause(base)

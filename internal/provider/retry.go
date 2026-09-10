@@ -7,7 +7,10 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"time"
+
+	"github.com/cat3399/pi-go/internal/llm"
 )
 
 const DefaultMaxRetryAfter = 60 * time.Second
@@ -188,6 +191,24 @@ func (p RetryController) Wait(ctx context.Context, delay time.Duration) error {
 	return p.sleep(ctx, delay)
 }
 
+// Call retries auxiliary model calls (for example titles and connection
+// probes). AgentSession keeps its own loop because it also owns persistence,
+// queue continuation and retry lifecycle events.
+func (p RetryController) Call(ctx context.Context, call func() (llm.AssistantTerminal, error)) (llm.AssistantTerminal, error) {
+	for attempt := uint32(1); ; attempt++ {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
+		terminal, err := call()
+		if context.Cause(ctx) != nil || attempt >= p.MaxAttempts() || !(IsRetryableAssistantError(terminal) || IsTransientStreamError(err)) {
+			return terminal, err
+		}
+		if err := p.Wait(ctx, p.Delay(attempt+1, nil)); err != nil {
+			return nil, err
+		}
+	}
+}
+
 func retrySleep(ctx context.Context, delay time.Duration) error {
 	if delay <= 0 {
 		return context.Cause(ctx)
@@ -202,9 +223,9 @@ func retrySleep(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// IsTransientFailure admits only failures which are safe to resend without a
-// durable state change. Invalid/auth/config/context-overflow decisions remain
-// with the Agent coordinator and are not ordinary retries.
+// IsTransientFailure admits remote failures unless retrying is known to be
+// futile. A malformed or incomplete response can be a transient gateway/model
+// failure too; the caller's finite budget bounds repeated protocol failures.
 func IsTransientFailure(failure *ProviderFailure) bool {
 	if failure == nil {
 		return false
@@ -214,10 +235,43 @@ func IsTransientFailure(failure *ProviderFailure) bool {
 		return true
 	case FailureHTTPStatus:
 		status, ok := failure.HTTPStatus()
-		return ok && (status == 408 || status == 409 || status == 425 || status == 429 || status >= 500)
+		return ok && (status == 408 || status == 409 || status == 425 || status == 429 || status >= 500) && !permanentProviderError(failure.message, failure.vendorCode)
+	case FailureInvalidResponse:
+		return !permanentProviderError(failure.message, failure.vendorCode)
 	default:
 		return false
 	}
+}
+
+func permanentProviderError(message, code string) bool {
+	text := strings.ToLower(code + " " + message)
+	for _, marker := range []string{
+		"insufficient_quota", "out of budget", "quota exceeded", "billing",
+		"gousagelimiterror", "freeusagelimiterror", "monthly usage limit reached", "available balance",
+		"invalid_api_key", "invalid api key", "authentication_error", "authentication failed",
+		"permission_denied", "permission denied", "invalid_request_error", "invalid_request",
+		"model_not_found", "context_length_exceeded", "prompt is too long",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsRetryableAssistantError also covers streams that return an ordinary error
+// instead of a ProviderFailure. It only applies to failed model turns, never
+// tool execution or session storage errors.
+func IsRetryableAssistantError(terminal llm.AssistantTerminal) bool {
+	failure, ok := terminal.(llm.AssistantFailureMessage)
+	if !ok || failure.FinishReason() != llm.FinishError {
+		return false
+	}
+	var providerFailure *ProviderFailure
+	if errors.As(failure.Failure(), &providerFailure) {
+		return IsTransientFailure(providerFailure)
+	}
+	return !errors.Is(failure.Failure(), context.Canceled) && !permanentProviderError(failure.ErrorMessage(), "")
 }
 
 // IsTransientStreamError separates transport drops from collector/parser

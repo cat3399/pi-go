@@ -351,6 +351,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 		clock:                   clock,
 		timestamp:               clock(),
 		payload:                 payload,
+		diagnostics:             newStreamDiagnostics(options, request.Model(), payload),
 		model:                   request.Model(),
 		headers:                 headers,
 		maxEventBytes:           p.maxEventBytes,

@@ -198,7 +198,8 @@ func (p *AnthropicProvider) Stream(ctx context.Context, request Request) EventSt
 		toolNames[strings.ToLower(tool.Name())] = tool.Name()
 	}
 	return &anthropicStream{
-		ctx: streamContext, cancel: cancel, timeoutCancel: timeoutCancel, endpoint: endpoint,
+		diagnostics: newStreamDiagnostics(options, request.Model(), payload),
+		ctx:         streamContext, cancel: cancel, timeoutCancel: timeoutCancel, endpoint: endpoint,
 		apiKey: effectiveAPIKey, client: client, clock: clock, timestamp: clock(), payload: payload,
 		model: request.Model(), headers: headers, maxEventBytes: p.maxEventBytes, maxErrorBodyBytes: p.maxErrorBodyBytes,
 		onResponse: options.OnResponse, onHeaders: options.OnHeaders, headerOverrides: cloneHeaderOverrides(options.HeaderOverrides),
@@ -856,6 +857,7 @@ type anthropicContentSlot struct {
 }
 
 type anthropicStream struct {
+	diagnostics       *streamDiagnostics
 	ctx               context.Context
 	cancel            context.CancelCauseFunc
 	timeoutCancel     context.CancelFunc
@@ -969,7 +971,10 @@ func (s *anthropicStream) Next() (llm.StreamEvent, error) {
 func (s *anthropicStream) initialize() *anthropicFailureSpec {
 	for retryIndex := uint32(0); ; retryIndex++ {
 		failure := s.initializeAttempt()
-		if failure == nil || retryIndex >= s.maxRetries || !providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry) {
+		if failure != nil {
+			s.diagnostics.failure(failure.kind, failure.message, failure.cause, failure.vendorCode)
+		}
+		if failure == nil || retryIndex >= s.maxRetries || permanentProviderError(failure.message, failure.vendorCode) || !providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry) {
 			return failure
 		}
 		if err := waitProviderRetry(s.ctx, retryIndex, failure.retryAfter, s.maxRetryDelayMS, failure.message); err != nil {
@@ -984,7 +989,7 @@ func (s *anthropicStream) initialize() *anthropicFailureSpec {
 }
 
 func (s *anthropicStream) initializeAttempt() *anthropicFailureSpec {
-	request, err := http.NewRequestWithContext(s.ctx, http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
+	request, err := http.NewRequestWithContext(s.diagnostics.begin(s.ctx, s.endpoint), http.MethodPost, s.endpoint, bytes.NewReader(s.payload))
 	if err != nil {
 		return &anthropicFailureSpec{kind: FailureInvalidRequest, cause: fmt.Errorf("%w: construct HTTP request: %v", ErrAnthropicRequest, err), message: "Could not construct Anthropic Messages request"}
 	}
@@ -1012,6 +1017,7 @@ func (s *anthropicStream) initializeAttempt() *anthropicFailureSpec {
 		return &anthropicFailureSpec{kind: FailureConfiguration, cause: fmt.Errorf("%w: final authorization headers are missing", ErrInvalidAnthropicConfig), message: "Anthropic API authorization was removed before the request"}
 	}
 	response, err := invokeResponsesHTTPDoer(s.client, request)
+	captureResponse(request.Context(), response)
 	if err != nil {
 		if cause := context.Cause(s.ctx); cause != nil {
 			return s.cancelled(cause)
@@ -1032,6 +1038,7 @@ func (s *anthropicStream) initializeAttempt() *anthropicFailureSpec {
 	}
 	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if mediaErr != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		drainDiagnosticResponse(response)
 		_ = response.Body.Close()
 		return &anthropicFailureSpec{kind: FailureInvalidResponse, cause: fmt.Errorf("%w: response content type %q is not text/event-stream", ErrAnthropicStream, response.Header.Get("Content-Type")), message: "Anthropic returned a non-streaming response"}
 	}
@@ -1054,6 +1061,7 @@ func anthropicHTTPHeadersHaveAuth(headers http.Header) bool {
 func (s *anthropicStream) httpFailure(response *http.Response) *anthropicFailureSpec {
 	defer response.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, int64(s.maxErrorBodyBytes)+1))
+	drainDiagnosticResponse(response)
 	if len(body) > s.maxErrorBodyBytes {
 		body = body[:s.maxErrorBodyBytes]
 	}
@@ -1723,6 +1731,9 @@ func (s *anthropicStream) invalidEvent(err error) *anthropicFailureSpec {
 }
 
 func (s *anthropicStream) cancelled(cause error) *anthropicFailureSpec {
+	if errors.Is(cause, errProviderRequestTimeout) {
+		return &anthropicFailureSpec{kind: FailureTransport, cause: cause, message: errProviderRequestTimeout.Error()}
+	}
 	joined := error(ErrAnthropicAborted)
 	if cause != nil {
 		joined = errors.Join(joined, cause)
@@ -1760,7 +1771,8 @@ func (s *anthropicStream) fail(spec *anthropicFailureSpec) (llm.StreamEvent, err
 	if s.responseID != "" || s.stopReason != "" {
 		response = &llm.AssistantResponseMetadata{ResponseID: s.responseID, RawStopReason: s.stopReason}
 	}
-	event, err := llm.NewErrorEventWithMetadata(reason, terminal, usage, s.timestamp, assistantProvenanceForModel(s.model), response, nil)
+	diagnostics := s.diagnostics.failure(spec.kind, message, spec.cause, spec.vendorCode)
+	event, err := llm.NewErrorEventWithMetadata(reason, terminal, usage, s.timestamp, assistantProvenanceForModel(s.model), response, diagnostics)
 	if err != nil {
 		s.finish()
 		return nil, closedStreamError(err)
@@ -1786,6 +1798,7 @@ func (s *anthropicStream) done() bool {
 }
 
 func (s *anthropicStream) finish() {
+	defer s.diagnostics.close()
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()
@@ -1812,6 +1825,7 @@ func (s *anthropicStream) Close() error {
 	if s == nil {
 		return nil
 	}
+	defer s.diagnostics.close()
 	s.mu.Lock()
 	s.closed = true
 	body := s.body

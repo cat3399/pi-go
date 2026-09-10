@@ -136,7 +136,7 @@ func TestTransientFailureAdmissionMatrix(t *testing.T) {
 			t.Errorf("status %d was transient", status)
 		}
 	}
-	for _, kind := range []provider.FailureKind{provider.FailureConfiguration, provider.FailureInvalidRequest, provider.FailureContextOverflow, provider.FailureInvalidResponse, provider.FailureCancelled} {
+	for _, kind := range []provider.FailureKind{provider.FailureConfiguration, provider.FailureInvalidRequest, provider.FailureContextOverflow, provider.FailureCancelled} {
 		failure, err := provider.NewProviderFailure(provider.ProviderFailureSpec{Kind: kind, Message: "fixture", Cause: errors.New("fixture")})
 		if err != nil {
 			t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/provider"
 )
 
 const (
@@ -87,7 +88,7 @@ func (s *AgentSession) GenerateSessionTitle(ctx context.Context) (GeneratedSessi
 		titleTools = sessionTitleToolExecutor{}
 	}
 	prepareTurn := policy.prepareTurn
-	temporary, err := New(Config{
+	titleConfig := Config{
 		Provider: policy.provider, InitialMessages: messages,
 		Model: state.Model(), ThinkingLevel: state.ThinkingLevel(), SystemPrompt: state.SystemPrompt(),
 		Stream: policy.stream, Tool: titleTools, Tools: state.Tools(), ToolExecution: policy.toolExecution,
@@ -111,33 +112,43 @@ func (s *AgentSession) GenerateSessionTitle(ctx context.Context) (GeneratedSessi
 			snapshot.Tools = state.Tools()
 			return snapshot, nil
 		},
-	})
-	if err != nil {
-		return GeneratedSessionTitle{}, err
 	}
-
 	runCtx, cancel := context.WithTimeout(ctx, defaultSessionTitleTimeout)
 	defer cancel()
-	var result Result
-	if continues {
-		result, err = temporary.Continue(runCtx)
-	} else {
-		result, err = temporary.Run(runCtx, sessionTitlePrompt)
+	enabled, retry := s.currentRetrySettings()
+	if !enabled {
+		retry, _ = provider.NewRetryController(provider.RetryPolicy{MaxAttempts: 1})
 	}
+	terminal, err := retry.Call(runCtx, func() (llm.AssistantTerminal, error) {
+		temporary, err := New(titleConfig)
+		if err != nil {
+			return nil, err
+		}
+		var result Result
+		if continues {
+			result, err = temporary.Continue(runCtx)
+		} else {
+			result, err = temporary.Run(runCtx, sessionTitlePrompt)
+		}
+		if err != nil {
+			_ = temporary.Abort(context.Background())
+			return nil, err
+		}
+		terminal, ok := result.Terminal()
+		if !ok {
+			return nil, errors.New("the model did not return a session title")
+		}
+		return terminal, nil
+	})
 	if err != nil {
-		_ = temporary.Abort(context.Background())
 		if errors.Is(context.Cause(runCtx), context.DeadlineExceeded) {
 			return GeneratedSessionTitle{}, errors.New("session title generation timed out")
 		}
 		return GeneratedSessionTitle{}, err
 	}
-	terminal, ok := result.Terminal()
-	if !ok {
-		return GeneratedSessionTitle{}, errors.New("the model did not return a session title")
-	}
 	if terminal.FinishReason() == llm.FinishError {
 		if failure, isFailure := terminal.(llm.AssistantFailureMessage); isFailure && failure.ErrorMessage() != "" {
-			return GeneratedSessionTitle{}, errors.New(failure.ErrorMessage())
+			return GeneratedSessionTitle{}, failure.Failure()
 		}
 		return GeneratedSessionTitle{}, errors.New("the title model request failed")
 	}

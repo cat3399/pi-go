@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"math/bits"
 	"strings"
 	"time"
@@ -218,7 +217,7 @@ func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, pro
 		if terminalFailure, ok := terminal.(llm.AssistantFailureMessage); ok {
 			_ = errors.As(terminalFailure.Failure().Cause(), &failure)
 		}
-		retryable := IsTransientStreamError(streamErr) || IsTransientFailure(failure)
+		retryable := IsTransientStreamError(streamErr) || IsRetryableAssistantError(terminal)
 		kind, status, _ := normalizedRetryOutcome(terminal, streamErr)
 		if retryable && attempt < s.retry.MaxAttempts() {
 			finishRetry(kind, status, false, RetryFinishFailed, errorMessage)
@@ -369,41 +368,7 @@ func normalizedRetryOutcome(terminal llm.AssistantTerminal, streamErr error) (Fa
 }
 
 func (s *ContextSummarizer) collectAttempt(ctx context.Context, request Request) (llm.AssistantTerminal, error) {
-	stream := s.provider.Stream(ctx, request)
-	if stream == nil || isTypedNil(stream) {
-		return nil, errors.New("context summarizer provider returned nil stream")
-	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = stream.Close()
-		}
-	}()
-	collector := &llm.StreamCollector{}
-	for {
-		event, nextErr := stream.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			return nil, nextErr
-		}
-		if err := collector.Accept(event); err != nil {
-			return nil, fmt.Errorf("summary stream event: %w", err)
-		}
-	}
-	closed = true
-	if err := stream.Close(); err != nil {
-		return nil, fmt.Errorf("summary stream transport close: %w", err)
-	}
-	if err := collector.Close(); err != nil {
-		return nil, fmt.Errorf("summary stream close: %w", err)
-	}
-	terminal, err := collector.Result()
-	if err != nil {
-		return nil, fmt.Errorf("summary result: %w", err)
-	}
-	return terminal, nil
+	return Complete(ctx, s.provider, request)
 }
 
 func summaryTerminal(terminal llm.AssistantTerminal, allowEmpty bool) (string, llm.Usage, error) {

@@ -93,7 +93,8 @@ func (c openAICodexStreamConfig) newWebSocketStream() EventStream {
 func (c openAICodexStreamConfig) newResponsesStream(client HTTPDoer, onResponse ResponseHook, onHeaders HeaderHook, overrides map[string]*string, maxRetries uint32, retry bool) EventStream {
 	streamContext, cancel := context.WithCancelCause(c.ctx)
 	return &openAIResponsesStream{
-		ctx: streamContext, cancel: cancel, timeoutCancel: func() {}, endpoint: c.endpoint, apiKey: c.token,
+		diagnostics: newStreamDiagnostics(c.options, c.model, c.payload),
+		ctx:         streamContext, cancel: cancel, timeoutCancel: func() {}, endpoint: c.endpoint, apiKey: c.token,
 		authHeader: "authorization", displayName: "OpenAI Codex", configurationError: ErrInvalidOpenAICodexConfig,
 		client: client, clock: c.clock, timestamp: c.clock(), payload: append([]byte(nil), c.payload...), model: c.model,
 		headers: cloneStrings(c.headers), maxEventBytes: c.maxEventBytes, maxErrorBodyBytes: c.maxErrorBodyBytes,
@@ -314,10 +315,14 @@ func codexTerminalStreamEvent(event llm.StreamEvent) bool {
 }
 
 func (s *openAICodexHybridStream) fallback(active EventStream, cause error) {
+	var evidence []llm.AssistantDiagnostic
+	if stream, ok := active.(*openAIResponsesStream); ok {
+		evidence = stream.diagnostics.failure(FailureTransport, safeResponsesErrorText(cause, "WebSocket transport failed"), cause, "")
+	}
 	_ = active.Close()
 	sessionID := codexCacheSessionID(s.config.options)
 	recordCodexWebSocketFailure(sessionID, cause)
-	diagnostic := codexFallbackDiagnostic(s.config, cause)
+	diagnostic := codexFallbackDiagnostic(s.config, cause, evidence)
 	s.mu.Lock()
 	s.diag = diagnostic
 	s.active = s.config.newSSEStream()
@@ -380,15 +385,22 @@ func (s *openAICodexHybridStream) Close() error {
 	return nil
 }
 
-func codexFallbackDiagnostic(config openAICodexStreamConfig, cause error) *llm.AssistantDiagnostic {
+func codexFallbackDiagnostic(config openAICodexStreamConfig, cause error, evidence []llm.AssistantDiagnostic) *llm.AssistantDiagnostic {
 	transport := config.options.Transport
 	if transport == "" {
 		transport = TransportAuto
 	}
-	details, _ := json.Marshal(map[string]any{
+	detailFields := map[string]any{}
+	if len(evidence) != 0 {
+		_ = json.Unmarshal(evidence[0].Details(), &detailFields)
+	}
+	for key, value := range map[string]any{
 		"configuredTransport": transport, "fallbackTransport": "sse", "eventsEmitted": false,
 		"phase": "before_message_stream_start", "requestBytes": len(config.payload),
-	})
+	} {
+		detailFields[key] = value
+	}
+	details, _ := json.Marshal(detailFields)
 	timestamp := config.clock().UTC().Truncate(time.Millisecond)
 	if timestamp.IsZero() {
 		timestamp = time.UnixMilli(1).UTC()
@@ -541,6 +553,7 @@ func (d *codexWebSocketDoer) Do(request *http.Request) (*http.Response, error) {
 		lease.release(false)
 		return nil, fmt.Errorf("write OpenAI Codex WebSocket request: %w", err)
 	}
+	captureFromContext(request.Context()).request(encoded)
 	recordCodexWebSocketRequest(lease, requestBody, useCachedContext)
 	first, err := readFirstCodexWebSocketEvent(request.Context(), lease.conn, config.options, config.maxEventBytes)
 	if err != nil {
@@ -593,6 +606,7 @@ func readCodexWebSocketMessage(ctx context.Context, conn *websocket.Conn, timeou
 	}
 	defer cancel()
 	_, data, err := conn.Read(readContext)
+	captureFromContext(ctx).write(data, err, true)
 	return data, err
 }
 
@@ -1050,6 +1064,9 @@ func dialCodexWebSocket(ctx context.Context, config openAICodexStreamConfig, hea
 	dialOptions := &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled}
 	if client, ok := config.client.(*http.Client); ok {
 		dialOptions.HTTPClient = client
+	}
+	if captureFromContext(ctx) != nil {
+		dialOptions.HTTPClient = diagnosticWebSocketClient(dialOptions.HTTPClient)
 	}
 	conn, response, err := websocket.Dial(connectContext, websocketURL, dialOptions)
 	if response != nil && response.Body != nil {

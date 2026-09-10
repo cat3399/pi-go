@@ -6,6 +6,7 @@
 | Provider 凭据 | `~/.pi-go/agent/auth.json` |
 | 模型配置 | `~/.pi-go/agent/models.json` |
 | 会话 | `~/.pi-go/agent/sessions/<编码后的工作目录>/` |
+| 模型失败原始记录 | `~/.pi-go/agent/diagnostics/providers/` |
 | 项目目录列表 | `~/.pi-go/agent/projects.json` |
 | 项目信任记录 | `~/.pi-go/agent/trust.json` |
 | 用户技能、模板 | `~/.pi-go/agent/skills/`、`prompts/` |
@@ -38,6 +39,35 @@ README 和源码位置由随二进制携带的资料决定。
 `APPEND_SYSTEM.md` 追加指令，同类文件优先选择项目版本。项目根目录和祖先目录的
 `AGENTS.md` / `CLAUDE.md` 仍作为共享项目指令加载。共享 `.agents/skills` 的发现规则保持独立。
 修改后可使用 `/reload`。
+
+## 模型失败与重试
+
+自动重试默认开启，失败后最多再请求 3 次，依次等待 2、4、8 秒：
+
+```json
+{
+  "retry": { "enabled": true, "maxRetries": 3, "baseDelayMs": 2000 }
+}
+```
+
+网络异常、单次模型请求超时、服务端过载、流提前结束和无法解析的响应都允许有限重试。
+用户取消、认证或明确的请求配置错误、额度耗尽不重试；上下文超限由压缩恢复流程处理。
+会话重试保留已完成的工具结果，只重新请求失败的模型回复。标题生成使用会话的重试设置，
+模型连通性测试使用全局重试设置。`retry.provider.maxRetries` 是独立的 provider 内部重试次数，
+默认 0；通常保持默认即可。
+
+每次失败的模型请求都会在 `diagnostics/providers/` 留下同名的两个文件：
+
+- `failure-*.json`：时间、会话和模型、请求地址、请求内容（Base64）、HTTP 状态、服务端请求 ID、
+  具体错误及响应原文路径。`attempt` 是本次 provider 调用中的尝试序号。
+- `failure-*.response`：HTTP 响应的原始字节，包括解析失败的内容和出错前已收到的流内容。
+  WebSocket 使用逐帧 JSONL，每行的 `data` 是原始帧内容的 Base64，保留帧边界和非法 UTF-8。
+
+记录发生在解析和 JSON 修复之前，不随错误显示文本截断。HTTP 错误正文完整读取并保存；
+断流、超时或解析提前终止时保存已经收到的字节，JSON 中记录是否读到 EOF 及读取错误。
+会话失败消息的 `diagnostics` 关联这些文件。重试或 WebSocket 回退成功后，先前失败的记录仍保留；
+成功请求的临时捕获会清理。诊断写入失败通过 `recordingError` 报告，不替换原本的模型错误。
+诊断目录和文件使用私有权限，不保存请求认证头。
 
 ## 首次导入
 
