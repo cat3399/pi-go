@@ -59,8 +59,8 @@ func projectBuiltinCatalog(document catalog.Document) (*builtinCatalog, error) {
 		p.API, p.BaseURL = entry.API, entry.BaseURL
 		result.providers = append(result.providers, p)
 		for _, models := range entry.Models {
-			for id, raw := range models {
-				model, err := projectBuiltinModel(entry.ID, id, raw)
+			for _, raw := range models {
+				model, err := projectBuiltinModel(entry.ID, raw)
 				if err != nil {
 					return nil, err
 				}
@@ -95,14 +95,12 @@ type catalogModel struct {
 	Compat           json.RawMessage                    `json:"compat"`
 }
 
-func projectBuiltinModel(providerID, id string, raw json.RawMessage) (Model, error) {
+func projectBuiltinModel(providerID string, raw json.RawMessage) (Model, error) {
 	var wire catalogModel
 	if err := json.Unmarshal(raw, &wire); err != nil {
-		return Model{}, fmt.Errorf("built-in catalog %s/%s: %w", providerID, id, err)
+		return Model{}, fmt.Errorf("built-in catalog %s: %w", providerID, err)
 	}
-	if wire.Provider != providerID || wire.ID != id {
-		return Model{}, fmt.Errorf("built-in catalog identity mismatch for %s/%s", providerID, id)
-	}
+	id := wire.ID
 	model := Model{Provider: wire.Provider, ID: wire.ID, Name: wire.Name, API: wire.API, BaseURL: wire.BaseURL,
 		Headers: wire.Headers, Reasoning: wire.Reasoning, ThinkingLevelMap: wire.ThinkingLevelMap, Input: wire.Input,
 		Cost: wire.Cost, ContextWindow: wire.ContextWindow, MaxTokens: wire.MaxTokens, compatRaw: bytes.Clone(wire.Compat)}

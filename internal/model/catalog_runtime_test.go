@@ -38,6 +38,53 @@ func publishTestCatalog(t *testing.T, path string, doc catalog.Document) {
 	}
 }
 
+func TestInstalledCatalogUsesModelIdentityRatherThanIndex(t *testing.T) {
+	before := installedTestCatalog(t)
+	after := installedTestCatalog(t)
+	for i := range after.Providers {
+		for api, entries := range after.Providers[i].Models {
+			reindexed := make(map[string]json.RawMessage, len(entries))
+			for id, raw := range entries {
+				key := "chat:" + id
+				if id == "z-synced" {
+					key = "opaque-index"
+				}
+				reindexed[key] = raw
+			}
+			after.Providers[i].Models[api] = reindexed
+		}
+	}
+	agentDir := t.TempDir()
+	publishTestCatalog(t, filepath.Join(agentDir, catalog.Filename), after)
+	r, err := NewRuntime(Options{AgentDir: agentDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Error(); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := r.Resolve(Selection{Provider: OpenAIProviderID, Model: "z-synced"})
+	if err != nil || selected.Model.ID != "z-synced" || selected.Model.API != OpenAIResponsesAPI {
+		t.Fatalf("model identity was taken from its index: %#v, %v", selected, err)
+	}
+	if _, ok := r.GetModel(OpenAIProviderID, "chat:z-synced"); ok {
+		t.Fatal("upstream index became a request model ID")
+	}
+	diff := catalog.Compare(before, after)
+	if len(diff.Added)+len(diff.Removed)+len(diff.Changed) != 0 {
+		t.Fatalf("reindexing changed the model diff: %#v", diff)
+	}
+	for i := range after.Providers {
+		if after.Providers[i].ID == OpenAIProviderID {
+			entries := after.Providers[i].Models[OpenAIResponsesAPI]
+			entries["another-index"] = entries["opaque-index"]
+		}
+	}
+	if err := after.Validate(); err == nil {
+		t.Fatal("duplicate request identity was accepted under different index keys")
+	}
+}
+
 func TestInstalledCatalogRemainsBelowUserConfiguration(t *testing.T) {
 	agentDir := t.TempDir()
 	path := filepath.Join(agentDir, catalog.Filename)

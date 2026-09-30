@@ -45,7 +45,7 @@ func fixtureBuiltinModels(t *testing.T) []Model {
 		if err := json.Unmarshal(entry, &identity); err != nil {
 			t.Fatal(err)
 		}
-		m, err := projectBuiltinModel(identity.Provider, identity.ID, entry)
+		m, err := projectBuiltinModel(identity.Provider, entry)
 		if err != nil {
 			t.Fatal(err)
 		}

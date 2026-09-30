@@ -20,14 +20,19 @@ type Diff struct {
 	Published bool
 }
 
+// Compare expects validated documents. Upstream index changes are not model changes.
 func Compare(before, after Document) Diff {
 	result := Diff{Before: before.Sources, After: after.Sources}
 	flatten := func(doc Document) map[string]json.RawMessage {
 		models := map[string]json.RawMessage{}
 		for _, p := range doc.Providers {
 			for _, entries := range p.Models {
-				for id, raw := range entries {
-					models[p.ID+"/"+id] = raw
+				for _, raw := range entries {
+					var identity struct {
+						ID string `json:"id"`
+					}
+					_ = json.Unmarshal(raw, &identity)
+					models[p.ID+"/"+identity.ID] = raw
 				}
 			}
 		}

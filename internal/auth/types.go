@@ -28,6 +28,7 @@ type OAuthCredential struct {
 	Access    string
 	Refresh   string
 	Expires   int64
+	RefreshAt int64
 	AccountID string
 	Extra     map[string]json.RawMessage
 }

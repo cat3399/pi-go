@@ -157,11 +157,13 @@ func parseOAuthCredential(raw json.RawMessage, provider string) (Credential, err
 		(value.AccountID != "" && !validOAuthText(value.AccountID)) {
 		return Credential{}, failure(KindMalformed, "read credential", provider, err)
 	}
-	for _, key := range []string{"type", "access", "refresh", "expires", "accountId"} {
+	var refreshAt int64
+	_ = json.Unmarshal(root["refreshAt"], &refreshAt)
+	for _, key := range []string{"type", "access", "refresh", "expires", "refreshAt", "accountId"} {
 		delete(root, key)
 	}
 	return Credential{Type: "oauth", OAuth: OAuthCredential{
-		Access: value.Access, Refresh: value.Refresh, Expires: value.Expires,
+		Access: value.Access, Refresh: value.Refresh, Expires: value.Expires, RefreshAt: refreshAt,
 		AccountID: value.AccountID, Extra: root,
 	}}, nil
 }
@@ -173,7 +175,7 @@ func encodeOAuthCredential(value OAuthCredential, provider string) (json.RawMess
 	}
 	root := make(map[string]json.RawMessage, len(value.Extra)+5)
 	for key, raw := range value.Extra {
-		if key == "type" || key == "access" || key == "refresh" || key == "expires" || key == "accountId" || !validJSONFieldName(key) {
+		if key == "type" || key == "access" || key == "refresh" || key == "expires" || key == "refreshAt" || key == "accountId" || !validJSONFieldName(key) {
 			continue
 		}
 		if err := validateRaw(raw); err != nil {
@@ -199,6 +201,11 @@ func encodeOAuthCredential(value OAuthCredential, provider string) (json.RawMess
 	}
 	if err := put("expires", value.Expires); err != nil {
 		return nil, err
+	}
+	if value.RefreshAt > 0 {
+		if err := put("refreshAt", value.RefreshAt); err != nil {
+			return nil, err
+		}
 	}
 	if value.AccountID != "" {
 		if err := put("accountId", value.AccountID); err != nil {

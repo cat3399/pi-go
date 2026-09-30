@@ -728,6 +728,11 @@ input:-webkit-autofill:focus {
   height: 100%;
 }
 
+/* Keep touch drags on xterm's scrollbar instead of handing them to page panning. */
+.pi-terminal-screen .xterm .scrollbar {
+  touch-action: none;
+}
+
 .pi-terminal-screen.is-readonly,
 .pi-terminal-screen.is-readonly .xterm,
 .pi-terminal-screen.is-readonly .xterm * {
@@ -960,7 +965,30 @@ input:-webkit-autofill:focus {
 .pi-transcript-inner {
   width: min(var(--pi-content-max-width), calc(100% - 48px));
   margin: 0 auto;
-  padding: 28px 0 164px;
+  padding: 28px 0 var(--pi-composer-height, 164px);
+}
+
+.pi-scroll-to-bottom {
+  position: absolute;
+  z-index: 7;
+  bottom: calc(var(--pi-composer-height, 164px) + 10px);
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--pi-border);
+  border-radius: 50%;
+  background: var(--pi-panel);
+  color: var(--pi-text-secondary);
+  box-shadow: 0 2px 8px #00000012;
+  transform: translateX(-50%);
+  cursor: pointer;
+}
+
+.pi-scroll-to-bottom:hover {
+  color: var(--pi-text);
 }
 
 .pi-message {
@@ -4486,6 +4514,26 @@ input:-webkit-autofill:focus {
   background: transparent;
 }
 
+.pi-saved-connection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px 32px;
+  align-items: center;
+  gap: 4px;
+  padding-right: 12px;
+  border-bottom: 1px solid var(--pi-border-subtle);
+}
+
+.pi-saved-connection .pi-connection-row > span:nth-child(2) {
+  min-width: 0;
+}
+
+.pi-saved-connection strong,
+.pi-saved-connection small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pi-settings-item-icon {
   display: grid;
   place-items: center;
@@ -4552,7 +4600,7 @@ input:-webkit-autofill:focus {
 
 .pi-remote-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   margin: 0;

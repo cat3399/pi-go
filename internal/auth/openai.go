@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-const DefaultOAuthRefreshSkew = 5 * time.Minute
-
 const (
 	OpenAIProviderID      = "openai"
 	OpenAICodexProviderID = "openai-codex"
@@ -30,9 +28,6 @@ type OpenAIResolveOptions struct {
 	OAuth           *OpenAICodexOAuth
 	Clock           func() time.Time
 	MinimumValidity time.Duration
-	// MinimumValiditySet distinguishes an explicit zero override from omission,
-	// matching minOAuthValidityMs?: number in the upstream resolver.
-	MinimumValiditySet bool
 }
 
 // ResolveOpenAIKey codifies product precedence. A selected stored credential
@@ -132,51 +127,7 @@ func resolveStoredOpenAIOAuth(ctx context.Context, runtime *Runtime, initial OAu
 	if options.OAuth == nil {
 		return OpenAIAuthResult{}, failure(KindUnsupported, "resolve stored OAuth credential", OpenAICodexProviderID, ErrCredentialType)
 	}
-	now := options.Clock
-	if now == nil {
-		now = time.Now
-	}
-	requireMinimumAfterRefresh := options.MinimumValiditySet || options.MinimumValidity != 0
-	skew := options.MinimumValidity
-	if skew == 0 {
-		skew = DefaultOAuthRefreshSkew
-	}
-	if skew < DefaultOAuthRefreshSkew {
-		skew = DefaultOAuthRefreshSkew
-	}
-	valid := func(value OAuthCredential) bool { return now().Add(skew).Before(value.Expiry()) }
-	credential := initial
-	if !valid(credential) {
-		// A concurrent CLI/runtime override wins before an irreversible token
-		// refresh. This makes runtime ownership explicit even during a refresh.
-		if key, ok := runtime.runtimeKey(OpenAICodexProviderID); ok {
-			return OpenAIAuthResult{APIKey: key, Source: "runtime API key"}, nil
-		}
-		post, exists, err := runtime.store.ModifyOAuth(ctx, OpenAICodexProviderID, func(current OAuthCredential) (OAuthCredential, bool, error) {
-			if valid(current) {
-				return current, false, nil
-			}
-			next, refreshErr := options.OAuth.Refresh(ctx, current)
-			if refreshErr != nil {
-				return OAuthCredential{}, false, refreshErr
-			}
-			return next, true, nil
-		})
-		if err != nil {
-			return OpenAIAuthResult{}, err
-		}
-		if !exists {
-			return OpenAIAuthResult{}, failure(KindNotConfigured, "resolve stored OAuth credential", OpenAICodexProviderID, nil)
-		}
-		credential = post
-		if requireMinimumAfterRefresh && !valid(credential) {
-			return OpenAIAuthResult{}, failure(KindOAuth, "validate refreshed OAuth credential", OpenAICodexProviderID, nil)
-		}
-	}
-	if !validOAuthText(credential.Access) {
-		return OpenAIAuthResult{}, failure(KindMalformed, "resolve stored OAuth credential", OpenAICodexProviderID, nil)
-	}
-	return OpenAIAuthResult{APIKey: credential.Access, Source: "OAuth", AccountID: credential.AccountID, Env: oauthCredentialEnv(credential)}, nil
+	return resolveStoredOAuth(ctx, runtime, OpenAICodexProviderID, initial, options.Clock, options.MinimumValidity, options.OAuth.Refresh)
 }
 
 // ResolveProviderAPIKey provides the same composed API-key path for a

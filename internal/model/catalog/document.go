@@ -41,6 +41,7 @@ type Provider struct {
 	API     string `json:"api"`
 	BaseURL string `json:"baseUrl"`
 	// Keep upstream objects intact, including fields unknown to this binary.
+	// Entry keys are upstream indexes; model identity comes from each object's id.
 	Models map[string]map[string]json.RawMessage `json:"models"`
 }
 
@@ -107,16 +108,19 @@ func (d Document) Validate() error {
 			if api == "" || models == nil {
 				return fmt.Errorf("invalid API group for %s", p.ID)
 			}
-			for id, raw := range models {
+			for key, raw := range models {
 				var identity struct {
 					ID       string `json:"id"`
 					Provider string `json:"provider"`
 					API      string `json:"api"`
 				}
-				if err := json.Unmarshal(raw, &identity); err != nil || id == "" || identity.ID != id || identity.Provider != p.ID || identity.API != api || ids[id] {
-					return fmt.Errorf("invalid or duplicate catalog model %s/%s", p.ID, id)
+				if err := json.Unmarshal(raw, &identity); err != nil || identity.ID == "" || identity.Provider != p.ID || identity.API != api {
+					return fmt.Errorf("invalid catalog model %s/%s", p.ID, key)
 				}
-				ids[id] = true
+				if ids[identity.ID] {
+					return fmt.Errorf("duplicate catalog model %s/%s", p.ID, identity.ID)
+				}
+				ids[identity.ID] = true
 			}
 		}
 	}

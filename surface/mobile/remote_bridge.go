@@ -59,6 +59,11 @@ type remoteUploadFile struct {
 	data []byte
 }
 
+type remoteCredential struct {
+	token   string
+	version uint64
+}
+
 type RemoteBridge struct {
 	requestClient *http.Client
 	uploadClient  *http.Client
@@ -74,15 +79,14 @@ type RemoteBridge struct {
 	nextStream uint64
 	streams    map[uint64]*remoteEventStream
 
-	credentialMu     sync.Mutex
-	credentialTokens map[string]string
-	credentialLoaded map[string]bool
+	credentialMu    sync.Mutex
+	credentialState map[string]remoteCredential
 }
 
 type remoteEventStream struct {
-	id       uint64
-	endpoint string
-	token    string
+	id         uint64
+	endpoint   string
+	credential remoteCredential
 
 	mu       sync.Mutex
 	revision uint64
@@ -94,15 +98,14 @@ type remoteEventStream struct {
 
 func NewRemoteBridge() *RemoteBridge {
 	return &RemoteBridge{
-		requestClient:    &http.Client{Timeout: 60 * time.Second},
-		uploadClient:     &http.Client{Timeout: 5 * time.Minute},
-		streamClient:     &http.Client{},
-		credentials:      newPlatformCredentialStore(),
-		requests:         make(map[string]context.CancelFunc),
-		cancelled:        make(map[string]struct{}),
-		streams:          make(map[uint64]*remoteEventStream),
-		credentialTokens: make(map[string]string),
-		credentialLoaded: make(map[string]bool),
+		requestClient:   &http.Client{Timeout: 60 * time.Second},
+		uploadClient:    &http.Client{Timeout: 5 * time.Minute},
+		streamClient:    &http.Client{},
+		credentials:     newPlatformCredentialStore(),
+		requests:        make(map[string]context.CancelFunc),
+		cancelled:       make(map[string]struct{}),
+		streams:         make(map[uint64]*remoteEventStream),
+		credentialState: make(map[string]remoteCredential),
 	}
 }
 
@@ -172,9 +175,11 @@ func (b *RemoteBridge) request(requestID, method, endpoint, requestPath, token, 
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	token = b.tokenForEndpoint(endpoint, token)
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	credential := b.credentialForEndpoint(endpoint, token)
+	// Password login does not authenticate with the previous session's token.
+	reference, _ := url.Parse(requestPath)
+	if reference.Path != "/api/v1/auth/login" && credential.token != "" {
+		request.Header.Set("Authorization", "Bearer "+credential.token)
 	}
 	response, err := b.requestClient.Do(request)
 	if err != nil {
@@ -189,7 +194,10 @@ func (b *RemoteBridge) request(requestID, method, endpoint, requestPath, token, 
 		Status: response.StatusCode, Body: string(data),
 		RetryAfterMS: retryAfterMilliseconds(response.Header.Get("Retry-After")),
 	}
-	b.captureAuthentication(endpoint, requestPath, &result)
+	if err := requestContext.Err(); err != nil {
+		return RemoteResponse{}, err
+	}
+	b.captureAuthentication(endpoint, requestPath, credential, &result)
 	return result, nil
 }
 
@@ -222,8 +230,9 @@ func (b *RemoteBridge) UploadFilesWithID(requestID, endpoint, requestPath, token
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
-	if token = b.tokenForEndpoint(endpoint, token); token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	credential := b.credentialForEndpoint(endpoint, token)
+	if credential.token != "" {
+		request.Header.Set("Authorization", "Bearer "+credential.token)
 	}
 	go writeRemoteUploadBody(writer, multipartWriter, files)
 
@@ -241,7 +250,10 @@ func (b *RemoteBridge) UploadFilesWithID(requestID, endpoint, requestPath, token
 		Status: response.StatusCode, Body: string(data),
 		RetryAfterMS: retryAfterMilliseconds(response.Header.Get("Retry-After")),
 	}
-	b.captureAuthentication(endpoint, requestPath, &result)
+	if err := requestContext.Err(); err != nil {
+		return RemoteResponse{}, err
+	}
+	b.captureAuthentication(endpoint, requestPath, credential, &result)
 	return result, nil
 }
 
@@ -355,7 +367,7 @@ func (b *RemoteBridge) OpenEventStream(endpoint, token string, after uint64) (Re
 	b.nextStream++
 	streamID := b.nextStream
 	b.streams[streamID] = &remoteEventStream{
-		id: streamID, endpoint: endpoint, token: b.tokenForEndpoint(endpoint, token), revision: after,
+		id: streamID, endpoint: endpoint, credential: b.credentialForEndpoint(endpoint, token), revision: after,
 		ctx: streamContext, cancel: cancel,
 	}
 	b.mu.Unlock()
@@ -407,7 +419,7 @@ func (b *RemoteBridge) pumpEventStream(stream *remoteEventStream) {
 		}
 		terminal := status >= 400 && status < 500
 		if status == http.StatusUnauthorized {
-			b.forgetToken(stream.endpoint)
+			b.forgetToken(stream.endpoint, stream.credential)
 		}
 		b.emit(mobileRemoteErrorEvent, RemoteStreamError{
 			StreamID: stream.id, Revision: stream.cursor(), Message: err.Error(), Terminal: terminal,
@@ -437,8 +449,8 @@ func (b *RemoteBridge) consumeEventStream(stream *remoteEventStream) (int, error
 	}
 	request.Header.Set("Accept", "text/event-stream")
 	request.Header.Set("Cache-Control", "no-cache")
-	if stream.token != "" {
-		request.Header.Set("Authorization", "Bearer "+stream.token)
+	if stream.credential.token != "" {
+		request.Header.Set("Authorization", "Bearer "+stream.credential.token)
 	}
 	response, err := b.streamClient.Do(request)
 	if err != nil {
@@ -573,23 +585,24 @@ func normalizeRemoteEndpoint(endpoint string) (string, error) {
 	return parsed.String(), nil
 }
 
-func (b *RemoteBridge) tokenForEndpoint(endpoint, explicit string) string {
-	if token := strings.TrimSpace(explicit); token != "" {
-		return token
-	}
+func (b *RemoteBridge) credentialForEndpoint(endpoint, explicit string) remoteCredential {
 	normalized, err := normalizeRemoteEndpoint(endpoint)
 	if err != nil {
-		return ""
+		return remoteCredential{}
 	}
 	b.credentialMu.Lock()
 	defer b.credentialMu.Unlock()
-	if !b.credentialLoaded[normalized] {
-		b.credentialLoaded[normalized] = true
+	credential, loaded := b.credentialState[normalized]
+	if !loaded {
 		if token, loadErr := b.credentials.Load(normalized); loadErr == nil {
-			b.credentialTokens[normalized] = strings.TrimSpace(token)
+			credential.token = strings.TrimSpace(token)
+			b.credentialState[normalized] = credential
 		}
 	}
-	return b.credentialTokens[normalized]
+	if token := strings.TrimSpace(explicit); token != "" {
+		credential.token = token
+	}
+	return credential
 }
 
 func (b *RemoteBridge) rememberToken(endpoint, token string) {
@@ -599,31 +612,36 @@ func (b *RemoteBridge) rememberToken(endpoint, token string) {
 	}
 	token = strings.TrimSpace(token)
 	b.credentialMu.Lock()
-	b.credentialLoaded[normalized] = true
-	b.credentialTokens[normalized] = token
+	current := b.credentialState[normalized]
+	b.credentialState[normalized] = remoteCredential{token: token, version: current.version + 1}
 	_ = b.credentials.Save(normalized, token)
 	b.credentialMu.Unlock()
 }
 
-func (b *RemoteBridge) forgetToken(endpoint string) {
+func (b *RemoteBridge) forgetToken(endpoint string, rejected remoteCredential) {
 	normalized, err := normalizeRemoteEndpoint(endpoint)
 	if err != nil {
 		return
 	}
 	b.credentialMu.Lock()
-	b.credentialLoaded[normalized] = true
-	delete(b.credentialTokens, normalized)
+	defer b.credentialMu.Unlock()
+	current := b.credentialState[normalized]
+	// A late 401/status response only invalidates the credential it used.
+	// The version also distinguishes logins that happen to return equal tokens.
+	if current != rejected {
+		return
+	}
+	b.credentialState[normalized] = remoteCredential{version: current.version + 1}
 	_ = b.credentials.Delete(normalized)
-	b.credentialMu.Unlock()
 }
 
-func (b *RemoteBridge) captureAuthentication(endpoint, requestPath string, response *RemoteResponse) {
+func (b *RemoteBridge) captureAuthentication(endpoint, requestPath string, credential remoteCredential, response *RemoteResponse) {
 	reference, err := url.Parse(requestPath)
 	if err != nil {
 		return
 	}
-	if response.Status == http.StatusUnauthorized {
-		b.forgetToken(endpoint)
+	if response.Status == http.StatusUnauthorized && reference.Path != "/api/v1/auth/login" {
+		b.forgetToken(endpoint, credential)
 	}
 	if response.Status < 200 || response.Status >= 300 {
 		return
@@ -647,10 +665,10 @@ func (b *RemoteBridge) captureAuthentication(endpoint, requestPath string, respo
 		required, _ := body["authRequired"].(bool)
 		authenticated, _ := body["authenticated"].(bool)
 		if required && !authenticated {
-			b.forgetToken(endpoint)
+			b.forgetToken(endpoint, credential)
 		}
 	case "/api/v1/auth/logout":
-		b.forgetToken(endpoint)
+		b.forgetToken(endpoint, credential)
 	}
 }
 

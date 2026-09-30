@@ -602,11 +602,14 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [client]);
 
   const login = useCallback(async (password: string) => {
+    const generation = generationRef.current;
     setError("");
     try {
       await client.login(password);
+      if (generation !== generationRef.current) return;
       await connect();
     } catch (loginError) {
+      if (generation !== generationRef.current) return;
       setError(errorMessage(loginError));
       throw loginError;
     }

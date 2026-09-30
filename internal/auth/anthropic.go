@@ -13,10 +13,9 @@ const (
 )
 
 type AnthropicResolveOptions struct {
-	OAuth              *AnthropicOAuth
-	Clock              func() time.Time
-	MinimumValidity    time.Duration
-	MinimumValiditySet bool
+	OAuth           *AnthropicOAuth
+	Clock           func() time.Time
+	MinimumValidity time.Duration
 }
 
 // ResolveAnthropicAuth mirrors the provider's auth composition order. An
@@ -80,49 +79,7 @@ func resolveStoredAnthropicOAuth(ctx context.Context, runtime *Runtime, initial 
 	if options.OAuth == nil {
 		return OpenAIAuthResult{}, failure(KindUnsupported, "resolve stored OAuth credential", AnthropicProviderID, ErrCredentialType)
 	}
-	now := options.Clock
-	if now == nil {
-		now = time.Now
-	}
-	requireMinimumAfterRefresh := options.MinimumValiditySet || options.MinimumValidity != 0
-	skew := options.MinimumValidity
-	if skew == 0 {
-		skew = DefaultOAuthRefreshSkew
-	}
-	if skew < DefaultOAuthRefreshSkew {
-		skew = DefaultOAuthRefreshSkew
-	}
-	expiresSoon := func(value OAuthCredential) bool { return !now().Add(skew).Before(value.Expiry()) }
-	credential := initial
-	if expiresSoon(credential) {
-		if key, ok := runtime.runtimeKey(AnthropicProviderID); ok {
-			return OpenAIAuthResult{APIKey: key, Source: "runtime API key"}, nil
-		}
-		post, exists, err := runtime.store.ModifyOAuth(ctx, AnthropicProviderID, func(current OAuthCredential) (OAuthCredential, bool, error) {
-			if !expiresSoon(current) {
-				return current, false, nil
-			}
-			next, refreshErr := options.OAuth.Refresh(ctx, current)
-			if refreshErr != nil {
-				return OAuthCredential{}, false, refreshErr
-			}
-			return next, true, nil
-		})
-		if err != nil {
-			return OpenAIAuthResult{}, err
-		}
-		if !exists {
-			return OpenAIAuthResult{}, failure(KindNotConfigured, "resolve stored OAuth credential", AnthropicProviderID, nil)
-		}
-		credential = post
-		if requireMinimumAfterRefresh && expiresSoon(credential) {
-			return OpenAIAuthResult{}, failure(KindOAuth, "validate refreshed OAuth credential", AnthropicProviderID, nil)
-		}
-	}
-	if !validOAuthText(credential.Access) {
-		return OpenAIAuthResult{}, failure(KindMalformed, "resolve stored OAuth credential", AnthropicProviderID, nil)
-	}
-	return OpenAIAuthResult{APIKey: credential.Access, Source: "OAuth", Env: oauthCredentialEnv(credential)}, nil
+	return resolveStoredOAuth(ctx, runtime, AnthropicProviderID, initial, options.Clock, options.MinimumValidity, options.OAuth.Refresh)
 }
 
 // HasAuthorization reports whether a resolved auth result can authorize a

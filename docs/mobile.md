@@ -56,7 +56,9 @@ PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
   --api-only --listen 0.0.0.0:30141 --cwd /path/to/project
 ```
 
-在移动端连接页输入 HTTP 局域网地址或 HTTPS endpoint。
+在移动端“设置 → 连接”中保存节点名称与 HTTP 局域网地址或 HTTPS endpoint，
+点击已保存节点即可切换；每次只连接一个节点，并记住上次选择。
+节点可编辑或从列表移除，登录凭据由 Android 原生存储按地址分别保存。
 请求由 Go 网络桥接发送；HTTP 不依赖 WebView mixed content 设置，HTTPS 使用系统证书根，
 SSE 断开后可以重连。协议见 [Surface](SURFACES.md)，源码归属见
 [共享 UI 第三方说明](../surface/ui/THIRD_PARTY_NOTICES.md)。

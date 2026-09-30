@@ -1,13 +1,15 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Radio, Settings } from "lucide-react";
+import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Pencil, Radio, Settings, Trash2 } from "lucide-react";
 import type { ClientKind } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
+import type { RemoteConnection } from "../remote-connections";
 
 interface SettingsDrawerProps {
   open: boolean;
   kind: ClientKind;
   endpoint: string;
+  nodes: RemoteConnection[];
   version: string;
   localAvailable: boolean;
   localError?: string;
@@ -16,11 +18,15 @@ interface SettingsDrawerProps {
   onClose(): void;
   onUseLocal(): void;
   onUseRemote(endpoint: string): void;
+  onSaveRemote(node: RemoteConnection, previousEndpoint?: string): void;
+  onRemoveRemote(endpoint: string): void;
   onStreamingInputBehaviorChange(value: StreamingInputBehavior): void;
 }
 
 export function SettingsDrawer(props: SettingsDrawerProps) {
-  const [endpoint, setEndpoint] = useState(props.endpoint);
+  const [endpoint, setEndpoint] = useState("");
+  const [name, setName] = useState("");
+  const [editingEndpoint, setEditingEndpoint] = useState<string | undefined>();
   const [error, setError] = useState("");
   const [page, setPage] = useState<"connection" | "input" | "about">("connection");
   const dialogRef = useRef<HTMLElement>(null);
@@ -28,7 +34,6 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
 
   useDialogFocus(props.open, dialogRef, backRef);
 
-  useEffect(() => setEndpoint(props.endpoint), [props.endpoint]);
   useEffect(() => {
     if (!props.open) setError("");
   }, [props.open]);
@@ -48,7 +53,10 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   const connectRemote = (event: FormEvent) => {
     event.preventDefault();
     try {
-      props.onUseRemote(endpoint);
+      props.onSaveRemote({ name, endpoint }, editingEndpoint);
+      setName("");
+      setEndpoint("");
+      setEditingEndpoint(undefined);
       setError("");
     } catch (connectError) {
       setError(connectError instanceof Error ? connectError.message : String(connectError));
@@ -116,22 +124,78 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                   </button>
                 )}
                 {props.hostKind === "desktop" && props.localError && <p className="pi-settings-error">{props.localError}</p>}
+                {props.nodes.map((node) => (
+                  <div className="pi-saved-connection" key={node.endpoint}>
+                    <button
+                      className={`pi-connection-row ${props.kind === "remote" && node.endpoint === props.endpoint ? "is-selected" : ""}`}
+                      type="button"
+                      onClick={() => props.onUseRemote(node.endpoint)}
+                      aria-label={`连接 ${node.name}`}
+                      aria-pressed={props.kind === "remote" && node.endpoint === props.endpoint}
+                    >
+                      <span className="pi-settings-item-icon"><Radio size={17} /></span>
+                      <span><strong>{node.name}</strong><small>{node.endpoint}</small></span>
+                      <span className="pi-selection-dot" aria-hidden="true" />
+                    </button>
+                    <button
+                      className="pi-icon-button"
+                      type="button"
+                      aria-label={`编辑节点 ${node.name}`}
+                      title="编辑节点"
+                      onClick={() => {
+                        setName(node.name);
+                        setEndpoint(node.endpoint);
+                        setEditingEndpoint(node.endpoint);
+                        setError("");
+                      }}
+                    ><Pencil size={15} /></button>
+                    <button
+                      className="pi-icon-button"
+                      type="button"
+                      aria-label={`移除节点 ${node.name}`}
+                      title="移除保存的节点"
+                      onClick={() => {
+                        props.onRemoveRemote(node.endpoint);
+                        if (editingEndpoint === node.endpoint) {
+                          setEditingEndpoint(undefined);
+                          setName("");
+                          setEndpoint("");
+                        }
+                      }}
+                    ><Trash2 size={15} /></button>
+                  </div>
+                ))}
                 <form className={`pi-remote-form ${remoteOnly ? "is-remote-only" : ""}`} onSubmit={connectRemote}>
                   <div>
-                    <label htmlFor="pi-remote-endpoint">{remoteLabel}</label>
+                    <label htmlFor="pi-remote-name">{editingEndpoint ? "编辑节点" : "添加节点"}</label>
                     <p>{remoteDescription}</p>
                   </div>
+                  <input
+                    id="pi-remote-name"
+                    aria-label="节点名称"
+                    placeholder="节点名称（可选）"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                  />
                   <div className="pi-remote-controls">
                     <input
                       id="pi-remote-endpoint"
+                      aria-label={remoteLabel}
                       type="url"
                       inputMode="url"
+                      required
                       placeholder={remoteOnly ? "https://pi.example.com" : "http://192.168.1.10:30141"}
                       value={endpoint}
                       onChange={(event) => setEndpoint(event.target.value)}
                     />
-                    <button type="submit">连接</button>
+                    <button type="submit">{editingEndpoint ? "保存并连接" : "添加并连接"}</button>
                   </div>
+                  {editingEndpoint && <button className="pi-secondary-button" type="button" onClick={() => {
+                    setEditingEndpoint(undefined);
+                    setName("");
+                    setEndpoint("");
+                    setError("");
+                  }}>取消编辑</button>}
                   {error && <p className="pi-settings-error">{error}</p>}
                 </form>
               </div>

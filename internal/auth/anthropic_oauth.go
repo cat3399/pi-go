@@ -23,7 +23,6 @@ const (
 	defaultAnthropicTokenURL       = "https://platform.claude.com/v1/oauth/token"
 	defaultAnthropicCallbackPort   = 53692
 	defaultAnthropicRequestTimeout = 30 * time.Second
-	defaultAnthropicOAuthSkew      = 5 * time.Minute
 	anthropicCallbackPath          = "/callback"
 	anthropicOAuthScopes           = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 )
@@ -352,10 +351,11 @@ func (o *AnthropicOAuth) token(ctx context.Context, operation string, body map[s
 	if err := json.Unmarshal(wire.Expires, &seconds); err != nil || !isPositiveFinite(seconds) || seconds > float64(math.MaxInt64/int64(time.Second)) {
 		return OAuthCredential{}, failure(KindMalformed, operation+" Anthropic token", AnthropicProviderID, err)
 	}
-	expiresIn := time.Duration(seconds * float64(time.Second))
+	now := o.now()
+	expires := now.Add(time.Duration(seconds * float64(time.Second)))
 	return OAuthCredential{
 		Access: wire.Access, Refresh: wire.Refresh,
-		Expires: o.now().Add(expiresIn - defaultAnthropicOAuthSkew).UnixMilli(),
+		Expires: expires.UnixMilli(), RefreshAt: oauthRefreshAt(now, expires),
 	}, nil
 }
 

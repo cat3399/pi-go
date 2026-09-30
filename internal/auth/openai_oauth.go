@@ -357,7 +357,12 @@ func (o *OpenAICodexOAuth) token(ctx context.Context, operation string, form url
 	for _, key := range []string{"access_token", "refresh_token", "expires_in"} {
 		delete(root, key)
 	}
-	return OAuthCredential{Access: raw.Access, Refresh: raw.Refresh, Expires: o.now().Add(time.Duration(seconds * float64(time.Second))).UnixMilli(), AccountID: accountID, Extra: root}, nil
+	now := o.now()
+	expires := now.Add(time.Duration(seconds * float64(time.Second)))
+	return OAuthCredential{
+		Access: raw.Access, Refresh: raw.Refresh, Expires: expires.UnixMilli(), RefreshAt: oauthRefreshAt(now, expires),
+		AccountID: accountID, Extra: root,
+	}, nil
 }
 
 func (o *OpenAICodexOAuth) StartDeviceLogin(ctx context.Context) (DeviceCode, error) {

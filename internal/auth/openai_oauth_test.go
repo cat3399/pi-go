@@ -325,7 +325,7 @@ func TestResolveStoredOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *tes
 	}
 }
 
-func TestResolveStoredOAuthDistinguishesOmittedAndExplicitZeroMinimum(t *testing.T) {
+func TestResolveStoredOAuthAcceptsShortLivedTokensWithExplicitMinimum(t *testing.T) {
 	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -354,11 +354,11 @@ func TestResolveStoredOAuthDistinguishesOmittedAndExplicitZeroMinimum(t *testing
 	if err := store.SetOAuth(context.Background(), OpenAICodexProviderID, old); err != nil {
 		t.Fatal(err)
 	}
-	_, err = ResolveOpenAICodexAuth(context.Background(), NewRuntime(store), nil, nil, nil, OpenAIResolveOptions{
-		OAuth: flow, Clock: func() time.Time { return now }, MinimumValiditySet: true,
+	resolved, err = ResolveOpenAICodexAuth(context.Background(), NewRuntime(store), nil, nil, nil, OpenAIResolveOptions{
+		OAuth: flow, Clock: func() time.Time { return now }, MinimumValidity: 30 * time.Second,
 	})
-	if !IsKind(err, KindOAuth) {
-		t.Fatalf("explicit zero minimum error = %v", err)
+	if err != nil || resolved.APIKey != oauthJWT("short-account") {
+		t.Fatalf("valid short-lived token was rejected: %#v, %v", resolved, err)
 	}
 }
 

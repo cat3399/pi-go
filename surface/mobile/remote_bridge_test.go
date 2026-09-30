@@ -233,6 +233,131 @@ func TestRemoteBridgeDropsRejectedStoredToken(t *testing.T) {
 	}
 }
 
+func TestRemoteBridgeLateRejectionKeepsFreshLogin(t *testing.T) {
+	for _, route := range []string{"/api/v1/auth/status", "/api/v1/snapshot"} {
+		t.Run(route, func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v1/auth/login" {
+					if r.Header.Get("Authorization") != "" {
+						t.Error("password login carried a previous bearer token")
+					}
+					_, _ = io.WriteString(w, `{"ok":true,"authenticated":true,"token":"fresh-token"}`)
+					return
+				}
+				close(started)
+				<-release
+				if route == "/api/v1/snapshot" {
+					w.WriteHeader(http.StatusUnauthorized)
+				}
+				_, _ = io.WriteString(w, `{"authRequired":true,"authenticated":false}`)
+			}))
+			defer server.Close()
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			bridge := NewRemoteBridge()
+			store := newMemoryCredentialStore()
+			bridge.credentials = store
+			bridge.rememberToken(server.URL, "old-token")
+			done := make(chan error, 1)
+			go func() {
+				_, err := bridge.Request(http.MethodGet, server.URL, route, "", "")
+				done <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				t.Fatal("old request did not start")
+			}
+			login, err := bridge.Request(http.MethodPost, server.URL, "/api/v1/auth/login", "", `{}`)
+			if err != nil || login.Status != http.StatusOK {
+				t.Fatalf("login = %#v, %v", login, err)
+			}
+			unblock()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if bridge.credentialForEndpoint(server.URL, "").token != "fresh-token" {
+				t.Fatal("old rejection erased the new in-memory credential")
+			}
+			if token, err := store.Load(server.URL); err != nil || token != "fresh-token" {
+				t.Fatal("old rejection erased the new persistent credential")
+			}
+		})
+	}
+}
+
+func TestRemoteBridgeNodeSwitchRetainsSeparateCredentials(t *testing.T) {
+	store := newMemoryCredentialStore()
+	node := func(token string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/auth/login" {
+				body, _ := io.ReadAll(r.Body)
+				if string(body) != `{"passwordHash":"correct"}` {
+					w.WriteHeader(http.StatusUnauthorized)
+					_, _ = io.WriteString(w, `{"error":"Invalid password"}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"authenticated":true,"token":"`+token+`"}`)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"authRequired":true,"authenticated":true}`)
+		}))
+	}
+	first, second := node("first-token"), node("second-token")
+	defer first.Close()
+	defer second.Close()
+	bridge := NewRemoteBridge()
+	bridge.credentials = store
+	for _, endpoint := range []string{first.URL, second.URL} {
+		response, err := bridge.Request(http.MethodPost, endpoint, "/api/v1/auth/login", "", `{"passwordHash":"correct"}`)
+		if err != nil || response.Status != http.StatusOK {
+			t.Fatalf("node login = %#v, %v", response, err)
+		}
+	}
+	// A wrong password is not evidence that a previously issued token is invalid.
+	response, err := bridge.Request(http.MethodPost, first.URL, "/api/v1/auth/login", "", `{"passwordHash":"wrong"}`)
+	if err != nil || response.Status != http.StatusUnauthorized {
+		t.Fatalf("incorrect password response = %#v, %v", response, err)
+	}
+	for range 2 {
+		for _, endpoint := range []string{first.URL + "/", second.URL, first.URL} {
+			response, err := bridge.Request(http.MethodGet, endpoint, "/api/v1/auth/status", "", "")
+			if err != nil || response.Status != http.StatusOK {
+				t.Fatalf("switching nodes lost their credentials: %#v, %v", response, err)
+			}
+		}
+		// Repeat the switches after restarting the native bridge.
+		bridge = NewRemoteBridge()
+		bridge.credentials = store
+	}
+}
+
+func TestRemoteBridgeOldEventStreamCannotInvalidateNewLogin(t *testing.T) {
+	bridge := NewRemoteBridge()
+	bridge.credentials = newMemoryCredentialStore()
+	endpoint := "https://node.example"
+	bridge.rememberToken(endpoint, "same-token")
+	opened, err := bridge.OpenEventStream(endpoint, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bridge.CloseEventStream(opened.StreamID)
+	stream := bridge.streams[opened.StreamID]
+	bridge.rememberToken(endpoint, "same-token")
+	bridge.forgetToken(endpoint, stream.credential)
+	if bridge.credentialForEndpoint(endpoint, "").token != "same-token" {
+		t.Fatal("an earlier event stream erased the credential of a new login")
+	}
+}
+
 func TestRemoteAPIURLValidation(t *testing.T) {
 	t.Parallel()
 	valid, err := remoteAPIURL("https://pi.example/base/", "/api/v1/snapshot?full=1")

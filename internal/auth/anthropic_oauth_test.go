@@ -61,7 +61,7 @@ func TestAnthropicBrowserLoginUsesUpstreamPKCEAndManualRedirectProtocol(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if credential.Access != "access" || credential.Refresh != "refresh" || credential.Expires != now.Add(55*time.Minute).UnixMilli() {
+	if credential.Access != "access" || credential.Refresh != "refresh" || credential.Expires != now.Add(time.Hour).UnixMilli() {
 		t.Fatalf("credential = %#v", credential)
 	}
 	if requestBody["grant_type"] != "authorization_code" || requestBody["client_id"] != AnthropicOAuthClientID ||
@@ -173,7 +173,7 @@ func TestResolveAnthropicOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *
 	}
 }
 
-func TestResolveAnthropicOAuthDistinguishesOmittedAndExplicitZeroMinimum(t *testing.T) {
+func TestResolveAnthropicOAuthAcceptsShortLivedTokensWithExplicitMinimum(t *testing.T) {
 	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -202,11 +202,11 @@ func TestResolveAnthropicOAuthDistinguishesOmittedAndExplicitZeroMinimum(t *test
 	if err := store.SetOAuth(context.Background(), AnthropicProviderID, old); err != nil {
 		t.Fatal(err)
 	}
-	_, err = ResolveAnthropicAuth(context.Background(), NewRuntime(store), nil, nil, nil, AnthropicResolveOptions{
-		OAuth: flow, Clock: func() time.Time { return now }, MinimumValiditySet: true,
+	resolved, err = ResolveAnthropicAuth(context.Background(), NewRuntime(store), nil, nil, nil, AnthropicResolveOptions{
+		OAuth: flow, Clock: func() time.Time { return now }, MinimumValidity: 30 * time.Second,
 	})
-	if !IsKind(err, KindOAuth) {
-		t.Fatalf("explicit zero minimum error = %v", err)
+	if err != nil || resolved.APIKey != "sk-ant-oat-short" {
+		t.Fatalf("valid short-lived token was rejected: %#v, %v", resolved, err)
 	}
 }
 

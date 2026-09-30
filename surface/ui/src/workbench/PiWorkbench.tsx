@@ -2,6 +2,7 @@ import { type CSSProperties, lazy, Suspense, useCallback, useEffect, useMemo, us
 import { Folder, LoaderCircle, PanelLeft, Settings, SquareTerminal } from "lucide-react";
 import type { ApplicationClient, ImageAttachment } from "../contracts";
 import { HTTPApplicationClient, normalizeRemoteEndpoint } from "../http-client";
+import { readRemoteConnections, writeRemoteConnections, type RemoteConnection, type RemoteConnections } from "../remote-connections";
 import {
   readStreamingInputBehavior,
   writeStreamingInputBehavior,
@@ -64,14 +65,6 @@ const unavailableClient: ApplicationClient = {
   close() {},
 };
 
-function savedRemoteEndpoint(): string {
-  try {
-    return localStorage.getItem("pi.remote.endpoint") ?? "";
-  } catch {
-    return "";
-  }
-}
-
 function activeTitle(
   sessionId: string | null,
   sessions: { id: string; name?: string; firstMessage: string }[],
@@ -84,11 +77,12 @@ function activeTitle(
 export function PiWorkbench(props: PiWorkbenchProps) {
   const hostKind = props.hostKind ?? "desktop";
   const mobile = hostKind === "mobile";
-  const initialRemote = props.defaultRemoteEndpoint?.trim() || savedRemoteEndpoint();
+  const [remoteConnections, setRemoteConnections] = useState(readRemoteConnections);
+  const initialRemote = remoteConnections.selectedEndpoint || props.defaultRemoteEndpoint?.trim() || "";
   const createRemoteClient = props.createRemoteClient ?? ((endpoint: string) => new HTTPApplicationClient(endpoint));
   const [remoteEndpoint, setRemoteEndpoint] = useState(initialRemote);
   const [client, setClient] = useState<ApplicationClient>(() => {
-    if (props.defaultRemoteEndpoint) return createRemoteClient(props.defaultRemoteEndpoint);
+    if (props.defaultRemoteEndpoint && initialRemote) return createRemoteClient(initialRemote);
     if (props.localAvailable && props.localClient) return props.localClient;
     if (initialRemote) return createRemoteClient(initialRemote);
     return unavailableClient;
@@ -188,16 +182,39 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     setSettingsOpen(false);
   };
 
+  const saveConnections = (next: RemoteConnections) => {
+    writeRemoteConnections(next);
+    setRemoteConnections(next);
+  };
+
   const useRemote = (endpoint: string) => {
     const normalized = normalizeRemoteEndpoint(endpoint);
-    try {
-      localStorage.setItem("pi.remote.endpoint", normalized);
-    } catch {
-      // Storage is optional; the active connection still works.
-    }
+    const nextClient = createRemoteClient(normalized);
+    saveConnections({ ...remoteConnections, selectedEndpoint: normalized });
     setRemoteEndpoint(normalized);
-    setClient(createRemoteClient(normalized));
+    setClient(nextClient);
     setSettingsOpen(false);
+  };
+
+  const saveRemote = (node: RemoteConnection, previousEndpoint?: string) => {
+    const endpoint = normalizeRemoteEndpoint(node.endpoint);
+    const nextClient = createRemoteClient(endpoint);
+    const saved = { endpoint, name: node.name.trim() || endpoint };
+    const nodes = remoteConnections.nodes.filter((value) => value.endpoint !== previousEndpoint);
+    const index = nodes.findIndex((value) => value.endpoint === endpoint);
+    if (index < 0) nodes.push(saved);
+    else nodes[index] = saved;
+    saveConnections({ nodes, selectedEndpoint: endpoint });
+    setRemoteEndpoint(endpoint);
+    setClient(nextClient);
+    setSettingsOpen(false);
+  };
+
+  const removeRemote = (endpoint: string) => {
+    saveConnections({
+      nodes: remoteConnections.nodes.filter((node) => node.endpoint !== endpoint),
+      selectedEndpoint: remoteConnections.selectedEndpoint === endpoint ? "" : remoteConnections.selectedEndpoint,
+    });
   };
 
   const closePointPicker = useCallback(() => setPointPicker(null), []);
@@ -308,6 +325,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       open={settingsOpen}
       kind={client.kind}
       endpoint={remoteEndpoint}
+      nodes={remoteConnections.nodes}
       version={props.version}
       localAvailable={props.localAvailable}
       localError={props.localError}
@@ -316,6 +334,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       onClose={() => setSettingsOpen(false)}
       onUseLocal={useLocal}
       onUseRemote={useRemote}
+      onSaveRemote={saveRemote}
+      onRemoveRemote={removeRemote}
       onStreamingInputBehaviorChange={changeStreamingInputBehavior}
     />
   );
@@ -324,7 +344,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     return (
       <div className={workbenchClass} style={workbenchStyle}>
         <AuthGate
-          title="请输入访问密码。"
+          key={client.endpoint}
+          title={`连接 ${remoteConnections.nodes.find((node) => node.endpoint === client.endpoint)?.name || client.endpoint}`}
           error={controller.error}
           onLogin={controller.login}
           onOpenSettings={() => setSettingsOpen(true)}

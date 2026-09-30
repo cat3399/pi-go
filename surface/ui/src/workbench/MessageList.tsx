@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
+import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
@@ -1165,6 +1165,7 @@ function MessageListContent({
   const turnRefs = useRef<(HTMLDivElement | null)[]>([]);
   const messageAnchorsRef = useRef<MessageAnchorsHandle>(null);
   const atBottomRef = useRef(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const anchorGestureRef = useRef<AnchorGesture | null>(null);
   const anchorPreviewTimerRef = useRef<number | null>(null);
   const anchorPreviewVisibleRef = useRef(false);
@@ -1227,8 +1228,10 @@ function MessageListContent({
 
   const syncActiveAnchor = () => {
     const transcript = transcriptRef.current;
-    if (!transcript || turns.length === 0) return;
+    if (!transcript) return;
     atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
+    setShowScrollToBottom(!atBottomRef.current);
+    if (turns.length === 0) return;
     const focus = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.28;
     let nearest = 0;
     let distance = Number.POSITIVE_INFINITY;
@@ -1412,6 +1415,7 @@ function MessageListContent({
     if (!transcript) return;
     transcript.scrollTop = transcript.scrollHeight;
     atBottomRef.current = true;
+    setShowScrollToBottom(false);
     anchorGestureRef.current = null;
     messageAnchorsRef.current?.setGestureIndex(null);
     clearAnchorPreviewTimer();
@@ -1462,8 +1466,12 @@ function MessageListContent({
   useEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
+    const composer = stageRef.current?.closest(".pi-conversation")?.querySelector(".pi-composer-wrap");
     const onScroll = () => syncActiveAnchor();
     const onResize = () => {
+      if (composer) {
+        stageRef.current?.style.setProperty("--pi-composer-height", `${composer.getBoundingClientRect().height}px`);
+      }
       if (atBottomRef.current) transcript.scrollTop = transcript.scrollHeight;
       syncActiveAnchor();
     };
@@ -1471,7 +1479,8 @@ function MessageListContent({
     const observer = new ResizeObserver(onResize);
     observer.observe(transcript);
     if (transcript.firstElementChild) observer.observe(transcript.firstElementChild);
-    onScroll();
+    if (composer) observer.observe(composer);
+    onResize();
     return () => {
       transcript.removeEventListener("scroll", onScroll);
       observer.disconnect();
@@ -1554,6 +1563,25 @@ function MessageListContent({
           </div>
         </div>
         <OverlayScrollbar viewportRef={transcriptRef} />
+        {showScrollToBottom && (
+          <button
+            className="pi-scroll-to-bottom"
+            type="button"
+            aria-label="回到底部"
+            title="回到底部"
+            data-swipe-ignore
+            onClick={() => {
+              const transcript = transcriptRef.current;
+              if (!transcript) return;
+              atBottomRef.current = true;
+              transcript.scrollTop = transcript.scrollHeight;
+              setShowScrollToBottom(false);
+              syncActiveAnchor();
+            }}
+          >
+            <ArrowDown size={18} />
+          </button>
+        )}
       </div>
       <MessageAnchors
         ref={messageAnchorsRef}
