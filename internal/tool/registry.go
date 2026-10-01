@@ -332,7 +332,7 @@ func bashSpecification() Specification {
 	return mustBuiltInSpecification(
 		BashToolName,
 		"Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
-		"Execute bash commands (ls, grep, find, etc.)", []string{"Inspect PI_* environment variables for current model and session details."}, schema,
+		"Execute bash commands (ls, grep, find, etc.)", nil, schema,
 	)
 }
 

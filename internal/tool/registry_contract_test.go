@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"math/big"
-	"strings"
 	"testing"
 )
 
@@ -74,10 +73,10 @@ func TestBashSpecificationTimeoutSchemaMatchesDecoder(t *testing.T) {
 	}
 }
 
-func TestBashSpecificationAdvertisesSessionEnvironmentGuideline(t *testing.T) {
+func TestBashSpecificationOmitsSessionEnvironmentGuideline(t *testing.T) {
 	t.Parallel()
 	guidelines := bashSpecification().PromptGuidelines()
-	if len(guidelines) != 1 || !strings.Contains(guidelines[0], "PI_*") {
+	if len(guidelines) != 0 {
 		t.Fatalf("bash prompt guidelines = %#v", guidelines)
 	}
 }
