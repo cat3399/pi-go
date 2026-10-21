@@ -55,13 +55,12 @@ make sync-models
 make sync-models ARGS='-version <上游发行版本>'
 ```
 
-入口位于 `scripts/sync-models.sh`，Go 驱动位于 `scripts/sync-models/`。默认同步最新正式发行包，也可以指定版本来重现或回退数据。
-完成后终端会显示新增、移除、参数变更、默认模型变更及 Provider 元数据变更；不生成报告文件。
+默认同步最新正式发行包，也可以指定版本来重现或回退数据。完成后终端会显示新增、移除、
+参数变更、默认模型变更及 Provider 元数据变更。
 
 仓库数据统一保存在 `internal/model/catalogdata/catalog.json`，包含模型原始 JSON、有序的
 Provider 默认模型、默认 API / 地址和上游包版本、commit、完整性信息。同步读取同一发行版本的
-`pi-ai` 模型数据和 `pi-coding-agent` 默认选择，不执行 TypeScript，也不生成模型 ID、版本号或
-文件校验值的 Go 常量。原始模型的未知字段会保留在数据中。
+`pi-ai` 模型数据和 `pi-coding-agent` 默认选择，保留原始模型的未知字段。
 
 已安装的程序也可以独立更新数据，无需重新编译：
 

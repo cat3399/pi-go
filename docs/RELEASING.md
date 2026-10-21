@@ -1,5 +1,35 @@
 # 构建与发布
 
+## 本地构建
+
+所有命令从仓库根目录执行，`SURFACE` 可选 `terminal`（默认）、`web`、`gui` 或 `mobile`：
+
+```sh
+make help
+make setup SURFACE=web
+make check SURFACE=web
+make build SURFACE=web
+make dev SURFACE=web ARGS='--cwd /path/to/project'
+make run SURFACE=web ARGS='--cwd /path/to/project'
+```
+
+Terminal、Web 和 GUI 的 `make run` 使用已有产物；Mobile 的设备运行会先构建再安装。
+Terminal 只需 Go 工具链，包含 CLI、TUI、RPC 和 Web API。其他平台的工具链与开发步骤见
+[Web](../surface/web/_frontend/README.md)、[GUI](gui.md)和[Android](mobile.md)。
+
+通过 `VERSION` 指定版本，`OUTPUT_DIR` 指定构建产物目录：
+
+```sh
+make build SURFACE=terminal VERSION=1.2.3
+make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
+```
+
+Terminal 和 Web 可以用 Go 环境变量交叉编译，例如 Linux AMD64：
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build SURFACE=web
+```
+
 ## GitHub Actions
 
 在 GitHub 仓库的 **Actions** 页面中：
@@ -23,13 +53,6 @@ Release workflow 会串行执行，避免并发任务同时修改同一个版本
   同一套缺失判断，最后统一追加 `-dev.<commit>`；
 - 同一版本会注入 Go CLI、内嵌 Web UI、GUI bridge、移动端 Go 库，以及 Android 的
   `versionName`。Android `versionCode` 由 SemVer 单调映射生成。
-
-本地构建也使用同一个入口：
-
-```sh
-make build SURFACE=terminal VERSION=1.2.3
-make build SURFACE=web VERSION=1.2.3 OUTPUT_DIR=/tmp/pi-go-build
-```
 
 ## 产物
 

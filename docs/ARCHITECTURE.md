@@ -50,12 +50,10 @@ AgentSession 发布配置变更，AgentLoop 在每一轮开始时取得不可变
 JSONL 会话文件是持久对话和会话树的事实源。SessionManager 将 entry 解释为当前分支上下文，
 保留 model/thinking change、compaction、branch summary、name、label 和 custom entry/message。
 
-多会话发现使用进程内 catalog，并在本机缓存目录保存可重建的 JSON 快照。查询检查目录及文件的
-size/mtime 指纹，只重解析新增或变化的文件。缓存通过临时文件同步和原子替换发布；缺失、损坏
-或过期时从 JSONL 恢复。缓存只保存列表投影，不保存第二份会话树。
+多会话发现使用进程内 catalog 和可从 JSONL 重建的本机缓存。它们只保存列表投影，
+不拥有第二份会话树。
 
-Application Service 管理每个活动会话的独立 Runtime。移除项目只改变项目列表及资源授权，
-不会移除源目录和已有会话文件。
+Application Service 管理每个活动会话的独立 Runtime。
 
 ## 事件与并发
 
@@ -72,7 +70,6 @@ Application Service 管理每个活动会话的独立 Runtime。移除项目只�
 随二进制携带的资料安装。`internal/app` 在服务读取配置和资源前完成初始化，然后把 README
 和文档目录交给 resource service，供默认提示词生成文档导航。
 
-Bash 的会话环境在 AgentSession 的工具执行边界读取当前状态，每次调用分别传入。
 详见[配置与目录](configuration.md)和[本地源码](self-knowledge.md)。
 
 ## 实现对应关系

@@ -46,18 +46,9 @@ PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
 | `gui` | 内嵌 Go Core 的桌面应用，也可连接远程服务 | `bin/pi-go-gui` |
 | `mobile` | 连接远程 Core 的 Android 应用 | `surface/mobile/bin/pi-go-mobile.apk` |
 
-各入口共用一套构建命令：
-
-```sh
-make help
-make setup SURFACE=gui
-make check SURFACE=gui
-make build SURFACE=gui
-make dev SURFACE=web ARGS='--cwd /path/to/project'
-```
-
 Web 开发使用 Next HMR 与自动重载的 Go API；生产运行只需内嵌静态资源的 Go 二进制。
-构建参数、平台工具链和通信方式见 [Surface](docs/SURFACES.md)。
+统一命令和平台工具链见[构建与发布](docs/RELEASING.md)，通信方式与状态边界见
+[Surface 架构](docs/SURFACES.md)。
 
 ## 文档
 
