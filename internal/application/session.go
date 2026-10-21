@@ -61,6 +61,25 @@ type ApplicationSession struct {
 	nextObserverID uint64
 }
 
+type sessionIdentity struct {
+	id, cwd, file string
+}
+
+func (s *ApplicationSession) identity() (sessionIdentity, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		current, generation, err := s.currentSession()
+		if err != nil {
+			return sessionIdentity{}, err
+		}
+		location := current.SessionManager().Location()
+		identity := sessionIdentity{id: location.ID, cwd: location.Cwd, file: location.Path}
+		if s.sameBinding(current, generation) {
+			return identity, nil
+		}
+	}
+	return sessionIdentity{}, ErrSessionChanged
+}
+
 func NewApplicationSession(ctx context.Context, runtime *agentruntime.Runtime) (*ApplicationSession, error) {
 	if runtime == nil || runtime.Session() == nil || runtime.Services() == nil {
 		return nil, fmt.Errorf("%w: runtime is required", ErrSessionUnavailable)

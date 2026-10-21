@@ -158,15 +158,11 @@ func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.Raw
 		if len(message) == 0 || !json.Valid(message) {
 			return nil, false, nil
 		}
-		normalized, err := NormalizeHistoryToolCalls(message)
+		projected, err := projectHistoryMessage(message, true, deferThinking, deferMedia, entry.ID())
 		if err != nil {
 			return nil, false, err
 		}
-		if !deferThinking && !deferMedia {
-			return normalized, true, nil
-		}
-		deferred, err := DeferHistoryMedia(normalized, deferThinking, deferMedia, entry.ID())
-		return deferred, true, err
+		return projected, true, err
 	case "compaction":
 		var payload struct {
 			Summary          string `json:"summary"`
@@ -225,19 +221,36 @@ func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.Raw
 // view consumes toolCallId/toolName/input. Live events perform the same
 // projection in the browser before rendering.
 func NormalizeHistoryToolCalls(message json.RawMessage) (json.RawMessage, error) {
+	return projectHistoryMessage(message, true, false, false, "")
+}
+
+func projectHistoryMessage(message json.RawMessage, normalizeTools, deferThinking, deferMedia bool, entryID string) (json.RawMessage, error) {
 	var value map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(message))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
+	changed := false
+	if normalizeTools {
+		changed = normalizeHistoryToolCalls(value)
+	}
+	changed = deferHistoryMedia(value, deferThinking, deferMedia, entryID) || changed
+	if !changed {
+		return bytes.Clone(message), nil
+	}
+	return json.Marshal(value)
+}
+
+func normalizeHistoryToolCalls(value map[string]any) bool {
 	if value["role"] != "assistant" {
-		return append(json.RawMessage(nil), message...), nil
+		return false
 	}
 	content, ok := value["content"].([]any)
 	if !ok {
-		return append(json.RawMessage(nil), message...), nil
+		return false
 	}
+	changed := false
 	for index, rawBlock := range content {
 		block, ok := rawBlock.(map[string]any)
 		if !ok || block["type"] != "toolCall" {
@@ -262,9 +275,9 @@ func NormalizeHistoryToolCalls(message json.RawMessage) (json.RawMessage, error)
 			"type": "toolCall", "toolCallId": toolCallID,
 			"toolName": toolName, "input": input,
 		}
+		changed = true
 	}
-	encoded, err := json.Marshal(value)
-	return json.RawMessage(encoded), err
+	return changed
 }
 
 func marshalRaw(value any) (json.RawMessage, bool, error) {
@@ -273,12 +286,11 @@ func marshalRaw(value any) (json.RawMessage, bool, error) {
 }
 
 func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool, entryID string) (json.RawMessage, error) {
-	var value map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(message))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return nil, err
-	}
+	return projectHistoryMessage(message, false, deferThinking, deferMedia, entryID)
+}
+
+func deferHistoryMedia(value map[string]any, deferThinking, deferMedia bool, entryID string) bool {
+	changed := false
 	role, _ := value["role"].(string)
 	content, _ := value["content"].([]any)
 	if deferThinking && role == "assistant" {
@@ -288,6 +300,7 @@ func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool, 
 			if block["type"] == "thinking" && strings.TrimSpace(thinking) != "" {
 				block["thinking"] = ""
 				block["deferred"] = true
+				changed = true
 			}
 		}
 	}
@@ -302,9 +315,10 @@ func DeferHistoryMedia(message json.RawMessage, deferThinking, deferMedia bool, 
 				"type": "image", "mimeType": mime, "byteSize": imageBytes,
 				"imageRef": map[string]any{"entryId": entryID, "blockIndex": index},
 			}
+			changed = true
 		}
 	}
-	return json.Marshal(value)
+	return changed
 }
 
 func historyImageData(block map[string]any) (bytes int64, mime string, ok bool) {

@@ -24,6 +24,7 @@ import {
 } from "../tool-presets";
 import { assistantResponseKey, assistantUsage, messageText } from "./message";
 import { SessionImageCache } from "./session-images";
+import { RefreshScheduler } from "./refresh-scheduler";
 
 type ControllerStatus = "connecting" | "auth" | "ready" | "error";
 export type SendBehavior = "prompt" | "steer" | "follow_up";
@@ -329,11 +330,35 @@ export function useApplicationController(client: ApplicationClient): Application
     return projected;
   }, [client]);
 
+  const eventRefreshes = useMemo(() => new RefreshScheduler(async (requests) => {
+    const generation = generationRef.current;
+    const current = requests.filter((request) => request.generation === generation);
+    const work: Promise<unknown>[] = [];
+    if (current.some((request) => request.snapshot)) work.push(refreshSnapshot(generation));
+    const sessionId = activeSessionRef.current;
+    const sessionRequests = current.filter((request) => request.sessionId === sessionId);
+    if (sessionId && sessionRequests.some((request) => request.session)) {
+      work.push(loadSession(sessionId, generation), loadSessionStats(sessionId, generation));
+    } else if (sessionId && sessionRequests.some((request) => request.turn)) {
+      work.push(refreshTurnProjection(sessionId, generation));
+    }
+    const results = await Promise.allSettled(work);
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected" && generation === generationRef.current && sessionId === activeSessionRef.current) {
+      setError(errorMessage(failure.reason));
+    }
+  }), [loadSession, loadSessionStats, refreshSnapshot, refreshTurnProjection]);
+
+  useEffect(() => {
+    eventRefreshes.start();
+    return () => eventRefreshes.dispose();
+  }, [eventRefreshes]);
+
   const handleEvent = useCallback((envelope: ApplicationEventEnvelope) => {
     revisionRef.current = Math.max(revisionRef.current, envelope.sequence);
     const event = envelope.event;
     if (event.type === "session_catalog" || event.type === "project_catalog") {
-      void refreshSnapshot();
+      eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
     }
     if (envelope.sessionId !== activeSessionRef.current) return;
 
@@ -423,7 +448,7 @@ export function useApplicationController(client: ApplicationClient): Application
       }
       case "turn_end":
         if (activeSessionRef.current) {
-          void refreshTurnProjection(activeSessionRef.current);
+          eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, turn: true });
         }
         break;
       case "agent_end":
@@ -440,12 +465,9 @@ export function useApplicationController(client: ApplicationClient): Application
           isCompacting: false,
           retryWaiting: false,
         }));
-        void refreshSnapshot();
+        eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
         if (activeSessionRef.current) {
-          void Promise.allSettled([
-            loadSession(activeSessionRef.current),
-            loadSessionStats(activeSessionRef.current),
-          ]);
+          eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, session: true });
         }
         break;
       case "queue_update":
@@ -480,7 +502,7 @@ export function useApplicationController(client: ApplicationClient): Application
         setRuntimeState((current) => ({ ...current, retryWaiting: false }));
         break;
       case "session_info_changed":
-        void refreshSnapshot();
+        eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
         break;
       case "operation":
         if ((event.command === "prompt" || event.command === "edit_and_resend") && event.status === "failed") {
@@ -492,7 +514,7 @@ export function useApplicationController(client: ApplicationClient): Application
       default:
         break;
     }
-  }, [loadSession, loadSessionStats, refreshSnapshot, refreshTurnProjection, removeDeliveredPendingMessage]);
+  }, [eventRefreshes, removeDeliveredPendingMessage]);
 
   const subscribe = useCallback((after: number, generation: number) => {
     subscriptionRef.current?.close();

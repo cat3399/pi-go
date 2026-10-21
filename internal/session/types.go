@@ -562,7 +562,8 @@ func (e Entry) Diagnostics() []Diagnostic {
 	return append([]Diagnostic(nil), e.diagnostics...)
 }
 func (e Entry) clone() Entry {
-	e.raw = bytes.Clone(e.raw)
+	// Encoded records are immutable after decoding. Snapshots may share their
+	// backing bytes; RawJSON still returns an owned copy at the public boundary.
 	e.diagnostics = append([]Diagnostic(nil), e.diagnostics...)
 	if e.compaction != nil {
 		compaction := *e.compaction

@@ -74,15 +74,10 @@ func (s *managedSession) identity() (id, cwd, file string) {
 	return s.id, s.cwd, s.file
 }
 
-func (s *managedSession) updateIdentity(state State) {
+func (s *managedSession) updateIdentity(identity sessionIdentity) {
 	s.identityMu.Lock()
 	defer s.identityMu.Unlock()
-	s.id, s.cwd = state.SessionID, state.CWD
-	if state.SessionFile == nil {
-		s.file = ""
-	} else {
-		s.file = *state.SessionFile
-	}
+	s.id, s.cwd, s.file = identity.id, identity.cwd, identity.file
 }
 
 func (s *managedSession) touch() {
@@ -150,7 +145,8 @@ type Service struct {
 	allowedRootMu       sync.RWMutex
 	allowedRoots        map[string]struct{}
 	fileIndexMu         sync.Mutex
-	fileIndexCache      map[string]fileIndexCacheEntry
+	fileIndexCache      map[string]*fileIndexCacheEntry
+	fileIndexLoads      map[string]*fileIndexLoad
 	sessionCatalog      *session.Catalog
 	skillHTTP           HTTPDoer
 	skillsAPI           string
@@ -215,7 +211,8 @@ func NewService(options ServiceOptions) (*Service, error) {
 		modelHTTP: modelHTTP, modelCatalogURL: modelCatalogURL,
 		skillHTTP: skillHTTP, skillsAPI: skillsAPI, githubAPI: githubAPI,
 		allowedRoots:   make(map[string]struct{}),
-		fileIndexCache: make(map[string]fileIndexCacheEntry),
+		fileIndexCache: make(map[string]*fileIndexCacheEntry),
+		fileIndexLoads: make(map[string]*fileIndexLoad),
 		sessionCatalog: sessionCatalog,
 		sessions:       make(map[string]*managedSession), opening: make(map[string]*openCall),
 		events: newEventStream(defaultEventHistoryCapacity), reaperDone: make(chan struct{}),
@@ -357,16 +354,12 @@ func (s *Service) adoptRuntime(runtime *agentruntime.Runtime) (*managedSession, 
 		_ = runtime.Dispose(context.Background())
 		return nil, err
 	}
-	state, err := applicationSession.State()
+	identity, err := applicationSession.identity()
 	if err != nil {
 		_ = applicationSession.Dispose(context.Background())
 		return nil, err
 	}
-	file := ""
-	if state.SessionFile != nil {
-		file = *state.SessionFile
-	}
-	managed := &managedSession{session: applicationSession, id: state.SessionID, cwd: state.CWD, file: file}
+	managed := &managedSession{session: applicationSession, id: identity.id, cwd: identity.cwd, file: identity.file}
 	managed.eventUnsubscribe = applicationSession.Subscribe(func(_ context.Context, event Event) {
 		s.events.publish(event)
 	})
@@ -528,25 +521,25 @@ func (s *Service) reconcileIdentity(managed *managedSession) error {
 	if managed == nil || managed.session == nil {
 		return errors.New("managed session is unavailable")
 	}
-	state, err := managed.session.State()
+	identity, err := managed.session.identity()
 	if err != nil {
 		return err
 	}
 	oldID, _, _ := managed.identity()
-	if state.SessionID == oldID {
-		managed.updateIdentity(state)
+	if identity.id == oldID {
+		managed.updateIdentity(identity)
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing := s.sessions[state.SessionID]; existing != nil && existing != managed {
-		return fmt.Errorf("session identity changed to already-active session %s", state.SessionID)
+	if existing := s.sessions[identity.id]; existing != nil && existing != managed {
+		return fmt.Errorf("session identity changed to already-active session %s", identity.id)
 	}
 	if s.sessions[oldID] == managed {
 		delete(s.sessions, oldID)
 	}
-	managed.updateIdentity(state)
-	s.sessions[state.SessionID] = managed
+	managed.updateIdentity(identity)
+	s.sessions[identity.id] = managed
 	return nil
 }
 

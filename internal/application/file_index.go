@@ -2,10 +2,12 @@ package application
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,12 +41,23 @@ type fileIndexListing struct {
 }
 
 type fileIndexCacheEntry struct {
-	listing fileIndexListing
-	entries []FileIndexEntry
-	expires time.Time
+	listing     fileIndexListing
+	expires     time.Time
+	entriesOnce sync.Once
+	entries     []FileIndexEntry
+}
+
+type fileIndexLoad struct {
+	done  chan struct{}
+	entry *fileIndexCacheEntry
+	err   error
 }
 
 func (s *Service) QueryFileIndex(ctx context.Context, cwd, query string) (FileIndexResult, error) {
+	ctx = normalizeContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return FileIndexResult{}, err
+	}
 	resolved, err := s.authorizeResourcePath(cwd, true)
 	if err != nil {
 		return FileIndexResult{}, err
@@ -57,42 +70,92 @@ func (s *Service) QueryFileIndex(ctx context.Context, cwd, query string) (FileIn
 		return FileIndexResult{}, ErrPathNotDirectory
 	}
 	query = truncateRunes(query, fileIndexQueryLimit)
-	now := time.Now()
-
-	s.fileIndexMu.Lock()
-	cached, exists := s.fileIndexCache[resolved]
-	if !exists || !now.Before(cached.expires) {
-		listing, listed := listFilesWithGit(ctx, resolved)
-		if !listed {
-			listing = listFilesWithWalk(resolved)
-		}
-		for key, entry := range s.fileIndexCache {
-			if !now.Before(entry.expires) {
-				delete(s.fileIndexCache, key)
-			}
-		}
-		if len(s.fileIndexCache) >= fileIndexCacheLimit {
-			clear(s.fileIndexCache)
-		}
-		cached = fileIndexCacheEntry{listing: listing, expires: now.Add(fileIndexCacheTTL)}
-		s.fileIndexCache[resolved] = cached
+	cached, err := s.cachedFileIndex(ctx, resolved, loadFileIndexListing)
+	if err != nil {
+		return FileIndexResult{}, err
 	}
 	if query != "" {
-		if cached.entries == nil {
-			cached.entries = buildFileIndexEntries(cached.listing.files)
-			s.fileIndexCache[resolved] = cached
+		// The listing is immutable. Only callers searching this particular listing
+		// wait for its derived directory index; unrelated projects remain independent.
+		cached.entriesOnce.Do(func() { cached.entries = buildFileIndexEntries(cached.listing.files) })
+		if err := ctx.Err(); err != nil {
+			return FileIndexResult{}, err
 		}
 		matches := filterFileIndexEntries(cached.entries, query, fileIndexMatchLimit)
-		s.fileIndexMu.Unlock()
-		return FileIndexResult{Matches: matches, HasQuery: true}, nil
+		return FileIndexResult{Matches: matches, HasQuery: true}, ctx.Err()
 	}
-	files := append([]string(nil), cached.listing.files...)
-	s.fileIndexMu.Unlock()
+	files := cached.listing.files
 	truncated := cached.listing.hardTruncated || len(files) > fileIndexClientCap
 	if len(files) > fileIndexClientCap {
 		files = files[:fileIndexClientCap]
 	}
-	return FileIndexResult{Files: files, Truncated: truncated}, nil
+	return FileIndexResult{Files: append([]string(nil), files...), Truncated: truncated}, ctx.Err()
+}
+
+func loadFileIndexListing(ctx context.Context, cwd string) (fileIndexListing, error) {
+	listing, listed := listFilesWithGit(ctx, cwd)
+	if err := ctx.Err(); err != nil {
+		return fileIndexListing{}, err
+	}
+	if listed {
+		return listing, nil
+	}
+	return listFilesWithWalk(ctx, cwd)
+}
+
+// cachedFileIndex coalesces rebuilds per directory. Filesystem work never holds
+// the cache lock, and an individual waiter can cancel without waiting for I/O.
+func (s *Service) cachedFileIndex(ctx context.Context, cwd string, load func(context.Context, string) (fileIndexListing, error)) (*fileIndexCacheEntry, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.fileIndexMu.Lock()
+		if cached := s.fileIndexCache[cwd]; cached != nil && time.Now().Before(cached.expires) {
+			s.fileIndexMu.Unlock()
+			return cached, nil
+		}
+		if pending := s.fileIndexLoads[cwd]; pending != nil {
+			s.fileIndexMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-pending.done:
+			}
+			// A cancelled initiating request must not cancel other clients' queries.
+			if errors.Is(pending.err, context.Canceled) || errors.Is(pending.err, context.DeadlineExceeded) {
+				continue
+			}
+			return pending.entry, pending.err
+		}
+		pending := &fileIndexLoad{done: make(chan struct{})}
+		s.fileIndexLoads[cwd] = pending
+		s.fileIndexMu.Unlock()
+
+		listing, err := load(ctx, cwd)
+		if err == nil {
+			err = ctx.Err()
+		}
+		s.fileIndexMu.Lock()
+		delete(s.fileIndexLoads, cwd)
+		pending.err = err
+		if err == nil {
+			now := time.Now()
+			for key, entry := range s.fileIndexCache {
+				if !now.Before(entry.expires) {
+					delete(s.fileIndexCache, key)
+				}
+			}
+			if len(s.fileIndexCache) >= fileIndexCacheLimit {
+				clear(s.fileIndexCache)
+			}
+			pending.entry = &fileIndexCacheEntry{listing: listing, expires: now.Add(fileIndexCacheTTL)}
+			s.fileIndexCache[cwd] = pending.entry
+		}
+		close(pending.done)
+		s.fileIndexMu.Unlock()
+		return pending.entry, pending.err
+	}
 }
 
 func listFilesWithGit(ctx context.Context, cwd string) (fileIndexListing, bool) {
@@ -116,7 +179,7 @@ func listFilesWithGit(ctx context.Context, cwd string) (fileIndexListing, bool) 
 	return fileIndexListing{files: files}, true
 }
 
-func listFilesWithWalk(cwd string) fileIndexListing {
+func listFilesWithWalk(ctx context.Context, cwd string) (fileIndexListing, error) {
 	type queuedDirectory struct {
 		absolute string
 		relative string
@@ -125,6 +188,9 @@ func listFilesWithWalk(cwd string) fileIndexListing {
 	files := make([]string, 0)
 	queue := []queuedDirectory{{absolute: cwd}}
 	for head := 0; head < len(queue); head++ {
+		if err := ctx.Err(); err != nil {
+			return fileIndexListing{}, err
+		}
 		current := queue[head]
 		entries, err := os.ReadDir(current.absolute)
 		if err != nil {
@@ -146,13 +212,13 @@ func listFilesWithWalk(cwd string) fileIndexListing {
 				}
 			} else if entry.Type().IsRegular() {
 				if len(files) >= fileIndexWalkCap {
-					return fileIndexListing{files: files, hardTruncated: true}
+					return fileIndexListing{files: files, hardTruncated: true}, nil
 				}
 				files = append(files, relative)
 			}
 		}
 	}
-	return fileIndexListing{files: files}
+	return fileIndexListing{files: files}, nil
 }
 
 func buildFileIndexEntries(files []string) []FileIndexEntry {

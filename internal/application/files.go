@@ -2,13 +2,10 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -26,8 +23,6 @@ const (
 	MaxUploadFileBytes  int64 = 25 * 1024 * 1024
 	MaxUploadTotalBytes int64 = 100 * 1024 * 1024
 )
-
-var webSessionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 var ignoredFileNames = map[string]struct{}{
 	"node_modules": {}, ".git": {}, ".next": {}, "dist": {}, "build": {}, "__pycache__": {},
@@ -88,21 +83,37 @@ type UploadResult struct {
 	Inspection UploadTargetInspection
 }
 
-func (s *Service) ResolveFile(ctx context.Context, target, sessionID string) (FileResource, error) {
-	_ = ctx
-	resolved, err := s.authorizeResourcePath(target, true)
-	if errors.Is(err, ErrResourceAccessDenied) && strings.TrimSpace(sessionID) != "" {
-		allowed, referenceErr := s.sessionReferencesFile(sessionID, target)
-		if referenceErr != nil {
-			return FileResource{}, referenceErr
-		}
-		if allowed {
-			resolved, err = filepath.EvalSymlinks(filepath.Clean(target))
-		}
+// ResolveFile resolves an operator-selected file using the host's filesystem
+// permissions. Conversation text is not an authority for file access. The last
+// parameter remains accepted for existing API callers.
+func (s *Service) ResolveFile(ctx context.Context, target, _ string) (FileResource, error) {
+	if err := normalizeContext(ctx).Err(); err != nil {
+		return FileResource{}, err
 	}
+	target = strings.TrimSpace(target)
+	if target == "" || !filepath.IsAbs(target) {
+		return FileResource{}, ErrResourceAccessDenied
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(target))
 	if err != nil {
 		return FileResource{}, err
 	}
+	return statFileResource(resolved)
+}
+
+// Directory browsing and mutations retain their workspace-root scope.
+func (s *Service) workspaceResource(ctx context.Context, target string) (FileResource, error) {
+	if err := normalizeContext(ctx).Err(); err != nil {
+		return FileResource{}, err
+	}
+	resolved, err := s.authorizeResourcePath(target, true)
+	if err != nil {
+		return FileResource{}, err
+	}
+	return statFileResource(resolved)
+}
+
+func statFileResource(resolved string) (FileResource, error) {
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return FileResource{}, err
@@ -114,7 +125,7 @@ func (s *Service) ResolveFile(ctx context.Context, target, sessionID string) (Fi
 }
 
 func (s *Service) ListFiles(ctx context.Context, target string) (FileList, error) {
-	resource, err := s.ResolveFile(ctx, target, "")
+	resource, err := s.workspaceResource(ctx, target)
 	if err != nil {
 		return FileList{}, err
 	}
@@ -245,7 +256,7 @@ func resolveDirectoryEntry(path string, entry os.DirEntry) (bool, bool) {
 }
 
 func (s *Service) InspectUploadTargets(ctx context.Context, directory string, fileNames []string) (UploadTargetInspection, error) {
-	resource, err := s.ResolveFile(ctx, directory, "")
+	resource, err := s.workspaceResource(ctx, directory)
 	if err != nil {
 		return UploadTargetInspection{}, err
 	}
@@ -272,7 +283,7 @@ func (s *Service) SaveUploads(ctx context.Context, directory string, files []Upl
 
 	s.resourceMu.Lock()
 	defer s.resourceMu.Unlock()
-	resource, err := s.ResolveFile(ctx, directory, "")
+	resource, err := s.workspaceResource(ctx, directory)
 	if err != nil {
 		return UploadResult{}, err
 	}
@@ -371,88 +382,4 @@ func stringSet(values []string) map[string]struct{} {
 		result[value] = struct{}{}
 	}
 	return result
-}
-
-func (s *Service) sessionReferencesFile(sessionID, filePath string) (bool, error) {
-	if !webSessionIDPattern.MatchString(sessionID) || !filepath.IsAbs(filePath) {
-		return false, nil
-	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(sessionID)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	if closeManager {
-		defer manager.Close()
-	}
-	for _, entry := range manager.Entries() {
-		var value any
-		if json.Unmarshal(entry.RawJSON(), &value) != nil {
-			continue
-		}
-		stringsInEntry := make([]string, 0)
-		collectJSONStrings(value, &stringsInEntry)
-		for _, candidate := range stringsInEntry {
-			if containsExactPathReference(candidate, filePath) {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
-func collectJSONStrings(value any, result *[]string) {
-	switch typed := value.(type) {
-	case string:
-		*result = append(*result, typed)
-	case []any:
-		for _, item := range typed {
-			collectJSONStrings(item, result)
-		}
-	case map[string]any:
-		for _, item := range typed {
-			collectJSONStrings(item, result)
-		}
-	}
-}
-
-func containsExactPathReference(text, filePath string) bool {
-	target := normalizeReferenceSlashes(filePath)
-	targets := []string{target}
-	if strings.HasPrefix(target, "/") {
-		targets = append(targets, "file://"+target)
-	}
-	haystacks := []string{normalizeReferenceSlashes(text)}
-	if decoded, err := url.PathUnescape(text); err == nil && decoded != text {
-		haystacks = append(haystacks, normalizeReferenceSlashes(decoded))
-	}
-	for _, haystack := range haystacks {
-		for _, candidate := range targets {
-			for offset := 0; ; {
-				position := strings.Index(haystack[offset:], candidate)
-				if position < 0 {
-					break
-				}
-				position += offset
-				beforeOK := position == 0 || !isPathReferenceCharacter(haystack[position-1])
-				after := position + len(candidate)
-				afterOK := after >= len(haystack) || !isPathReferenceCharacter(haystack[after]) || haystack[after] == ':' && after+1 < len(haystack) && haystack[after+1] >= '0' && haystack[after+1] <= '9'
-				if beforeOK && afterOK {
-					return true
-				}
-				offset = position + 1
-			}
-		}
-	}
-	return false
-}
-
-func normalizeReferenceSlashes(value string) string {
-	return strings.ReplaceAll(value, "\\", "/")
-}
-
-func isPathReferenceCharacter(value byte) bool {
-	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || strings.ContainsRune("._~+%@/\\:-", rune(value))
 }

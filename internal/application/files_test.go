@@ -44,8 +44,9 @@ func TestFileResourcesListAuthorizeAndUpload(t *testing.T) {
 		if err := os.Symlink(outside, link); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := service.ResolveFile(context.Background(), link, ""); !errors.Is(err, ErrResourceAccessDenied) {
-			t.Fatalf("symlink escape error = %v", err)
+		resource, err := service.ResolveFile(context.Background(), link, "")
+		if err != nil || !resource.IsFile {
+			t.Fatalf("operator-selected symlink = %#v, %v", resource, err)
 		}
 	}
 
@@ -136,21 +137,64 @@ func TestDeleteFileRemovesOnlyOneAuthorizedEntry(t *testing.T) {
 	}
 }
 
-func TestContainsExactPathReferenceMatchesOriginalBoundaries(t *testing.T) {
-	path := "/tmp/report.txt"
-	for _, value := range []string{
-		"open /tmp/report.txt please",
-		"file:///tmp/report.txt:12",
-		"/tmp/report.txt%3A8",
-	} {
-		if !containsExactPathReference(value, path) {
-			t.Fatalf("reference not detected: %q", value)
+func TestFileReadsDoNotDependOnConversationOrProjectCatalog(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	service := newFileTestService(t, root)
+	path := filepath.Join(outside, "notes.txt")
+	if err := os.WriteFile(path, []byte("outside workspace"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// File reading does not need discovery or a valid session. A corrupt catalog
+	// must not turn an ordinary filesystem read into a session-history operation.
+	if err := os.MkdirAll(service.paths.AgentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(service.paths.AgentDir, "projects.json"), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"", "not-a-session", "01234567-89ab-4cde-8abc-0123456789ab"} {
+		resource, err := service.ResolveFile(context.Background(), path, id)
+		if err != nil || !resource.IsFile || resource.Size != int64(len("outside workspace")) {
+			t.Fatalf("ResolveFile(%q) = %#v, %v", id, resource, err)
 		}
 	}
-	for _, value := range []string{"/tmp/report.txt.bak", "x/tmp/report.txt", "/tmp/report.txt:line"} {
-		if containsExactPathReference(value, path) {
-			t.Fatalf("false reference detected: %q", value)
+	for _, path := range []string{"", "relative.txt"} {
+		if _, err := service.ResolveFile(context.Background(), path, ""); !errors.Is(err, ErrResourceAccessDenied) {
+			t.Fatalf("invalid path %q: %v", path, err)
 		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.ResolveFile(ctx, path, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled read: %v", err)
+	}
+}
+
+func TestOutsideFileReadDoesNotGrantDirectoryOrMutationAccess(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	service := newFileTestService(t, root)
+	path := filepath.Join(outside, "notes.txt")
+	if err := os.WriteFile(path, []byte("kept"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ResolveFile(context.Background(), path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ListFiles(context.Background(), outside); !errors.Is(err, ErrResourceAccessDenied) {
+		t.Fatalf("outside listing: %v", err)
+	}
+	if _, err := service.InspectUploadTargets(context.Background(), outside, []string{"notes.txt"}); !errors.Is(err, ErrResourceAccessDenied) {
+		t.Fatalf("outside upload inspection: %v", err)
+	}
+	if _, err := service.SaveUploads(context.Background(), outside, []UploadFile{{Name: "notes.txt", Data: []byte("replacement")}}, UploadConflictOverwrite); !errors.Is(err, ErrResourceAccessDenied) {
+		t.Fatalf("outside upload: %v", err)
+	}
+	if err := service.DeleteFile(context.Background(), path); !errors.Is(err, ErrResourceAccessDenied) {
+		t.Fatalf("outside deletion: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "kept" {
+		t.Fatalf("outside file = %q, %v", content, err)
 	}
 }
 
