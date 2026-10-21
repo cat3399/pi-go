@@ -364,7 +364,7 @@ func buildSessionInfoProjection(path string, collectAllMessages bool) (SessionIn
 	if collectAllMessages {
 		allMessages = make([]string, 0)
 	}
-	var lastActivity time.Time
+	var summary sessionInfoSummary
 	reader := bufio.NewReaderSize(file, 64*1024)
 	headerFound := false
 	for {
@@ -407,41 +407,8 @@ func buildSessionInfoProjection(path string, collectAllMessages bool) (SessionIn
 			result.Created = decoded.Timestamp()
 			continue
 		}
-		if typeName == "session_info" {
-			var name string
-			if json.Unmarshal(object["name"], &name) == nil {
-				name = strings.TrimSpace(name)
-				result.Name, result.HasName = name, name != ""
-			} else {
-				result.Name, result.HasName = "", false
-			}
-			continue
-		}
-		if typeName != "message" {
-			if readErr == nil {
-				continue
-			}
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return SessionInfo{}, false
-		}
-		result.MessageCount++
-		needText := collectAllMessages || result.FirstMessage == "(no messages)"
-		text, role, activity, hasContent := sessionInfoMessage(object, needText)
-		if role != "user" && role != "assistant" {
-			continue
-		}
-		if hasContent && activity.After(time.UnixMilli(0)) && activity.After(lastActivity) {
-			lastActivity = activity
-		}
-		if text != "" {
-			if collectAllMessages {
-				allMessages = append(allMessages, text)
-			}
-			if result.FirstMessage == "(no messages)" && role == "user" {
-				result.FirstMessage = text
-			}
+		if text := summary.append(typeName, object, collectAllMessages); collectAllMessages && text != "" {
+			allMessages = append(allMessages, text)
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
@@ -456,14 +423,8 @@ func buildSessionInfoProjection(path string, collectAllMessages bool) (SessionIn
 	if collectAllMessages {
 		result.AllMessagesText = strings.Join(allMessages, " ")
 	}
-	if !lastActivity.IsZero() {
-		result.Modified = lastActivity
-	} else if !result.Created.IsZero() {
-		result.Modified = result.Created
-	} else {
-		result.Modified = stat.ModTime()
-	}
-	return result, true
+	result.Modified = stat.ModTime()
+	return summary.apply(result), true
 }
 
 func sessionInfoMessage(entry map[string]json.RawMessage, includeText bool) (text, role string, activity time.Time, hasContent bool) {

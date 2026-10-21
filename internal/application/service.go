@@ -92,18 +92,22 @@ func (s *managedSession) touch() {
 }
 
 func (s *managedSession) manager() *session.SessionManager {
-	if s == nil || s.session == nil || s.session.Runtime() == nil || s.session.Runtime().Session() == nil {
+	if s == nil || s.session == nil || s.session.Runtime() == nil {
 		return nil
 	}
-	return s.session.Runtime().Session().SessionManager()
+	current := s.session.Runtime().Session()
+	if current == nil {
+		return nil
+	}
+	return current.SessionManager()
 }
 
 func (s *managedSession) busy() bool {
 	if s == nil || s.session == nil {
 		return false
 	}
-	state, err := s.session.State()
-	return err == nil && (state.IsPromptRunning || state.IsStreaming || state.IsBashRunning || state.IsCompacting)
+	busy, err := s.session.busy()
+	return err == nil && busy
 }
 
 func (s *managedSession) dispose(ctx context.Context) error {

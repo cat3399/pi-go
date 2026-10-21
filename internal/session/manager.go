@@ -29,6 +29,8 @@ type SessionManager struct {
 	flushed     bool
 	runtime     runtimeConfig
 	store       *Session
+	summaryMu   sync.Mutex
+	summary     managerSummary
 }
 
 var managerLineBreakPattern = regexp.MustCompile(`[\r\n]+`)
@@ -264,7 +266,8 @@ func (m *SessionManager) SetSessionFile(path string) error {
 	}
 	old := m.store
 	m.cwd, m.sessionDir, m.sessionFile = next.cwd, next.sessionDir, next.sessionFile
-	m.persist, m.flushed, m.runtime, m.store = next.persist, next.flushed, next.runtime, next.store
+	m.persist, m.flushed, m.runtime = next.persist, next.flushed, next.runtime
+	m.setStore(next.store)
 	return old.Close()
 }
 
@@ -291,7 +294,7 @@ func (m *SessionManager) setVolatileSessionFile(path string) error {
 		flushed = statErr == nil
 	}
 	old := m.store
-	m.store = next
+	m.setStore(next)
 	m.sessionFile = path
 	m.flushed = flushed
 	return old.Close()
@@ -315,7 +318,7 @@ func (m *SessionManager) startNew(options NewSessionOptions) error {
 	if m.store != nil {
 		_ = m.store.Close()
 	}
-	m.store = next
+	m.setStore(next)
 	m.flushed = false
 	if m.persist {
 		m.sessionFile = filepath.Join(m.sessionDir, managerSessionFilename(header.Timestamp(), header.ID()))
@@ -342,7 +345,7 @@ func (m *SessionManager) appendAndFlush(ctx context.Context, appendFn func(*Sess
 		return Entry{}, err
 	}
 	old := m.store
-	m.store = durable
+	m.setStore(durable)
 	m.flushed = true
 	_ = old.Close()
 	return entry, nil
@@ -394,7 +397,7 @@ func (m *SessionManager) AppendModelControlChange(ctx context.Context, provider,
 			return nil, err
 		}
 		old := m.store
-		m.store = durable
+		m.setStore(durable)
 		m.flushed = true
 		_ = old.Close()
 	}
@@ -445,18 +448,8 @@ func (m *SessionManager) appendPayload(ctx context.Context, payload EntryPayload
 }
 
 func (m *SessionManager) SessionName() (string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	entries := m.store.Entries()
-	for index := len(entries) - 1; index >= 0; index-- {
-		if value, ok := entries[index].Payload().(SessionInfoPayload); ok {
-			if value.Name == nil || strings.TrimSpace(*value.Name) == "" {
-				return "", false
-			}
-			return strings.TrimSpace(*value.Name), true
-		}
-	}
-	return "", false
+	info := m.Summary()
+	return info.Name, info.HasName
 }
 
 func (m *SessionManager) LeafID() (string, bool) {
@@ -685,7 +678,8 @@ func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID strin
 	}
 	old := m.store
 	m.cwd, m.sessionDir, m.sessionFile = next.cwd, next.sessionDir, next.sessionFile
-	m.persist, m.flushed, m.runtime, m.store = next.persist, next.flushed, next.runtime, next.store
+	m.persist, m.flushed, m.runtime = next.persist, next.flushed, next.runtime
+	m.setStore(next.store)
 	_ = old.Close()
 	return m.sessionFile, m.sessionFile != "", nil
 }

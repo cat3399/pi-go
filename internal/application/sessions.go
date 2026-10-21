@@ -2,12 +2,10 @@ package application
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/session"
@@ -43,22 +41,17 @@ type SessionSnapshot struct {
 }
 
 func (s *Service) ListSessions() ([]SessionInfo, error) {
-	discovered, err := s.discoveredSessions()
+	discovered, live, err := s.sessionCatalogSnapshot()
 	if err != nil {
 		return nil, err
 	}
 	pathIDs := discoveredSessionPathIDs(discovered)
-	byID := make(map[string]SessionInfo, len(discovered))
+	byID := make(map[string]SessionInfo, len(discovered)+len(live))
 	for _, info := range discovered {
 		byID[info.ID] = discoveredSessionInfo(info, pathIDs)
 	}
-	for _, managed := range s.activeSessions() {
-		managedID, _, _ := managed.identity()
-		manager := managed.manager()
-		if manager == nil {
-			continue
-		}
-		byID[managedID] = activeSessionInfo(manager, managed, pathIDs)
+	for _, info := range live {
+		byID[info.ID] = discoveredSessionInfo(info, pathIDs)
 	}
 	result := make([]SessionInfo, 0, len(byID))
 	for _, info := range byID {
@@ -70,11 +63,27 @@ func (s *Service) ListSessions() ([]SessionInfo, error) {
 	return result, nil
 }
 
-func (s *Service) discoveredSessions() ([]session.SessionInfo, error) {
+func (s *Service) sessionCatalogSnapshot() (discovered, live []session.SessionInfo, err error) {
 	if s == nil || s.sessionCatalog == nil {
-		return nil, errors.New("session catalog is unavailable")
+		return nil, nil, errors.New("session catalog is unavailable")
 	}
-	return s.sessionCatalog.ListAll()
+	live = make([]session.SessionInfo, 0)
+	for _, managed := range s.activeSessions() {
+		if manager := managed.manager(); manager != nil {
+			info := manager.Summary()
+			if info.Path == "" {
+				_, _, info.Path = managed.identity()
+			}
+			live = append(live, info)
+		}
+	}
+	discovered, err = s.sessionCatalog.ListAllWithSummaries(live)
+	return discovered, live, err
+}
+
+func (s *Service) discoveredSessions() ([]session.SessionInfo, error) {
+	discovered, _, err := s.sessionCatalogSnapshot()
+	return discovered, err
 }
 
 func discoveredSessionPathIDs(values []session.SessionInfo) map[string]string {
@@ -116,81 +125,11 @@ func discoveredSessionInfo(info session.SessionInfo, pathIDs map[string]string) 
 }
 
 func activeSessionInfo(manager *session.SessionManager, managed *managedSession, pathIDs map[string]string) SessionInfo {
-	header := manager.Header()
-	created := header.Timestamp()
-	var lastActivity time.Time
-	entries := manager.Entries()
-	messageCount := 0
-	firstMessage := "(no messages)"
-	for _, entry := range entries {
-		if entry.Type() != "message" {
-			continue
-		}
-		messageCount++
-		text, role, activity, hasContent := sessionEntryMessage(entry.RawJSON())
-		if (role == "user" || role == "assistant") && hasContent && activity.After(time.UnixMilli(0)) && activity.After(lastActivity) {
-			lastActivity = activity
-		}
-		if firstMessage == "(no messages)" && role == "user" && text != "" {
-			firstMessage = text
-		}
+	info := manager.Summary()
+	if info.Path == "" {
+		_, _, info.Path = managed.identity()
 	}
-	modified := created
-	if !lastActivity.IsZero() {
-		modified = lastActivity
-	}
-	name, _ := manager.SessionName()
-	parentID := ""
-	if parent, ok := header.ParentSession(); ok {
-		parentID = pathIDs[cleanPathKey(parent)]
-	}
-	_, _, path := managed.identity()
-	if current, ok := manager.SessionFile(); ok {
-		path = current
-	}
-	return SessionInfo{
-		Path: path, ID: manager.SessionID(), CWD: manager.Cwd(), Name: name,
-		Created: created, Modified: modified, MessageCount: messageCount,
-		FirstMessage: firstMessage, ParentSessionID: parentID,
-	}
-}
-
-func sessionEntryMessage(raw []byte) (text, role string, activity time.Time, hasContent bool) {
-	var entry map[string]json.RawMessage
-	if json.Unmarshal(raw, &entry) != nil {
-		return "", "", time.Time{}, false
-	}
-	var message map[string]json.RawMessage
-	if json.Unmarshal(entry["message"], &message) != nil {
-		return "", "", time.Time{}, false
-	}
-	_ = json.Unmarshal(message["role"], &role)
-	content, hasContent := message["content"]
-	var milliseconds int64
-	if json.Unmarshal(message["timestamp"], &milliseconds) == nil {
-		activity = time.UnixMilli(milliseconds)
-	} else {
-		var timestamp string
-		_ = json.Unmarshal(entry["timestamp"], &timestamp)
-		activity, _ = time.Parse(time.RFC3339, timestamp)
-	}
-	if json.Unmarshal(content, &text) == nil {
-		return text, role, activity, hasContent
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(content, &blocks) != nil {
-		return "", role, activity, hasContent
-	}
-	parts := make([]string, 0, len(blocks))
-	for _, block := range blocks {
-		if block.Type == "text" && block.Text != "" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.Join(parts, " "), role, activity, hasContent
+	return discoveredSessionInfo(info, pathIDs)
 }
 
 func cleanPathKey(value string) string {

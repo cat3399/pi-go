@@ -11,22 +11,24 @@ var ErrResourceAccessDenied = errors.New("access denied")
 
 func (s *Service) resourceRoots() ([]string, error) {
 	roots := []string{s.paths.WorkingDir}
-	projects, err := s.ListProjects()
+	s.projectMu.Lock()
+	projects, err := s.readProjectCatalogLocked()
+	s.projectMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	for _, project := range projects {
-		if project.Path != "" {
+	for _, project := range projects.Projects {
+		if project.Path != "" && !containsProjectPath(projects.Hidden, projectPathKey(project.Path)) {
 			roots = append(roots, project.Path)
 		}
 	}
-	sessions, err := s.ListSessions()
+	cwds, err := s.sessionResourceDirectories()
 	if err != nil {
 		return nil, err
 	}
-	for _, session := range sessions {
-		if session.CWD != "" {
-			roots = append(roots, session.CWD)
+	for _, cwd := range cwds {
+		if cwd != "" {
+			roots = append(roots, cwd)
 		}
 	}
 	s.allowedRootMu.RLock()
@@ -35,6 +37,41 @@ func (s *Service) resourceRoots() ([]string, error) {
 	}
 	s.allowedRootMu.RUnlock()
 	return uniqueCleanPaths(roots), nil
+}
+
+func (s *Service) sessionResourceDirectories() ([]string, error) {
+	locations, err := s.sessionCatalog.ListDirectories()
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]string, len(locations))
+	for _, location := range locations {
+		if _, duplicate := byID[location.ID]; duplicate {
+			// Existing discovery resolves duplicate IDs in activity order. Only
+			// that exceptional case requires full metadata to preserve its choice.
+			sessions, err := s.ListSessions()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]string, 0, len(sessions))
+			for _, info := range sessions {
+				result = append(result, info.CWD)
+			}
+			return result, nil
+		}
+		byID[location.ID] = location.Cwd
+	}
+	for _, managed := range s.activeSessions() {
+		if manager := managed.manager(); manager != nil {
+			location := manager.Location()
+			byID[location.ID] = location.Cwd
+		}
+	}
+	result := make([]string, 0, len(byID))
+	for _, cwd := range byID {
+		result = append(result, cwd)
+	}
+	return result, nil
 }
 
 func (s *Service) allowResourceRoot(root string) {

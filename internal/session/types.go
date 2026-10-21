@@ -337,20 +337,23 @@ type LoadDiagnostic struct {
 }
 
 type Entry struct {
-	id           string
-	parentID     string
-	hasParent    bool
-	timestamp    time.Time
-	typeName     string
-	raw          []byte
-	messageRole  string
-	hasMsgRole   bool
-	message      llm.ConversationMessage
-	assistant    AssistantProvenance
-	hasAssistant bool
-	compaction   *CompactionRecord
-	diagnostics  []Diagnostic
-	payload      EntryPayload
+	id          string
+	parentID    string
+	hasParent   bool
+	timestamp   time.Time
+	typeName    string
+	raw         []byte
+	messageRole string
+	hasMsgRole  bool
+	// Captured from the original message envelope before compatibility defaults
+	// add missing content/timestamps; catalog activity must retain that distinction.
+	messageActivity time.Time
+	message         llm.ConversationMessage
+	assistant       AssistantProvenance
+	hasAssistant    bool
+	compaction      *CompactionRecord
+	diagnostics     []Diagnostic
+	payload         EntryPayload
 }
 
 // EntryPayload is the typed v3 session-entry union.  Entry.RawJSON remains

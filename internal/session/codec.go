@@ -418,17 +418,24 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			}
 			return Entry{}, fmt.Errorf("message entry is missing message")
 		}
+		if messageObject, objectErr := decodeObject(messageRaw); objectErr == nil {
+			if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
+				entry.messageRole = role
+				entry.hasMsgRole = true
+				if _, hasContent := messageObject["content"]; hasContent && (role == "user" || role == "assistant") {
+					var milliseconds int64
+					entry.messageActivity = timestamp
+					if json.Unmarshal(messageObject["timestamp"], &milliseconds) == nil {
+						entry.messageActivity = time.UnixMilli(milliseconds)
+					}
+				}
+			}
+		}
 		if compatible {
 			var omittedOptionalMetadata int
 			messageRaw, omittedOptionalMetadata = normalizeCompatibleMessage(messageRaw, timestamp)
 			for range omittedOptionalMetadata {
 				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticOptionalMetadataOmitted, EntryID: id, ContentIndex: -1})
-			}
-		}
-		if messageObject, objectErr := decodeObject(messageRaw); objectErr == nil {
-			if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
-				entry.messageRole = role
-				entry.hasMsgRole = true
 			}
 		}
 		entry.assistant, entry.hasAssistant, err = decodeAssistantProvenance(messageRaw)

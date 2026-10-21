@@ -264,6 +264,23 @@ func (s *ApplicationSession) promptRunning() bool {
 	return running
 }
 
+// busy samples the same lifecycle flags as State without projecting messages,
+// session metadata, queues, or context usage merely to decide whether to reap.
+func (s *ApplicationSession) busy() (bool, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		session, generation, err := s.currentSession()
+		if err != nil {
+			return false, err
+		}
+		activity := session.Activity()
+		busy := s.promptRunning() || activity.IsStreaming || activity.IsCompacting || session.IsBashRunning()
+		if s.sameBinding(session, generation) {
+			return busy, nil
+		}
+	}
+	return false, ErrSessionChanged
+}
+
 // State samples the current AgentSession directly and retries once if Runtime
 // replaces/rebinds it during the read. It never derives product state by
 // replaying the ApplicationSession event stream.

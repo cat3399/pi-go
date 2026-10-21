@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	sessionCatalogSnapshotVersion  = 1
+	// v2 retains a literal "(no messages)" first user message, rather than
+	// treating that text as an unset value and replacing it with a later one.
+	sessionCatalogSnapshotVersion  = 2
 	maxSessionCatalogSnapshotBytes = 64 << 20
 )
 
@@ -34,6 +36,12 @@ type Catalog struct {
 	closed          bool
 
 	mu sync.Mutex
+
+	// Directory reads have their own header-only index and lock. A file request
+	// must not wait for an unrelated full catalog rebuild to parse message bodies.
+	directoryMu     sync.Mutex
+	directories     map[string]catalogDirectory
+	directoriesDone bool
 }
 
 type catalogFingerprint struct {
@@ -300,6 +308,16 @@ func (info catalogSnapshotInfo) sessionInfo(path string) SessionInfo {
 // ListAll returns the current durable session catalog, ordered by conversation
 // activity. Calls are serialized so concurrent surfaces share one refresh.
 func (c *Catalog) ListAll() ([]SessionInfo, error) {
+	return c.ListAllWithSummaries(nil)
+}
+
+// ListAllWithSummaries overlays caller-owned, loaded session summaries on the
+// files found during discovery. Those files need no second parse after each
+// append. Overrides are never persisted as disk fingerprints: after the owner
+// releases a session, normal discovery reconciles its actual file again.
+// Paths not present on disk are deliberately omitted; the application owns
+// merging delayed-persistence and in-memory sessions into its live catalog.
+func (c *Catalog) ListAllWithSummaries(summaries []SessionInfo) ([]SessionInfo, error) {
 	if c == nil {
 		return nil, errors.New("session catalog is unavailable")
 	}
@@ -314,9 +332,21 @@ func (c *Catalog) ListAll() ([]SessionInfo, error) {
 		return nil, err
 	}
 	present := make(map[string]struct{}, len(files))
+	provided := make(map[string]SessionInfo, len(summaries))
+	for _, info := range summaries {
+		if info.Path != "" {
+			provided[filepath.Clean(info.Path)] = info
+		}
+	}
+	overrides := make(map[string]SessionInfo, len(provided))
 	changed := make([]catalogFile, 0)
 	for _, file := range files {
 		present[file.path] = struct{}{}
+		if info, ok := provided[file.path]; ok {
+			info.Path, info.AllMessagesText = file.path, ""
+			overrides[file.path] = info
+			continue
+		}
 		if record, ok := c.records[file.path]; !ok || record.fingerprint != file.fingerprint {
 			changed = append(changed, file)
 		}
@@ -338,7 +368,7 @@ func (c *Catalog) ListAll() ([]SessionInfo, error) {
 		// the next call without failing session discovery.
 		_ = c.persistSnapshot()
 	}
-	return c.queryAll(), nil
+	return c.queryAll(overrides), nil
 }
 
 func catalogFilesInAgentDir(agentDir string) ([]catalogFile, error) {
@@ -461,12 +491,18 @@ func newCatalogSnapshotInfo(info SessionInfo) *catalogSnapshotInfo {
 	}
 }
 
-func (c *Catalog) queryAll() []SessionInfo {
-	result := make([]SessionInfo, 0, len(c.records))
-	for _, record := range c.records {
+func (c *Catalog) queryAll(overrides map[string]SessionInfo) []SessionInfo {
+	result := make([]SessionInfo, 0, len(c.records)+len(overrides))
+	for path, record := range c.records {
+		if _, overridden := overrides[path]; overridden {
+			continue
+		}
 		if record.valid {
 			result = append(result, record.info)
 		}
+	}
+	for _, info := range overrides {
+		result = append(result, info)
 	}
 	sort.Slice(result, func(left, right int) bool {
 		if !result[left].Modified.Equal(result[right].Modified) {
@@ -493,5 +529,9 @@ func (c *Catalog) Close() error {
 	}
 	c.closed = true
 	c.records = nil
+	c.directoryMu.Lock()
+	c.directoriesDone = true
+	c.directories = nil
+	c.directoryMu.Unlock()
 	return nil
 }

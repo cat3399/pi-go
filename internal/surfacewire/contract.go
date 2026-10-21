@@ -36,20 +36,17 @@ func Snapshot(api application.API) (ApplicationSnapshot, error) {
 	if api == nil {
 		return ApplicationSnapshot{}, errors.New("application API is required")
 	}
-	// The cursor is sampled before the catalog. Events published during the
-	// read remain replayable by either SSE or GUI IPC.
-	revision := api.CurrentRevision()
-	sessions, err := ListSessions(api)
+	value, err := api.Snapshot()
 	if err != nil {
 		return ApplicationSnapshot{}, err
 	}
-	projects, err := ListProjects(api)
-	if err != nil {
-		return ApplicationSnapshot{}, err
+	sessions := make([]SessionInfo, 0, len(value.Sessions))
+	for _, info := range value.Sessions {
+		sessions = append(sessions, SessionInfoFromApplication(info))
 	}
 	return ApplicationSnapshot{
-		Revision: revision, AgentDir: api.AgentDir(), DefaultCWD: api.DefaultCWD(),
-		Projects: projects, Sessions: sessions, RunningSessionIDs: api.RunningIDs(),
+		Revision: value.Revision, AgentDir: value.AgentDir, DefaultCWD: value.DefaultCWD,
+		Projects: projectsFromApplication(value.Projects), Sessions: sessions, RunningSessionIDs: value.RunningSessionIDs,
 	}, nil
 }
 
@@ -205,13 +202,17 @@ func ListProjects(api application.API) ([]ProjectInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	return projectsFromApplication(values), nil
+}
+
+func projectsFromApplication(values []application.ProjectInfo) []ProjectInfo {
 	result := make([]ProjectInfo, 0, len(values))
 	for _, value := range values {
 		result = append(result, ProjectInfo{
 			Path: value.Path, Modified: formatWebTime(value.Modified), SessionCount: value.SessionCount,
 		})
 	}
-	return result, nil
+	return result
 }
 
 func AddProject(ctx context.Context, api application.API, requested string) (ProjectInfo, error) {

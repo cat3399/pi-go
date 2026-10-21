@@ -685,6 +685,9 @@ func TestCatalogRebuildsInvalidSnapshots(t *testing.T) {
 		{name: "unsupported version", data: func(t *testing.T, agentDir string) []byte {
 			return encode(t, catalogSnapshot{Version: sessionCatalogSnapshotVersion + 1, AgentDir: agentDir})
 		}},
+		{name: "previous projection version", data: func(t *testing.T, agentDir string) []byte {
+			return encode(t, catalogSnapshot{Version: sessionCatalogSnapshotVersion - 1, AgentDir: agentDir})
+		}},
 		{name: "different agent directory", data: func(t *testing.T, agentDir string) []byte {
 			return encode(t, catalogSnapshot{Version: sessionCatalogSnapshotVersion, AgentDir: agentDir + "-other"})
 		}},

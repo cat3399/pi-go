@@ -38,6 +38,14 @@ type projectCatalogFile struct {
 }
 
 func (s *Service) ListProjects() ([]ProjectInfo, error) {
+	sessions, err := s.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	return s.projectsForSessions(sessions)
+}
+
+func (s *Service) projectsForSessions(sessions []SessionInfo) ([]ProjectInfo, error) {
 	if s == nil {
 		return nil, errors.New("application service is unavailable")
 	}
@@ -48,11 +56,6 @@ func (s *Service) ListProjects() ([]ProjectInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := s.ListSessions()
-	if err != nil {
-		return nil, err
-	}
-
 	hidden := make(map[string]struct{}, len(catalog.Hidden))
 	for _, path := range catalog.Hidden {
 		hidden[projectPathKey(path)] = struct{}{}

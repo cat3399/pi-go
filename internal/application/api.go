@@ -30,6 +30,7 @@ type API interface {
 
 	ListSessions() ([]SessionInfo, error)
 	ListProjects() ([]ProjectInfo, error)
+	Snapshot() (Snapshot, error)
 	AddProject(context.Context, string) (ProjectInfo, error)
 	RemoveProject(context.Context, string) error
 	SnapshotSession(string, string) (SessionSnapshot, error)
