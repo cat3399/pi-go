@@ -17,6 +17,7 @@ import { latestAssistantUsageInfo } from "./message";
 import { SessionPointPicker } from "./SessionPointPicker";
 import { SessionStatsPanel } from "./SessionStatsPanel";
 import { SettingsDrawer } from "./SettingsDrawer";
+import type { HostUpdater } from "../host-update";
 import { Sidebar } from "./Sidebar";
 import { useApplicationController, type SendBehavior } from "./useApplicationController";
 import { useMobilePanelGestures } from "./useMobilePanelGestures";
@@ -32,6 +33,7 @@ export interface PiWorkbenchProps {
   localError?: string;
   defaultRemoteEndpoint?: string;
   version: string;
+  hostUpdater?: HostUpdater;
   hostKind?: "desktop" | "web" | "mobile";
   createRemoteClient?(endpoint: string): ApplicationClient;
   onEdgeGesturesEnabledChange?(enabled: boolean): void;
@@ -327,6 +329,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       endpoint={remoteEndpoint}
       nodes={remoteConnections.nodes}
       version={props.version}
+      hostUpdater={props.hostUpdater}
       localAvailable={props.localAvailable}
       localError={props.localError}
       hostKind={hostKind}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	coreapp "github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/installation"
 	"github.com/cat3399/pi-go/internal/product"
+	"github.com/cat3399/pi-go/surface/cli"
 	wails "github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -46,6 +48,13 @@ func parseLaunchOptions(args []string) (launchOptions, error) {
 }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println(product.Version)
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		os.Exit(cli.RunUpdateForBuild(context.Background(), os.Args[2:], os.Stdout, os.Stderr, product.GUIBuildInfo()))
+	}
 	options, err := parseLaunchOptions(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
@@ -63,6 +72,7 @@ func main() {
 		Description: "pi-go desktop agent",
 		Services: []wails.Service{
 			wails.NewService(bridge),
+			wails.NewService(NewUpdateBridge()),
 		},
 		Assets: wails.AssetOptions{
 			Handler: wails.AssetFileServerFS(frontendAssets),

@@ -12,10 +12,20 @@ func TestUnifiedCommandShowsAvailableSurfaces(t *testing.T) {
 	if code := run(context.Background(), nil, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"run", "tui", "web", "rpc"} {
+	for _, command := range []string{"run", "tui", "web", "rpc", "update"} {
 		if !strings.Contains(stdout.String(), "  "+command) {
 			t.Fatalf("usage does not contain %q: %s", command, stdout.String())
 		}
+	}
+}
+
+func TestUpdateHelpDoesNotOpenApplication(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"update", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "pi-go update") {
+		t.Fatalf("missing update help: %s", stderr.String())
 	}
 }
 

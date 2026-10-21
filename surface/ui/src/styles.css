@@ -5918,3 +5918,15 @@ input:-webkit-autofill:focus {
     animation: none;
   }
 }
+
+.pi-host-update { padding: 18px; display: grid; gap: 14px; }
+.pi-host-update p { margin: 0; color: var(--pi-text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.pi-host-update details { font-size: 13px; }
+.pi-host-update summary { cursor: pointer; }
+.pi-host-update label { display: grid; gap: 6px; margin-top: 12px; }
+.pi-host-update input:not([type="checkbox"]) { max-width: 280px; padding: 8px 10px; border: 1px solid var(--pi-border); border-radius: 6px; background: var(--pi-bg); color: inherit; }
+.pi-host-update label.pi-host-update-force { display: flex; align-items: center; }
+.pi-host-update-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.pi-host-update-actions button { border: 1px solid var(--pi-border-strong); border-radius: 8px; padding: 8px 14px; background: var(--pi-bg); color: inherit; cursor: pointer; }
+.pi-host-update-actions button:hover:not(:disabled) { background: var(--pi-border-subtle); }
+.pi-host-update-actions button:disabled { opacity: 0.5; cursor: default; }

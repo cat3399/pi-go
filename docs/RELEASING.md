@@ -66,6 +66,13 @@ Release workflow 会串行执行，避免并发任务同时修改同一个版本
 所有发布资产旁会生成 `SHA256SUMS`。向已有版本补充 surface 时，workflow 会保留原资产的校验和、
 合并新资产校验和，并更新发布说明中的完整 surface 列表。
 
+Terminal/Web/GUI 的打包脚本注入 `internal/product.Distribution=archive`；普通源码构建默认 `source`。
+Terminal/Web 的身份来自实际编译标签 `pi_go_webui`，GUI/mobile 由各自独立宿主绑定，
+不从文件名、当前连接的 Core 或启动子命令推断。这些信息用于[程序自更新](usage.md#更新程序)。
+打包时需保持发布文件命名和压缩包根目录的单个程序结构（CLI 为 `pi-go[.exe]`，GUI 为
+`pi-go-gui[.exe]`）；Android 保持应用 ID、版本编码与签名身份。补充 surface 时，只有资产及合并后的校验记录都发布完成，
+该版本才会成为这一 surface 的可更新版本。
+
 包含 Core 的二进制同时内嵌本次编译的源码和使用文档，普通 `go build` 也具备该能力；GUI
 额外内嵌独立 GUI 模块的源码输入。`internal/product.Version` 是 Core 与 Surface 共用的版本
 注入点。资料安装位置、本地自定义和版本对应关系见[本地源码](self-knowledge.md)。

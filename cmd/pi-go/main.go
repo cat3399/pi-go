@@ -30,8 +30,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		writeUsage(stdout)
 		return 0
 	case "version", "--version":
-		_, _ = fmt.Fprintln(stdout, product.Version)
+		_, _ = fmt.Fprintln(stdout, product.CLIBuildInfo().Version)
 		return 0
+	case "update":
+		return cli.RunUpdate(ctx, args[1:], stdout, stderr)
 	case "run":
 		return app.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdout, stderr)
 	case "models":
@@ -58,6 +60,7 @@ Commands:
   web      Serve the WebUI and application API
   rpc      Run the JSONL automation adapter
   models   Update installed built-in model data
+  update   Update this installation's surface
   version  Print the version
   help     Show this help`)
 }

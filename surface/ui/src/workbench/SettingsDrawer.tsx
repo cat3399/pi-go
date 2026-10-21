@@ -4,6 +4,8 @@ import type { ClientKind } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import type { RemoteConnection } from "../remote-connections";
+import type { HostUpdater } from "../host-update";
+import { HostUpdatePanel } from "./HostUpdatePanel";
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -11,6 +13,7 @@ interface SettingsDrawerProps {
   endpoint: string;
   nodes: RemoteConnection[];
   version: string;
+  hostUpdater?: HostUpdater;
   localAvailable: boolean;
   localError?: string;
   hostKind: "desktop" | "web" | "mobile";
@@ -254,6 +257,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                 </div>
               </div>
             </section>
+            {props.hostUpdater && <HostUpdatePanel updater={props.hostUpdater} />}
           </>
         )}
       </main>

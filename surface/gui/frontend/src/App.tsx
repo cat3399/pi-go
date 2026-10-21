@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PiWorkbench } from "@cat3399/pi-workbench";
 import type { GUIHostInfo } from "./wails-client";
 import { readGUIHostInfo, WailsApplicationClient } from "./wails-client";
+import { guiUpdater } from "./host-update";
 
 export default function App() {
   const localClient = useMemo(() => new WailsApplicationClient(), []);
@@ -38,6 +39,7 @@ export default function App() {
       defaultRemoteEndpoint={host.defaultRemoteEndpoint}
       version={host.version}
       hostKind="desktop"
+      hostUpdater={guiUpdater}
     />
   );
 }

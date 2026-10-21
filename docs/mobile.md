@@ -1,7 +1,7 @@
 # pi-go Mobile
 
 Android 应用复用 `surface/ui` 的 React Workbench，通过 Wails WebView 与 Go 网络桥接访问远程
-`pi-go web`。会话和 Agent 在服务器上运行，移动端模块不链接 Go Core。
+`pi-go web`。会话和 Agent 在服务器上运行，移动端模块不链接 Go Core。宿主更新仅复用根模块的产品信息、文件锁与发布更新包。
 
 ## 工具链
 
@@ -62,3 +62,9 @@ PI_GO_WEB_PASSWORD='change-me' ./bin/pi-go web \
 请求由 Go 网络桥接发送；HTTP 不依赖 WebView mixed content 设置，HTTPS 使用系统证书根，
 SSE 断开后可以重连。协议见 [Surface](SURFACES.md)，源码归属见
 [共享 UI 第三方说明](../surface/ui/THIRD_PARTY_NOTICES.md)。
+
+## 应用更新
+
+在“设置 → 关于 → 应用更新”检查当前平台的最新版，点击“下载 APK”后由系统浏览器下载，
+完成后手动安装。应用不申请安装权限。该入口不依赖远程 Core 连接，版本显示来自已安装的
+Android 包；完整说明见[更新程序](usage.md#更新程序)。

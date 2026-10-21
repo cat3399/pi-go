@@ -14,7 +14,8 @@ if [ "${SKIP_FRONTEND_BUILD:-0}" != "1" ]; then
 fi
 output_dir=${OUTPUT_DIR:-"$repo_dir/bin"}
 version=${PI_GO_VERSION:-0.1.0-dev}
+distribution=${PI_GO_DISTRIBUTION:-source}
 mkdir -p "$output_dir"
 
 cd "$repo_dir"
-go build -trimpath -tags pi_go_webui -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go
+go build -trimpath -tags pi_go_webui -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version -X=github.com/cat3399/pi-go/internal/product.Distribution=$distribution" -o "$output_dir/pi-go$(go env GOEXE)" ./cmd/pi-go

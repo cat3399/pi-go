@@ -50,7 +50,7 @@ for target in $targets; do
 	binary_dir="$staging_root/$archive_base"
 	mkdir -p "$binary_dir"
 
-	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+	CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" PI_GO_DISTRIBUTION=archive \
 		SKIP_FRONTEND_BUILD="$skip_frontend_build" \
 		make -C "$repo_dir" build SURFACE="$surface" VERSION="$version" OUTPUT_DIR="$binary_dir"
 

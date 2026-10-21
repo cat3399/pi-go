@@ -19,6 +19,9 @@ make build
 运行前通过环境变量或 `~/.pi-go/agent/auth.json` 配置 Provider 凭据，模型由设置或启动参数选择。
 详细步骤见[使用说明](docs/usage.md)、[Provider 配置](docs/providers.md)和[模型配置](docs/models.md)。
 
+Terminal/Web 使用 `pi-go update`，GUI 使用 `pi-go-gui update` 或设置页替换更新，
+Android 在设置页下载最新版 APK。各入口选择自己的产物，详见[更新程序](docs/usage.md#更新程序)。
+
 单次运行和自动化入口：
 
 ```sh

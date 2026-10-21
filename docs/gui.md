@@ -11,6 +11,7 @@ Workbench 通过 Wails IPC 使用本地 Core。设置中的远程模式使用与
 |---|---|
 | `main.go` | 桌面入口、窗口、静态资源和 Core 装配 |
 | `bridge.go` | 本地 Core 的 query/command/event IPC |
+| `update_bridge.go` | 当前 GUI 的发布检查与更新 IPC |
 | `frontend/` | Wails 前端宿主 |
 | `../ui/` | 共享 Workbench |
 | `../web/` | 远程 HTTP/SSE 和认证 |
@@ -35,3 +36,6 @@ macOS 需要 Xcode Command Line Tools；Windows 和 Linux 需要对应的编译�
 Workbench 提供会话管理、流式对话、模型与思考等级选择、Markdown、图片附件、工具详情、文件预览、
 本地/远程切换及远程密码登录。公共通信契约见 [Surface](SURFACES.md)，
 源码归属与许可证见[共享 UI 第三方说明](../surface/ui/THIRD_PARTY_NOTICES.md)。
+
+在“设置 → 关于 → 应用更新”中检查并更新本机 GUI，也可运行 `pi-go-gui update --check`
+或 `pi-go-gui update`。更新后退出并重新打开应用；行为与恢复方法见[更新程序](usage.md#更新程序)。

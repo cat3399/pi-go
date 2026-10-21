@@ -23,6 +23,7 @@ func main() {
 		Description: "pi-go remote mobile client",
 		Services: []wails.Service{
 			wails.NewService(bridge),
+			wails.NewService(&UpdateBridge{}),
 		},
 		Assets: wails.AssetOptions{
 			Handler: wails.AssetFileServerFS(frontendAssets),
