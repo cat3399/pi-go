@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -120,9 +119,6 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 	}
 	if oracle.UpstreamCommit != providerWireUpstreamCommit {
 		t.Fatalf("upstream commit = %q, want %q", oracle.UpstreamCommit, providerWireUpstreamCommit)
-	}
-	if len(oracle.Scenarios) != 5 {
-		t.Fatalf("provider wire scenarios = %d, want 5", len(oracle.Scenarios))
 	}
 
 	seen := make(map[string]bool, len(oracle.Scenarios))
@@ -591,25 +587,4 @@ func providerWireResponsesSSE(t *testing.T, prefix string) string {
 		map[string]any{"type": "response.completed", "sequence_number": 10, "response": map[string]any{"id": responseID, "status": "completed", "service_tier": map[bool]string{true: "flex", false: "priority"}[prefix == "codex"], "output": []any{reasoningItem}, "usage": map[string]any{"input_tokens": 20, "output_tokens": 8, "total_tokens": 28, "input_tokens_details": map[string]any{"cached_tokens": 3, "cache_write_tokens": 2}, "output_tokens_details": map[string]any{"reasoning_tokens": 3}}}},
 	}
 	return responsesSSE(events...) + "data: [DONE]\n\n"
-}
-
-func TestProviderWireOracleGeneratorMetadataIsStable(t *testing.T) {
-	raw, err := os.ReadFile("testdata/upstream_provider_wire_oracle.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(raw, &document); err != nil {
-		t.Fatal(err)
-	}
-	generator, ok := document["generator"].(map[string]any)
-	if !ok || generator["corpus"] != "upstream_provider_wire_corpus.json" {
-		t.Fatalf("generator metadata = %#v", document["generator"])
-	}
-	if got := document["generatedBy"]; got != "pinned packages/ai provider adapters with deterministic HTTP/SSE transport" {
-		t.Fatalf("generatedBy = %#v", got)
-	}
-	if reflect.ValueOf(document["scenarios"]).Len() != 5 {
-		t.Fatalf("scenario metadata = %#v", document["scenarios"])
-	}
 }

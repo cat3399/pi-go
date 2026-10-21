@@ -340,8 +340,11 @@ func TestRunProductionRoutesIndependentOpenAICodexOAuthOverWebSocket(t *testing.
 	}))
 	defer server.Close()
 	writeProviderModelsJSON(t, agentDir, map[string]any{"openai-codex": map[string]any{"baseUrl": server.URL}})
-	writeAuthJSON(t, agentDir, fmt.Sprintf(`{"openai-codex":{"type":"oauth","access":%q,"refresh":"refresh","expires":%d,"accountId":"codex-production-account"}}`, token, time.Now().Add(time.Hour).UnixMilli()))
+	writeAuthJSON(t, agentDir, fmt.Sprintf(`{"openai-codex":{"type":"oauth","access":%q,"refresh":"refresh","expires":%d,"refreshAt":%d,"accountId":"codex-production-account"}}`, token, productionTestTime.Add(time.Hour).UnixMilli(), productionTestTime.Add(30*time.Minute).UnixMilli()))
 	config := productionTestConfig(workingDir, agentDir, nil)
+	config.OpenAIOAuthClock = func() time.Time { return productionTestTime }
+	config.OpenAIOAuthBaseURL = server.URL
+	config.OpenAIOAuthHTTPClient = server.Client()
 	var stdout, stderr bytes.Buffer
 	code := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai-codex/gpt-5.5", "--session", filepath.Join(workingDir, "codex.jsonl"), "-p", "hello",

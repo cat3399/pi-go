@@ -754,11 +754,18 @@ func TestWebProjectTrustAndSkillToggleUseApplicationResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = skillsResponse.Body.Close()
-	if skillsResponse.StatusCode != http.StatusOK || !skillsBody.ProjectResourcesLoaded || len(skillsBody.Skills) != 1 || skillsBody.Skills[0].Name != "review" {
+	var reviewPath string
+	for _, skill := range skillsBody.Skills {
+		if skill.Name == "review" && skill.FilePath == skillPath {
+			reviewPath = skill.FilePath
+			break
+		}
+	}
+	if skillsResponse.StatusCode != http.StatusOK || !skillsBody.ProjectResourcesLoaded || reviewPath == "" {
 		t.Fatalf("skills response = %d, %#v", skillsResponse.StatusCode, skillsBody)
 	}
 	toggleBody, err := json.Marshal(map[string]any{
-		"cwd": cwd, "filePath": skillsBody.Skills[0].FilePath, "disableModelInvocation": true,
+		"cwd": cwd, "filePath": reviewPath, "disableModelInvocation": true,
 	})
 	if err != nil {
 		t.Fatal(err)

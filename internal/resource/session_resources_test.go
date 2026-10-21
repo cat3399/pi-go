@@ -28,7 +28,7 @@ func TestServiceRebuildsPromptAndExpandsInputFromOneHealthySnapshot(t *testing.T
 		t.Fatal(err)
 	}
 	service, err := resource.New(resource.Config{
-		CWD: cwd, AgentDir: agentDir,
+		CWD: cwd, AgentDir: agentDir, HomeDir: t.TempDir(),
 		Tools: []resource.Tool{
 			{Name: "read", Snippet: "Read files"},
 			{Name: "bash", Snippet: "Run commands"},

@@ -838,7 +838,7 @@ func TestApplicationSessionGetCommandsProjectsPromptAndSkillResources(t *testing
 		ConfigureServices: func(cwd string, services *agentruntime.Services) {
 			writeSessionFile(t, filepath.Join(cwd, "prompts", "review.md"), "---\ndescription: Review files\nargument-hint: <path>\n---\nreview $1")
 			writeSessionFile(t, filepath.Join(cwd, "skills", "audit", "SKILL.md"), "---\nname: audit\ndescription: Audit project\n---\naudit")
-			resources, err := resource.New(resource.Config{CWD: cwd, AgentDir: cwd})
+			resources, err := resource.New(resource.Config{CWD: cwd, AgentDir: cwd, HomeDir: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}

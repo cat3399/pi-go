@@ -21,7 +21,7 @@ func newService(t *testing.T) (*Service, string, string) {
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{CWD: cwd, AgentDir: agent, Tools: []Tool{{Name: "read", Snippet: "Read files"}}})
+	s, err := New(Config{CWD: cwd, AgentDir: agent, HomeDir: t.TempDir(), Tools: []Tool{{Name: "read", Snippet: "Read files"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
