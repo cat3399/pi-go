@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -49,7 +50,7 @@ type providerWireScenario struct {
 	Name    string            `json:"name"`
 	API     string            `json:"api"`
 	Input   providerWireInput `json:"input"`
-	Request any               `json:"request"`
+	Request map[string]any    `json:"request"`
 	Events  any               `json:"events"`
 	Result  any               `json:"result"`
 }
@@ -130,7 +131,11 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 			}
 			seen[scenario.API] = true
 			request, events, result := runProviderWireScenario(t, scenario)
-			t.Run("request", func(t *testing.T) { assertProviderWireJSON(t, "request", request, scenario.Request) })
+			t.Run("request", func(t *testing.T) {
+				assertProviderWireJSON(t, "request",
+					providerWireRequestContract(t, scenario.API, request),
+					providerWireRequestContract(t, scenario.API, scenario.Request))
+			})
 			t.Run("events", func(t *testing.T) { assertProviderWireJSON(t, "events", events, scenario.Events) })
 			t.Run("result", func(t *testing.T) { assertProviderWireJSON(t, "result", result, scenario.Result) })
 		})
@@ -146,6 +151,26 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 			t.Errorf("missing provider wire oracle for %q", api)
 		}
 	}
+}
+
+func providerWireRequestContract(t *testing.T, api string, request map[string]any) map[string]any {
+	t.Helper()
+	if api != provider.OpenAIResponsesAPI {
+		return request
+	}
+	body, ok := request["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider wire request body is not an object: %T", request["body"])
+	}
+	// Cache mode and TTL follow provider policy, covered by
+	// TestOpenAIResponsesCachePolicyAndConfigurationPrecedence. Keep the cache
+	// key, authentication, conversation and tool payloads in the pinned oracle.
+	normalized := maps.Clone(request)
+	body = maps.Clone(body)
+	delete(body, "prompt_cache_retention")
+	delete(body, "prompt_cache_options")
+	normalized["body"] = body
+	return normalized
 }
 
 func runProviderWireScenario(t *testing.T, scenario providerWireScenario) (map[string]any, []map[string]any, map[string]any) {

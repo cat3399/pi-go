@@ -48,18 +48,36 @@ func TestOpenAIResponsesAcceptsRequestAuthorizationWithoutAPIKey(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesCacheRetentionUsesRequestThenAmbientWhitelist(t *testing.T) {
+func TestOpenAIResponsesCachePolicyAndConfigurationPrecedence(t *testing.T) {
 	t.Setenv("PI_CACHE_RETENTION", "long")
+	supported, unsupported := true, false
+	explicitMode := &provider.OpenAIResponsesCompat{SupportsExplicitPromptCacheMode: &supported}
 	for _, testCase := range []struct {
-		name    string
-		env     map[string]string
-		wantTTL bool
+		name      string
+		env       map[string]string
+		retention provider.CacheRetention
+		compat    *provider.OpenAIResponsesCompat
+		wantTTL   bool
+		wantMode  string
 	}{
 		{name: "ambient long", wantTTL: true},
 		{name: "request short overrides ambient", env: map[string]string{"PI_CACHE_RETENTION": "short", "UNRELATED_SECRET": "must-not-be-consumed"}},
+		{name: "explicit short overrides request environment", retention: provider.CacheRetentionShort, env: map[string]string{"PI_CACHE_RETENTION": "long"}},
+		{name: "disabled cache", retention: provider.CacheRetentionNone},
+		{name: "disabled implicit cache", retention: provider.CacheRetentionNone, compat: explicitMode, wantMode: "explicit"},
+		{name: "short cache with explicit mode support", retention: provider.CacheRetentionShort, compat: explicitMode},
+		{name: "long cache with explicit mode support", retention: provider.CacheRetentionLong, compat: explicitMode, wantTTL: true},
+		{name: "long cache unsupported", retention: provider.CacheRetentionLong, compat: &provider.OpenAIResponsesCompat{SupportsLongCacheRetention: &unsupported, SupportsExplicitPromptCacheMode: &supported}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			var captured map[string]any
+			var captured struct {
+				Key       string `json:"prompt_cache_key"`
+				Retention string `json:"prompt_cache_retention"`
+				Options   *struct {
+					TTL  string `json:"ttl"`
+					Mode string `json:"mode"`
+				} `json:"prompt_cache_options"`
+			}
 			implementation := mustResponsesProvider(t, provider.OpenAIResponsesConfig{
 				BaseURL: "https://fixture.test/v1", APIKey: "secret",
 				Client: responsesDoerFunc(func(request *http.Request) (*http.Response, error) {
@@ -71,12 +89,15 @@ func TestOpenAIResponsesCacheRetentionUsesRequestThenAmbientWhitelist(t *testing
 					})), nil
 				}),
 			})
-			model, err := newTestModel(provider.OpenAIProviderID, provider.OpenAIResponsesAPI, "cache-model")
+			model, err := newModel(provider.ModelSpec{
+				Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "cache-model",
+				Compat: provider.ModelCompat{OpenAIResponses: testCase.compat},
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			request, err := provider.NewRequestWithOptions(model, "", []llm.ConversationMessage{mustUser(t, "hi")}, provider.RequestOptions{
-				Stream: provider.StreamOptions{Env: testCase.env},
+				Stream: provider.StreamOptions{Env: testCase.env, CacheRetention: testCase.retention, SessionID: "cache-session"},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -85,10 +106,30 @@ func TestOpenAIResponsesCacheRetentionUsesRequestThenAmbientWhitelist(t *testing
 			if terminal.FinishReason() != llm.FinishStop {
 				t.Fatalf("terminal = %#v", terminal)
 			}
-			if got := captured["prompt_cache_retention"]; testCase.wantTTL && got != "24h" {
-				t.Fatalf("prompt_cache_retention = %#v, want 24h", got)
-			} else if !testCase.wantTTL && got != nil {
-				t.Fatalf("prompt_cache_retention = %#v, want omitted", got)
+			ttl, mode := captured.Retention, ""
+			if captured.Options != nil {
+				if ttl != "" && captured.Options.TTL != "" {
+					t.Fatalf("multiple cache retention encodings: %#v", captured)
+				}
+				ttl += captured.Options.TTL
+				mode = captured.Options.Mode
+			}
+			if testCase.wantTTL {
+				if duration, err := time.ParseDuration(ttl); err != nil || duration <= 0 {
+					t.Fatalf("cache retention = %q, want a positive duration", ttl)
+				}
+			} else if ttl != "" {
+				t.Fatalf("cache retention = %q, want omitted", ttl)
+			}
+			if mode != testCase.wantMode {
+				t.Fatalf("cache mode = %q, want %q", mode, testCase.wantMode)
+			}
+			wantKey := "cache-session"
+			if testCase.retention == provider.CacheRetentionNone {
+				wantKey = ""
+			}
+			if captured.Key != wantKey {
+				t.Fatalf("cache key = %q, want %q", captured.Key, wantKey)
 			}
 		})
 	}

@@ -601,12 +601,13 @@ capabilities:
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/provider/openai_responses_test.go, symbol: TestOpenAIResponsesStreamsTextAndNormalizesRequestAndUsage}
+      - {kind: go_test, path: internal/provider/openai_responses_test.go, symbol: TestOpenAIResponsesCachePolicyAndConfigurationPrecedence}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesToolDefinitionsAndFunctionCallReplay}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesPersistsEmptyReasoningSummaryAcrossRestartAndReplay}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesRepairsLegacyEncryptedReasoningWithoutSummary}
       - {kind: go_test, path: internal/provider/openai_responses_tools_test.go, symbol: TestOpenAIResponsesAssemblesMultipartReasoningAndIgnoresProgressMetadata}
       - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
-    intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines; the request boundary repairs only historical pi-go encrypted signatures that omitted schema-required summary.
+    intentionalGoDifference: HTTP/SSE decoding and replay state use explicit bounded Go state machines; the request boundary repairs only historical pi-go encrypted signatures that omitted schema-required summary. Prompt-cache mode and TTL follow the Go provider policy and are checked independently of the frozen wire oracle; cache identity, authentication, conversation, tools, events, and results remain covered by the oracle.
     remainingDifference: none
 
   - id: provider.openai_completions
