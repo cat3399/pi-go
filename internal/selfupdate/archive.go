@@ -15,35 +15,34 @@ import (
 const maxArchiveBytes int64 = 512 << 20
 const maxExecutableBytes int64 = 512 << 20
 
-func (u *Updater) download(ctx context.Context, plan Plan) (string, error) {
+// The caller owns destination and removes it with the rest of the staging
+// directory on both success and failure.
+func (u *Updater) download(ctx context.Context, plan Plan, destination string) error {
 	response, err := u.get(ctx, plan.archiveURL)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer response.Body.Close()
 	if response.ContentLength > maxArchiveBytes {
-		return "", fmt.Errorf("update archive exceeds size limit")
+		return fmt.Errorf("update archive exceeds size limit")
 	}
-	file, err := os.CreateTemp("", "pi-go-update-*")
+	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	n, err := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, maxArchiveBytes+1))
+	n, err := copyContext(ctx, io.MultiWriter(file, hash), io.LimitReader(response.Body, maxArchiveBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("download update (partial archive at %s): %w", file.Name(), err)
+		return fmt.Errorf("download update: %w", err)
 	}
 	if n > maxArchiveBytes {
-		return "", fmt.Errorf("update archive exceeds size limit (saved at %s)", file.Name())
+		return fmt.Errorf("update archive exceeds size limit")
 	}
 	if string(hash.Sum(nil)) != string(plan.checksum[:]) {
-		return "", fmt.Errorf("SHA-256 mismatch for %s (archive at %s); installation was not changed", plan.Asset, file.Name())
+		return fmt.Errorf("SHA-256 mismatch for %s; installation was not changed", plan.Asset)
 	}
-	if err := file.Close(); err != nil {
-		return "", err
-	}
-	return file.Name(), nil
+	return file.Close()
 }
 
 func extractExecutable(ctx context.Context, archive, destination string, plan Plan) error {

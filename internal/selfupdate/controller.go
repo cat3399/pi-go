@@ -51,7 +51,7 @@ func (c *Controller) Apply(ctx context.Context, id string) (Result, error) {
 		return Result{}, errors.New("update check expired; check again before installing")
 	}
 	result, err := c.updater.Apply(ctx, c.plan.Plan)
-	if err == nil {
+	if err == nil || result.Updated {
 		c.installed = result
 		c.plan = CheckedPlan{}
 	}

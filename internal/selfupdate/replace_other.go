@@ -4,6 +4,6 @@ package selfupdate
 
 import "errors"
 
-func replaceExecutable(string, string, string) error {
+func replaceExecutable(string, string) error {
 	return errors.New("portable self-update is unavailable on this platform")
 }

@@ -46,8 +46,7 @@ type Plan struct {
 
 type Result struct {
 	Plan
-	Updated bool   `json:"updated"`
-	Backup  string `json:"backup,omitempty"`
+	Updated bool `json:"updated"`
 }
 
 // Updater is configured by the composition root. APIURL/Client are injectable

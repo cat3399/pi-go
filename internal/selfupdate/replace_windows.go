@@ -3,14 +3,20 @@ package selfupdate
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
 
-func replaceExecutable(target, next, backup string) error {
+func replaceExecutable(target, next string) error {
 	// Windows allows a running image to be renamed, but not overwritten.
-	// Backup names are unique, so another process may still be running any
-	// previous image. Roll back a failed second move before releasing the lock.
+	// Reuse one old-file slot, removing the previous image before replacing
+	// anything. If it is still running, fail instead of accumulating copies.
+	backup := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+".old")
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove previous executable at %s; close processes using it and retry: %w", backup, err)
+	}
 	if err := moveExecutable(target, backup); err != nil {
 		return fmt.Errorf("back up running executable: %w", err)
 	}
@@ -20,6 +26,9 @@ func replaceExecutable(target, next, backup string) error {
 		}
 		return fmt.Errorf("replace failed; original executable restored: %w", err)
 	}
+	// A running old image cannot be deleted yet. It stays in the fixed slot
+	// until the next update; an image that is no longer running is removed now.
+	_ = os.Remove(backup)
 	return nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,7 +131,7 @@ func assertVersion(t *testing.T, path, version string) {
 	}
 }
 
-func holdExecutable(t *testing.T, path string) {
+func holdExecutable(t *testing.T, path string) func() {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	command := exec.CommandContext(ctx, path, "hold")
@@ -148,13 +149,56 @@ func holdExecutable(t *testing.T, path string) {
 		cancel()
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
+	stop := sync.OnceFunc(func() {
 		stdin.Close()
 		_ = command.Wait()
 		cancel()
 	})
+	t.Cleanup(stop)
 	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || line != "ready\n" {
 		t.Fatalf("start running executable: %q, %v", line, err)
+	}
+	return stop
+}
+
+// Isolate the system temp directory too: a clean installation directory must
+// not conceal leaked download archives elsewhere.
+func isolateUpdateTemp(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, dir)
+	}
+	t.Cleanup(func() {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 0 {
+			t.Errorf("update leaked system temporary files: %v, %v", entries, err)
+		}
+	})
+}
+
+func assertUpdateFiles(t *testing.T, path string, runningOldBinary []byte) {
+	t.Helper()
+	want := map[string]bool{filepath.Base(path): true, filepath.Base(path) + ".update.lock": true}
+	if runtime.GOOS == "windows" && runningOldBinary != nil {
+		old := "." + filepath.Base(path) + ".old"
+		want[old] = true
+		if data, err := os.ReadFile(filepath.Join(filepath.Dir(path), old)); err != nil || !bytes.Equal(data, runningOldBinary) {
+			t.Errorf("old executable was not preserved: %v", err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !want[entry.Name()] {
+			t.Errorf("unexpected update artifact: %s", entry.Name())
+		}
+		delete(want, entry.Name())
+	}
+	if len(want) != 0 {
+		t.Errorf("missing installation files: %v", want)
 	}
 }
 
@@ -164,10 +208,13 @@ func TestUpdateRunningExecutablePreservesSurfaceAndSupportsReinstallAndDowngrade
 	}
 	for _, surface := range []string{"terminal", "web", "gui"} {
 		t.Run(surface, func(t *testing.T) {
-			oldBinary := buildFixture(t, "0.1.0", surface)
-			newBinary := buildFixture(t, "0.2.0", surface)
 			build := testBuild()
 			build.Surface = surface
+			if err := validateTarget(build); err != nil {
+				t.Skip(err)
+			}
+			oldBinary := buildFixture(t, "0.1.0", surface)
+			newBinary := buildFixture(t, "0.2.0", surface)
 			f := newReleaseFixture(t)
 			latest := f.publish(build, "0.2.0", archiveFixture(t, newBinary, build.OS, binaryName(surface, runtime.GOOS)))
 			f.publish(build, "0.1.0", archiveFixture(t, oldBinary, build.OS, binaryName(surface, runtime.GOOS)))
@@ -177,24 +224,25 @@ func TestUpdateRunningExecutablePreservesSurfaceAndSupportsReinstallAndDowngrade
 			if err := os.WriteFile(path, oldBinary, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			holdExecutable(t, path)
+			stopOld := holdExecutable(t, path)
 			u := &Updater{Build: build, Executable: path, APIURL: f.server.URL, Client: f.server.Client()}
 			// The symlink itself must survive updating its resolved target.
 			link := filepath.Join(t.TempDir(), binaryName(surface, runtime.GOOS))
 			if err := os.Symlink(path, link); err == nil {
 				u.Executable = link
 			}
+			isolateUpdateTemp(t)
 			ctx := context.Background()
 			plan, err := u.Check(ctx, Options{})
 			if err != nil {
 				t.Fatal(err)
 			}
 			result, err := u.Apply(ctx, plan)
-			if err != nil || !result.Updated || result.Backup == "" {
+			if err != nil || !result.Updated {
 				t.Fatalf("update: %+v, %v", result, err)
 			}
 			assertVersion(t, path, "0.2.0")
-			assertVersion(t, result.Backup, "0.1.0")
+			assertUpdateFiles(t, path, oldBinary)
 			if u.Executable == link {
 				info, err := os.Lstat(link)
 				if err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -217,11 +265,22 @@ func TestUpdateRunningExecutablePreservesSurfaceAndSupportsReinstallAndDowngrade
 			if err != nil || force.Action != "reinstall" {
 				t.Fatalf("reinstall plan: %+v, %v", force, err)
 			}
+			if runtime.GOOS == "windows" {
+				if result, err := u.Apply(ctx, force); err == nil || result.Updated || !strings.Contains(err.Error(), "remove previous executable") {
+					t.Fatalf("updated while the previous image was still running: %+v, %v", result, err)
+				}
+				assertVersion(t, path, "0.2.0")
+				assertUpdateFiles(t, path, oldBinary)
+			}
+			stopOld()
+			stopCurrent := holdExecutable(t, path)
 			reinstalled, err := u.Apply(ctx, force)
-			if err != nil || !reinstalled.Updated || reinstalled.Backup == result.Backup {
+			if err != nil || !reinstalled.Updated {
 				t.Fatalf("reinstall: %+v, %v", reinstalled, err)
 			}
-			assertVersion(t, reinstalled.Backup, "0.2.0")
+			assertVersion(t, path, "0.2.0")
+			assertUpdateFiles(t, path, newBinary)
+			stopCurrent()
 			downgrade, err := u.Check(ctx, Options{Version: "v0.1.0"})
 			if err != nil || downgrade.Action != "downgrade" {
 				t.Fatalf("downgrade plan: %+v, %v", downgrade, err)
@@ -231,7 +290,7 @@ func TestUpdateRunningExecutablePreservesSurfaceAndSupportsReinstallAndDowngrade
 				t.Fatalf("downgrade: %+v, %v", reverted, err)
 			}
 			assertVersion(t, path, "0.1.0")
-			assertVersion(t, reverted.Backup, "0.2.0")
+			assertUpdateFiles(t, path, nil)
 		})
 	}
 }
@@ -261,6 +320,7 @@ func TestInvalidUpdatesPreserveInstalledExecutable(t *testing.T) {
 				f.set("/download/v"+test.version+"/"+r.Assets[0].Name, []byte("corrupted download"))
 			}
 			u := f.updater(t, testBuild())
+			isolateUpdateTemp(t)
 			original, _ := os.ReadFile(u.Executable)
 			plan, err := u.Check(context.Background(), Options{Version: test.version})
 			if err != nil {
@@ -273,21 +333,25 @@ func TestInvalidUpdatesPreserveInstalledExecutable(t *testing.T) {
 			if err != nil || !bytes.Equal(original, after) {
 				t.Fatalf("failed update changed installation: %v", err)
 			}
+			assertUpdateFiles(t, u.Executable, nil)
 		})
 	}
 }
 
 func TestReplaceFailureRestoresOriginal(t *testing.T) {
 	dir := t.TempDir()
-	target, next, backup := filepath.Join(dir, executableName()), filepath.Join(dir, "missing"), filepath.Join(dir, "previous")
+	target, next := filepath.Join(dir, executableName()), filepath.Join(dir, "missing")
 	if err := os.WriteFile(target, []byte("original"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := replaceExecutable(target, next, backup); err == nil {
+	if err := replaceExecutable(target, next); err == nil {
 		t.Fatal("expected replacement failure")
 	}
 	if data, err := os.ReadFile(target); err != nil || string(data) != "original" {
 		t.Fatalf("original not restored: %q, %v", data, err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Fatalf("failed replacement left files: %v, %v", entries, err)
 	}
 }
 
@@ -321,6 +385,7 @@ func TestCancelledDownloadPreservesInstallation(t *testing.T) {
 	r := f.publish(testBuild(), "0.2.0", []byte("archive"))
 	f.setJSON("/releases?per_page=100&page=1", []release{r})
 	u := f.updater(t, testBuild())
+	isolateUpdateTemp(t)
 	plan, err := u.Check(context.Background(), Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -336,6 +401,82 @@ func TestCancelledDownloadPreservesInstallation(t *testing.T) {
 	}
 	if data, err := os.ReadFile(u.Executable); err != nil || string(data) != "installed fixture" {
 		t.Fatalf("cancelled update changed installation: %q, %v", data, err)
+	}
+	assertUpdateFiles(t, u.Executable, nil)
+}
+
+type readFunc func([]byte) (int, error)
+
+func (f readFunc) Read(p []byte) (int, error) { return f(p) }
+
+func TestInterruptedDownloadCleansPartialArchive(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		name := "network failure"
+		if cancelled {
+			name = "cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newReleaseFixture(t)
+			f.publish(testBuild(), "0.2.0", []byte("complete archive"))
+			u := f.updater(t, testBuild())
+			isolateUpdateTemp(t)
+			plan, err := u.Check(context.Background(), Options{Version: "0.2.0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			failure := error(io.ErrUnexpectedEOF)
+			if cancelled {
+				failure = context.Canceled
+			}
+			u.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body := io.MultiReader(strings.NewReader("partial archive"), readFunc(func([]byte) (int, error) {
+					if cancelled {
+						cancel()
+					}
+					return 0, failure
+				}))
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(body), Request: req}, nil
+			})}
+			result, err := u.Apply(ctx, plan)
+			if !errors.Is(err, failure) || result.Updated {
+				t.Fatalf("interrupted download: %+v, %v", result, err)
+			}
+			if data, err := os.ReadFile(u.Executable); err != nil || string(data) != "installed fixture" {
+				t.Fatalf("interrupted download changed installation: %q, %v", data, err)
+			}
+			assertUpdateFiles(t, u.Executable, nil)
+		})
+	}
+}
+
+func TestUpdateCleanupOnlyRemovesItsOwnDirectory(t *testing.T) {
+	f := newReleaseFixture(t)
+	f.publish(testBuild(), "0.2.0", []byte("invalid archive"))
+	u := f.updater(t, testBuild())
+	preexisting := filepath.Join(filepath.Dir(u.Executable), ".pi-go-update-existing")
+	if err := os.Mkdir(preexisting, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(preexisting, "keep")
+	if err := os.WriteFile(sentinel, []byte("existing data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	isolateUpdateTemp(t)
+	plan, err := u.Check(context.Background(), Options{Version: "0.2.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := u.Apply(context.Background(), plan); err == nil || result.Updated || !strings.Contains(err.Error(), "extract executable") {
+		t.Fatalf("invalid archive: %+v, %v", result, err)
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "existing data" {
+		t.Fatalf("cleanup touched an existing directory: %q, %v", data, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(u.Executable))
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("cleanup left temporary files: %v, %v", entries, err)
 	}
 }
 

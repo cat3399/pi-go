@@ -109,7 +109,7 @@ func runUpdateCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 		return writeUpdateJSON(stdout, stderr, result)
 	}
 	if result.Updated {
-		fmt.Fprintf(stdout, "Updated %s from %s to %s.\nPrevious executable: %s\nRestart %s to use the new version.\n", plan.Surface, plan.CurrentVersion, plan.TargetVersion, result.Backup, name)
+		fmt.Fprintf(stdout, "Updated %s from %s to %s.\nRestart %s to use the new version.\n", plan.Surface, plan.CurrentVersion, plan.TargetVersion, name)
 	} else {
 		fmt.Fprintln(stdout, "Already at or ahead of the target release.")
 	}

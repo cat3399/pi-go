@@ -76,10 +76,12 @@ Release 如果只包含其他 surface，不会成为当前安装的目标。web 
 旧版 GUI 的版本从二进制符号读取，新版也提供 `--version`。更新不会创建 Agent 会话、修改设置或重启服务。
 成功后重新启动程序以使用新版本；正在运行的进程继续使用已加载版本。
 
-旧程序保留在安装目录旁的 `.pi-go-update-*/previous-pi-go`（Windows 为
-`previous-pi-go.exe`；GUI 为 `previous-pi-go-gui` 或 `previous-pi-go-gui.exe`），成功输出会给出准确路径。下载或验证失败不会修改原程序；Unix 原子替换
-目标文件，Windows 的第二次移动失败会尝试恢复旧文件。若被强制终止或恢复失败，可从该目录
-将旧程序恢复到原安装路径。下载文件保留在系统临时目录，失败的暂存目录也会保留以便检查。
+下载包与解压文件放在安装目录旁的同一个临时目录中，更新成功或失败返回时都会清理；
+清理失败会报告具体路径。下载或验证失败不会修改原程序。Linux/macOS 原子替换目标文件，
+不保留旧程序副本。Windows 将旧程序暂存到固定的 `.<程序文件名>.old` 路径，例如
+`.pi-go.exe.old` 或 `.pi-go-gui.exe.old`；替换成功后尝试删除，仍被进程占用时留待下一次
+更新前清理。如果上次旧程序仍被占用，本次更新直接报错。Windows 的第二次移动失败会恢复
+旧程序；恢复失败时保留该固定旧文件并在错误中报告恢复路径。
 校验和提供下载完整性校验；当前发布尚未对校验文件签名。
 
 Android 在应用内检查匹配当前平台的最新版 APK，点击“下载 APK”后交给系统浏览器下载，
@@ -88,6 +90,6 @@ Android 在应用内检查匹配当前平台的最新版 APK，点击“下载 A
 
 `--json` 把检查计划或安装结果写入 stdout，进度及错误写入 stderr。检查结果包括
 `current_version`、`target_version`、`surface`、`os`、`arch`、`executable`、
-`update_available`、`can_update`、`action` 和可能的 `reason`；安装结果另外包含 `updated`
-及旧程序的 `backup` 路径。退出码：`0` 表示检查或操作成功（包括无需更新），`1` 表示失败，
+`update_available`、`can_update`、`action` 和可能的 `reason`；安装结果另外包含 `updated`。
+退出码：`0` 表示检查或操作成功（包括无需更新），`1` 表示失败，
 `2` 表示参数错误。网络错误不会被当作“已经最新”。

@@ -25,7 +25,7 @@ func (s *updateStub) Check(_ context.Context, options selfupdate.Options) (selfu
 
 func (s *updateStub) Apply(_ context.Context, plan selfupdate.Plan) (selfupdate.Result, error) {
 	s.applied = true
-	return selfupdate.Result{Plan: plan, Updated: plan.Available, Backup: "/installation/previous-pi-go"}, s.err
+	return selfupdate.Result{Plan: plan, Updated: plan.Available}, s.err
 }
 
 func TestUpdateHelpAndInvalidArgumentsDoNotInitializeUpdater(t *testing.T) {
@@ -79,7 +79,7 @@ func TestUpdateAppliesResolvedPlanAndPropagatesOptions(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if code != 0 || !stub.applied || !stub.options.Force || stub.options.Version != "v0.1.0" || !result.Updated || result.Backup == "" {
+	if code != 0 || !stub.applied || !stub.options.Force || stub.options.Version != "v0.1.0" || !result.Updated || strings.Contains(stdout.String(), "backup") {
 		t.Fatalf("code = %d; result = %+v; options = %+v; stderr = %s", code, result, stub.options, stderr.String())
 	}
 }

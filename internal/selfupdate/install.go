@@ -19,8 +19,8 @@ import (
 
 // Apply only installs the exact asset resolved by Check. The lock is scoped to
 // the real executable path, so invocations through different symlinks serialize.
-func (u *Updater) Apply(ctx context.Context, plan Plan) (Result, error) {
-	result := Result{Plan: plan}
+func (u *Updater) Apply(ctx context.Context, plan Plan) (result Result, err error) {
+	result = Result{Plan: plan}
 	if plan.Surface == "mobile" {
 		return result, errors.New("mobile only supports APK downloads")
 	}
@@ -45,18 +45,27 @@ func (u *Updater) Apply(ctx context.Context, plan Plan) (Result, error) {
 	if err := unchanged(plan); err != nil {
 		return result, err
 	}
-	archive, err := u.download(ctx, plan)
-	if err != nil {
-		return result, err
-	}
 	stage, err := os.MkdirTemp(filepath.Dir(plan.Executable), ".pi-go-update-")
 	if err != nil {
 		return result, fmt.Errorf("stage update beside executable: %w", err)
 	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(stage); cleanupErr != nil {
+			cleanupErr = fmt.Errorf("clean update directory %s: %w", stage, cleanupErr)
+			if result.Updated {
+				cleanupErr = fmt.Errorf("update installed; restart to use the new version; %w", cleanupErr)
+			}
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	archive := filepath.Join(stage, "download")
+	if err := u.download(ctx, plan, archive); err != nil {
+		return result, err
+	}
 	filename := binaryName(plan.Surface, plan.OS)
 	next := filepath.Join(stage, filename)
 	if err := extractExecutable(ctx, archive, next, plan); err != nil {
-		return result, fmt.Errorf("%w (staging directory: %s)", err, stage)
+		return result, err
 	}
 	if err := verifyExecutable(ctx, next, plan); err != nil {
 		return result, err
@@ -72,8 +81,7 @@ func (u *Updater) Apply(ctx context.Context, plan Plan) (Result, error) {
 	if err := unchanged(plan); err != nil {
 		return result, err
 	}
-	result.Backup = filepath.Join(stage, "previous-"+filename)
-	if err := replaceExecutable(plan.Executable, next, result.Backup); err != nil {
+	if err := replaceExecutable(plan.Executable, next); err != nil {
 		return result, err
 	}
 	result.Updated = true
