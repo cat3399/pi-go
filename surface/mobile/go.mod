@@ -1,6 +1,6 @@
 module github.com/cat3399/pi-go/surface/mobile
 
-go 1.25.8
+go 1.27.3
 
 require (
 	github.com/cat3399/pi-go v0.0.0
