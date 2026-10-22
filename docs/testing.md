@@ -18,8 +18,7 @@ provider 或本机测试服务器，验证请求、工具循环、事件、JSONL
 自更新使用本地 HTTPS 发布服务器及真实 Go 可执行 fixture，覆盖不同 surface 的资产选择、
 分页与版本排序、下载校验、terminal/web/gui 运行中程序替换、重装、降级、取消和失败恢复，
 以及 Android APK 选择、下载链接和宿主计划过期。相关检查为
-`go test -race ./internal/selfupdate ./internal/product ./surface/cli ./cmd/pi-go`；
-`Self-update tests` workflow 在 Linux、macOS、Windows 上运行同一套场景。
+`go test -race ./internal/selfupdate ./internal/product ./surface/cli ./cmd/pi-go`。
 Android 验收检查设置页读取实际安装版本、选中本平台最新 APK，以及通过系统浏览器打开下载。
 
 图形与移动宿主分别检查：
