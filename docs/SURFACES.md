@@ -32,6 +32,7 @@ Workbench 的 `ApplicationClient` 提供本地 IPC 和远程 HTTP/SSE 两种实�
 | `POST /api/v1/sessions` | 创建会话 |
 | `GET /api/v1/snapshot` | 应用快照 |
 | `GET /api/v1/sessions/{id}` | 单会话 durable/live 快照 |
+| `GET /api/v1/sessions/{id}/resources/{resource}` | 有界历史、节点、元数据、当前运行态和按需正文 |
 | `POST /api/v1/sessions/{id}/commands` | 会话命令 |
 | `POST /api/v1/projects` | 添加已有项目目录 |
 | `DELETE /api/v1/projects` | 从项目列表移除目录 |
@@ -40,6 +41,20 @@ Workbench 的 `ApplicationClient` 提供本地 IPC 和远程 HTTP/SSE 两种实�
 客户端共用一条 SSE 连接，按 `sessionId` 分发事件。SSE 使用 `id: <revision>` 与
 `Last-Event-ID`；历史游标过期时发送 `reset_required`，客户端读取新 snapshot 后继续订阅。
 慢客户端断开自己的订阅，Agent 执行不等待网络消费者。
+
+分资源读取与桌面 IPC `ReadSessionResource` 共用 `surfacewire` 投影和校验 token。`resource`
+可为 `history`、`nodes`、`metadata`、`live`、`entry`、`chunk`、`thinking`、`image`；HTTP 的
+`query` 参数是 JSON 对象，IPC 传同一请求对象的 JSON。历史支持 `limit`、`maxBytes`、
+`cursor`、`leafId`、`at`、`aroundId` 和 `afterId`；节点支持 `parentId`、`role`、`search`、
+`cursor` 和 `limit`。游标绑定会话、查询类型与固定资源版本，不能跨会话或历史/节点混用。
+
+响应为 `{token, data}`；提交 `known` token 后，未变化时返回 `{token, unchanged: true}`。
+HTTP 同时支持 `ETag`/`If-None-Match` 和 304。token 覆盖实际资源表示，不包含全局事件序号；
+当前实现仍执行有界投影与编码后计算 token，条件读取节省响应字节，不承诺免除服务端投影成本。
+`history` 返回原始分支路径，`context` 继续返回模型使用的压缩上下文。超大条目返回
+`deferred` 节点，可用 `entry` 读取投影正文，或用 `chunk` 的 `offset`/`length` 获取原始
+JSON 字节的 base64 分块。图片、thinking、单条正文和分块以 `generation`、`entryId`、
+`blockIndex`（适用时）定位；旧代次或不可用游标返回 409，客户端需校验对应资源。
 
 Go 服务直接提供 HTTP，HTTPS 可由前置代理终止。桌面和移动端的远程连接支持 HTTP 与 HTTPS。
 

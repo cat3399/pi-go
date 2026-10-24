@@ -19,7 +19,12 @@ func handleSessionImage(api application.API) http.HandlerFunc {
 			writeAPIError(writer, http.StatusBadRequest, errors.New("valid blockIndex is required"))
 			return
 		}
-		image, err := api.SessionImage(request.Context(), request.PathValue("id"), request.PathValue("entryId"), index)
+		var image application.SessionImage
+		if generation := request.URL.Query().Get("generation"); generation != "" {
+			image, err = api.SessionImageAt(request.Context(), request.PathValue("id"), request.PathValue("entryId"), generation, index)
+		} else {
+			image, err = api.SessionImage(request.Context(), request.PathValue("id"), request.PathValue("entryId"), index)
+		}
 		if err != nil {
 			if errors.Is(err, application.ErrImageNotFound) || errors.Is(err, application.ErrSessionEntryNotFound) {
 				writeAPIError(writer, http.StatusNotFound, err)

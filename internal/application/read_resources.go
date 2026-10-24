@@ -20,6 +20,17 @@ type sessionResourceReader interface {
 	ReadHistory(session.HistoryQuery) (session.HistoryPage, error)
 	ReadNodes(session.NodeQuery) (session.NodePage, error)
 	ReadEntryChunk(string, string, int, int) (session.EntryChunk, error)
+	ReadEntry(string, string) (session.EntrySnapshot, error)
+}
+
+func (s *Service) ReadEntry(id, entryID, generation string) (session.EntrySnapshot, error) {
+	var result session.EntrySnapshot
+	err := s.readSessionResource(id, func(reader sessionResourceReader) (string, error) {
+		var err error
+		result, err = reader.ReadEntry(entryID, generation)
+		return result.SessionID, err
+	})
+	return result, err
 }
 
 type cachedReadIndex struct {
@@ -140,6 +151,9 @@ func (s *Service) readSessionResource(id string, read func(sessionResourceReader
 			continue
 		}
 		readID, err := read(index)
+		if _, active := s.active(id); active {
+			continue
+		}
 		if err != nil {
 			return err
 		}

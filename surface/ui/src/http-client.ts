@@ -13,6 +13,10 @@ import type {
   ModelsView,
   ProjectInfo,
   SessionView,
+  SessionResources,
+  ResourceResponse,
+  ReadResourceRequest,
+  AgentMessage,
   UploadConflictStrategy,
   UploadResult,
   UploadTargetInspection,
@@ -175,6 +179,28 @@ export class RemoteApplicationClient implements ApplicationClient {
       }
     }
     return view;
+  }
+
+  async readResource<K extends keyof SessionResources>(sessionId: string, kind: K, input: ReadResourceRequest = {}, known = ""): Promise<ResourceResponse<SessionResources[K]>> {
+    const query = new URLSearchParams({ query: JSON.stringify(input) });
+    if (known) query.set("known", known);
+    const response = await this.request<ResourceResponse<SessionResources[K]>>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/resources/${kind}?${query}`);
+    const attachImages = (message: AgentMessage | null | undefined) => {
+      if (!Array.isArray(message?.content)) return;
+      for (const block of message.content) {
+        if (block.type !== "image" || !block.imageRef) continue;
+        const ref = block.imageRef;
+        const url = new URL(`${this.endpoint}/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(ref.entryId)}/image`);
+        url.searchParams.set("blockIndex", String(ref.blockIndex));
+        if (ref.generation) url.searchParams.set("generation", ref.generation);
+        if (this.token) url.searchParams.set("token", this.token);
+        block.url = url.toString();
+      }
+    };
+    if (kind === "history" && response.data) {
+      for (const item of (response.data as SessionResources["history"]).items) attachImages(item.message);
+    } else if (kind === "entry" && response.data) attachImages((response.data as SessionResources["entry"]).message);
+    return response;
   }
 
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult> {

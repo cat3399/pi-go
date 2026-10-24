@@ -156,6 +156,18 @@ func (b *GUIBridge) SessionView(sessionID, leafID string) (surfacewire.SessionVi
 	return surfacewire.SessionViewFor(api, sessionID, leafID, false, false)
 }
 
+func (b *GUIBridge) ReadSessionResource(sessionID, kind, requestJSON, known string) (surfacewire.ResourceResponse, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.ResourceResponse{}, err
+	}
+	var query surfacewire.ReadResourceRequest
+	if len(requestJSON) > 16384 || json.Unmarshal([]byte(requestJSON), &query) != nil {
+		return surfacewire.ResourceResponse{}, surfacewire.ErrInvalidRequest
+	}
+	return surfacewire.ReadSessionResource(b.context(), api, sessionID, kind, query, known)
+}
+
 func (b *GUIBridge) CreateSession(input surfacewire.CreateSessionRequest) (surfacewire.CreateSessionResult, error) {
 	api, err := b.localAPI()
 	if err != nil {

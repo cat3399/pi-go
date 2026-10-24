@@ -16,6 +16,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/application"
 	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
+	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
@@ -32,6 +33,7 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("POST /api/v1/sessions", handleCreateSession(api))
 	mux.HandleFunc("GET /api/v1/sessions/running", handleRunningSessions(api))
 	mux.HandleFunc("GET /api/v1/sessions/{id}", handleSessionView(api))
+	mux.HandleFunc("GET /api/v1/sessions/{id}/resources/{resource}", handleSessionResource(api))
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}", handleSessionRename(api))
 	mux.HandleFunc("DELETE /api/v1/sessions/{id}", handleSessionDelete(api))
 	mux.HandleFunc("GET /api/v1/sessions/{id}/export", handleSessionExport(api))
@@ -462,6 +464,18 @@ func handleDefaultCWD(writer http.ResponseWriter, request *http.Request) {
 }
 
 func writeApplicationError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, session.ErrInvalidReadQuery) || errors.Is(err, surfacewire.ErrInvalidRequest) {
+		writeAPIError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if errors.Is(err, session.ErrReadCursorUnavailable) || errors.Is(err, application.ErrSessionChanged) || errors.Is(err, session.ErrReadSourceChanged) {
+		writeAPIError(writer, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, session.ErrEntryNotFound) || errors.Is(err, application.ErrSessionEntryNotFound) {
+		writeAPIError(writer, http.StatusNotFound, err)
+		return
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		writeAPIError(writer, http.StatusNotFound, errors.New("session not found"))
 		return

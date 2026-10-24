@@ -14,6 +14,9 @@ import type {
   ModelsView,
   ProjectInfo,
   SessionView,
+  SessionResources,
+  ResourceResponse,
+  ReadResourceRequest,
   UploadConflictStrategy,
   UploadResult,
   UploadTargetInspection,
@@ -77,6 +80,10 @@ export class WailsApplicationClient implements ApplicationClient {
 
   sessionView(sessionId: string, leafId = ""): Promise<SessionView> {
     return call("SessionView", sessionId, leafId);
+  }
+
+  readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query: ReadResourceRequest = {}, known = ""): Promise<ResourceResponse<SessionResources[K]>> {
+    return call("ReadSessionResource", sessionId, kind, JSON.stringify(query), known);
   }
 
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult> {

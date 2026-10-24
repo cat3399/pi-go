@@ -307,6 +307,9 @@ func (m *SessionManager) ReadNodes(query NodeQuery) (NodePage, error) {
 				children[entry.parentID] = true
 			}
 		}
+		// Node candidates and labels depend on the immutable log prefix, not
+		// the manager's selected leaf. Branch selection must not invalidate it.
+		version.View = 0
 		result = NodePage{Source: source, Version: version, Items: []EntryNode{}}
 		needle := []byte(strings.ToLower(query.Search))
 		for position < int(version.Log) {
@@ -353,6 +356,31 @@ type EntryChunk struct {
 	Offset    int
 	Total     int
 	Data      []byte
+}
+
+// EntrySnapshot reads one immutable entry and its source identity together.
+// Media readers must validate here, rather than checking a version before a
+// separate Entry call which could race a logical session replacement.
+type EntrySnapshot struct {
+	Version   ReadVersion
+	SessionID string
+	Entry     Entry
+}
+
+func (m *SessionManager) ReadEntry(id, generation string) (EntrySnapshot, error) {
+	var result EntrySnapshot
+	err := m.readView(func(store *Session, source ReadSnapshot) error {
+		if generation != "" && generation != source.Version.Generation {
+			return ErrReadCursorUnavailable
+		}
+		index, ok := store.byID[id]
+		if !ok {
+			return ErrEntryNotFound
+		}
+		result = EntrySnapshot{Version: source.Version, SessionID: source.Info.ID, Entry: store.entries[index].clone()}
+		return nil
+	})
+	return result, err
 }
 
 func (m *SessionManager) ReadEntryChunk(id, generation string, offset, length int) (EntryChunk, error) {

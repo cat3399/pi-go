@@ -190,6 +190,119 @@ export interface SessionView {
   state?: SessionRuntimeState;
 }
 
+export interface SessionVersion {
+  generation: string;
+  log: number;
+  view: number;
+}
+
+export interface AgentReadVersion {
+  generation: string;
+  state: number;
+  configuration: number;
+  queue: number;
+}
+
+export interface ReadResourceRequest {
+  leafId?: string;
+  at?: SessionVersion;
+  cursor?: string;
+  aroundId?: string;
+  afterId?: string;
+  limit?: number;
+  maxBytes?: number;
+  parentId?: string;
+  role?: string;
+  search?: string;
+  entryId?: string;
+  generation?: string;
+  offset?: number;
+  length?: number;
+  blockIndex?: number;
+}
+
+export interface ResourceResponse<T> {
+  token: string;
+  unchanged?: boolean;
+  data?: T;
+}
+
+export interface EntryNode {
+  id: string;
+  parentId: string | null;
+  type: string;
+  role?: string;
+  timestamp: string;
+  preview: string;
+  label?: string;
+  hasChildren: boolean;
+  rawBytes: number;
+}
+
+export interface HistoryItem {
+  node: EntryNode;
+  message?: AgentMessage;
+  deferred?: boolean;
+}
+
+export interface HistoryPage {
+  sessionId: string;
+  version: SessionVersion;
+  anchorId: string;
+  items: HistoryItem[];
+  start: number;
+  end: number;
+  total: number;
+  connected: boolean;
+  older?: string;
+  newer?: string;
+}
+
+export interface NodesPage {
+  sessionId: string;
+  version: SessionVersion;
+  items: EntryNode[];
+  next?: string;
+}
+
+export interface SessionMetadata {
+  sessionId: string;
+  version: SessionVersion;
+  info: SessionInfo;
+  filePath: string;
+  leafId: string | null;
+}
+
+export interface ReadMessage {
+  id: string;
+  message: AgentMessage;
+}
+
+export interface LiveSnapshot {
+  sessionId: string;
+  active: boolean;
+  version?: AgentReadVersion;
+  history?: SessionVersion & { leafId: string | null };
+  state?: SessionRuntimeState;
+  streaming?: ReadMessage | null;
+  pending?: ReadMessage[];
+  toolsRunning?: { toolCallId: string; toolName: string; args: unknown; partialResult?: Record<string, unknown> }[];
+  runId?: number;
+  turn?: number;
+  errorMessage?: string;
+}
+
+export interface SessionResources {
+  history: HistoryPage;
+  nodes: NodesPage;
+  metadata: SessionMetadata;
+  live: LiveSnapshot;
+  entry: { sessionId: string; generation: string; entryId: string; message: AgentMessage | null };
+  chunk: { sessionId: string; generation: string; entryId: string; offset: number; total: number; data: string };
+  thinking: { sessionId: string; generation: string; entryId: string; thinking: string };
+  image: { sessionId: string; generation: string; entryId: string; mimeType: string; data: string };
+}
+
 export interface CreateSessionRequest {
   cwd: string;
   provider?: string;
@@ -281,6 +394,7 @@ export interface ApplicationClient {
   login(password: string): Promise<void>;
   snapshot(): Promise<ApplicationSnapshot>;
   sessionView(sessionId: string, leafId?: string): Promise<SessionView>;
+  readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query?: ReadResourceRequest, known?: string): Promise<ResourceResponse<SessionResources[K]>>;
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult>;
   models(cwd: string): Promise<ModelsView>;
   browseDirectories(path?: string): Promise<DirectoryView>;
@@ -299,7 +413,8 @@ export interface ApplicationClient {
 }
 
 export type MessageContentBlock = {
-  imageRef?: { entryId: string; blockIndex: number };
+  imageRef?: { entryId: string; blockIndex: number; generation?: string };
+  thinkingRef?: { entryId: string; blockIndex: number; generation: string };
   byteSize?: number;
   type?: string;
   text?: string;

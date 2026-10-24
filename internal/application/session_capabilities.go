@@ -74,23 +74,24 @@ func (s *Service) GenerateSessionTitle(ctx context.Context, id string) (Generate
 }
 
 func (s *Service) SessionThinking(ctx context.Context, id, entryID string, blockIndex int) (string, error) {
+	return s.SessionThinkingAt(ctx, id, entryID, "", blockIndex)
+}
+
+func (s *Service) SessionThinkingAt(ctx context.Context, id, entryID, generation string, blockIndex int) (string, error) {
 	if cause := context.Cause(normalizeContext(ctx)); cause != nil {
 		return "", cause
 	}
 	if blockIndex < 0 {
 		return "", ErrThinkingNotFound
 	}
-	manager, _, closeManager, err := s.sessionManagerForRead(id)
+	read, err := s.ReadEntry(id, entryID, generation)
+	if errors.Is(err, session.ErrEntryNotFound) {
+		return "", ErrSessionEntryNotFound
+	}
 	if err != nil {
 		return "", err
 	}
-	if closeManager {
-		defer manager.Close()
-	}
-	entry, ok := manager.Entry(entryID)
-	if !ok {
-		return "", ErrSessionEntryNotFound
-	}
+	entry := read.Entry
 	message, ok := entry.AgentMessage()
 	if !ok {
 		return "", ErrSessionEntryNotFound

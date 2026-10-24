@@ -48,6 +48,7 @@ const unavailableClient: ApplicationClient = {
   async login() { throw new Error("请先配置远程地址"); },
   async snapshot() { throw new Error("请先配置远程地址"); },
   async sessionView() { throw new Error("请先配置远程地址"); },
+  async readResource() { throw new Error("请先配置远程地址"); },
   async createSession() { throw new Error("请先配置远程地址"); },
   async models() { throw new Error("请先配置远程地址"); },
   async browseDirectories() { throw new Error("请先配置远程地址"); },

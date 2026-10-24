@@ -75,9 +75,12 @@ func handleSessionThinking(api application.API) http.HandlerFunc {
 			writeAPIError(writer, http.StatusBadRequest, errors.New("valid blockIndex is required"))
 			return
 		}
-		thinking, err := api.SessionThinking(
-			request.Context(), request.PathValue("id"), request.PathValue("entryId"), blockIndex,
-		)
+		var thinking string
+		if generation := request.URL.Query().Get("generation"); generation != "" {
+			thinking, err = api.SessionThinkingAt(request.Context(), request.PathValue("id"), request.PathValue("entryId"), generation, blockIndex)
+		} else {
+			thinking, err = api.SessionThinking(request.Context(), request.PathValue("id"), request.PathValue("entryId"), blockIndex)
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, application.ErrSessionEntryNotFound):

@@ -33,6 +33,7 @@ type API interface {
 	ReadNodes(string, session.NodeQuery) (NodesSnapshot, error)
 	ReadSessionMetadata(string) (SessionSnapshot, error)
 	ReadEntryChunk(string, string, string, int, int) (session.EntryChunk, error)
+	ReadEntry(string, string, string) (session.EntrySnapshot, error)
 
 	ListSessions() ([]SessionInfo, error)
 	ListProjects() ([]ProjectInfo, error)
@@ -49,6 +50,8 @@ type API interface {
 	GenerateSessionTitle(context.Context, string) (GeneratedSessionTitle, error)
 	SessionThinking(context.Context, string, string, int) (string, error)
 	SessionImage(context.Context, string, string, int) (SessionImage, error)
+	SessionThinkingAt(context.Context, string, string, string, int) (string, error)
+	SessionImageAt(context.Context, string, string, string, int) (SessionImage, error)
 	OpenBashOutput(context.Context, string, string) (BashOutput, error)
 	RunningIDs() []string
 	ListModels(context.Context, string) (ModelsSnapshot, error)

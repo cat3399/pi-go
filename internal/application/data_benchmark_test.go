@@ -151,6 +151,11 @@ func BenchmarkDataReads(b *testing.B) {
 				}
 				benchmarkHistoryPage(b, cold, corpus.firstID)
 			})
+			b.Run("HistoryPageWireUnopenedWarm", func(b *testing.B) {
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "history", surfacewire.ReadResourceRequest{}, "")
+				})
+			})
 			if _, err := api.Dispatch(context.Background(), corpus.firstID, application.GetStateCommand{}); err != nil {
 				b.Fatal(err)
 			}
@@ -161,6 +166,25 @@ func BenchmarkDataReads(b *testing.B) {
 			})
 			b.Run("HistoryPageActive", func(b *testing.B) {
 				benchmarkHistoryPage(b, api, corpus.firstID)
+			})
+			b.Run("HistoryPageWireActive", func(b *testing.B) {
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "history", surfacewire.ReadResourceRequest{}, "")
+				})
+			})
+			b.Run("HistoryPageWireUnchanged", func(b *testing.B) {
+				first, err := surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "history", surfacewire.ReadResourceRequest{}, "")
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "history", surfacewire.ReadResourceRequest{}, first.Token)
+				})
+			})
+			b.Run("LiveReadWireActive", func(b *testing.B) {
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "live", surfacewire.ReadResourceRequest{}, "")
+				})
 			})
 			b.Run("NodesPageActive", func(b *testing.B) {
 				b.ReportAllocs()

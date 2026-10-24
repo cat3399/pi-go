@@ -57,6 +57,7 @@ type ReadSnapshot struct {
 	FollowUp      []agentmsg.Message
 	SteeringMode  QueueMode
 	FollowUpMode  QueueMode
+	Queue         QueueState
 }
 
 // Observation adds read metadata to the canonical event without changing the
@@ -148,6 +149,8 @@ func (a *Agent) ReadSnapshot() ReadSnapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	steering, followUp := a.richQueueMessagesLocked()
+	llmSteering, _ := agentmsg.ConvertToLLM(steering)
+	llmFollowUp, _ := agentmsg.ConvertToLLM(followUp)
 	result := ReadSnapshot{
 		Version: a.readVersionLocked(), Phase: a.phaseLocked(), IsStreaming: a.isStreaming,
 		MessageCount: len(a.messages), ErrorMessage: a.errorMessage,
@@ -155,6 +158,7 @@ func (a *Agent) ReadSnapshot() ReadSnapshot {
 		SystemPrompt: a.systemPrompt, Tools: append([]provider.ToolDefinition(nil), a.tools...),
 		Steering: agentmsg.Clone(steering), FollowUp: agentmsg.Clone(followUp),
 		SteeringMode: a.steeringMode, FollowUpMode: a.followUpMode,
+		Queue: newQueueState(llmSteering, llmFollowUp),
 	}
 	if a.streaming != nil {
 		result.Streaming = &ReadMessage{ID: a.read.messageID, Message: agentmsg.CloneOne(a.streaming)}

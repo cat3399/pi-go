@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 var ErrImageNotFound = errors.New("image block not found")
@@ -18,23 +20,24 @@ type SessionImage struct {
 // SessionImage reads the durable image at its original content-block position,
 // including entries outside the active branch or compacted context.
 func (s *Service) SessionImage(ctx context.Context, id, entryID string, blockIndex int) (SessionImage, error) {
+	return s.SessionImageAt(ctx, id, entryID, "", blockIndex)
+}
+
+func (s *Service) SessionImageAt(ctx context.Context, id, entryID, generation string, blockIndex int) (SessionImage, error) {
 	if cause := context.Cause(normalizeContext(ctx)); cause != nil {
 		return SessionImage{}, cause
 	}
 	if blockIndex < 0 {
 		return SessionImage{}, ErrImageNotFound
 	}
-	manager, _, closeManager, err := s.sessionManagerForRead(id)
+	read, err := s.ReadEntry(id, entryID, generation)
+	if errors.Is(err, session.ErrEntryNotFound) {
+		return SessionImage{}, ErrSessionEntryNotFound
+	}
 	if err != nil {
 		return SessionImage{}, err
 	}
-	if closeManager {
-		defer manager.Close()
-	}
-	entry, ok := manager.Entry(entryID)
-	if !ok {
-		return SessionImage{}, ErrSessionEntryNotFound
-	}
+	entry := read.Entry
 	var raw struct {
 		Message struct {
 			Content json.RawMessage `json:"content"`
