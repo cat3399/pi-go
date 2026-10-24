@@ -128,6 +128,10 @@ func (s *Session) pathIndexesLocked(index int) []int {
 func (s *Session) Tree() []TreeNode {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.treeLocked()
+}
+
+func (s *Session) treeLocked() []TreeNode {
 	nodes := make([]TreeNode, len(s.entries))
 	children := make([][]int, len(s.entries))
 	roots := make([]int, 0)

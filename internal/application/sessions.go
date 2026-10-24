@@ -25,11 +25,13 @@ type SessionInfo struct {
 	ParentSessionID string
 }
 
-// SessionSnapshot is one consistent read of durable session state plus the
-// optional live application state. Entries and trees retain the canonical session
-// types so surfaces do not invent a second conversation model.
+// SessionSnapshot contains one consistent SessionManager read and an optional,
+// independently sampled live state from the same Runtime binding. Version
+// validates the manager resource, not LiveState or catalog-resolved parent IDs.
+// Entries and trees retain canonical session types.
 type SessionSnapshot struct {
 	Revision  uint64
+	Version   session.ReadVersion
 	SessionID string
 	FilePath  string
 	Info      SessionInfo
@@ -137,7 +139,7 @@ func cleanPathKey(value string) string {
 
 func (s *Service) SnapshotSession(id, leafID string) (SessionSnapshot, error) {
 	revision := s.CurrentRevision()
-	manager, managed, info, closeManager, err := s.sessionManagerForRead(id)
+	manager, managed, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return SessionSnapshot{}, err
 	}
@@ -145,36 +147,58 @@ func (s *Service) SnapshotSession(id, leafID string) (SessionSnapshot, error) {
 		defer manager.Close()
 	}
 
-	var entries []session.Entry
-	var contextValue session.Context
-	if leafID == "" {
-		entries = manager.ContextEntries()
-		contextValue = manager.BuildContext()
-	} else {
-		projection, projectionErr := manager.ProjectContextAt(leafID)
-		if projectionErr != nil {
-			return SessionSnapshot{}, projectionErr
-		}
-		entries, contextValue = projection.Entries, projection.Context
-	}
-	var leaf *string
-	if value, ok := manager.LeafID(); ok {
-		copy := value
-		leaf = &copy
-	}
-	file, _ := manager.SessionFile()
-	result := SessionSnapshot{
-		Revision: revision, SessionID: id, FilePath: file, Info: info, LeafID: leaf,
-		Tree: manager.Tree(), Entries: entries, Context: contextValue,
-	}
+	options := session.SnapshotOptions{LeafID: leafID, IncludeContext: true, IncludeTree: true}
+	var snapshot session.ReadSnapshot
+	var liveState *State
 	if managed != nil {
-		state, stateErr := managed.session.State()
-		if stateErr != nil {
-			return SessionSnapshot{}, stateErr
-		}
-		result.LiveState = &state
+		snapshot, liveState, err = managed.session.snapshotHistory(options)
+	} else {
+		snapshot, err = manager.ReadSnapshot(options)
 	}
-	return result, nil
+	if err != nil {
+		return SessionSnapshot{}, err
+	}
+	if snapshot.Info.ID != id {
+		return SessionSnapshot{}, ErrSessionChanged
+	}
+	var pathIDs map[string]string
+	if snapshot.Info.HasParentSession {
+		discovered, discoverErr := s.discoveredSessions()
+		if discoverErr != nil {
+			return SessionSnapshot{}, discoverErr
+		}
+		pathIDs = discoveredSessionPathIDs(discovered)
+	}
+	return SessionSnapshot{
+		Revision: revision, Version: snapshot.Version, SessionID: id, FilePath: snapshot.Info.Path,
+		Info: discoveredSessionInfo(snapshot.Info, pathIDs), LeafID: snapshot.LeafID,
+		Tree: snapshot.Tree, Entries: snapshot.Entries, Context: snapshot.Context, LiveState: liveState,
+	}, nil
+}
+
+func (s *ApplicationSession) snapshotHistory(options session.SnapshotOptions) (session.ReadSnapshot, *State, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		current, binding, err := s.currentSession()
+		if err != nil {
+			return session.ReadSnapshot{}, nil, err
+		}
+		history, err := current.SessionManager().ReadSnapshot(options)
+		var state State
+		if err == nil {
+			state, err = snapshotSession(current, s.promptRunning())
+		}
+		if !s.sameBinding(current, binding) {
+			continue
+		}
+		if err != nil {
+			return session.ReadSnapshot{}, nil, err
+		}
+		if history.Info.ID != state.SessionID {
+			return session.ReadSnapshot{}, nil, ErrSessionChanged
+		}
+		return history, &state, nil
+	}
+	return session.ReadSnapshot{}, nil, ErrSessionChanged
 }
 
 func (s *Service) SessionExists(id string) (bool, error) {
@@ -191,7 +215,7 @@ func (s *Service) RenameSession(ctx context.Context, id, name string) error {
 		_, err := s.Dispatch(ctx, id, SetSessionNameCommand{Name: name})
 		return err
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return err
 	}
@@ -205,41 +229,25 @@ func (s *Service) RenameSession(ctx context.Context, id, name string) error {
 	return err
 }
 
-func (s *Service) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, SessionInfo, bool, error) {
+func (s *Service) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, bool, error) {
 	if managed, ok := s.active(id); ok {
 		manager := managed.manager()
 		if manager == nil {
-			return nil, nil, SessionInfo{}, false, errors.New("active session manager is unavailable")
+			return nil, nil, false, errors.New("active session manager is unavailable")
 		}
-		info := manager.Summary()
-		if info.Path == "" {
-			_, _, info.Path = managed.identity()
-		}
-		// A known active session owns its metadata already. Discovery is only
-		// needed to resolve a recorded parent file into a catalog session ID;
-		// ordinary history/media reads must not scan every unrelated session.
-		var pathIDs map[string]string
-		if info.HasParentSession {
-			discovered, err := s.discoveredSessions()
-			if err != nil {
-				return nil, nil, SessionInfo{}, false, err
-			}
-			pathIDs = discoveredSessionPathIDs(discovered)
-		}
-		return manager, managed, discoveredSessionInfo(info, pathIDs), false, nil
+		return manager, managed, false, nil
 	}
 	discovered, err := s.discoveredSessions()
 	if err != nil {
-		return nil, nil, SessionInfo{}, false, err
+		return nil, nil, false, err
 	}
-	pathIDs := discoveredSessionPathIDs(discovered)
 	info, found := findDiscoveredSession(discovered, id)
 	if !found {
-		return nil, nil, SessionInfo{}, false, os.ErrNotExist
+		return nil, nil, false, os.ErrNotExist
 	}
 	manager, err := session.OpenSessionManager(info.Path, filepath.Dir(info.Path), "")
 	if err != nil {
-		return nil, nil, SessionInfo{}, false, err
+		return nil, nil, false, err
 	}
-	return manager, nil, discoveredSessionInfo(info, pathIDs), true, nil
+	return manager, nil, true, nil
 }

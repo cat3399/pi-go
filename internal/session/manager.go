@@ -31,6 +31,8 @@ type SessionManager struct {
 	store       *Session
 	summaryMu   sync.Mutex
 	summary     managerSummary
+	readEpoch   string
+	readOnce    sync.Once
 }
 
 var managerLineBreakPattern = regexp.MustCompile(`[\r\n]+`)
@@ -345,7 +347,7 @@ func (m *SessionManager) appendAndFlush(ctx context.Context, appendFn func(*Sess
 		return Entry{}, err
 	}
 	old := m.store
-	m.setStore(durable)
+	m.adoptDurableStore(durable)
 	m.flushed = true
 	_ = old.Close()
 	return entry, nil
@@ -397,7 +399,7 @@ func (m *SessionManager) AppendModelControlChange(ctx context.Context, provider,
 			return nil, err
 		}
 		old := m.store
-		m.setStore(durable)
+		m.adoptDurableStore(durable)
 		m.flushed = true
 		_ = old.Close()
 	}

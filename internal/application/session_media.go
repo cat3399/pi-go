@@ -24,7 +24,7 @@ func (s *Service) SessionImage(ctx context.Context, id, entryID string, blockInd
 	if blockIndex < 0 {
 		return SessionImage{}, ErrImageNotFound
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return SessionImage{}, err
 	}

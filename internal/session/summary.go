@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -75,6 +76,11 @@ func (m *SessionManager) Summary() SessionInfo {
 	store := m.store
 	store.mu.RLock()
 	defer store.mu.RUnlock()
+	return m.summaryLocked(store)
+}
+
+// summaryLocked requires m.mu, m.summaryMu and store.mu, in that order.
+func (m *SessionManager) summaryLocked(store *Session) SessionInfo {
 	if m.summary.store != store {
 		m.summary = managerSummary{store: store}
 	}
@@ -115,6 +121,19 @@ func (m *SessionManager) Summary() SessionInfo {
 // Summary readers as well. Drop the old reference so replacement cannot retain
 // its log. The separate summaryMu lets ordinary Store readers run concurrently.
 func (m *SessionManager) setStore(store *Session) {
+	m.store = store
+	m.summary = managerSummary{}
+	m.readEpoch = ""
+	m.readOnce = sync.Once{}
+}
+
+// The first assistant makes the existing log durable; it does not replace its
+// logical data generation or selected-view revision. The new Store has not yet
+// been published, and m.mu excludes every manager reader and writer here.
+func (m *SessionManager) adoptDurableStore(store *Session) {
+	m.store.mu.RLock()
+	store.generation = m.store.generation
+	m.store.mu.RUnlock()
 	m.store = store
 	m.summary = managerSummary{}
 }

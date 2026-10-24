@@ -80,7 +80,7 @@ func (s *Service) SessionThinking(ctx context.Context, id, entryID string, block
 	if blockIndex < 0 {
 		return "", ErrThinkingNotFound
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return "", err
 	}
@@ -253,7 +253,7 @@ func (s *Service) OpenBashOutput(ctx context.Context, id, path string) (BashOutp
 	if filepath.Dir(resolved) != filepath.Clean(root) || !bashOutputName.MatchString(filepath.Base(resolved)) {
 		return BashOutput{}, ErrInvalidBashOutput
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return BashOutput{}, err
 	}

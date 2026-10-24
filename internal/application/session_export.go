@@ -24,7 +24,7 @@ func (s *Service) ExportSession(ctx context.Context, id string) (SessionExport, 
 	if cause := context.Cause(ctx); cause != nil {
 		return SessionExport{}, cause
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return SessionExport{}, err
 	}
@@ -68,7 +68,7 @@ func (s *Service) ExportSessionJSONL(ctx context.Context, id string) (SessionJSO
 	if cause := context.Cause(ctx); cause != nil {
 		return SessionJSONLExport{}, cause
 	}
-	manager, _, _, closeManager, err := s.sessionManagerForRead(id)
+	manager, _, closeManager, err := s.sessionManagerForRead(id)
 	if err != nil {
 		return SessionJSONLExport{}, err
 	}
