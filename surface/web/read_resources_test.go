@@ -57,7 +57,7 @@ func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing
 	api := testService(t, app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir}, nil)
 	mux := http.NewServeMux()
 	registerAPIRoutes(mux, api)
-	for _, kind := range []string{"overview", "directory"} {
+	for _, kind := range []string{"overview", "directory", "projects"} {
 		path := "/api/v1/resources/" + kind
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))

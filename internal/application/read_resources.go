@@ -18,6 +18,7 @@ const (
 type sessionResourceReader interface {
 	ReadSnapshot(session.SnapshotOptions) (session.ReadSnapshot, error)
 	ReadHistory(session.HistoryQuery) (session.HistoryPage, error)
+	ReadRuns(session.RunsQuery) (session.RunsPage, error)
 	ReadNodes(session.NodeQuery) (session.NodePage, error)
 	ReadEntry(string, string) (session.EntrySnapshot, error)
 }
@@ -64,6 +65,22 @@ type NodesSnapshot struct {
 	Revision  uint64
 	SessionID string
 	Page      session.NodePage
+}
+
+type RunsSnapshot struct {
+	Revision  uint64
+	SessionID string
+	Page      session.RunsPage
+}
+
+func (s *Service) ReadRuns(id string, query session.RunsQuery) (RunsSnapshot, error) {
+	result := RunsSnapshot{Revision: s.CurrentRevision(), SessionID: id}
+	err := s.readSessionResource(id, func(reader sessionResourceReader) (string, error) {
+		page, err := reader.ReadRuns(query)
+		result.Page = page
+		return page.Source.Info.ID, err
+	})
+	return result, err
 }
 
 func (s *Service) ReadHistory(id string, query session.HistoryQuery) (HistorySnapshot, error) {

@@ -429,6 +429,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         directory={controller.directory}
         watchDirectory={controller.watchDirectory}
         loadDirectory={controller.loadDirectory}
+        hasMoreProjects={controller.hasMoreProjects}
+        loadProjects={controller.loadProjects}
         activeSessionId={controller.activeSessionId}
         activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}

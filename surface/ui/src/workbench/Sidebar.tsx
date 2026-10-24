@@ -1,5 +1,5 @@
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Ellipsis, FileText, Folder, FolderOpen, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { Ellipsis, FileText, Folder, FolderOpen, LoaderCircle, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { FileList, ProjectInfo, SessionInfo } from "../contracts";
 import { AnchoredPopover } from "../primitives/AnchoredPopover";
 import { IconAction, InlineActions } from "../primitives/InlineActions";
@@ -16,6 +16,8 @@ interface SidebarProps {
   directory(project: string, search?: string): DirectoryWindow | undefined;
   watchDirectory(project: string, search?: string): () => void;
   loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
+  hasMoreProjects: boolean;
+  loadProjects(): Promise<void>;
   runningSessionIds: string[];
   activeSessionId: string | null;
   activePreviewPath: string;
@@ -217,8 +219,7 @@ function ProjectSessions(props: {
   const listRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const loadingRef = useRef(false);
-  const retryAtRef = useRef(0);
-  const [retryKey, setRetryKey] = useState(0);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => { if (containsActive) setOpen(true); }, [containsActive]);
 
@@ -227,31 +228,21 @@ function ProjectSessions(props: {
     const release = props.watchDirectory(props.project.root);
     let current = true;
     loadingRef.current = true;
-    setLoading(true);
-    void props.loadDirectory(props.project.root).catch(() => undefined).finally(() => {
+    setLoading(sessions.length === 0);
+    void props.loadDirectory(props.project.root).catch(() => setLoadFailed(true)).finally(() => {
       if (current) { loadingRef.current = false; setLoading(false); }
     });
     return () => { current = false; loadingRef.current = false; release(); };
   }, [open, props.project.root, props.loadDirectory, props.watchDirectory]);
 
-  useEffect(() => {
-    const list = listRef.current;
-    const last = list?.lastElementChild;
-    if (!open || !directory?.next || !last || loading) return;
-    if (retryAtRef.current > Date.now()) {
-      const timer = setTimeout(() => setRetryKey((value) => value + 1), retryAtRef.current - Date.now());
-      return () => clearTimeout(timer);
-    }
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((entry) => entry.isIntersecting) || loadingRef.current) return;
-      loadingRef.current = true;
-      setLoading(true);
-      void props.loadDirectory(props.project.root, "", true).catch(() => { retryAtRef.current = Date.now() + 2000; })
-        .finally(() => { loadingRef.current = false; setLoading(false); });
-    }, { root: list.closest(".pi-session-list"), rootMargin: "250px" });
-    observer.observe(last);
-    return () => observer.disconnect();
-  }, [open, loading, directory?.next, sessions.length, props.loadDirectory, props.project.root, retryKey]);
+  const loadMore = () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true); setLoadFailed(false);
+    void props.loadDirectory(props.project.root, "", Boolean(directory?.next), loadFailed)
+      .catch(() => setLoadFailed(true))
+      .finally(() => { loadingRef.current = false; setLoading(false); });
+  };
 
   const removeProject = async () => {
     setRemoving(true);
@@ -336,7 +327,12 @@ function ProjectSessions(props: {
               onDelete={() => props.onDelete(session.id)}
             />
           ))}
-
+          {(directory?.next || loading || loadFailed) && (
+            <button className="pi-sidebar-more" type="button" disabled={loading} onClick={loadMore}>
+              {loading && <LoaderCircle className="pi-loading-spinner" size={13} aria-hidden="true" />}
+              {loading ? "正在加载…" : loadFailed ? "加载失败，重试" : "展开更多对话"}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -344,6 +340,13 @@ function ProjectSessions(props: {
 }
 
 export function Sidebar(props: SidebarProps) {
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsFailed, setProjectsFailed] = useState(false);
+  const loadProjects = () => {
+    if (projectsLoading) return;
+    setProjectsLoading(true); setProjectsFailed(false);
+    void props.loadProjects().catch(() => setProjectsFailed(true)).finally(() => setProjectsLoading(false));
+  };
   const sidebarRef = useRef<HTMLElement>(null);
   const sessionListRef = useRef<HTMLElement>(null);
   const selectSection = (section: "sessions" | "files", focus = false) => {
@@ -494,6 +497,12 @@ export function Sidebar(props: SidebarProps) {
                     onDelete={props.onDelete}
                   />
                 ))}
+                {(props.hasMoreProjects || projectsLoading || projectsFailed) && (
+                  <button className="pi-sidebar-more" type="button" disabled={projectsLoading} onClick={loadProjects}>
+                    {projectsLoading && <LoaderCircle className="pi-loading-spinner" size={13} aria-hidden="true" />}
+                    {projectsLoading ? "正在加载…" : projectsFailed ? "加载失败，重试" : "展开更多工作目录"}
+                  </button>
+                )}
               </nav>
               <OverlayScrollbar viewportRef={sessionListRef} />
             </>

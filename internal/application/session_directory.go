@@ -45,6 +45,7 @@ type Overview struct {
 	Projects          []ProjectInfo
 	SessionCount      int
 	RunningSessionIDs []string
+	Directory         ProjectDirectoryPage
 }
 
 func (s *Service) ReadOverview() (Overview, error) {
@@ -57,8 +58,16 @@ func (s *Service) ReadOverview() (Overview, error) {
 	if err != nil {
 		return Overview{}, err
 	}
-	return Overview{Cursor: cursor, AgentDir: s.AgentDir(), DefaultCWD: s.DefaultCWD(), Projects: projects,
-		SessionCount: len(sessions), RunningSessionIDs: s.RunningIDs()}, nil
+	index, err := s.projectDirectoryIndex(projects, sessions)
+	if err != nil {
+		return Overview{}, err
+	}
+	directory, err := s.projectDirectoryPage(index, 0, defaultProjectPageSize, defaultProjectSessionPageSize)
+	if err != nil {
+		return Overview{}, err
+	}
+	return Overview{Cursor: cursor, AgentDir: s.AgentDir(), DefaultCWD: s.DefaultCWD(), Projects: projects[:len(directory.Projects)],
+		SessionCount: len(sessions), RunningSessionIDs: s.RunningIDs(), Directory: directory}, nil
 }
 
 type directoryIndex struct {
@@ -67,6 +76,8 @@ type directoryIndex struct {
 	bytes                    int64
 	expires                  time.Time
 	used                     uint64
+	projectIndex             bool
+	projects                 []ProjectInfo
 }
 
 type directoryCache struct {
@@ -101,7 +112,7 @@ func (s *Service) ReadSessionDirectory(query SessionDirectoryQuery) (SessionDire
 			index = nil
 		}
 		s.directoryCache.mu.Unlock()
-		if index != nil && (index.project != project || index.search != search) {
+		if index != nil && (index.projectIndex || index.project != project || index.search != search) {
 			return SessionDirectoryPage{}, session.ErrInvalidReadQuery
 		}
 	}

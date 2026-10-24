@@ -20,7 +20,7 @@ var (
 )
 
 const (
-	DefaultPageEntries = 64
+	DefaultPageEntries = 128
 	MaxPageEntries     = 256
 	DefaultPageBytes   = 512 << 10
 	MaxPageBytes       = 4 << 20
@@ -41,6 +41,7 @@ type HistoryCursor struct {
 	AnchorID  string
 	Position  int
 	Direction PageDirection
+	RunID     string
 }
 
 type HistoryQuery struct {
@@ -52,6 +53,7 @@ type HistoryQuery struct {
 	Direction PageDirection // optional forward tail reads after AfterID
 	Limit     int
 	MaxBytes  int
+	RunID     string // restrict the page to one complete historical browsing group
 }
 
 type EntryNode struct {
@@ -85,6 +87,7 @@ type HistoryPage struct {
 	Connected bool // AfterID was an ancestor in this fixed path
 	Older     *HistoryCursor
 	Newer     *HistoryCursor
+	Run       *HistoryRun
 }
 
 func readPageLimits(limit, maxBytes int) (int, int, error) {
@@ -129,10 +132,11 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 			anchor = *query.LeafID
 		}
 		if cursor := query.Cursor; cursor != nil {
-			if query.AroundID != "" || query.AfterID != "" || query.Direction != "" || query.At != nil || query.LeafID != nil && *query.LeafID != cursor.AnchorID {
+			if query.AroundID != "" || query.AfterID != "" || query.Direction != "" || query.At != nil || query.LeafID != nil && *query.LeafID != cursor.AnchorID || query.RunID != "" && query.RunID != cursor.RunID {
 				return ErrInvalidReadQuery
 			}
 			at, anchor = &cursor.Version, cursor.AnchorID
+			query.RunID = cursor.RunID
 		}
 		version, err := validateReadVersion(source.Version, at)
 		if err != nil {
@@ -143,23 +147,40 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 			return err
 		}
 		result = HistoryPage{Source: source, Version: version, AnchorID: anchor, Total: len(path), Items: []PageEntry{}, Connected: query.AfterID == ""}
-		position, direction := len(path), PageOlder
+		base, ceiling := 0, len(path)
+		if query.RunID != "" {
+			for _, span := range store.historyRunsLocked(path) {
+				if store.entries[path[span.start]].id == query.RunID {
+					run := store.runNodeLocked(path, span)
+					result.Run, base, ceiling = &run, span.start, span.end
+					result.Total = ceiling - base
+					break
+				}
+			}
+			if result.Run == nil {
+				return fmt.Errorf("%w: run is outside the selected path", ErrEntryNotFound)
+			}
+		}
+		position, direction := ceiling, PageOlder
 		if query.Direction == PageNewer {
-			position, direction = 0, PageNewer
+			position, direction = base, PageNewer
 		}
 		if cursor := query.Cursor; cursor != nil {
 			position, direction = cursor.Position, cursor.Direction
 		}
-		floor := 0
+		floor := base
 		if query.AroundID != "" || query.AfterID != "" {
 			foundAround := query.AroundID == ""
 			for i, index := range path {
 				id := store.entries[index].id
 				if id == query.AroundID {
+					if i < base || i >= ceiling {
+						return fmt.Errorf("%w: node is outside the selected run", ErrEntryNotFound)
+					}
 					position, foundAround = i+1, true
 				}
 				if id == query.AfterID {
-					floor, result.Connected = i+1, true
+					floor, result.Connected = max(base, i+1), true
 					if direction == PageNewer {
 						position = floor
 					}
@@ -169,7 +190,7 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 				return fmt.Errorf("%w: node is outside the selected path", ErrEntryNotFound)
 			}
 		}
-		if position < floor || position > len(path) || direction != PageOlder && direction != PageNewer {
+		if position < floor || position > ceiling || direction != PageOlder && direction != PageNewer {
 			return ErrReadCursorUnavailable
 		}
 		start, end, used := position, position, 0
@@ -178,11 +199,12 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 			if direction == PageOlder {
 				index = start - 1
 			}
-			if index < floor || index >= len(path) {
+			if index < floor || index >= ceiling {
 				break
 			}
 			entry := store.entries[path[index]]
 			item := PageEntry{Node: entryReadNode(entry)}
+			item.Node.Position = index
 			metadataBytes := 256 + 6*(len(entry.id)+len(entry.parentID)+len(entry.typeName)+len(entry.messageRole)+len(item.Node.Preview))
 			cost := len(entry.raw) + metadataBytes
 			// A page always makes progress and returns a complete entry. Large
@@ -206,12 +228,12 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 				result.Items[left], result.Items[right] = result.Items[right], result.Items[left]
 			}
 		}
-		result.Start, result.End = start, end
-		if start > 0 {
-			result.Older = &HistoryCursor{Version: version, AnchorID: anchor, Position: start, Direction: PageOlder}
+		result.Start, result.End = start-base, end-base
+		if start > base {
+			result.Older = &HistoryCursor{Version: version, AnchorID: anchor, Position: start, Direction: PageOlder, RunID: query.RunID}
 		}
-		if end < len(path) {
-			result.Newer = &HistoryCursor{Version: version, AnchorID: anchor, Position: end, Direction: PageNewer}
+		if end < ceiling {
+			result.Newer = &HistoryCursor{Version: version, AnchorID: anchor, Position: end, Direction: PageNewer, RunID: query.RunID}
 		}
 		return nil
 	})

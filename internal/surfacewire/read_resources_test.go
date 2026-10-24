@@ -28,6 +28,67 @@ func (a *resourceReadAPI) ReadNodes(id string, query session.NodeQuery) (applica
 	return application.NodesSnapshot{Revision: a.revision, SessionID: id, Page: page}, err
 }
 
+func (a *resourceReadAPI) ReadRuns(id string, query session.RunsQuery) (application.RunsSnapshot, error) {
+	page, err := a.manager.ReadRuns(query)
+	return application.RunsSnapshot{Revision: a.revision, SessionID: id, Page: page}, err
+}
+
+func TestRunOverviewDefersProcessAndDetailKeepsCompleteEntryAndGroupHeader(t *testing.T) {
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	user, _ := llm.NewUserTextMessage("original question", time.UnixMilli(1))
+	header, err := manager.AppendLLMMessage(context.Background(), user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking, _ := llm.NewThinkingBlock("thinking-start\n" + strings.Repeat("完整思考\n", 60000) + "thinking-end")
+	text, _ := llm.NewTextBlock("complete final answer")
+	assistant, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinking, text}, llm.FinishStop, llm.Usage{}, time.UnixMilli(2), llm.AssistantProvenance{API: "scripted", Provider: "scripted", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := manager.AppendLLMMessage(context.Background(), assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &resourceReadAPI{manager: manager}
+	overview, err := ReadSessionResource(context.Background(), api, manager.SessionID(), "runs", ReadResourceRequest{AroundID: header.ID()}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page RunsPage
+	if err := json.Unmarshal(overview.Data, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Runs) != 1 || len(page.Items) != 2 || page.Runs[0].Header.ID != header.ID() || page.Runs[0].Result.ID != final.ID() || !page.Runs[0].ResultHasProcess {
+		t.Fatalf("overview lost group context: %s", overview.Data)
+	}
+	if len(overview.Data) > 10_000 || bytes.Contains(overview.Data, []byte("thinking-start")) || !bytes.Contains(page.Items[1].Message, []byte("complete final answer")) || page.Items[1].Projection != "answer" {
+		t.Fatal("overview eagerly fetched hidden process or truncated its answer")
+	}
+	detail, err := ReadSessionResource(context.Background(), api, manager.SessionID(), "history", ReadResourceRequest{RunID: header.ID(), Limit: 1, MaxBytes: 512 << 10}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var full HistoryPage
+	if err := json.Unmarshal(detail.Data, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Run == nil || full.Run.Header.ID != header.ID() || full.Run.Result.ID != final.ID() || len(full.Items) != 1 || full.Items[0].Node.ID != final.ID() || full.Newer != "" {
+		t.Fatal("partial process page lost its group header or crossed the boundary")
+	}
+	if !bytes.Contains(full.Items[0].Message, []byte("thinking-start")) || !bytes.Contains(full.Items[0].Message, []byte("thinking-end")) || full.Items[0].Projection != "" || full.Items[0].Node.ContentToken != page.Items[1].Node.ContentToken {
+		t.Fatal("detail projection did not retain the complete original entry identity")
+	}
+	index, err := ReadSessionResource(context.Background(), api, manager.SessionID(), "runs", ReadResourceRequest{MetadataOnly: true}, "")
+	if err != nil || bytes.Contains(index.Data, []byte(`"message":`)) {
+		t.Fatal("run navigation downloaded a message body", err)
+	}
+}
+
 func TestFixedHistoryAndNodeTokensIgnoreUnrelatedRevisions(t *testing.T) {
 	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
 	if err != nil {

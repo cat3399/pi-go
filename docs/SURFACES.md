@@ -50,7 +50,7 @@ SSE 的资源订阅使用 `cursor=<epoch>:<sequence>`，重连时 `Last-Event-ID
 超大事件仍可实时传递，但不保证保留回放。慢客户端断开自己的订阅，Agent 执行不等待网络消费者。
 
 分资源读取与桌面 IPC `ReadSessionResource` 共用 `surfacewire` 投影和校验 token。`resource`
-可为 `history`、`nodes`、`metadata`、`live`、`entry`、`image`；HTTP 的
+可为 `runs`、`history`、`nodes`、`metadata`、`live`、`entry`、`image`；HTTP 的
 `query` 参数是 JSON 对象，IPC 传同一请求对象的 JSON。历史支持 `limit`、`maxBytes`、
 `cursor`、`leafId`、`at`、`aroundId`、`afterId` 和 `direction`；节点支持 `parentId`、`role`、`entryType`、`search`、`tree`、
 `leafId`、`afterId`、`cursor` 和 `limit`。游标绑定会话、查询类型与固定资源版本，不能跨会话或历史/节点混用。
@@ -63,9 +63,19 @@ HTTP 同时支持 `ETag`/`If-None-Match` 和 304。token 覆盖实际资源表�
 `generation`、`entryId`、`blockIndex`（图片）定位。旧代次或不可用游标返回 409，客户端需校验
 对应资源。`tree: true` 的节点查询保持原有树的遍历顺序和分支深度。
 
-应用资源与桌面 IPC `ReadApplicationResource` 共用相同校验协议。`overview` 返回项目、会话
-总数和运行中会话 ID，读取前的事件起点放在响应顶层 `cursor`，不参与内容 token；304 时通过
-`X-Pi-Event-Cursor` 返回。`directory` 支持 `project`、`search`、`limit` 和 `cursor`，按消息
+`runs` 提供完整分支上的历史浏览分组：以持久化用户条目为稳定组头，到下一条用户输入之前
+结束，压缩记录保留在所属组内。它是兼容现有 pi 日志的只读投影，不替代执行层
+`agent_start` / `agent_end` 的生命周期。概览仅投影组头及最后一条已结束的模型回答，
+不会把工具调用前的说明当作最终结果；`metadataOnly` 只返回组边界和锚点元数据。
+该资源也支持 `aroundId`、`afterId`、`direction` 和固定版本游标。`history` 的 `runId`
+将正文页限定在一个组内，每页都返回该组的组头、结果引用和范围，前后游标不会越过组边界。
+概览中的最终回答标记 `projection: "answer"`，完整正文及思考仍由原条目的详情读取提供。
+
+应用资源与桌面 IPC `ReadApplicationResource` 共用相同校验协议。`overview` 返回首批八个项目，
+每个项目附带最近八个会话及后续游标，同时提供会话总数和运行中会话 ID。项目与其会话来自
+同一次目录读取；展开已返回的项目直接使用这份首屏数据。`projects` 以 `limit`、`sessionLimit`
+和 `cursor` 继续读取其他项目及其首批会话。读取前的事件起点放在概览响应顶层 `cursor`，
+不参与内容 token；304 时通过 `X-Pi-Event-Cursor` 返回。`directory` 支持 `project`、`search`、`limit` 和 `cursor`，按消息
 活动时间降序、会话 ID 升序排列。后续页绑定同一不可变目录索引，改名不改变消息活动时间。
 索引在 16 MiB 预算内保留五分钟；淘汰后仅在重新计算的内容身份完全一致时继续原游标，否则
 返回 409。概览和分页读取都不创建 Runtime。
@@ -101,7 +111,7 @@ JSONL 和 SessionManager 的条目视图是历史依据，Agent 拥有生成中�
 | 会话统计 | 独立查询；累计用量覆盖完整日志，上下文占用按当前上下文计算 |
 | 模型、工具、命令 | 按全局、项目或会话作用域缓存，依赖变化时失效 |
 | 图片 | 通过条目和内容块引用按需读取；正文、思考与工具输出随历史页完整返回 |
-| 工作目录 | 小项目集合整体缓存，目录按层展开；单层过大时分页或搜索 |
+| 工作目录 | 首屏组合返回少量项目及各自的最近会话；两级列表分别通过“展开更多”续页 |
 
 SessionManager 提供条目、分支和上下文查询，Application 提供传输无关的资源版本与同步边界。
 Surface 只编码协议和维护展示缓存。普通历史读取不应顺带构建整棵树、完整模型上下文和无关配置。
@@ -126,7 +136,7 @@ Surface 只编码协议和维护展示缓存。普通历史读取不应顺带构
 接近已加载范围顶部时读取旧页。消息锚点独立读取完整分支的用户消息和压缩节点元数据，追加
 只补索引尾部；锚点不随正文窗口回收而重编号。已有节点直接滚动，未加载节点通过附近读取
 定位一页，不下载中间正文。节点选择器独立查询完整日志，保留其他分支和压缩前的候选。
-页控制条目数，并以字节量作为软边界；超大的单条记录独占一页，内容完整返回。轮次分组保留工具调用与结果关联，
+正文页使用 128 条、512 KiB 两个原有维度限制，并以字节量作为软边界；超大的单条记录独占一页，内容完整返回。轮次分组保留工具调用与结果关联，
 不要求整个超长轮次一次下载。长历史还需要有界渲染窗口。
 
 会话列表分页绑定短期保留的目录索引版本，避免活动时间变化导致重复或遗漏；实时变更按 ID

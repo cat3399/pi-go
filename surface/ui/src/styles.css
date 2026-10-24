@@ -968,6 +968,35 @@ input:-webkit-autofill:focus {
   padding: 28px 0 var(--pi-composer-height, 164px);
 }
 
+.pi-loading-spinner {
+  flex: 0 0 auto;
+  animation: pi-spin 850ms linear infinite;
+}
+
+.pi-sidebar-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pi-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pi-sidebar-more:hover:not(:disabled) { background: var(--pi-hover); }
+.pi-sidebar-more:disabled { cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pi-loading-spinner { animation: none; }
+}
+
 .pi-scroll-to-bottom {
   position: absolute;
   z-index: 7;

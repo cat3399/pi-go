@@ -51,6 +51,8 @@ export interface ApplicationController {
   directory(project: string, search?: string): DirectoryWindow | undefined;
   watchDirectory(project: string, search?: string): () => void;
   loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
+  hasMoreProjects: boolean;
+  loadProjects(): Promise<void>;
   imageCache: SessionImageCache;
   status: ControllerStatus;
   error: string;
@@ -1117,6 +1119,11 @@ export function useApplicationController(client: ApplicationClient): Application
     try { return await data.loadDirectory(project, search, more, force); }
     catch (error) { setError(errorMessage(error)); throw error; }
   }, [data]);
+
+  const loadProjects = useCallback(async () => {
+    try { await data.loadProjects(); }
+    catch (error) { setError(errorMessage(error)); throw error; }
+  }, [data]);
   const directory = useCallback((project: string, search = "") => data.directory(project, search), [data]);
   const watchDirectory = useCallback((project: string, search = "") => data.watchDirectory(project, search), [data]);
 
@@ -1127,6 +1134,8 @@ export function useApplicationController(client: ApplicationClient): Application
     loadHistory,
     loadNodes,
     loadDirectory,
+    hasMoreProjects: data.hasMoreProjects,
+    loadProjects,
     directory,
     watchDirectory,
     imageCache,

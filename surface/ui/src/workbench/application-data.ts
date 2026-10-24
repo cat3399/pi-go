@@ -2,13 +2,16 @@ import type {
   AgentMessage, AgentReadVersion, ApplicationClient, ApplicationEventEnvelope, ApplicationOverview,
   ApplicationReadRequest, ApplicationResources, ApplicationSnapshot, EventSubscription, HistoryItem,
   EntryNode, HistoryPage, LiveSnapshot, NodesPage, ReadMessage, ReadResourceRequest, ResourceResponse, ResourceRevision,
-  SessionDirectoryPage, SessionInfo, SessionMetadata, SessionResources, SessionRuntimeState, SessionVersion,
+  ProjectDirectoryPage, ProjectInfo, SessionDirectoryPage, SessionInfo, SessionMetadata, SessionResources, SessionRuntimeState, SessionVersion,
 } from "../contracts";
 import { ResourceCache, retainedBytes } from "./resource-cache.ts";
 
-const pageLimit = 64;
-const pageBytes = 256 * 1024;
+const pageLimit = 128;
+const pageBytes = 512 * 1024;
 const maxWindowPages = 3;
+const projectLimit = 8;
+const directoryLimit = 8;
+const directoryMoreLimit = 20;
 const revalidateAfter = 30_000;
 const maxBufferedBytes = 8 * 1024 * 1024;
 
@@ -50,6 +53,14 @@ export interface DirectoryWindow {
   start: number;
   next?: string;
 }
+
+interface ProjectDirectoryWindow {
+  pages: ProjectDirectoryPage[];
+  projects: ProjectInfo[];
+  next?: string;
+}
+
+const projectDirectoryKey = '["project-directory"]';
 
 export interface ScrollPosition { entryId: string; offset: number; bottom: boolean }
 export interface EditDraft { text: string; original: string; contentToken?: string }
@@ -155,12 +166,16 @@ export class ApplicationDataStore {
   private snapshotValue: ApplicationSnapshot | null = null;
   private error = "";
 
-  constructor(client: ApplicationClient, budget?: number) { this.client = client; this.cache = new ResourceCache(budget); }
+  constructor(client: ApplicationClient, budget?: number) {
+    this.client = client; this.cache = new ResourceCache(budget);
+    this.cache.pin(projectDirectoryKey);
+  }
   get version(): number { return this.revision; }
   get configurationVersion(): number { return this.configurationRevision; }
   get lastAppliedCursor(): string { return this.cursor; }
   get lastError(): string { return this.error; }
   get snapshot(): ApplicationSnapshot | null { return this.snapshotValue; }
+  get hasMoreProjects(): boolean { return Boolean(this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.next); }
   observe(listener: Listener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   observeEvents(listener: (event: ApplicationEventEnvelope) => void): () => void { this.eventListeners.add(listener); return () => this.eventListeners.delete(listener); }
   isMissing(id: string): boolean { return this.cache.peek(JSON.stringify(["missing", id])) === true; }
@@ -188,7 +203,7 @@ export class ApplicationDataStore {
         const result = await this.readApplication("overview", {}, true);
         if (lifecycle !== this.lifecycle) return;
         if (!result.cursor) throw new Error("服务端未返回事件同步起点");
-        this.overview = result.data;
+        this.acceptOverview(result.data);
         this.cursor = result.cursor;
         this.rebuildSnapshot();
       }
@@ -332,6 +347,7 @@ export class ApplicationDataStore {
       // Subscribe at the candidate baseline, while keeping the applied cursor
       // unchanged until all selected resources have successfully validated.
       this.openStream(baseline.cursor);
+      this.acceptOverview(baseline.data);
       const results = await Promise.allSettled([
         ...selected.map((id) => this.loadSession(id, true)), this.refreshLoadedDirectories(),
       ]);
@@ -339,7 +355,6 @@ export class ApplicationDataStore {
       const failure = results.find((result) => result.status === "rejected" && !isMissing(result.reason));
       if (failure?.status === "rejected") throw failure.reason;
       if (this.recoveryAgain || this.overflowed) return;
-      this.overview = baseline.data;
       this.cursor = baseline.cursor;
       this.needsBaseline = false;
       this.recoveryAttempts = 0;
@@ -390,28 +405,72 @@ export class ApplicationDataStore {
 
   async refreshOverview(force = false): Promise<ApplicationSnapshot> {
     const result = await this.readApplication("overview", {}, force);
-    this.overview = result.data;
+    this.acceptOverview(result.data);
     this.rebuildSnapshot();
     this.emit();
     return this.snapshotValue!;
+  }
+
+  private acceptOverview(value: ApplicationOverview): void {
+    this.overview = value;
+    if (value.directory) this.installProjectPage(value.directory, false);
+  }
+
+  private installProjectPage(page: ProjectDirectoryPage, more: boolean): void {
+    const previous = this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey);
+    let pages = more && previous ? [...previous.pages, page] : [page];
+    if (!more && previous) pages = previous.pages[0]?.version === page.version ? [page, ...previous.pages.slice(1)] : previous.pages;
+    const projects = new Map(pages.flatMap((item) => item.projects).map((item) => [item.project.path, item.project]));
+    for (const item of page.projects) {
+      projects.set(item.project.path, item.project);
+      const key = directoryKey(item.project.path, "");
+      const old = this.directory(item.project.path);
+      const head = item.sessions;
+      const window = !old ? this.directoryWindow([head], {})
+        : old.pages[0]?.version === head.version ? this.directoryWindow([head, ...old.pages.slice(1)], old.overrides)
+          : this.directoryWindow(old.pages, { ...old.overrides, ...Object.fromEntries(head.sessions.map((info) => [info.id, info])) });
+      this.directoryQueries.set(key, { project: item.project.path, search: "" });
+      this.cache.put(key, window);
+      this.cache.put(applicationKey("directory", { project: item.project.path, search: "", limit: directoryLimit }), head);
+    }
+    this.cache.put(projectDirectoryKey, { pages, projects: [...projects.values()].sort((a, b) => b.modified.localeCompare(a.modified) || a.path.localeCompare(b.path)),
+      next: pages.at(-1)?.next ?? (page.total > projects.size ? page.next : undefined) } satisfies ProjectDirectoryWindow);
+  }
+
+  async loadProjects(): Promise<void> {
+    const previous = this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey);
+    if (previous && !previous.next) return;
+    try {
+      const page = (await this.readApplication("projects", { limit: projectLimit, sessionLimit: directoryLimit, ...(previous?.next ? { cursor: previous.next } : {}) })).data;
+      this.installProjectPage(page, Boolean(previous));
+    } catch (error) {
+      if (!isConflict(error)) throw error;
+      this.cache.forget(projectDirectoryKey);
+      let next: string | undefined;
+      do {
+        const page = (await this.readApplication("projects", { limit: projectLimit, sessionLimit: directoryLimit, ...(next ? { cursor: next } : {}) }, true)).data;
+        this.installProjectPage(page, Boolean(next)); next = page.next;
+      } while (next && (this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.projects.length ?? 0) < (previous?.projects.length ?? projectLimit) + projectLimit);
+    }
+    this.rebuildSnapshot(); this.emit();
   }
 
   async loadDirectory(project: string, search = "", more = false, force = false): Promise<DirectoryWindow> {
     const key = directoryKey(project, search), previous = this.directory(project, search);
     for (const candidate of this.directoryQueries.keys()) if (!this.cache.peek(candidate) && !this.visibleDirectories.has(candidate)) this.directoryQueries.delete(candidate);
     this.directoryQueries.set(key, { project, search });
-    if (!more && !force && previous && this.cache.isFresh(applicationKey("directory", { project, search, limit: 50 }), revalidateAfter)) return previous;
+    if (!more && !force && previous && this.cache.isFresh(applicationKey("directory", { project, search, limit: directoryLimit }), revalidateAfter)) return previous;
     const cursor = more ? previous?.next : undefined;
     if (more && !cursor && previous) return previous;
     let page: SessionDirectoryPage;
-    try { page = (await this.readApplication("directory", { project, search, limit: 50, ...(cursor ? { cursor } : {}) }, force)).data; }
+    try { page = (await this.readApplication("directory", { project, search, limit: cursor ? directoryMoreLimit : directoryLimit, ...(cursor ? { cursor } : {}) }, force)).data; }
     catch (error) { if (more && isConflict(error)) {
       const pages: SessionDirectoryPage[] = [];
       let next: string | undefined;
       do {
-        const result = (await this.readApplication("directory", { project, search, limit: 50, ...(next ? { cursor: next } : {}) }, true)).data;
+        const result = (await this.readApplication("directory", { project, search, limit: next ? directoryMoreLimit : directoryLimit, ...(next ? { cursor: next } : {}) }, true)).data;
         pages.push(result); next = result.next;
-      } while (next && pages.reduce((count, item) => count + item.sessions.length, 0) < (previous?.sessions.length ?? 50));
+      } while (next && pages.reduce((count, item) => count + item.sessions.length, 0) < (previous?.sessions.length ?? directoryLimit));
       const value = this.directoryWindow(pages, {});
       this.cache.put(key, value); this.rebuildSnapshot(); this.emit(); return value;
     } throw error; }
@@ -447,7 +506,7 @@ export class ApplicationDataStore {
       const present = value.sessions.some((session) => session.id === id);
       // Retain updates for loaded rows. New rows are admitted through the
       // directory head, so unrelated session events cannot grow this map.
-      if (!present) { this.cache.invalidate(applicationKey("directory", { ...query, limit: 50 })); continue; }
+      if (!present) { this.cache.invalidate(applicationKey("directory", { ...query, limit: directoryLimit })); continue; }
       const match = info && projectMatches(query.project, info) && searchMatches(query.search, info);
       this.cache.put(key, this.directoryWindow(value.pages, { ...value.overrides, [id]: match ? info : null }));
     }
@@ -463,7 +522,8 @@ export class ApplicationDataStore {
       const view = this.session(id);
       if (view) sessions.set(id, view.metadata.info);
     }
-    this.snapshotValue = { revision: cursorParts(this.cursor)[1] || 0, cursor: this.cursor, ...this.overview, sessions: [...sessions.values()] };
+    this.snapshotValue = { revision: cursorParts(this.cursor)[1] || 0, cursor: this.cursor, ...this.overview,
+      projects: this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.projects ?? this.overview.projects, sessions: [...sessions.values()] };
   }
 
   invalidateSession(id: string, history = true): void {
@@ -707,7 +767,7 @@ export class ApplicationDataStore {
   private applyEvent(envelope: ApplicationEventEnvelope): void {
     const { sessionId: id, event } = envelope;
     let view = this.session(id);
-    if (event.type === "project_catalog") { this.cache.invalidate(applicationKey("overview")); return; }
+    if (event.type === "project_catalog") { this.cache.forget(projectDirectoryKey); this.cache.invalidate(applicationKey("overview")); return; }
     if (event.type === "session_catalog") {
       this.cache.invalidate(applicationKey("overview"));
       if (event.change === "deleted") {
@@ -869,7 +929,7 @@ export class ApplicationDataStore {
       const work: Promise<unknown>[] = selected.map((id) => this.loadSession(id));
       if (!this.cache.isFresh(applicationKey("overview"))) work.push(this.refreshOverview());
       for (const [key, query] of this.directoryQueries) {
-        if (this.visibleDirectories.has(key) && !this.cache.isFresh(applicationKey("directory", { ...query, limit: 50 })))
+        if (this.visibleDirectories.has(key) && !this.cache.isFresh(applicationKey("directory", { ...query, limit: directoryLimit })))
           work.push(this.loadDirectory(query.project, query.search));
       }
       for (const id of summaries) work.push(this.read(id, "metadata").then(({ data }) => { this.patchSummary(id, data.info); this.rebuildSnapshot(); this.emit(); }));

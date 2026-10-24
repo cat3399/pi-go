@@ -130,8 +130,9 @@ test("cached session revisits read no whole projection and reuse the fixed histo
   const client = fakeClient(), store = new ApplicationDataStore(client);
   client.setLog(12000);
   const view = await store.loadSession("one");
-  assert.equal(view.window.pages[0].items.length, 64);
-  assert.equal(view.window.start, 11936);
+  assert.equal(view.window.pages[0].items.length, 128);
+  assert.equal(view.window.start, 11872);
+  assert.equal(client.calls.find((call) => call.kind === "history").query.maxBytes, 512 * 1024);
   const count = client.calls.length;
   assert.equal(await store.loadSession("one"), view);
   assert.equal(client.calls.length, count);
@@ -208,12 +209,12 @@ test("history render windows stay bounded and old-node lookup skips all interven
   await store.loadSession("one");
   for (let index = 0; index < 5; index++) await store.pageHistory("one", "older");
   let value = store.session("one").window;
-  assert.ok(value.pages.flatMap((page) => page.items).length <= 192);
-  assert.equal(value.start, 11616);
-  assert.equal(value.end, 11808);
+  assert.ok(value.pages.flatMap((page) => page.items).length <= 384);
+  assert.equal(value.start, 11232);
+  assert.equal(value.end, 11616);
   await store.pageHistory("one", "newer");
   value = store.session("one").window;
-  assert.equal(value.end, 11872);
+  assert.equal(value.end, 11744);
   const previous = client.calls.filter((call) => call.kind === "history").length;
   await store.pageHistory("one", "latest", "n21");
   assert.equal(client.calls.filter((call) => call.kind === "history").length, previous + 1);
@@ -225,15 +226,15 @@ test("history render windows stay bounded and old-node lookup skips all interven
 
 test("small tail updates accumulate into a recent window instead of evicting one page per message", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);
-  client.setLog(64);
+  client.setLog(128);
   await store.loadSession("one");
-  for (let log = 65; log <= 74; log++) {
+  for (let log = 129; log <= 138; log++) {
     client.setLog(log);
     await store.loadSession("one", true);
   }
   const value = store.session("one").window;
   assert.equal(value.start, 0);
-  assert.equal(value.end, 74);
+  assert.equal(value.end, 138);
   assert.equal(value.pages.length, 2);
 });
 
@@ -384,7 +385,7 @@ test("scrolling past an old snapshot reads the next new page without skipping th
   assert.equal(store.session("one").window.end, 256);
   await store.pageHistory("one", "newer");
   const window = store.session("one").window;
-  assert.equal(window.end, 320);
+  assert.equal(window.end, 384);
   assert.equal(window.total, 1024);
   assert.equal(window.pages.at(-1).items[0].node.id, "n257");
   const query = client.calls.filter((call) => call.kind === "history").at(-1).query;
@@ -403,5 +404,54 @@ test("the first readonly paint does not download an index that Runtime admission
   await store.loadSession("one", true); await store.ensureNavigation("one");
   assert.equal(store.navigation("one").items.length, 3000);
   assert.equal(client.calls.filter((call) => call.kind === "nodes").length, 13);
+  store.stop();
+});
+
+test("the first screen seeds both directory levels and expanding a project reuses its session page", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  const info = (project, index) => ({ id: `${project}-${index}`, cwd: project, projectRoot: project, path: `${project}/${index}.jsonl`,
+    modified: new Date(Date.UTC(2026, 0, 40 - index)).toISOString(), created: "2026-01-01T00:00:00Z", messageCount: 2, firstMessage: `question ${index}` });
+  const directory = (project, start, limit) => ({ version: project, total: 35, start,
+    sessions: Array.from({ length: Math.min(limit, 35 - start) }, (_, index) => info(project, start + index)),
+    ...(start + limit < 35 ? { next: JSON.stringify({ project, start: start + limit }) } : {}) });
+  const projectPage = (start) => ({ version: "projects", start, total: 12,
+    projects: Array.from({ length: Math.min(8, 12 - start) }, (_, index) => {
+      const path = `/project-${start + index}`;
+      return { project: { path, modified: "2026-01-01T00:00:00Z", sessionCount: 35 }, sessions: directory(path, 0, 8) };
+    }), ...(start === 0 ? { next: "next-projects" } : {}) });
+  client.readApplicationResource = async (kind, query) => {
+    client.calls.push({ kind, query });
+    let data;
+    if (kind === "overview") {
+      const page = projectPage(0);
+      data = { agentDir: "/agent", defaultCwd: "/project-0", projects: page.projects.map((item) => item.project),
+        directory: page, sessionCount: 420, runningSessionIds: [] };
+    } else if (kind === "projects") data = projectPage(query.cursor ? 8 : 0);
+    else if (kind === "directory") {
+      const start = query.cursor ? JSON.parse(query.cursor).start : 0;
+      data = directory(query.project, start, query.limit);
+    }
+    return { token: JSON.stringify(data), data, cursor: "EpochA:0" };
+  };
+  await store.start();
+  assert.equal(store.snapshot.projects.length, 8);
+  assert.equal(store.snapshot.sessions.length, 64);
+  assert.equal(store.hasMoreProjects, true);
+  await store.loadDirectory("/project-0");
+  assert.deepEqual(client.calls.map((call) => call.kind), ["overview"], "opening a seeded project must not request its first page again");
+  await store.loadDirectory("/project-0", "", true);
+  assert.equal(store.directory("/project-0").sessions.length, 28);
+  assert.equal(client.calls.at(-1).query.limit, 20);
+  await store.refreshOverview(true);
+  assert.equal(store.directory("/project-0").sessions.length, 28, "head validation must retain manually expanded rows");
+  await store.loadProjects();
+  assert.equal(store.snapshot.projects.length, 12);
+  assert.equal(store.hasMoreProjects, false);
+  const count = client.calls.length;
+  await store.loadDirectory("/project-10");
+  assert.equal(client.calls.length, count, "project continuation must seed its session rows too");
+  await store.loadDirectory("/project-0", "", true);
+  assert.equal(store.directory("/project-0").sessions.length, 35);
+  assert.equal(store.directory("/project-0").next, undefined);
   store.stop();
 });

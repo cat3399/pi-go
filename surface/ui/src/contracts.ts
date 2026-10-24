@@ -235,6 +235,7 @@ export interface ApplicationReadRequest {
   search?: string;
   cursor?: string;
   limit?: number;
+  sessionLimit?: number;
 }
 
 export interface ApplicationOverview {
@@ -243,6 +244,15 @@ export interface ApplicationOverview {
   projects: ProjectInfo[];
   sessionCount: number;
   runningSessionIds: string[];
+  directory?: ProjectDirectoryPage;
+}
+
+export interface ProjectDirectoryPage {
+  version: string;
+  projects: { project: ProjectInfo; sessions: SessionDirectoryPage }[];
+  start: number;
+  total: number;
+  next?: string;
 }
 
 export interface SessionDirectoryPage {
@@ -256,6 +266,7 @@ export interface SessionDirectoryPage {
 export interface ApplicationResources {
   overview: ApplicationOverview;
   directory: SessionDirectoryPage;
+  projects: ProjectDirectoryPage;
 }
 
 export interface EntryNode {

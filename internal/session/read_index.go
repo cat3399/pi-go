@@ -219,6 +219,10 @@ func (r *ReadIndex) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 	return r.manager.ReadHistory(query)
 }
 
+func (r *ReadIndex) ReadRuns(query RunsQuery) (RunsPage, error) {
+	return r.manager.ReadRuns(query)
+}
+
 func (r *ReadIndex) ReadNodes(query NodeQuery) (NodePage, error) {
 	return r.manager.ReadNodes(query)
 }

@@ -1,9 +1,12 @@
 package application_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -83,6 +86,88 @@ func TestDirectoryPagesKeepOrderingThroughActivityAndRenames(t *testing.T) {
 	}
 	if len(managers) != 0 {
 		t.Fatal("directory admitted a Runtime")
+	}
+}
+
+func TestProjectDirectorySeedsSessionsAndKeepsBothCursorLevelsStable(t *testing.T) {
+	corpus := makeDataBenchmarkCorpus(t, dataBenchmarkShape{name: "grouped-directory", sessions: 15 * 12, messages: 4, textBytes: 32})
+	paths, err := filepath.Glob(filepath.Join(corpus.agentDir, "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := bytes.SplitN(data, []byte{'\n'}, 2)
+		var header map[string]any
+		if err := json.Unmarshal(lines[0], &header); err != nil {
+			t.Fatal(err)
+		}
+		header["cwd"] = filepath.Join(corpus.cwd, fmt.Sprintf("project-%02d", index/12))
+		encoded, err := json.Marshal(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(append(encoded, '\n'), lines[1]...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api, managers := openDataBenchmarkService(t, corpus)
+	overview, err := api.ReadOverview()
+	if err != nil || len(overview.Projects) != 8 || len(overview.Directory.Projects) != 8 || overview.Directory.Total != 15 || overview.Directory.Next == nil {
+		t.Fatalf("bounded first screen = %#v, %v", overview, err)
+	}
+	for _, item := range overview.Directory.Projects {
+		if len(item.Sessions.Sessions) != 8 || item.Sessions.Total != 12 || item.Sessions.Next == nil {
+			t.Fatalf("project did not include a bounded first session page: %#v", item)
+		}
+		if item.Project.Path != item.Sessions.Sessions[0].CWD {
+			t.Fatal("project/session grouping differs")
+		}
+	}
+	first := overview.Directory.Projects[0]
+	more, err := api.ReadSessionDirectory(application.SessionDirectoryQuery{Project: first.Project.Path, Cursor: first.Sessions.Next, Limit: 20})
+	if err != nil || more.Start != 8 || len(more.Sessions) != 4 || more.Next != nil {
+		t.Fatalf("seed cursor cannot continue through ordinary directory reads: %#v, %v", more, err)
+	}
+	// A new activity moves an unvisited project to the head. Existing project
+	// cursors must still finish the earlier ordering without duplicates.
+	writer, err := session.OpenSessionManager(paths[0], filepath.Dir(paths[0]), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _ := llm.NewUserTextMessage("new project activity", time.UnixMilli(3_000_000_000_000))
+	if _, err := writer.AppendLLMMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := api.ReadProjectDirectory(application.ProjectDirectoryQuery{Cursor: overview.Directory.Next, Limit: 8, SessionLimit: 3})
+	if err != nil || len(remaining.Projects) != 7 || remaining.Version != overview.Directory.Version || remaining.Start != 8 || remaining.Next != nil {
+		t.Fatalf("project continuation changed snapshot: %#v, %v", remaining, err)
+	}
+	seen := make(map[string]bool)
+	for _, item := range append(overview.Directory.Projects, remaining.Projects...) {
+		if seen[item.Project.Path] {
+			t.Fatal("repeated project", item.Project.Path)
+		}
+		seen[item.Project.Path] = true
+	}
+	latest, err := api.ReadOverview()
+	if err != nil || latest.Directory.Version == overview.Directory.Version || filepath.Base(latest.Projects[0].Path) != "project-00" {
+		t.Fatalf("fresh head did not include changed project: %#v, %v", latest, err)
+	}
+	if _, err := api.ReadProjectDirectory(application.ProjectDirectoryQuery{Cursor: &application.ProjectDirectoryCursor{Index: first.Sessions.Version, Offset: 0}}); !errors.Is(err, session.ErrInvalidReadQuery) {
+		t.Fatalf("session cursor was accepted as project cursor: %v", err)
+	}
+	if _, err := api.ReadSessionDirectory(application.SessionDirectoryQuery{Cursor: &application.SessionDirectoryCursor{Index: overview.Directory.Version, Offset: 0}}); !errors.Is(err, session.ErrInvalidReadQuery) {
+		t.Fatalf("project cursor was accepted as session cursor: %v", err)
+	}
+	if len(managers) != 0 {
+		t.Fatal("sidebar browse admitted an Agent Runtime")
 	}
 }
 

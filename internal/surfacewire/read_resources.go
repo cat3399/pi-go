@@ -45,22 +45,24 @@ func sessionVersion(value session.ReadVersion) SessionVersion {
 }
 
 type ReadResourceRequest struct {
-	LeafID     *string               `json:"leafId,omitempty"`
-	At         *SessionVersion       `json:"at,omitempty"`
-	Cursor     string                `json:"cursor,omitempty"`
-	AroundID   string                `json:"aroundId,omitempty"`
-	Direction  session.PageDirection `json:"direction,omitempty"`
-	AfterID    string                `json:"afterId,omitempty"`
-	Limit      int                   `json:"limit,omitempty"`
-	MaxBytes   int                   `json:"maxBytes,omitempty"`
-	EntryType  string                `json:"entryType,omitempty"`
-	Tree       bool                  `json:"tree,omitempty"`
-	ParentID   *string               `json:"parentId,omitempty"`
-	Role       string                `json:"role,omitempty"`
-	Search     string                `json:"search,omitempty"`
-	EntryID    string                `json:"entryId,omitempty"`
-	Generation string                `json:"generation,omitempty"`
-	BlockIndex int                   `json:"blockIndex,omitempty"`
+	LeafID       *string               `json:"leafId,omitempty"`
+	At           *SessionVersion       `json:"at,omitempty"`
+	Cursor       string                `json:"cursor,omitempty"`
+	AroundID     string                `json:"aroundId,omitempty"`
+	Direction    session.PageDirection `json:"direction,omitempty"`
+	AfterID      string                `json:"afterId,omitempty"`
+	Limit        int                   `json:"limit,omitempty"`
+	MaxBytes     int                   `json:"maxBytes,omitempty"`
+	EntryType    string                `json:"entryType,omitempty"`
+	Tree         bool                  `json:"tree,omitempty"`
+	ParentID     *string               `json:"parentId,omitempty"`
+	Role         string                `json:"role,omitempty"`
+	Search       string                `json:"search,omitempty"`
+	EntryID      string                `json:"entryId,omitempty"`
+	Generation   string                `json:"generation,omitempty"`
+	BlockIndex   int                   `json:"blockIndex,omitempty"`
+	RunID        string                `json:"runId,omitempty"`
+	MetadataOnly bool                  `json:"metadataOnly,omitempty"`
 }
 
 type EntryNode struct {
@@ -85,8 +87,35 @@ func readNode(value session.EntryNode) EntryNode {
 }
 
 type HistoryItem struct {
-	Node    EntryNode       `json:"node"`
-	Message json.RawMessage `json:"message,omitempty"`
+	Node       EntryNode       `json:"node"`
+	Message    json.RawMessage `json:"message,omitempty"`
+	Projection string          `json:"projection,omitempty"`
+}
+
+type HistoryRun struct {
+	ID               string      `json:"id"`
+	Header           EntryNode   `json:"header"`
+	Result           *EntryNode  `json:"result,omitempty"`
+	Start            int         `json:"start"`
+	End              int         `json:"end"`
+	LastEntryID      string      `json:"lastEntryId"`
+	ProcessCount     int         `json:"processCount"`
+	ResultHasProcess bool        `json:"resultHasProcess"`
+	StopReason       string      `json:"stopReason,omitempty"`
+	Anchors          []EntryNode `json:"anchors"`
+}
+
+func historyRun(value session.HistoryRun) HistoryRun {
+	run := HistoryRun{ID: value.ID, Header: readNode(value.Header), Start: value.Start, End: value.End,
+		LastEntryID: value.LastEntryID, ProcessCount: value.ProcessCount, ResultHasProcess: value.ResultHasProcess, StopReason: value.StopReason, Anchors: []EntryNode{}}
+	if value.Result != nil {
+		node := readNode(*value.Result)
+		run.Result = &node
+	}
+	for _, node := range value.Anchors {
+		run.Anchors = append(run.Anchors, readNode(node))
+	}
+	return run
 }
 
 type HistoryPage struct {
@@ -100,6 +129,12 @@ type HistoryPage struct {
 	Connected bool           `json:"connected"`
 	Older     string         `json:"older,omitempty"`
 	Newer     string         `json:"newer,omitempty"`
+	Run       *HistoryRun    `json:"run,omitempty"`
+}
+
+type RunsPage struct {
+	HistoryPage
+	Runs []HistoryRun `json:"runs"`
 }
 
 type NodesPage struct {
@@ -114,10 +149,11 @@ type readCursor struct {
 	SessionID string
 	History   *session.HistoryCursor
 	Nodes     *session.NodeCursor
+	Runs      *session.RunsCursor
 }
 
 func encodeReadCursor(value readCursor) string {
-	if value.History == nil && value.Nodes == nil {
+	if value.History == nil && value.Nodes == nil && value.Runs == nil {
 		return ""
 	}
 	data, _ := json.Marshal(value)
@@ -134,8 +170,9 @@ func decodeReadCursor(id, kind, encoded string) (readCursor, error) {
 	}
 	data, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil || json.Unmarshal(data, &value) != nil || value.SessionID != id ||
-		(kind == "history" && (value.History == nil || value.Nodes != nil)) ||
-		(kind == "nodes" && (value.Nodes == nil || value.History != nil)) {
+		(kind == "history" && (value.History == nil || value.Nodes != nil || value.Runs != nil)) ||
+		(kind == "nodes" && (value.Nodes == nil || value.History != nil || value.Runs != nil)) ||
+		(kind == "runs" && (value.Runs == nil || value.History != nil || value.Nodes != nil)) {
 		return readCursor{}, session.ErrInvalidReadQuery
 	}
 	return value, nil
@@ -149,13 +186,45 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 		at = &session.ReadVersion{Generation: query.At.Generation, Log: query.At.Log, View: query.At.View}
 	}
 	switch kind {
+	case "runs":
+		cursor, err := decodeReadCursor(id, kind, query.Cursor)
+		if err != nil {
+			return ResourceResponse{}, err
+		}
+		value, err := api.ReadRuns(id, session.RunsQuery{LeafID: query.LeafID, At: at, Cursor: cursor.Runs,
+			AroundID: query.AroundID, AfterID: query.AfterID, Direction: query.Direction, MetadataOnly: query.MetadataOnly, Limit: query.Limit, MaxBytes: query.MaxBytes})
+		if err != nil {
+			return ResourceResponse{}, err
+		}
+		page := value.Page
+		result := RunsPage{HistoryPage: HistoryPage{SessionID: id, Version: sessionVersion(page.Version), AnchorID: page.AnchorID,
+			Start: page.Start, End: page.End, Total: page.Total, Connected: page.Connected, Items: []HistoryItem{},
+			Older: encodeReadCursor(readCursor{SessionID: id, Runs: page.Older}), Newer: encodeReadCursor(readCursor{SessionID: id, Runs: page.Newer})}, Runs: []HistoryRun{}}
+		for _, item := range page.Items {
+			result.Runs = append(result.Runs, historyRun(item.Run))
+			if item.Header != nil {
+				message, _, err := ProjectEntryAt(*item.Header, page.Version.Generation)
+				if err != nil {
+					return ResourceResponse{}, err
+				}
+				result.Items = append(result.Items, HistoryItem{Node: readNode(item.Run.Header), Message: message})
+			}
+			if item.Result != nil {
+				message, err := projectRunAnswer(*item.Result, page.Version.Generation)
+				if err != nil {
+					return ResourceResponse{}, err
+				}
+				result.Items = append(result.Items, HistoryItem{Node: readNode(*item.Run.Result), Message: message, Projection: "answer"})
+			}
+		}
+		return resourceResponse(result, known)
 	case "history":
 		cursor, err := decodeReadCursor(id, kind, query.Cursor)
 		if err != nil {
 			return ResourceResponse{}, err
 		}
 		value, err := api.ReadHistory(id, session.HistoryQuery{LeafID: query.LeafID, At: at, Cursor: cursor.History,
-			AroundID: query.AroundID, AfterID: query.AfterID, Direction: query.Direction, Limit: query.Limit, MaxBytes: query.MaxBytes})
+			AroundID: query.AroundID, AfterID: query.AfterID, Direction: query.Direction, Limit: query.Limit, MaxBytes: query.MaxBytes, RunID: query.RunID})
 		if err != nil {
 			return ResourceResponse{}, err
 		}
@@ -163,6 +232,10 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 		result := HistoryPage{SessionID: id, Version: sessionVersion(page.Version), AnchorID: page.AnchorID,
 			Start: page.Start, End: page.End, Total: page.Total, Connected: page.Connected, Items: []HistoryItem{},
 			Older: encodeReadCursor(readCursor{SessionID: id, History: page.Older}), Newer: encodeReadCursor(readCursor{SessionID: id, History: page.Newer})}
+		if page.Run != nil {
+			run := historyRun(*page.Run)
+			result.Run = &run
+		}
 		for _, item := range page.Items {
 			projected := HistoryItem{Node: readNode(item.Node)}
 			if item.Entry != nil {
@@ -223,6 +296,39 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 	default:
 		return ResourceResponse{}, ErrInvalidRequest
 	}
+}
+
+// Overview answers omit the process prefix without changing the stored entry.
+// Expanding a run reads that same entry through the complete history projection.
+func projectRunAnswer(entry session.Entry, generation string) (json.RawMessage, error) {
+	message, ok, err := ProjectEntryAt(entry, generation)
+	if err != nil || !ok {
+		return message, err
+	}
+	var value map[string]json.RawMessage
+	if err := json.Unmarshal(message, &value); err != nil {
+		return nil, err
+	}
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(value["content"], &blocks) != nil {
+		return message, nil
+	}
+	lastProcess := -1
+	for index, block := range blocks {
+		var kind string
+		_ = json.Unmarshal(block["type"], &kind)
+		if kind != "text" && kind != "image" {
+			lastProcess = index
+		}
+	}
+	if lastProcess < 0 {
+		return message, nil
+	}
+	value["content"], err = json.Marshal(blocks[lastProcess+1:])
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
 }
 
 // Every deferred block carries the source generation as well as entry/block
