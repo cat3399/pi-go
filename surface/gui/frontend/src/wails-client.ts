@@ -1,6 +1,8 @@
 import { Call, Events } from "@wailsio/runtime";
 import type {
   ApplicationClient,
+  ApplicationResources,
+  ApplicationReadRequest,
   ApplicationEventEnvelope,
   ApplicationSnapshot,
   AuthState,
@@ -86,6 +88,10 @@ export class WailsApplicationClient implements ApplicationClient {
 
   readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query: ReadResourceRequest = {}, known = ""): Promise<ResourceResponse<SessionResources[K]>> {
     return call("ReadSessionResource", sessionId, kind, JSON.stringify(query), known);
+  }
+
+  readApplicationResource<K extends keyof ApplicationResources>(kind: K, query: ApplicationReadRequest = {}, known = ""): Promise<ResourceResponse<ApplicationResources[K]>> {
+    return call("ReadApplicationResource", kind, JSON.stringify(query), known);
   }
 
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult> {

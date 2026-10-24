@@ -1,5 +1,7 @@
 import type {
   ApplicationClient,
+  ApplicationResources,
+  ApplicationReadRequest,
   ApplicationEventEnvelope,
   ApplicationSnapshot,
   AuthState,
@@ -160,6 +162,12 @@ export class RemoteApplicationClient implements ApplicationClient {
 
   snapshot(): Promise<ApplicationSnapshot> {
     return this.request("/api/v1/snapshot");
+  }
+
+  readApplicationResource<K extends keyof ApplicationResources>(kind: K, input: ApplicationReadRequest = {}, known = ""): Promise<ResourceResponse<ApplicationResources[K]>> {
+    const query = new URLSearchParams({ query: JSON.stringify(input) });
+    if (known) query.set("known", known);
+    return this.request(`/api/v1/resources/${kind}?${query}`);
   }
 
   async sessionView(sessionId: string, leafId = ""): Promise<SessionView> {

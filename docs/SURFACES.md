@@ -31,6 +31,7 @@ Workbench 的 `ApplicationClient` 提供本地 IPC 和远程 HTTP/SSE 两种实�
 |---|---|
 | `POST /api/v1/sessions` | 创建会话 |
 | `GET /api/v1/snapshot` | 应用快照 |
+| `GET /api/v1/resources/{resource}` | 项目概览、数量、运行中会话及分页会话目录 |
 | `GET /api/v1/sessions/{id}` | 单会话 durable/live 快照 |
 | `GET /api/v1/sessions/{id}/resources/{resource}` | 有界历史、节点、元数据、当前运行态和按需正文 |
 | `POST /api/v1/sessions/{id}/commands` | 会话命令 |
@@ -61,6 +62,13 @@ HTTP 同时支持 `ETag`/`If-None-Match` 和 304。token 覆盖实际资源表�
 `deferred` 节点，可用 `entry` 读取投影正文，或用 `chunk` 的 `offset`/`length` 获取原始
 JSON 字节的 base64 分块。图片、thinking、单条正文和分块以 `generation`、`entryId`、
 `blockIndex`（适用时）定位；旧代次或不可用游标返回 409，客户端需校验对应资源。
+
+应用资源与桌面 IPC `ReadApplicationResource` 共用相同校验协议。`overview` 返回项目、会话
+总数和运行中会话 ID，读取前的事件起点放在响应顶层 `cursor`，不参与内容 token；304 时通过
+`X-Pi-Event-Cursor` 返回。`directory` 支持 `project`、`search`、`limit` 和 `cursor`，按消息
+活动时间降序、会话 ID 升序排列。后续页绑定同一不可变目录索引，改名不改变消息活动时间。
+索引在 16 MiB 预算内保留五分钟；淘汰后仅在重新计算的内容身份完全一致时继续原游标，否则
+返回 409。概览和分页读取都不创建 Runtime。
 
 Go 服务直接提供 HTTP，HTTPS 可由前置代理终止。桌面和移动端的远程连接支持 HTTP 与 HTTPS。
 

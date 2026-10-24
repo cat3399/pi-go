@@ -131,6 +131,29 @@ func BenchmarkDataReads(b *testing.B) {
 			b.Run("CatalogWarm", func(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) { return surfacewire.Snapshot(api) })
 			})
+			b.Run("OverviewWire", func(b *testing.B) {
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadApplicationResource(api, "overview", surfacewire.ApplicationReadRequest{}, "")
+				})
+			})
+			b.Run("DirectoryFirstWire", func(b *testing.B) {
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadApplicationResource(api, "directory", surfacewire.ApplicationReadRequest{Limit: 50}, "")
+				})
+			})
+			b.Run("DirectoryCursorWire", func(b *testing.B) {
+				first, err := surfacewire.ReadApplicationResource(api, "directory", surfacewire.ApplicationReadRequest{Limit: 50}, "")
+				if err != nil {
+					b.Fatal(err)
+				}
+				var page surfacewire.SessionDirectoryPage
+				if err := json.Unmarshal(first.Data, &page); err != nil {
+					b.Fatal(err)
+				}
+				benchmarkDataQuery(b, func() (any, error) {
+					return surfacewire.ReadApplicationResource(api, "directory", surfacewire.ApplicationReadRequest{Cursor: page.Next, Limit: 50}, "")
+				})
+			})
 			b.Run("HistoryUnopened", func(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) {
 					return surfacewire.SessionViewFor(api, corpus.firstID, "", false, true)

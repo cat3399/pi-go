@@ -27,6 +27,7 @@ var errJSONContentType = errors.New("Content-Type must be application/json")
 func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	oauth := newOAuthBroker()
 	mux.HandleFunc("GET /api/v1/snapshot", handleApplicationSnapshot(api))
+	mux.HandleFunc("GET /api/v1/resources/{resource}", handleApplicationResource(api))
 	mux.HandleFunc("GET /api/v1/events", handleApplicationEvents(api))
 
 	mux.HandleFunc("GET /api/v1/sessions", handleSessions(api))

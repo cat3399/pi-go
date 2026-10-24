@@ -170,6 +170,18 @@ func (b *GUIBridge) ReadSessionResource(sessionID, kind, requestJSON, known stri
 	return surfacewire.ReadSessionResource(b.context(), api, sessionID, kind, query, known)
 }
 
+func (b *GUIBridge) ReadApplicationResource(kind, requestJSON, known string) (surfacewire.ResourceResponse, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.ResourceResponse{}, err
+	}
+	var query surfacewire.ApplicationReadRequest
+	if len(requestJSON) > 16384 || json.Unmarshal([]byte(requestJSON), &query) != nil {
+		return surfacewire.ResourceResponse{}, surfacewire.ErrInvalidRequest
+	}
+	return surfacewire.ReadApplicationResource(api, kind, query, known)
+}
+
 func (b *GUIBridge) CreateSession(input surfacewire.CreateSessionRequest) (surfacewire.CreateSessionResult, error) {
 	api, err := b.localAPI()
 	if err != nil {

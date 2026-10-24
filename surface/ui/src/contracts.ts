@@ -224,8 +224,37 @@ export interface ReadResourceRequest {
 
 export interface ResourceResponse<T> {
   token: string;
+	cursor?: string;
   unchanged?: boolean;
   data?: T;
+}
+
+export interface ApplicationReadRequest {
+  project?: string;
+  search?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ApplicationOverview {
+  agentDir: string;
+  defaultCwd: string;
+  projects: ProjectInfo[];
+  sessionCount: number;
+  runningSessionIds: string[];
+}
+
+export interface SessionDirectoryPage {
+  version: string;
+  sessions: SessionInfo[];
+  total: number;
+  start: number;
+  next?: string;
+}
+
+export interface ApplicationResources {
+  overview: ApplicationOverview;
+  directory: SessionDirectoryPage;
 }
 
 export interface EntryNode {
@@ -396,6 +425,7 @@ export interface ApplicationClient {
   authStatus(): Promise<AuthState>;
   login(password: string): Promise<void>;
   snapshot(): Promise<ApplicationSnapshot>;
+  readApplicationResource<K extends keyof ApplicationResources>(kind: K, query?: ApplicationReadRequest, known?: string): Promise<ResourceResponse<ApplicationResources[K]>>;
   sessionView(sessionId: string, leafId?: string): Promise<SessionView>;
   readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query?: ReadResourceRequest, known?: string): Promise<ResourceResponse<SessionResources[K]>>;
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult>;

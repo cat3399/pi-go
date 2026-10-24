@@ -9,6 +9,33 @@ import (
 	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
+func handleApplicationResource(api application.API) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		var query surfacewire.ApplicationReadRequest
+		if encoded := request.URL.Query().Get("query"); encoded != "" {
+			if len(encoded) > 16384 || json.Unmarshal([]byte(encoded), &query) != nil {
+				writeAPIError(writer, http.StatusBadRequest, surfacewire.ErrInvalidRequest)
+				return
+			}
+		}
+		value, err := surfacewire.ReadApplicationResource(api, request.PathValue("resource"), query, request.URL.Query().Get("known"))
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		writer.Header().Set("ETag", `"`+value.Token+`"`)
+		writer.Header().Set("Cache-Control", "private, no-cache")
+		if value.Cursor != "" {
+			writer.Header().Set("X-Pi-Event-Cursor", value.Cursor)
+		}
+		if matchesResourceETag(request.Header.Get("If-None-Match"), value.Token) {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writeJSON(writer, http.StatusOK, value)
+	}
+}
+
 func handleSessionResource(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		var query surfacewire.ReadResourceRequest

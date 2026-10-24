@@ -36,6 +36,8 @@ type API interface {
 	ReadEntry(string, string, string) (session.EntrySnapshot, error)
 
 	ListSessions() ([]SessionInfo, error)
+	ReadSessionDirectory(SessionDirectoryQuery) (SessionDirectoryPage, error)
+	ReadOverview() (Overview, error)
 	ListProjects() ([]ProjectInfo, error)
 	Snapshot() (Snapshot, error)
 	AddProject(context.Context, string) (ProjectInfo, error)

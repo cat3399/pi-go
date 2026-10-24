@@ -60,6 +60,9 @@ func (s *Service) ListSessions() ([]SessionInfo, error) {
 		result = append(result, info)
 	}
 	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].Modified.Equal(result[right].Modified) {
+			return result[left].ID < result[right].ID
+		}
 		return result[left].Modified.After(result[right].Modified)
 	})
 	return result, nil

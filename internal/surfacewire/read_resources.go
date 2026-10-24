@@ -19,6 +19,7 @@ type ResourceResponse struct {
 	Token     string          `json:"token"`
 	Unchanged bool            `json:"unchanged,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
+	Cursor    string          `json:"cursor,omitempty"`
 }
 
 func resourceResponse(value any, known string) (ResourceResponse, error) {

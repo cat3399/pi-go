@@ -57,6 +57,29 @@ func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing
 	api := testService(t, app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir}, nil)
 	mux := http.NewServeMux()
 	registerAPIRoutes(mux, api)
+	for _, kind := range []string{"overview", "directory"} {
+		path := "/api/v1/resources/" + kind
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		var remote surfacewire.ResourceResponse
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &remote) != nil {
+			t.Fatalf("%s = %d %s", kind, response.Code, response.Body)
+		}
+		local, err := surfacewire.ReadApplicationResource(api, kind, surfacewire.ApplicationReadRequest{}, "")
+		if err != nil || local.Token != remote.Token || !bytes.Equal(local.Data, remote.Data) {
+			t.Fatalf("%s differs across HTTP/IPC: %v", kind, err)
+		}
+		conditional := httptest.NewRequest(http.MethodGet, path, nil)
+		conditional.Header.Set("If-None-Match", response.Header().Get("ETag"))
+		validated := httptest.NewRecorder()
+		mux.ServeHTTP(validated, conditional)
+		if validated.Code != 304 || validated.Body.Len() != 0 {
+			t.Fatalf("%s validation = %d", kind, validated.Code)
+		}
+		if kind == "overview" && validated.Header().Get("X-Pi-Event-Cursor") == "" {
+			t.Fatal("304 lost event anchor")
+		}
+	}
 	get := func(id, kind string, query surfacewire.ReadResourceRequest, known, etag string) (*httptest.ResponseRecorder, surfacewire.ResourceResponse) {
 		t.Helper()
 		encoded, _ := json.Marshal(query)

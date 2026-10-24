@@ -152,6 +152,7 @@ type Service struct {
 	fileIndexLoads      map[string]*fileIndexLoad
 	sessionCatalog      *session.Catalog
 	readCache           readIndexCache
+	directoryCache      directoryCache
 	skillHTTP           HTTPDoer
 	skillsAPI           string
 	githubAPI           string
@@ -748,5 +749,9 @@ func (s *Service) Close(ctx context.Context) error {
 	s.readCache.entries = nil
 	s.readCache.bytes = 0
 	s.readCache.mu.Unlock()
+	s.directoryCache.mu.Lock()
+	s.directoryCache.entries = nil
+	s.directoryCache.bytes = 0
+	s.directoryCache.mu.Unlock()
 	return closeErr
 }
