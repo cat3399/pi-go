@@ -361,7 +361,13 @@ func TestApplicationSessionRejectsPromptBeforeStartingOperation(t *testing.T) {
 func TestApplicationSessionReloadRebindsWithoutDuplicatingSessionEvents(t *testing.T) {
 	harness := newSessionHarness(t)
 	events := make(chan application.Event, 4)
-	unsubscribe := harness.session.Subscribe(func(_ context.Context, event application.Event) { events <- event })
+	// Read invalidations share the Application sequence but are not duplicate
+	// canonical session events.
+	unsubscribe := harness.session.Subscribe(func(_ context.Context, event application.Event) {
+		if _, canonical := event.Value.(application.AgentSessionEvent); canonical {
+			events <- event
+		}
+	})
 	defer unsubscribe()
 	initial := harness.runtime.Session()
 	initialID := initial.SessionManager().SessionID()
@@ -393,7 +399,13 @@ func TestApplicationSessionReloadRebindsWithoutDuplicatingSessionEvents(t *testi
 func TestApplicationSessionTracksRuntimeReplacementAsOneIdentityAndEventSequence(t *testing.T) {
 	harness := newSessionHarness(t)
 	events := make(chan application.Event, 8)
-	unsubscribe := harness.session.Subscribe(func(_ context.Context, event application.Event) { events <- event })
+	// Read invalidations share the Application sequence but are not duplicate
+	// canonical session events.
+	unsubscribe := harness.session.Subscribe(func(_ context.Context, event application.Event) {
+		if _, canonical := event.Value.(application.AgentSessionEvent); canonical {
+			events <- event
+		}
+	})
 	defer unsubscribe()
 	oldID := harness.runtime.Session().SessionManager().SessionID()
 	if _, err := harness.session.Dispatch(context.Background(), application.ClearQueueCommand{}); err != nil {
@@ -416,7 +428,7 @@ func TestApplicationSessionTracksRuntimeReplacementAsOneIdentityAndEventSequence
 		t.Fatal(err)
 	}
 	second := waitApplicationEvent(t, events, func(application.Event) bool { return true })
-	if first.SessionID != oldID || second.SessionID != state.SessionID || second.Sequence != first.Sequence+1 {
+	if first.SessionID != oldID || second.SessionID != state.SessionID || second.Sequence <= first.Sequence {
 		t.Fatalf("replacement event order = %#v then %#v", first, second)
 	}
 }

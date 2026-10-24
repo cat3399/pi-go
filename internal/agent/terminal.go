@@ -16,7 +16,7 @@ func (s *AgentSession) Terminal(ctx context.Context, req terminal.Request) (term
 		// Agent's streaming state excludes retry waits and other run phases.
 		s.lifecycleMu.Lock()
 		running := s.run != nil
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		if running {
 			return terminal.Result{}, ErrBusy
 		}

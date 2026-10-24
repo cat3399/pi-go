@@ -385,7 +385,22 @@ func encodeApplicationEvent(value application.Event) (any, error) {
 		if event.MessageID != "" {
 			record["messageId"] = event.MessageID
 		}
+		if event.Activity != nil {
+			record["activityVersion"] = resourceRevision(event.Activity.Version)
+			record["activity"] = activityWire(event.Activity.State)
+		}
 		return record, nil
+	case application.LiveResourceEvent:
+		result := map[string]any{"type": "live_resource"}
+		if event.Agent != nil {
+			result["agent"] = AgentReadVersion(*event.Agent)
+		}
+		if version := event.Session; version != nil {
+			result["session"] = map[string]any{"generation": version.Generation, "activity": version.Activity, "bash": version.Bash, "controls": version.Controls}
+		}
+		return result, nil
+	case application.SessionAvailabilityEvent:
+		return map[string]any{"type": "session_availability", "active": event.Active, "generation": event.Version.Generation, "logVersion": event.Version.Log, "viewVersion": event.Version.View}, nil
 	case application.MessageReceiptEvent:
 		receipt := event.Receipt
 		return map[string]any{

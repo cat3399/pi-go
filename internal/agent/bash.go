@@ -54,7 +54,7 @@ type bashExecutionRegistration struct {
 
 func (s *AgentSession) registerBashExecution(ctx context.Context) (bashExecutionRegistration, error) {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return bashExecutionRegistration{}, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -69,6 +69,7 @@ func (s *AgentSession) registerBashExecution(ctx context.Context) (bashExecution
 		s.bashIdle = make(chan struct{})
 	}
 	s.bashRuns[id] = cancel
+	s.notifyReadChange("bash")
 	s.bashMu.Unlock()
 	return bashExecutionRegistration{id: id, ctx: runCtx, cancel: cancel}, nil
 }
@@ -77,6 +78,7 @@ func (s *AgentSession) unregisterBashExecution(registration bashExecutionRegistr
 	registration.cancel(context.Canceled)
 	s.bashMu.Lock()
 	delete(s.bashRuns, registration.id)
+	s.notifyReadChange("bash")
 	if len(s.bashRuns) == 0 && s.bashIdle != nil {
 		close(s.bashIdle)
 		s.bashIdle = nil
@@ -221,13 +223,13 @@ func (s *AgentSession) recordBashMessage(ctx context.Context, message agentmsg.B
 		s.bashRecordMu.Lock()
 		s.lifecycleMu.Lock()
 		if s.closed || s.closing && !allowClosing {
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			s.bashRecordMu.Unlock()
 			return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 		}
 		if s.standaloneMutation {
 			done := s.standaloneDone
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			s.bashRecordMu.Unlock()
 			if done == nil {
 				return fmt.Errorf("%w: standalone mutation has no completion signal", ErrInvariant)
@@ -245,7 +247,7 @@ func (s *AgentSession) recordBashMessage(ctx context.Context, message agentmsg.B
 		}
 		if s.run != nil && s.run.agentRunActive {
 			s.pendingBash = append(s.pendingBash, message)
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			s.bashRecordMu.Unlock()
 			return nil
 		}
@@ -255,7 +257,7 @@ func (s *AgentSession) recordBashMessage(ctx context.Context, message agentmsg.B
 		if s.idleWait == nil {
 			s.idleWait = make(chan struct{})
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		reservation := &standaloneReservation{session: s, done: done}
 		if err := s.flushPendingBashMessagesLocked(ctx); err != nil {
 			reservation.finish(false)
@@ -370,7 +372,7 @@ func (s *AgentSession) runLowAgent(run *sessionRun, operation func() (Result, er
 	s.bashRecordMu.Lock()
 	s.lifecycleMu.Lock()
 	if s.run != run {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		s.bashRecordMu.Unlock()
 		return Result{}, fmt.Errorf("%w: session run is no longer active", ErrInvalidRun)
 	}
@@ -380,7 +382,7 @@ func (s *AgentSession) runLowAgent(run *sessionRun, operation func() (Result, er
 	// are drained in settleSessionRun.
 	run.agentRunActive = true
 	run.phase = PhaseProvider
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.bashRecordMu.Unlock()
 	return operation()
 }

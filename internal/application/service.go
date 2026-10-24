@@ -379,15 +379,29 @@ func (s *Service) adoptRuntime(runtime *agentruntime.Runtime) (*managedSession, 
 func (s *Service) register(managed *managedSession) error {
 	id, _, _ := managed.identity()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return errors.New("application service is closed")
 	}
 	if existing := s.sessions[id]; existing != nil && existing != managed {
+		s.mu.Unlock()
 		return fmt.Errorf("session %s is already active", id)
 	}
 	s.sessions[id] = managed
+	s.mu.Unlock()
+	s.publishAvailability(managed, true)
 	return nil
+}
+
+func (s *Service) publishAvailability(managed *managedSession, active bool) {
+	id, _, _ := managed.identity()
+	var version session.ReadVersion
+	if manager := managed.manager(); manager != nil {
+		if snapshot, err := manager.ReadSnapshot(session.SnapshotOptions{}); err == nil {
+			version = snapshot.Version
+		}
+	}
+	s.events.publish(Event{SessionID: id, Value: SessionAvailabilityEvent{Active: active, Version: version}})
 }
 
 func (s *Service) active(id string) (*managedSession, bool) {
@@ -452,6 +466,8 @@ func (s *Service) open(ctx context.Context, id string) (*managedSession, error) 
 	s.mu.Unlock()
 	if redundant != nil {
 		_ = redundant.dispose(context.Background())
+	} else if err == nil {
+		s.publishAvailability(managed, true)
 	}
 	return managed, err
 }
@@ -540,8 +556,8 @@ func (s *Service) reconcileIdentity(managed *managedSession) error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if existing := s.sessions[identity.id]; existing != nil && existing != managed {
+		s.mu.Unlock()
 		return fmt.Errorf("session identity changed to already-active session %s", identity.id)
 	}
 	if s.sessions[oldID] == managed {
@@ -549,6 +565,9 @@ func (s *Service) reconcileIdentity(managed *managedSession) error {
 	}
 	managed.updateIdentity(identity)
 	s.sessions[identity.id] = managed
+	s.mu.Unlock()
+	s.events.publish(Event{SessionID: oldID, Value: SessionAvailabilityEvent{Active: false}})
+	s.publishAvailability(managed, true)
 	return nil
 }
 
@@ -670,6 +689,7 @@ func (s *Service) reapOnce(now time.Time) {
 		s.mu.Unlock()
 	}
 	for _, managed := range expired {
+		s.publishAvailability(managed, false)
 		_ = managed.dispose(context.Background())
 	}
 }

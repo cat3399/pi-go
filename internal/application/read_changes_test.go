@@ -6,6 +6,7 @@ import (
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 func TestApplicationForwardsOwnerReadChangesIncludingDirectBranchMutation(t *testing.T) {
@@ -34,6 +35,32 @@ func TestApplicationForwardsOwnerReadChangesIncludingDirectBranchMutation(t *tes
 	before, after := appended.Value.(application.SessionResourceEvent).Change, branched.Value.(application.SessionResourceEvent).Change
 	if appended.SessionID != manager.SessionID() || before.Version.Generation == "" || before.Version.Generation != after.Version.Generation || before.Version.Log != after.Version.Log || before.Version.View >= after.Version.View {
 		t.Fatalf("owner changes = %#v, %#v", before, after)
+	}
+}
+
+func TestApplicationPublishesRuntimeAdmissionGeneration(t *testing.T) {
+	corpus := makeDataBenchmarkCorpus(t, dataBenchmarkShape{name: "admission", sessions: 1, messages: 20, textBytes: 32})
+	api, _ := openDataBenchmarkService(t, corpus)
+	before, err := api.ReadHistory(corpus.firstID, session.HistoryQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription, err := api.SubscribeEvents(api.CurrentRevision())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	if _, err := api.Dispatch(context.Background(), corpus.firstID, application.GetToolsCommand{}); err != nil {
+		t.Fatal(err)
+	}
+	value := waitApplicationEvent(t, subscription.Events, func(event application.Event) bool {
+		availability, ok := event.Value.(application.SessionAvailabilityEvent)
+		return ok && availability.Active
+	})
+	availability := value.Value.(application.SessionAvailabilityEvent)
+	after, err := api.ReadHistory(corpus.firstID, session.HistoryQuery{})
+	if err != nil || value.SessionID != corpus.firstID || before.Page.Version.Generation == availability.Version.Generation || after.Page.Version.Generation != availability.Version.Generation {
+		t.Fatalf("admission did not expose replacement generation: %+v, %v", availability, err)
 	}
 }
 

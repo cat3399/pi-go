@@ -47,6 +47,7 @@ func (s *AgentSession) syncReloadedRuntimeSettings(settings RuntimeControlSettin
 	s.compactionEnabled = settings.AutoCompactionEnabled
 	s.retryEnabled = settings.AutoRetryEnabled
 	s.retryPolicy = settings.Retry
+	s.notifyReadChange("controls")
 	if settings.CompactionReserveSet {
 		s.contextReserve = settings.CompactionReserveTokens
 	}
@@ -64,17 +65,17 @@ func (s *AgentSession) syncReloadedRuntimeSettings(settings RuntimeControlSettin
 func (s *AgentSession) beginReload() (func(), error) {
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if s.reloading {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil, fmt.Errorf("%w: session reload is already active", ErrBusy)
 	}
 	done := make(chan struct{})
 	s.reloading = true
 	s.reloadDone = done
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return func() {
 		s.lifecycleMu.Lock()
 		if s.reloadDone == done {
@@ -82,7 +83,7 @@ func (s *AgentSession) beginReload() (func(), error) {
 			s.reloadDone = nil
 			close(done)
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 	}, nil
 }
 

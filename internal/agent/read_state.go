@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"strconv"
+	"sync"
 
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/provider"
@@ -78,6 +79,8 @@ type agentReadState struct {
 	nextMessage uint64
 	messageID   string
 	pending     []pendingReadMessage
+	nextWatcher uint64
+	watchers    map[uint64]chan ReadVersion
 }
 
 func (a *Agent) readVersionLocked() ReadVersion {
@@ -94,6 +97,39 @@ func (a *Agent) touchReadLocked(configuration, queue bool) {
 	}
 	if queue {
 		a.read.version.Queue++
+	}
+	if configuration || queue {
+		for _, watcher := range a.read.watchers {
+			select {
+			case <-watcher:
+			default:
+			}
+			watcher <- a.readVersionLocked()
+		}
+	}
+}
+
+// SubscribeConfigurationChanges invalidates config/queue reads even when a
+// mutator has no canonical event. Token updates stay on the event stream.
+func (a *Agent) SubscribeConfigurationChanges() (ReadVersion, <-chan ReadVersion, func()) {
+	a.mu.Lock()
+	if a.read.watchers == nil {
+		a.read.watchers = make(map[uint64]chan ReadVersion)
+	}
+	a.read.nextWatcher++
+	id := a.read.nextWatcher
+	watcher := make(chan ReadVersion, 1)
+	a.read.watchers[id] = watcher
+	initial := a.readVersionLocked()
+	a.mu.Unlock()
+	var once sync.Once
+	return initial, watcher, func() {
+		once.Do(func() {
+			a.mu.Lock()
+			delete(a.read.watchers, id)
+			close(watcher)
+			a.mu.Unlock()
+		})
 	}
 }
 

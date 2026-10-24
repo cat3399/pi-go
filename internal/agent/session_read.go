@@ -24,6 +24,7 @@ type SessionObservation struct {
 	Version   ReadVersion
 	MessageID string
 	Receipt   *MessageReceipt
+	Activity  *ActivityReadSnapshot
 }
 
 type sessionReadObserver struct {
@@ -37,18 +38,22 @@ type sessionReadObserver struct {
 // Activity and Controls are independent product resources, not a global
 // transaction with Agent state or external settings.
 type SessionReadSnapshot struct {
-	Agent       ReadSnapshot
-	History     session.ReadSnapshot
-	Activity    SessionActivity
-	Controls    RuntimeControlSettings
-	BashRunning bool
+	Agent           ReadSnapshot
+	History         session.ReadSnapshot
+	Activity        SessionActivity
+	ActivityVersion ResourceRevision
+	BashVersion     ResourceRevision
+	Controls        RuntimeControlSettings
+	BashRunning     bool
 }
 
 func (s *AgentSession) ReadSnapshot() (SessionReadSnapshot, error) {
 	if s == nil || s.loop == nil || s.sessionManager == nil {
 		return SessionReadSnapshot{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	result := SessionReadSnapshot{Activity: s.Activity(), Controls: s.resolvedRuntimeSettings(), BashRunning: s.IsBashRunning()}
+	activity := s.ReadActivity()
+	bashRunning, bashVersion := s.readBashRunning()
+	result := SessionReadSnapshot{Activity: activity.State, ActivityVersion: activity.Version, Controls: s.resolvedRuntimeSettings(), BashRunning: bashRunning, BashVersion: bashVersion}
 	s.transcriptReadMu.Lock()
 	defer s.transcriptReadMu.Unlock()
 	result.Agent = s.loop.ReadSnapshot()
@@ -63,7 +68,7 @@ func (s *AgentSession) SubscribeObserved(observer func(context.Context, SessionO
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return func() {}
 	}
 	s.mu.Lock()
@@ -71,7 +76,7 @@ func (s *AgentSession) SubscribeObserved(observer func(context.Context, SessionO
 	id := s.nextObserver
 	s.readObservers = append(s.readObservers, sessionReadObserver{id: id, observer: observer})
 	s.mu.Unlock()
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -99,6 +104,10 @@ func (s *AgentSession) emitReadObservation(ctx context.Context, observed Session
 		if observed.Receipt != nil {
 			receipt := *observed.Receipt
 			copy.Receipt = &receipt
+		}
+		if observed.Activity != nil {
+			activity := *observed.Activity
+			copy.Activity = &activity
 		}
 		entry.observer(ctx, copy)
 	}

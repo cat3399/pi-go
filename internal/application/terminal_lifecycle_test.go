@@ -63,8 +63,27 @@ func TestLiveTerminalRetainsIdleSessionWithoutMarkingAgentBusy(t *testing.T) {
 		t.Fatalf("surface terminal shutdown changed Agent tools: %v", err)
 	}
 	managed.lastAccess.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	changes, err := s.SubscribeEvents(s.CurrentRevision())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer changes.Close()
 	s.reapOnce(time.Now())
 	if _, live, err := s.LiveState(state.SessionID); err != nil || live {
 		t.Fatalf("exited terminal retained idle session: %t %v", live, err)
+	}
+	timeout := time.After(time.Second)
+	for {
+		select {
+		case event := <-changes.Events:
+			if value, ok := event.Value.(SessionAvailabilityEvent); ok && !value.Active {
+				if event.SessionID != state.SessionID || value.Version.Generation == "" {
+					t.Fatalf("reap lost resource identity: %+v", event)
+				}
+				return
+			}
+		case <-timeout:
+			t.Fatal("Runtime reaping had no availability invalidation")
+		}
 	}
 }

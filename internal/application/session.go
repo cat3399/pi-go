@@ -148,22 +148,50 @@ func (s *ApplicationSession) bind(next *agent.AgentSession) error {
 			return
 		}
 		if observed.Event != nil {
-			s.enqueue(ctx, sessionID, AgentSessionEvent{Event: observed.Event, Version: observed.Version, MessageID: observed.MessageID})
+			s.enqueue(ctx, sessionID, AgentSessionEvent{Event: observed.Event, Version: observed.Version, MessageID: observed.MessageID, Activity: observed.Activity})
 		} else if observed.Receipt != nil {
 			s.enqueue(ctx, sessionID, MessageReceiptEvent{Receipt: *observed.Receipt, Version: observed.Version})
 		}
 	})
-	_, changes, cancelChanges := next.SessionManager().SubscribeChanges()
+	initial, changes, cancelChanges := next.SessionManager().SubscribeChanges()
+	_, liveChanges, cancelLive := next.SubscribeReadChanges()
+	_, configurationChanges, cancelConfiguration := next.SubscribeConfigurationChanges()
 	// The initial state is available through reads. Install the watch before
 	// releasing the binding so later mutations cannot fall between them.
-	s.unsubscribeReads = cancelChanges
+	s.unsubscribeReads = func() { cancelChanges(); cancelLive(); cancelConfiguration() }
 	s.bindMu.Unlock()
+	s.enqueue(s.ctx, initial.SessionID, SessionResourceEvent{Change: initial})
 	go func() {
 		for change := range changes {
 			if !s.sameBinding(next, generation) {
 				return
 			}
 			s.enqueue(s.ctx, change.SessionID, SessionResourceEvent{Change: change})
+		}
+	}()
+	go func() {
+		for liveChanges != nil || configurationChanges != nil {
+			var value LiveResourceEvent
+			select {
+			case change, ok := <-liveChanges:
+				if !ok {
+					liveChanges = nil
+					continue
+				}
+				value.Session = &change
+			case change, ok := <-configurationChanges:
+				if !ok {
+					configurationChanges = nil
+					continue
+				}
+				value.Agent = &change
+			case <-s.ctx.Done():
+				return
+			}
+			if !s.sameBinding(next, generation) {
+				return
+			}
+			s.enqueue(s.ctx, sessionID, value)
 		}
 	}()
 	return nil
@@ -217,6 +245,22 @@ func cloneEventValue(value EventValue) EventValue {
 	switch value := value.(type) {
 	case AgentSessionEvent:
 		value.Event = agent.CloneSessionEvent(value.Event)
+		if value.Activity != nil {
+			activity := *value.Activity
+			value.Activity = &activity
+		}
+		return value
+	case LiveResourceEvent:
+		if value.Agent != nil {
+			version := *value.Agent
+			value.Agent = &version
+		}
+		if value.Session != nil {
+			version := *value.Session
+			value.Session = &version
+		}
+		return value
+	case SessionAvailabilityEvent:
 		return value
 	case SessionResourceEvent:
 		return value

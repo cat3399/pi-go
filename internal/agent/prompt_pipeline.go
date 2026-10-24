@@ -216,7 +216,7 @@ func (s *AgentSession) hasActiveSessionRun() bool {
 	}
 	s.lifecycleMu.Lock()
 	active := s.run != nil
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return active
 }
 
@@ -319,15 +319,15 @@ func (s *AgentSession) queuePromptInputIfRunning(input sessionPromptInput, behav
 	steering := behavior == StreamingSteer
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return false, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if s.run == nil || !s.run.acceptingQueues {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return false, nil
 	}
 	err := s.loop.enqueueAgentMessage(input.Messages[0], steering)
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if err != nil {
 		return false, err
 	}
@@ -547,7 +547,7 @@ func (s *AgentSession) rejectQueuedExtensionCommand(text string) error {
 
 func (s *AgentSession) appendPendingNextTurn(message agentmsg.Message) error {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -576,7 +576,7 @@ func (r *standaloneReservation) finish(settling bool) {
 		close(r.done)
 		completed = true
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if completed && !settling {
 		s.resolveSessionIdle()
 	}
@@ -585,11 +585,11 @@ func (r *standaloneReservation) finish(settling bool) {
 func (s *AgentSession) reserveStandaloneMutation() (*standaloneReservation, error) {
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if s.run != nil || s.standaloneMutation {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil, ErrBusy
 	}
 	done := make(chan struct{})
@@ -598,7 +598,7 @@ func (s *AgentSession) reserveStandaloneMutation() (*standaloneReservation, erro
 	if s.idleWait == nil {
 		s.idleWait = make(chan struct{})
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return &standaloneReservation{session: s, done: done}, nil
 }
 
@@ -651,7 +651,7 @@ func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agent
 		if s.settlingCallbacks > 0 {
 			s.settlingCallbacks--
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		s.resolveSessionIdle()
 	}()
 	s.emitStandaloneMessage(ctx, message, metadata)
@@ -663,15 +663,15 @@ func (s *AgentSession) queueCustomIfRunning(message agentmsg.Custom, delivery Cu
 	steering := delivery != DeliverCustomFollowUp
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return false, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if s.run == nil || !s.run.acceptingQueues {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return false, nil
 	}
 	err := s.loop.enqueueAgentMessage(message, steering)
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if err != nil {
 		return false, err
 	}

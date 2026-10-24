@@ -433,8 +433,11 @@ type AgentSession struct {
 	// lifecycleMu owns admission, close state, and the complete top-level
 	// lifecycle.  A low Agent run is only one phase of sessionRun: retry waits
 	// and post-run continuations remain active too.
-	lifecycleMu sync.Mutex
-	run         *sessionRun
+	lifecycleMu      sync.Mutex
+	readChanges      sessionReadChanges
+	lastReadActivity SessionActivity
+	lastReadClosed   bool
+	run              *sessionRun
 	// pendingNextTurn mirrors coding-agent's deliverAs:"nextTurn" buffer. It is
 	// consumed only by the next ordinary prompt, after model/compaction
 	// preflight and before before_agent_start messages are injected.
@@ -833,7 +836,7 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 	case AgentStartEvent:
 		s.lifecycleMu.Lock()
 		if s.run == nil {
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			// Manual compact remains a standalone low-level lifecycle.
 			types = []string{"agent_start"}
 			break
@@ -844,7 +847,7 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 		s.run.committed = nil
 		s.run.committedAgent = nil
 		s.run.toolResults = nil
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		// Every low-level continuation is a new upstream agent loop and therefore
 		// emits its own agent_start. AgentSession adds agent_settled only once after
 		// the complete retry/compaction/queue series becomes idle.
@@ -1132,12 +1135,12 @@ func (s *AgentSession) resetSessionTurn(_ agentRuntimeEvent) {
 		s.run.assistantHookStarted = false
 		s.run.toolResults = nil
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 }
 
 func (s *AgentSession) beginAssistantMessage() bool {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run == nil || s.run.assistantStarted {
 		return false
 	}
@@ -1147,7 +1150,7 @@ func (s *AgentSession) beginAssistantMessage() bool {
 
 func (s *AgentSession) beginAssistantHookMessage() bool {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run == nil || s.run.assistantHookStarted {
 		return false
 	}
@@ -1174,12 +1177,12 @@ func (s *AgentSession) recordCommitted(message llm.ConversationMessage, agentMes
 			s.run.terminalModel = model
 		}
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 }
 
 func (s *AgentSession) sessionCommittedAgentMessages() []agentmsg.Message {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run == nil {
 		return nil
 	}
@@ -1188,7 +1191,7 @@ func (s *AgentSession) sessionCommittedAgentMessages() []agentmsg.Message {
 
 func (s *AgentSession) sessionTurnResults() []llm.ConversationMessage {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run == nil {
 		return nil
 	}
@@ -1197,7 +1200,7 @@ func (s *AgentSession) sessionTurnResults() []llm.ConversationMessage {
 
 func (s *AgentSession) sessionCommittedMessages() []llm.ConversationMessage {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run == nil {
 		return nil
 	}
@@ -1233,7 +1236,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 	if s.run != nil && s.run.extensionSystemPrompt != nil {
 		snapshot.SystemPrompt = *s.run.extensionSystemPrompt
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if resolver != nil {
 		resolved, err := resolver(ctx, snapshot.Model)
 		if err != nil {
@@ -1260,7 +1263,7 @@ func (s *AgentSession) State() SessionState {
 	// Hold the documented lifecycle -> selection -> Agent lock order so the
 	// returned active/idle projection cannot straddle session-run detachment.
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	run := s.run
 	phase := PhaseIdle
 	if run != nil {
@@ -1291,21 +1294,7 @@ func (s *AgentSession) State() SessionState {
 // AgentSession remains the sole owner of these fields; an application surface must sample this
 // view instead of reconstructing streaming/compaction state from events.
 func (s *AgentSession) Activity() SessionActivity {
-	if s == nil {
-		return SessionActivity{Phase: PhaseIdle}
-	}
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.run == nil {
-		return SessionActivity{Phase: PhaseIdle}
-	}
-	return SessionActivity{
-		Phase:        s.run.phase,
-		IsStreaming:  s.run.agentRunActive,
-		IsCompacting: s.run.compaction != nil || s.run.branchCancellation != nil,
-		RetryAttempt: s.run.retryAttempt,
-		RetryWaiting: s.run.retryCancel != nil,
-	}
+	return s.ReadActivity().State
 }
 
 func (s *AgentSession) rejectIfClosed() error {
@@ -1314,7 +1303,7 @@ func (s *AgentSession) rejectIfClosed() error {
 	}
 	s.lifecycleMu.Lock()
 	closed := s.closed || s.closing
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if closed {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -1537,14 +1526,14 @@ func (s *AgentSession) SetSystemPrompt(prompt string) error {
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if err := s.loop.SetSystemPrompt(prompt); err != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return err
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return nil
 }
 
@@ -1595,7 +1584,7 @@ func (s *AgentSession) publishToolRuntime(
 	replaceStandalone bool,
 ) error {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -1729,7 +1718,7 @@ func (s *AgentSession) setActiveToolsByName(names []string) error {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -1977,7 +1966,7 @@ func (s *AgentSession) runSession(
 			input.Messages = append(input.Messages, agentmsg.Clone(s.pendingNextTurn)...)
 			s.pendingNextTurn = nil
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 	}
 	var extra []agentmsg.Message
 	if hook := s.hooks.BeforeAgentStart; prePromptCheck && hook != nil {
@@ -2005,7 +1994,7 @@ func (s *AgentSession) runSession(
 			value := *out.SystemPrompt
 			s.lifecycleMu.Lock()
 			run.extensionSystemPrompt = &value
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 		}
 		extra = agentmsg.Clone(out.ExtraMessages)
 	}
@@ -2036,7 +2025,7 @@ func (s *AgentSession) runSession(
 				run.retryAttempt++
 				retryAttempt = run.retryAttempt
 			}
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 		}
 		if retryAttempt != 0 {
 			nextAttempt := retryAttempt + 1
@@ -2060,14 +2049,14 @@ func (s *AgentSession) runSession(
 			if s.run == run {
 				run.retryCancel = cancelRetry
 			}
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			waitErr := retryController.Wait(waitCtx, delay)
 			waitCause := context.Cause(waitCtx)
 			s.lifecycleMu.Lock()
 			if s.run == run {
 				run.retryCancel = nil
 			}
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			cancelRetry(nil)
 			if waitErr != nil {
 				finalError := waitErr.Error()
@@ -2107,7 +2096,7 @@ func (s *AgentSession) runSession(
 		if s.run == run {
 			run.acceptingQueues = false
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		if !s.loop.HasQueuedMessages() {
 			return result, runErr
 		}
@@ -2115,7 +2104,7 @@ func (s *AgentSession) runSession(
 		if s.run == run {
 			run.acceptingQueues = true
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		result, runErr = s.runLowAgent(run, func() (Result, error) {
 			return s.loop.Continue(run.ctx)
 		})
@@ -2152,7 +2141,7 @@ func (s *AgentSession) beginRetrySeries(run *sessionRun, delay time.Duration, er
 		run.retryError = errorMessage
 		run.retryMax = maxRetries
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 }
 
 // endRetrySeries emits at most once. Successful dispatch calls this from the
@@ -2161,7 +2150,7 @@ func (s *AgentSession) endRetrySeries(ctx context.Context, succeeded bool, final
 	s.lifecycleMu.Lock()
 	run := s.run
 	if run == nil || !run.retrySeries {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return
 	}
 	payload := retryControl{
@@ -2169,7 +2158,7 @@ func (s *AgentSession) endRetrySeries(ctx context.Context, succeeded bool, final
 		succeeded: succeeded, errorMessage: run.retryError, finalError: finalError,
 	}
 	run.retrySeries = false
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.emitControl(ctx, "auto_retry_end", payload)
 }
 
@@ -2182,7 +2171,7 @@ func (s *AgentSession) resetRetryState(run *sessionRun) {
 		run.retryMax = 0
 		run.retryCancel = nil
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 }
 
 // maxRetries uses the product-facing retry budget: the initial request is not
@@ -2243,7 +2232,7 @@ func (s *AgentSession) compactBeforeNextAssistantResponse(ctx context.Context, t
 
 	s.lifecycleMu.Lock()
 	run := s.run
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if run == nil {
 		return false
 	}
@@ -2292,7 +2281,7 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 		if !already && s.run == run {
 			run.overflowCompacted = true
 		}
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		if already {
 			s.emitCompaction(run.ctx, "compaction_end", CompactionContextOverflow, nil, false, false,
 				"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.")
@@ -2334,7 +2323,7 @@ func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTe
 	if !already && s.run == run {
 		run.thresholdCompactionAttempted = true
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if already {
 		return false
 	}
@@ -2366,7 +2355,7 @@ func compactionThresholdExceeded(tokens, contextWindow, reserveTokens uint64) bo
 
 func (s *AgentSession) terminalRunModel(run *sessionRun) provider.Model {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run != run {
 		return provider.Model{}
 	}
@@ -2405,12 +2394,12 @@ func (s *AgentSession) beginCompaction(run *sessionRun) (*runCancellation, bool)
 	domain := &runCancellation{ctx: ctx, cancel: cancel}
 	s.lifecycleMu.Lock()
 	if s.run != run || run.compaction != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		cancel(context.Canceled)
 		return nil, false
 	}
 	run.compaction = domain
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return domain, true
 }
 
@@ -2422,7 +2411,7 @@ func (s *AgentSession) endCompaction(run *sessionRun, domain *runCancellation) {
 	if s.run == run && run.compaction == domain {
 		run.compaction = nil
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	domain.cancel(context.Canceled)
 }
 
@@ -2434,13 +2423,13 @@ func (s *AgentSession) beginBranchSummary(run *sessionRun) (*runCancellation, bo
 	domain := &runCancellation{ctx: ctx, cancel: cancel}
 	s.lifecycleMu.Lock()
 	if s.run != run || run.branchCancellation != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		cancel(context.Canceled)
 		return nil, false
 	}
 	run.branchSummary = true
 	run.branchCancellation = domain
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return domain, true
 }
 
@@ -2453,7 +2442,7 @@ func (s *AgentSession) endBranchSummary(run *sessionRun, domain *runCancellation
 		run.branchCancellation = nil
 		run.branchSummary = false
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	domain.cancel(context.Canceled)
 }
 
@@ -2468,7 +2457,7 @@ func (s *AgentSession) AbortCompaction() {
 	if s.run != nil && s.run.compaction != nil {
 		cancel = s.run.compaction.cancel
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if cancel != nil {
 		cancel(errCompactionCancelled)
 	}
@@ -2672,7 +2661,7 @@ func (s *AgentSession) ReloadMessagesFromSession() error {
 		return fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -2914,6 +2903,11 @@ func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, rea
 // the session's retained state.
 func (s *AgentSession) emitToObservers(ctx context.Context, observers []SessionObserver, event SessionEvent, metadata ...Observation) {
 	observed := SessionObservation{Event: event}
+	switch event.(type) {
+	case AgentStartEvent, SessionAgentEndEvent, AgentSettledEvent, CompactionStartEvent, CompactionEndEvent, AutoRetryStartEvent, AutoRetryEndEvent:
+		activity := s.ReadActivity()
+		observed.Activity = &activity
+	}
 	if len(metadata) != 0 {
 		observed.Version, observed.MessageID = metadata[0].Version, metadata[0].MessageID
 	} else {
@@ -2988,13 +2982,13 @@ func CloneSessionEvent(event SessionEvent) SessionEvent {
 func (s *AgentSession) sessionRunStarted(run *sessionRun) bool {
 	s.lifecycleMu.Lock()
 	started := s.run == run && run.started
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return started
 }
 
 func (s *AgentSession) sessionRunCommittedAgentMessages(run *sessionRun) []agentmsg.Message {
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.run != run {
 		return nil
 	}
@@ -3006,7 +3000,7 @@ func (s *AgentSession) admitSessionRun(ctx context.Context, agentPipeline bool) 
 		return nil, fmt.Errorf("%w: invalid session context", ErrInvalidRun)
 	}
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	if s.closed || s.closing {
 		return nil, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
@@ -3030,7 +3024,7 @@ func (s *AgentSession) setSessionPhase(run *sessionRun, phase Phase) {
 	if s.run == run {
 		run.phase = phase
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 }
 
 func (s *AgentSession) finishSessionRun(run *sessionRun) {
@@ -3039,11 +3033,11 @@ func (s *AgentSession) finishSessionRun(run *sessionRun) {
 	}
 	s.lifecycleMu.Lock()
 	if s.run != run {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return
 	}
 	s.run = nil
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.completeSessionRun(run)
 	s.resolveSessionIdle()
 }
@@ -3064,7 +3058,7 @@ func (s *AgentSession) endSessionSettlement(run *sessionRun) {
 	if s.settlingCallbacks > 0 {
 		s.settlingCallbacks--
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.resolveSessionIdle()
 }
 
@@ -3079,7 +3073,7 @@ func (s *AgentSession) resolveSessionIdle() {
 		idle = s.idleWait
 		s.idleWait = nil
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if idle != nil {
 		close(idle)
 	}
@@ -3105,14 +3099,14 @@ func (s *AgentSession) settleSessionRun(run *sessionRun) error {
 	flushErr := s.flushPendingBashMessagesLocked(run.ctx)
 	s.lifecycleMu.Lock()
 	if s.run != run {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		s.bashRecordMu.Unlock()
 		return flushErr
 	}
 	run.agentRunActive = false
 	s.run = nil
 	s.settlingCallbacks++
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.bashRecordMu.Unlock()
 	defer s.endSessionSettlement(run)
 	if started {
@@ -3149,7 +3143,7 @@ func (s *AgentSession) willRetry(terminal llm.AssistantTerminal) bool {
 	s.lifecycleMu.Lock()
 	run := s.run
 	will := enabled && run != nil && run.retryAttempt+1 < retryController.MaxAttempts() && s.retryableResult(result)
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return will
 }
 func (s *AgentSession) Continue(ctx context.Context) (Result, error) {
@@ -3245,17 +3239,17 @@ func (s *AgentSession) enqueueAgentMessage(message agentmsg.Message, steering bo
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	if s.run != nil && !s.run.acceptingQueues {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return ErrBusy
 	}
 	// enqueueMessage only takes Agent.mu and invokes no clock/provider/tool or
 	// observer callback, so it is safe to make close/admission atomic here.
 	err := s.loop.enqueueAgentMessage(message, steering)
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if err == nil {
 		s.emitControl(context.Background(), "queue_update")
 	}
@@ -3373,11 +3367,11 @@ func (s *AgentSession) ClearQueue() QueueState {
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return QueueState{}
 	}
 	steeringMessages, followUpMessages := s.loop.clearAllQueues()
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	steering, _ := agentmsg.ConvertToLLM(steeringMessages)
 	followUp, _ := agentmsg.ConvertToLLM(followUpMessages)
 	cleared := newQueueState(steering, followUp)
@@ -3391,13 +3385,13 @@ func (s *AgentSession) clearQueues(clear func()) {
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return
 	}
 	beforeSteering, beforeFollowUp := s.RichQueues()
 	clear()
 	afterSteering, afterFollowUp := s.RichQueues()
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if !sameMessages(beforeSteering, afterSteering) || !sameMessages(beforeFollowUp, afterFollowUp) {
 		s.emitControl(context.Background(), "queue_update")
 	}
@@ -3419,7 +3413,7 @@ func (s *AgentSession) Abort(ctx context.Context) error {
 	} else {
 		run = nil
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if run == nil {
 		return nil
 	}
@@ -3451,11 +3445,11 @@ func (s *AgentSession) WaitForIdle(ctx context.Context) error {
 	}
 	s.lifecycleMu.Lock()
 	if s.run == nil && !s.standaloneMutation {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil
 	}
 	idle := s.idleWait
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	select {
 	case <-idle:
 		return nil
@@ -3469,7 +3463,7 @@ func (s *AgentSession) Subscribe(observer SessionObserver) func() {
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return func() {}
 	}
 	s.mu.Lock()
@@ -3477,7 +3471,7 @@ func (s *AgentSession) Subscribe(observer SessionObserver) func() {
 	id := s.nextObserver
 	s.observers = append(s.observers, sessionObserverEntry{id: id, observer: observer})
 	s.mu.Unlock()
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -3546,7 +3540,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	}
 	s.lifecycleMu.Lock()
 	if active := s.shutdown; active != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		select {
 		case <-active.done:
 			return active.err
@@ -3555,7 +3549,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		}
 	}
 	if s.closed {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return nil
 	}
 	attempt := &sessionShutdownAttempt{done: make(chan struct{})}
@@ -3567,7 +3561,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 			s.shutdown = nil
 		}
 		close(attempt.done)
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 	}()
 	s.closing = true
 	run := s.run
@@ -3582,7 +3576,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 		cancelRetry = run.retryCancel
 		run.cancel(ErrAgentAborted)
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	// Shutdown is the owning-lifecycle cancellation boundary. Unlike public
 	// Abort it must stop every session phase, including compaction and branch
 	// summarization, before invalidating the manager.
@@ -3618,7 +3612,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	if err := s.flushPendingBashMessages(ctx); err != nil {
 		s.lifecycleMu.Lock()
 		s.closing = false
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return err
 	}
 	if s.hooks.SessionShutdown != nil {
@@ -3638,7 +3632,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	s.lifecycleMu.Lock()
 	s.closed = true
 	s.closing = false
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	s.mu.Lock()
 	unsubscribe := s.loopUnsubscribe
 	s.loopUnsubscribe = nil
@@ -4177,7 +4171,7 @@ func (s *AgentSession) AbortBranchSummary() {
 	if s.run != nil && s.run.branchSummary && s.run.branchCancellation != nil {
 		cancel = s.run.branchCancellation.cancel
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if cancel != nil {
 		cancel(ErrAgentAborted)
 	}

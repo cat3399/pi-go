@@ -43,6 +43,7 @@ func encodeResult(result application.CommandResult) (any, error) {
 func encodeApplicationEvent(event application.Event) (any, error) {
 	if value, ok := event.Value.(application.AgentSessionEvent); ok {
 		value.Version, value.MessageID = agent.ReadVersion{}, ""
+		value.Activity = nil
 		event.Value = value
 	}
 	return protocolv1.EncodeEvent(event)

@@ -119,6 +119,7 @@ func (s *AgentSession) SetAutoCompactionEnabled(enabled bool) error {
 	}
 	s.mu.Lock()
 	s.compactionEnabled = effective
+	s.notifyReadChange("controls")
 	s.mu.Unlock()
 	return writeErr
 }
@@ -151,6 +152,7 @@ func (s *AgentSession) SetAutoRetryEnabled(enabled bool) error {
 	}
 	s.mu.Lock()
 	s.retryEnabled = effective
+	s.notifyReadChange("controls")
 	s.mu.Unlock()
 	return writeErr
 }
@@ -175,7 +177,7 @@ func (s *AgentSession) AbortRetry() {
 	if s.run != nil {
 		cancel = s.run.retryCancel
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	if cancel != nil {
 		cancel(errRetryCancelled)
 	}
@@ -186,6 +188,6 @@ func (s *AgentSession) IsRetrying() bool {
 		return false
 	}
 	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
+	defer s.unlockLifecycle()
 	return s.run != nil && s.run.retryCancel != nil
 }

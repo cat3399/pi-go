@@ -372,12 +372,14 @@ type State struct {
 type EventType string
 
 const (
-	EventAgentSession    EventType = "agent_session"
-	EventOperation       EventType = "operation"
-	EventSessionCatalog  EventType = "session_catalog"
-	EventProjectCatalog  EventType = "project_catalog"
-	EventSessionResource EventType = "session_resource"
-	EventMessageReceipt  EventType = "message_receipt"
+	EventAgentSession        EventType = "agent_session"
+	EventOperation           EventType = "operation"
+	EventSessionCatalog      EventType = "session_catalog"
+	EventProjectCatalog      EventType = "project_catalog"
+	EventSessionResource     EventType = "session_resource"
+	EventMessageReceipt      EventType = "message_receipt"
+	EventLiveResource        EventType = "live_resource"
+	EventSessionAvailability EventType = "session_availability"
 )
 
 type OperationStatus string
@@ -398,6 +400,17 @@ type AgentSessionEvent struct {
 	Event     agent.SessionEvent
 	Version   agent.ReadVersion
 	MessageID string
+	Activity  *agent.ActivityReadSnapshot
+}
+
+type LiveResourceEvent struct {
+	Agent   *agent.ReadVersion
+	Session *agent.SessionReadVersion
+}
+
+type SessionAvailabilityEvent struct {
+	Active  bool
+	Version session.ReadVersion
 }
 
 type MessageReceiptEvent struct {
@@ -436,19 +449,23 @@ type OperationEvent struct {
 	Error       string
 }
 
-func (AgentSessionEvent) Type() EventType    { return EventAgentSession }
-func (SessionResourceEvent) Type() EventType { return EventSessionResource }
-func (MessageReceiptEvent) Type() EventType  { return EventMessageReceipt }
-func (SessionCatalogEvent) Type() EventType  { return EventSessionCatalog }
-func (ProjectCatalogEvent) Type() EventType  { return EventProjectCatalog }
-func (OperationEvent) Type() EventType       { return EventOperation }
+func (AgentSessionEvent) Type() EventType        { return EventAgentSession }
+func (SessionResourceEvent) Type() EventType     { return EventSessionResource }
+func (MessageReceiptEvent) Type() EventType      { return EventMessageReceipt }
+func (LiveResourceEvent) Type() EventType        { return EventLiveResource }
+func (SessionAvailabilityEvent) Type() EventType { return EventSessionAvailability }
+func (SessionCatalogEvent) Type() EventType      { return EventSessionCatalog }
+func (ProjectCatalogEvent) Type() EventType      { return EventProjectCatalog }
+func (OperationEvent) Type() EventType           { return EventOperation }
 
-func (AgentSessionEvent) applicationEvent()    {}
-func (SessionResourceEvent) applicationEvent() {}
-func (MessageReceiptEvent) applicationEvent()  {}
-func (SessionCatalogEvent) applicationEvent()  {}
-func (ProjectCatalogEvent) applicationEvent()  {}
-func (OperationEvent) applicationEvent()       {}
+func (AgentSessionEvent) applicationEvent()        {}
+func (SessionResourceEvent) applicationEvent()     {}
+func (MessageReceiptEvent) applicationEvent()      {}
+func (LiveResourceEvent) applicationEvent()        {}
+func (SessionAvailabilityEvent) applicationEvent() {}
+func (SessionCatalogEvent) applicationEvent()      {}
+func (ProjectCatalogEvent) applicationEvent()      {}
+func (OperationEvent) applicationEvent()           {}
 
 // Event is an immutable application event envelope. ApplicationSession assigns
 // a session-local Sequence across replacement and reload; Service republishes

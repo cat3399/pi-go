@@ -24,6 +24,7 @@ func EncodeLiveSnapshot(value application.LiveSnapshot, active bool) (map[string
 		MessageCount: read.MessageCount, PendingMessageCount: len(read.Steering) + len(read.FollowUp), QueuedMessages: read.Queue,
 	}
 	result["state"], result["version"] = stateWire(state), AgentReadVersion(read.Version)
+	result["activityVersion"], result["bashVersion"] = resourceRevision(value.State.ActivityVersion), resourceRevision(value.State.BashVersion)
 	result["history"] = map[string]any{"generation": history.Version.Generation, "log": history.Version.Log, "view": history.Version.View, "leafId": history.LeafID}
 	result["runId"], result["turn"], result["errorMessage"] = read.RunID, read.Turn, read.ErrorMessage
 	project := func(message agent.ReadMessage) (map[string]any, error) {
@@ -61,4 +62,12 @@ func EncodeLiveSnapshot(value application.LiveSnapshot, active bool) (map[string
 	}
 	result["toolsRunning"] = tools
 	return result, nil
+}
+
+func resourceRevision(value agent.ResourceRevision) map[string]any {
+	return map[string]any{"generation": value.Generation, "revision": value.Revision}
+}
+
+func activityWire(value agent.SessionActivity) map[string]any {
+	return map[string]any{"phase": value.Phase.String(), "isStreaming": value.IsStreaming, "isCompacting": value.IsCompacting, "retryAttempt": value.RetryAttempt, "retryWaiting": value.RetryWaiting}
 }

@@ -382,7 +382,7 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return modelSelectionEvent{}, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	state := s.loop.State()
@@ -394,7 +394,7 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 		var err error
 		desired, err = s.currentDefaultThinking()
 		if err != nil {
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			return modelSelectionEvent{}, err
 		}
 	}
@@ -409,7 +409,7 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 	}
 	settingsWrite, settingsErr := s.writeSettings(update)
 	if settingsErr != nil && !settingsWrite.CommitUnknown {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return modelSelectionEvent{}, settingsErr
 	}
 	settlement, cancel := context.WithTimeout(context.Background(), s.settlementTimeout)
@@ -427,15 +427,15 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 			// either possible disk outcome less recoverable. The poisoned session
 			// forces reopen/reconciliation before another transcript mutation.
 			if err := s.publishModelSelection(model, selectedThinking, persistThinking); err != nil {
-				s.lifecycleMu.Unlock()
+				s.unlockLifecycle()
 				return modelSelectionEvent{}, errors.Join(fmt.Errorf("%w: model change: %w", ErrTranscriptCommit, transcriptErr), err)
 			}
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			event := modelSelectionEvent{previous: previous, hadPrevious: hadPrevious, previousThinking: previousThinking, model: model, thinking: selectedThinking, source: source, published: true}
 			return event, errors.Join(fmt.Errorf("%w: model change outcome unknown: %w", ErrTranscriptCommit, transcriptErr), settingsErr)
 		}
 		rollbackErr := runSettingsUndo(s.settlementTimeout, settingsWrite.Undo)
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		base := fmt.Errorf("%w: model change: %w", ErrTranscriptCommit, transcriptErr)
 		if rollbackErr != nil {
 			return modelSelectionEvent{}, errors.Join(base, settingsErr, fmt.Errorf("restore settings: %w", rollbackErr))
@@ -443,10 +443,10 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 		return modelSelectionEvent{}, errors.Join(base, settingsErr)
 	}
 	if err := s.publishModelSelection(model, selectedThinking, persistThinking); err != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return modelSelectionEvent{}, err
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return modelSelectionEvent{previous: previous, hadPrevious: hadPrevious, previousThinking: previousThinking, model: model, thinking: selectedThinking, source: source, published: true}, settingsErr
 }
 
@@ -511,7 +511,7 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 	}
 	s.lifecycleMu.Lock()
 	if s.closed || s.closing {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return thinkingSelectionEvent{}, fmt.Errorf("%w: session is closed", ErrInvalidRun)
 	}
 	state := s.loop.State()
@@ -525,7 +525,7 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 		selected = provider.ThinkingOff
 	}
 	if selected == previous {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return thinkingSelectionEvent{}, nil
 	}
 	persistDefault := (hasModel && model.Reasoning()) || selected != provider.ThinkingOff
@@ -535,7 +535,7 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 		updateLevel := selected
 		settingsWrite, settingsErr = s.writeSettings(SettingsUpdate{DefaultThinkingLevel: &updateLevel})
 		if settingsErr != nil && !settingsWrite.CommitUnknown {
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			return thinkingSelectionEvent{}, settingsErr
 		}
 	}
@@ -545,15 +545,15 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 	if persistErr != nil {
 		if errors.Is(persistErr, session.ErrCommitUnknown) {
 			if err := s.publishThinkingLevel(selected, persistDefault); err != nil {
-				s.lifecycleMu.Unlock()
+				s.unlockLifecycle()
 				return thinkingSelectionEvent{}, errors.Join(fmt.Errorf("%w: thinking level outcome unknown: %w", ErrTranscriptCommit, persistErr), err)
 			}
-			s.lifecycleMu.Unlock()
+			s.unlockLifecycle()
 			event := thinkingSelectionEvent{previous: previous, selected: selected, published: true}
 			return event, errors.Join(fmt.Errorf("%w: thinking level outcome unknown: %w", ErrTranscriptCommit, persistErr), settingsErr)
 		}
 		rollbackErr := runSettingsUndo(s.settlementTimeout, settingsWrite.Undo)
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		base := fmt.Errorf("%w: thinking level change: %w", ErrTranscriptCommit, persistErr)
 		if rollbackErr != nil {
 			return thinkingSelectionEvent{}, errors.Join(base, settingsErr, fmt.Errorf("restore settings: %w", rollbackErr))
@@ -561,10 +561,10 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 		return thinkingSelectionEvent{}, errors.Join(base, settingsErr)
 	}
 	if err := s.publishThinkingLevel(selected, persistDefault); err != nil {
-		s.lifecycleMu.Unlock()
+		s.unlockLifecycle()
 		return thinkingSelectionEvent{}, err
 	}
-	s.lifecycleMu.Unlock()
+	s.unlockLifecycle()
 	return thinkingSelectionEvent{previous: previous, selected: selected, published: true}, settingsErr
 }
 

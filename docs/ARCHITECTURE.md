@@ -65,6 +65,11 @@ Agent 在自身状态锁内分配运行消息身份与运行态、配置、队�
 生成内容、待确认消息和工具进度，不复制已完成的历史。AgentSession 的独立观察接口将原版事件
 附上这些身份，并在实际写入后发出 `MessageReceipt`。读取与写入确认共用短期串行边界，避免
 同一消息既出现在已接受历史中，又留在待确认快照中。Application 转发这些元数据，不另建消息状态。
+Agent 的配置和队列另有可合并通知；AgentSession 在 lifecycle 与 bash 的各自锁内维护读版本，
+覆盖原版事件之前或之后发生的实际状态变化，例如 `auto_retry_start` 之后进入等待。相关事件
+附带当时的 activity 快照与版本，读取时分别校验 Agent、activity 和 bash，不用 Agent 的状态
+版本代替整个产品生命周期。Runtime control 写入与 reload 发出配置失效通知；有效配置仍由
+原有 settings 解析器提供。Application 在 Runtime 入驻、回收和替换时通知资源可用性变化。
 资源失效、写入回执与运行消息身份用于 Application 资源同步；JSONL RPC 保留原版事件词汇，
 不转发这组新增同步元数据。
 Application 的会话快照保留这组版本，并校验历史与运行态来自同一 Runtime binding；运行态和
