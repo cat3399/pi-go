@@ -404,8 +404,10 @@ type AgentSessionEvent struct {
 }
 
 type LiveResourceEvent struct {
-	Agent   *agent.ReadVersion
-	Session *agent.SessionReadVersion
+	Agent    *agent.ReadVersion
+	Session  *agent.SessionReadVersion
+	Activity *agent.ActivityReadSnapshot
+	Bash     *agent.BashReadSnapshot
 }
 
 type SessionAvailabilityEvent struct {
@@ -471,6 +473,7 @@ func (OperationEvent) applicationEvent()           {}
 // a session-local Sequence across replacement and reload; Service republishes
 // the same payload with a process-wide Sequence for surface subscriptions.
 type Event struct {
+	Epoch     string
 	Sequence  uint64
 	SessionID string
 	Value     EventValue

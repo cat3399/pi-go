@@ -26,6 +26,7 @@ export interface ProjectInfo {
 
 export interface ApplicationSnapshot {
   revision: number;
+	cursor: string;
   agentDir: string;
   defaultCwd: string;
   projects: ProjectInfo[];
@@ -331,6 +332,7 @@ export interface ApplicationEvent {
 
 export interface ApplicationEventEnvelope {
   sequence: number;
+  cursor?: string;
   sessionId: string;
   event: ApplicationEvent;
 }
@@ -379,7 +381,8 @@ export interface SessionStatsInfo {
 
 export interface EventObserver {
   onEvent(envelope: ApplicationEventEnvelope): void;
-  onReset(revision: number, reason?: string): void;
+  onReset(revision: number, reason?: string, cursor?: string): void;
+  onConnected?(cursor: string): void;
 }
 
 export interface EventSubscription {
@@ -408,7 +411,7 @@ export interface ApplicationClient {
   renameSession(sessionId: string, name: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   dispatch<T = unknown>(sessionId: string, command: Record<string, unknown>): Promise<T>;
-  subscribe(after: number, observer: EventObserver): EventSubscription;
+  subscribe(after: number | string, observer: EventObserver, sessionIds?: string[]): EventSubscription;
   close(): void;
 }
 

@@ -598,6 +598,20 @@ func (s *Service) SubscribeEvents(after uint64) (*EventSubscription, error) {
 	return s.events.subscribe(after)
 }
 
+func (s *Service) CurrentCursor() EventCursor {
+	if s == nil {
+		return EventCursor{}
+	}
+	return s.events.currentCursor()
+}
+
+func (s *Service) SubscribeReadEvents(options ReadEventOptions) (*EventSubscription, error) {
+	if s == nil {
+		return nil, ErrClosed
+	}
+	return s.events.subscribeRead(options, false)
+}
+
 func (s *Service) RunningIDs() []string {
 	if s == nil {
 		return []string{}

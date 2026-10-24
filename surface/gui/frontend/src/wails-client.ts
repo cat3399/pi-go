@@ -37,6 +37,7 @@ export interface GUIHostInfo {
 interface OpenedEventStream {
   streamId: number;
   revision: number;
+  cursor: string;
   resetRequired: boolean;
   replay: ApplicationEventEnvelope[];
 }
@@ -49,6 +50,7 @@ interface GUIApplicationEvent {
 interface GUIStreamReset {
   streamId: number;
   revision: number;
+  cursor: string;
   reason?: string;
 }
 
@@ -144,7 +146,7 @@ export class WailsApplicationClient implements ApplicationClient {
     return response.data;
   }
 
-  subscribe(after: number, observer: EventObserver): EventSubscription {
+  subscribe(after: number | string, observer: EventObserver, sessionIds?: string[]): EventSubscription {
     let closed = false;
     let streamId = 0;
     const offApplicationEvent = Events.On(applicationEventName, (event) => {
@@ -154,7 +156,7 @@ export class WailsApplicationClient implements ApplicationClient {
     const offReset = Events.On(streamResetEventName, (event) => {
       const payload = event.data as GUIStreamReset;
       if (!closed && payload.streamId === streamId) {
-        observer.onReset(payload.revision, payload.reason);
+        observer.onReset(payload.revision, payload.reason, payload.cursor);
       }
     });
 
@@ -168,14 +170,20 @@ export class WailsApplicationClient implements ApplicationClient {
     };
     this.subscriptions.add(close);
 
-    const ready = call<OpenedEventStream>("OpenEventStream", after).then(async (opened) => {
+    const opening = typeof after === "string"
+      ? call<OpenedEventStream>("OpenReadEventStream", after, sessionIds ? JSON.stringify(sessionIds) : "")
+      : sessionIds ? Promise.reject(new Error("详情订阅需要包含流代次的游标")) : call<OpenedEventStream>("OpenEventStream", after);
+    const ready = opening.then(async (opened) => {
       if (closed) {
         await call("CloseEventStream", opened.streamId);
         return;
       }
       streamId = opened.streamId;
-      if (opened.resetRequired) observer.onReset(opened.revision, "本地事件游标已过期");
+      if (opened.resetRequired) observer.onReset(opened.revision, "本地事件游标已过期", opened.cursor);
+      if (closed) return;
       for (const envelope of opened.replay) observer.onEvent(envelope);
+      observer.onConnected?.(opened.cursor);
+      if (closed) return;
       await call("ResumeEventStream", streamId);
     });
 

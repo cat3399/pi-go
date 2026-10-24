@@ -24,6 +24,11 @@ type ActivityReadSnapshot struct {
 	State   SessionActivity
 }
 
+type BashReadSnapshot struct {
+	Version ResourceRevision
+	Running bool
+}
+
 type sessionReadChanges struct {
 	mu       sync.Mutex
 	version  SessionReadVersion
@@ -131,4 +136,9 @@ func (s *AgentSession) readBashRunning() (bool, ResourceRevision) {
 	version := s.readChangesVersionLocked()
 	s.readChanges.mu.Unlock()
 	return len(s.bashRuns) != 0, ResourceRevision{Generation: version.Generation, Revision: version.Bash}
+}
+
+func (s *AgentSession) ReadBash() BashReadSnapshot {
+	running, version := s.readBashRunning()
+	return BashReadSnapshot{Version: version, Running: running}
 }

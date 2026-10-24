@@ -179,6 +179,8 @@ func (s *ApplicationSession) bind(next *agent.AgentSession) error {
 					continue
 				}
 				value.Session = &change
+				activity, bash := next.ReadActivity(), next.ReadBash()
+				value.Activity, value.Bash = &activity, &bash
 			case change, ok := <-configurationChanges:
 				if !ok {
 					configurationChanges = nil
@@ -251,6 +253,14 @@ func cloneEventValue(value EventValue) EventValue {
 		}
 		return value
 	case LiveResourceEvent:
+		if value.Activity != nil {
+			activity := *value.Activity
+			value.Activity = &activity
+		}
+		if value.Bash != nil {
+			bash := *value.Bash
+			value.Bash = &bash
+		}
 		if value.Agent != nil {
 			version := *value.Agent
 			value.Agent = &version

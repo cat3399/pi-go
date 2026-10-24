@@ -38,9 +38,15 @@ Workbench 的 `ApplicationClient` 提供本地 IPC 和远程 HTTP/SSE 两种实�
 | `DELETE /api/v1/projects` | 从项目列表移除目录 |
 | `GET /api/v1/events` | 全局 SSE |
 
-客户端共用一条 SSE 连接，按 `sessionId` 分发事件。SSE 使用 `id: <revision>` 与
-`Last-Event-ID`；历史游标过期时发送 `reset_required`，客户端读取新 snapshot 后继续订阅。
-慢客户端断开自己的订阅，Agent 执行不等待网络消费者。
+SSE 的资源订阅使用 `cursor=<epoch>:<sequence>`，重连时 `Last-Event-ID` 优先于查询参数；
+快照的 `cursor` 在读取开始前取得。`sessions` 是需要详细事件的会话 ID JSON 数组，空数组
+只订阅全局摘要、活动状态与资源变化，省略则保留完整事件能力。HTTP、桌面 IPC
+`OpenReadEventStream` 和 Android 网络桥共用这一语义；旧的数字 `after` 订阅保留兼容。
+
+进程代次不匹配、游标超出范围或回放已淘汰时发送 `reset_required`。客户端应先缓冲后续事件、
+校验订阅资源，再应用快照期间的变化；不能仅保存重置后的游标。可回放的短暂断线只补事件。
+回放先于 `connected` 和实时事件，回放缓冲同时受 4096 条与 32 MiB 估算载荷预算限制，
+超大事件仍可实时传递，但不保证保留回放。慢客户端断开自己的订阅，Agent 执行不等待网络消费者。
 
 分资源读取与桌面 IPC `ReadSessionResource` 共用 `surfacewire` 投影和校验 token。`resource`
 可为 `history`、`nodes`、`metadata`、`live`、`entry`、`chunk`、`thinking`、`image`；HTTP 的

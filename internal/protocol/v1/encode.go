@@ -392,6 +392,12 @@ func encodeApplicationEvent(value application.Event) (any, error) {
 		return record, nil
 	case application.LiveResourceEvent:
 		result := map[string]any{"type": "live_resource"}
+		if event.Activity != nil {
+			result["activityVersion"], result["activity"] = resourceRevision(event.Activity.Version), activityWire(event.Activity.State)
+		}
+		if event.Bash != nil {
+			result["bashVersion"], result["bashRunning"] = resourceRevision(event.Bash.Version), event.Bash.Running
+		}
 		if event.Agent != nil {
 			result["agent"] = AgentReadVersion(*event.Agent)
 		}

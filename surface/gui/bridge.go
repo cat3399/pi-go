@@ -31,6 +31,7 @@ type HostInfo struct {
 type EventStreamOpened struct {
 	StreamID      uint64                      `json:"streamId"`
 	Revision      uint64                      `json:"revision"`
+	Cursor        string                      `json:"cursor"`
 	ResetRequired bool                        `json:"resetRequired"`
 	Replay        []surfacewire.EventEnvelope `json:"replay"`
 }
@@ -43,6 +44,7 @@ type GUIApplicationEvent struct {
 type GUIStreamReset struct {
 	StreamID uint64 `json:"streamId"`
 	Revision uint64 `json:"revision"`
+	Cursor   string `json:"cursor"`
 	Reason   string `json:"reason,omitempty"`
 }
 
@@ -331,6 +333,39 @@ func (b *GUIBridge) OpenEventStream(after uint64) (EventStreamOpened, error) {
 	if err != nil {
 		return EventStreamOpened{}, err
 	}
+	return b.registerEventStream(subscription, resetRequired)
+}
+
+func (b *GUIBridge) OpenReadEventStream(after, sessionsJSON string) (EventStreamOpened, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return EventStreamOpened{}, err
+	}
+	cursor, err := surfacewire.DecodeEventCursor(after)
+	if err != nil {
+		return EventStreamOpened{}, err
+	}
+	options := coreapplication.ReadEventOptions{After: cursor}
+	if sessionsJSON != "" {
+		var selected []string
+		if err := json.Unmarshal([]byte(sessionsJSON), &selected); err != nil {
+			return EventStreamOpened{}, surfacewire.ErrInvalidRequest
+		}
+		options.Sessions = &selected
+	}
+	subscription, err := api.SubscribeReadEvents(options)
+	reset := errors.Is(err, coreapplication.ErrEventCursorUnavailable)
+	if reset {
+		options.After = nil
+		subscription, err = api.SubscribeReadEvents(options)
+	}
+	if err != nil {
+		return EventStreamOpened{}, err
+	}
+	return b.registerEventStream(subscription, reset)
+}
+
+func (b *GUIBridge) registerEventStream(subscription *coreapplication.EventSubscription, resetRequired bool) (EventStreamOpened, error) {
 	replay := make([]surfacewire.EventEnvelope, 0, len(subscription.Replay))
 	for _, event := range subscription.Replay {
 		envelope, encodeErr := surfacewire.EncodeEvent(event)
@@ -349,6 +384,7 @@ func (b *GUIBridge) OpenEventStream(after uint64) (EventStreamOpened, error) {
 	b.mu.Unlock()
 	return EventStreamOpened{
 		StreamID: streamID, Revision: subscription.Revision,
+		Cursor:        surfacewire.EncodeEventCursor(subscription.Cursor),
 		ResetRequired: resetRequired, Replay: replay,
 	}, nil
 }
@@ -417,7 +453,7 @@ func (b *GUIBridge) emitReset(streamID uint64, reason string) {
 		return
 	}
 	b.emit(guiStreamResetEvent, GUIStreamReset{
-		StreamID: streamID, Revision: api.CurrentRevision(), Reason: reason,
+		StreamID: streamID, Revision: api.CurrentRevision(), Cursor: surfacewire.EncodeEventCursor(api.CurrentCursor()), Reason: reason,
 	})
 }
 

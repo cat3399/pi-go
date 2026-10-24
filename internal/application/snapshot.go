@@ -6,6 +6,7 @@ import "errors"
 // counts and activity are derived from the same session list that it returns.
 type Snapshot struct {
 	Revision          uint64
+	Cursor            EventCursor
 	AgentDir          string
 	DefaultCWD        string
 	Sessions          []SessionInfo
@@ -18,7 +19,7 @@ func (s *Service) Snapshot() (Snapshot, error) {
 		return Snapshot{}, errors.New("application service is unavailable")
 	}
 	// Events published during the read remain replayable by every surface.
-	revision := s.CurrentRevision()
+	cursor := s.CurrentCursor()
 	sessions, err := s.ListSessions()
 	if err != nil {
 		return Snapshot{}, err
@@ -28,7 +29,7 @@ func (s *Service) Snapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return Snapshot{
-		Revision: revision, AgentDir: s.AgentDir(), DefaultCWD: s.DefaultCWD(),
+		Revision: cursor.Sequence, Cursor: cursor, AgentDir: s.AgentDir(), DefaultCWD: s.DefaultCWD(),
 		Sessions: sessions, Projects: projects, RunningSessionIDs: s.RunningIDs(),
 	}, nil
 }

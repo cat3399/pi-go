@@ -78,6 +78,8 @@ type API interface {
 
 	CurrentRevision() uint64
 	SubscribeEvents(uint64) (*EventSubscription, error)
+	CurrentCursor() EventCursor
+	SubscribeReadEvents(ReadEventOptions) (*EventSubscription, error)
 }
 
 var _ API = (*Service)(nil)

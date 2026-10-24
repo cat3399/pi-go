@@ -25,6 +25,7 @@ func invalidRequest(err error) error {
 // by HTTP/SSE and native GUI IPC. It contains no surface-owned state.
 type ApplicationSnapshot struct {
 	Revision          uint64        `json:"revision"`
+	Cursor            string        `json:"cursor"`
 	AgentDir          string        `json:"agentDir"`
 	DefaultCWD        string        `json:"defaultCwd"`
 	Projects          []ProjectInfo `json:"projects"`
@@ -45,7 +46,7 @@ func Snapshot(api application.API) (ApplicationSnapshot, error) {
 		sessions = append(sessions, SessionInfoFromApplication(info))
 	}
 	return ApplicationSnapshot{
-		Revision: value.Revision, AgentDir: value.AgentDir, DefaultCWD: value.DefaultCWD,
+		Revision: value.Revision, Cursor: EncodeEventCursor(value.Cursor), AgentDir: value.AgentDir, DefaultCWD: value.DefaultCWD,
 		Projects: projectsFromApplication(value.Projects), Sessions: sessions, RunningSessionIDs: value.RunningSessionIDs,
 	}, nil
 }
@@ -297,6 +298,7 @@ func DispatchJSON(ctx context.Context, api application.API, sessionID string, pa
 
 type EventEnvelope struct {
 	Sequence  uint64 `json:"sequence"`
+	Cursor    string `json:"cursor,omitempty"`
 	SessionID string `json:"sessionId"`
 	Event     any    `json:"event"`
 }
@@ -306,7 +308,7 @@ func EncodeEvent(event application.Event) (EventEnvelope, error) {
 	if err != nil {
 		return EventEnvelope{}, err
 	}
-	return EventEnvelope{Sequence: event.Sequence, SessionID: event.SessionID, Event: encoded}, nil
+	return EventEnvelope{Sequence: event.Sequence, Cursor: EncodeEventCursor(application.EventCursor{Epoch: event.Epoch, Sequence: event.Sequence}), SessionID: event.SessionID, Event: encoded}, nil
 }
 
 // DecodeCommandPayload validates that a Wails string argument is one JSON

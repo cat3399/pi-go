@@ -25,6 +25,7 @@ interface RemoteStreamEvent {
 interface RemoteStreamError {
   streamId: number;
   revision: number;
+  cursor?: string;
   message: string;
   terminal: boolean;
 }
@@ -88,8 +89,9 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
   subscribe(
     endpoint: string,
     token: string,
-    after: number,
+    after: number | string,
     observer: EventObserver,
+    sessionIds?: string[],
   ): EventSubscription {
     let closed = false;
     let connected = false;
@@ -116,7 +118,7 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
         rejectReady(new Error(payload.message || "远程事件连接失败"));
         close();
       } else if (payload.terminal) {
-        observer.onReset(payload.revision, payload.message || "远程事件连接已关闭");
+        observer.onReset(payload.revision, payload.message || "远程事件连接已关闭", payload.cursor);
       }
     });
 
@@ -130,7 +132,10 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
     };
     this.subscriptions.add(close);
 
-    void call<RemoteStreamOpened>("OpenEventStream", endpoint, token, after)
+    const opening = typeof after === "string"
+      ? call<RemoteStreamOpened>("OpenReadEventStream", endpoint, token, after, sessionIds ? JSON.stringify(sessionIds) : "")
+      : sessionIds ? Promise.reject(new Error("详情订阅需要包含流代次的游标")) : call<RemoteStreamOpened>("OpenEventStream", endpoint, token, after);
+    void opening
       .then(async (opened) => {
         if (closed) {
           await call("CloseEventStream", opened.streamId);

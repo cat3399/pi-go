@@ -55,8 +55,9 @@ export interface RemoteApplicationTransport {
   subscribe(
     endpoint: string,
     token: string,
-    after: number,
+    after: number | string,
     observer: EventObserver,
+    sessionIds?: string[],
   ): EventSubscription;
   close(): void;
 }
@@ -357,8 +358,8 @@ export class RemoteApplicationClient implements ApplicationClient {
     return response.data;
   }
 
-  subscribe(after: number, observer: EventObserver): EventSubscription {
-    return this.transport.subscribe(this.endpoint, this.token, after, observer);
+  subscribe(after: number | string, observer: EventObserver, sessionIds?: string[]): EventSubscription {
+    return this.transport.subscribe(this.endpoint, this.token, after, observer, sessionIds);
   }
 
   close(): void {
@@ -492,8 +493,9 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
   subscribe(
     endpoint: string,
     token: string,
-    after: number,
+    after: number | string,
     observer: EventObserver,
+    sessionIds?: string[],
   ): EventSubscription {
     let closed = false;
     let source: EventSource | null = null;
@@ -505,8 +507,14 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
     });
 
     try {
-      const url = new URL("/api/v1/events", endpoint);
-      url.searchParams.set("after", String(after));
+      const url = new URL(`${endpoint}/api/v1/events`);
+      if (typeof after === "string") {
+        url.searchParams.set("cursor", after);
+        if (sessionIds) url.searchParams.set("sessions", JSON.stringify(sessionIds));
+      } else {
+        if (sessionIds) throw new Error("详情订阅需要包含流代次的游标");
+        url.searchParams.set("after", String(after));
+      }
       if (token) url.searchParams.set("token", token);
       source = new EventSource(url, { withCredentials: true });
       this.sources.add(source);
@@ -559,6 +567,7 @@ export function applyEventData(
   if (!value || typeof value !== "object") return;
   const object = value as Record<string, unknown>;
   if (object.type === "connected") {
+    if (typeof object.cursor === "string") observer.onConnected?.(object.cursor);
     onConnected();
     return;
   }
@@ -566,6 +575,7 @@ export function applyEventData(
     observer.onReset(
       typeof object.revision === "number" ? object.revision : 0,
       "远程事件游标已过期",
+      typeof object.cursor === "string" ? object.cursor : undefined,
     );
     return;
   }

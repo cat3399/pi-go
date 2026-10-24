@@ -45,6 +45,7 @@ type RemoteStreamEvent struct {
 type RemoteStreamError struct {
 	StreamID uint64 `json:"streamId"`
 	Revision uint64 `json:"revision"`
+	Cursor   string `json:"cursor,omitempty"`
 	Message  string `json:"message"`
 	Terminal bool   `json:"terminal"`
 }
@@ -88,12 +89,15 @@ type remoteEventStream struct {
 	endpoint   string
 	credential remoteCredential
 
-	mu       sync.Mutex
-	revision uint64
-	started  bool
-	closed   bool
-	ctx      context.Context
-	cancel   context.CancelFunc
+	mu         sync.Mutex
+	revision   uint64
+	readCursor string
+	scopeJSON  string
+	versioned  bool
+	started    bool
+	closed     bool
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 func NewRemoteBridge() *RemoteBridge {
@@ -374,6 +378,19 @@ func (b *RemoteBridge) OpenEventStream(endpoint, token string, after uint64) (Re
 	return RemoteStreamOpened{StreamID: streamID}, nil
 }
 
+func (b *RemoteBridge) OpenReadEventStream(endpoint, token, cursor, sessionsJSON string) (RemoteStreamOpened, error) {
+	if _, err := remoteReadEventsURL(endpoint, cursor, sessionsJSON); err != nil {
+		return RemoteStreamOpened{}, err
+	}
+	streamContext, cancel := context.WithCancel(b.context())
+	b.mu.Lock()
+	b.nextStream++
+	id := b.nextStream
+	b.streams[id] = &remoteEventStream{id: id, endpoint: endpoint, credential: b.credentialForEndpoint(endpoint, token), readCursor: cursor, scopeJSON: sessionsJSON, versioned: true, ctx: streamContext, cancel: cancel}
+	b.mu.Unlock()
+	return RemoteStreamOpened{StreamID: id}, nil
+}
+
 func (b *RemoteBridge) ResumeEventStream(streamID uint64) error {
 	b.mu.RLock()
 	stream := b.streams[streamID]
@@ -422,7 +439,7 @@ func (b *RemoteBridge) pumpEventStream(stream *remoteEventStream) {
 			b.forgetToken(stream.endpoint, stream.credential)
 		}
 		b.emit(mobileRemoteErrorEvent, RemoteStreamError{
-			StreamID: stream.id, Revision: stream.cursor(), Message: err.Error(), Terminal: terminal,
+			StreamID: stream.id, Revision: stream.cursor(), Cursor: stream.opaqueCursor(), Message: err.Error(), Terminal: terminal,
 		})
 		if terminal {
 			return
@@ -440,6 +457,9 @@ func (b *RemoteBridge) pumpEventStream(stream *remoteEventStream) {
 
 func (b *RemoteBridge) consumeEventStream(stream *remoteEventStream) (int, error) {
 	target, err := remoteEventsURL(stream.endpoint, stream.cursor())
+	if stream.versioned {
+		target, err = remoteReadEventsURL(stream.endpoint, stream.opaqueCursor(), stream.scopeJSON)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -468,9 +488,17 @@ func (b *RemoteBridge) consumeEventStream(stream *remoteEventStream) (int, error
 		}
 		return response.StatusCode, errors.New(message)
 	}
-	return response.StatusCode, readSSE(response.Body, func(id uint64, data string) error {
-		if id != 0 {
-			stream.setCursor(id)
+	return response.StatusCode, readSSECursor(response.Body, func(id string, data string) error {
+		if stream.versioned {
+			if id != "" {
+				stream.setOpaqueCursor(id)
+			}
+		} else if id != "" {
+			sequence, err := strconv.ParseUint(id, 10, 64)
+			if err != nil {
+				return err
+			}
+			stream.setCursor(sequence)
 		}
 		b.emit(mobileRemoteEvent, RemoteStreamEvent{StreamID: stream.id, Data: data})
 		return nil
@@ -534,6 +562,18 @@ func (s *remoteEventStream) setCursor(value uint64) {
 	s.mu.Unlock()
 }
 
+func (s *remoteEventStream) opaqueCursor() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readCursor
+}
+
+func (s *remoteEventStream) setOpaqueCursor(value string) {
+	s.mu.Lock()
+	s.readCursor = value
+	s.mu.Unlock()
+}
+
 func remoteAPIURL(endpoint, requestPath string) (*url.URL, error) {
 	base, err := parseRemoteEndpoint(endpoint)
 	if err != nil {
@@ -558,6 +598,24 @@ func remoteEventsURL(endpoint string, after uint64) (*url.URL, error) {
 	}
 	query := target.Query()
 	query.Set("after", strconv.FormatUint(after, 10))
+	target.RawQuery = query.Encode()
+	return target, nil
+}
+
+func remoteReadEventsURL(endpoint, cursor, sessionsJSON string) (*url.URL, error) {
+	target, err := remoteAPIURL(endpoint, "/api/v1/events")
+	if err != nil {
+		return nil, err
+	}
+	query := target.Query()
+	query.Set("cursor", cursor)
+	if sessionsJSON != "" {
+		var ids []string
+		if json.Unmarshal([]byte(sessionsJSON), &ids) != nil {
+			return nil, errors.New("invalid session subscription")
+		}
+		query.Set("sessions", sessionsJSON)
+	}
 	target.RawQuery = query.Encode()
 	return target, nil
 }
@@ -692,8 +750,22 @@ func retryAfterMilliseconds(value string) int64 {
 }
 
 func readSSE(reader io.Reader, emit func(id uint64, data string) error) error {
+	return readSSECursor(reader, func(id, data string) error {
+		var sequence uint64
+		if id != "" {
+			var err error
+			sequence, err = strconv.ParseUint(id, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid SSE event id: %w", err)
+			}
+		}
+		return emit(sequence, data)
+	})
+}
+
+func readSSECursor(reader io.Reader, emit func(id string, data string) error) error {
 	buffered := bufio.NewReader(reader)
-	var eventID uint64
+	var eventID string
 	var data strings.Builder
 	for {
 		line, err := buffered.ReadString('\n')
@@ -707,16 +779,15 @@ func readSSE(reader io.Reader, emit func(id uint64, data string) error) error {
 						return err
 					}
 					data.Reset()
-					eventID = 0
+					eventID = ""
 				}
 			case strings.HasPrefix(line, "id:"):
 				value := strings.TrimSpace(strings.TrimPrefix(line, "id:"))
 				if value != "" {
-					parsed, parseErr := strconv.ParseUint(value, 10, 64)
-					if parseErr != nil {
-						return fmt.Errorf("invalid SSE event id: %w", parseErr)
+					if len(value) > 256 || strings.ContainsRune(value, '\x00') {
+						return errors.New("invalid SSE event id")
 					}
-					eventID = parsed
+					eventID = value
 				}
 			case strings.HasPrefix(line, "data:"):
 				value := strings.TrimPrefix(line, "data:")
@@ -729,12 +800,8 @@ func readSSE(reader io.Reader, emit func(id uint64, data string) error) error {
 			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) && data.Len() != 0 {
-				value := strings.TrimSuffix(data.String(), "\n")
-				if emitErr := emit(eventID, value); emitErr != nil {
-					return emitErr
-				}
-			}
+			// A disconnected partial frame has not been delivered. Do not move
+			// the reconnect cursor past data the UI could not apply.
 			return err
 		}
 	}

@@ -174,6 +174,10 @@ func handleRunningSessions(api application.API) http.HandlerFunc {
 
 func handleApplicationEvents(api application.API) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Has("cursor") || request.URL.Query().Has("sessions") || strings.Contains(request.Header.Get("Last-Event-ID"), ":") {
+			handleReadEvents(api, writer, request)
+			return
+		}
 		flusher, ok := writer.(http.Flusher)
 		if !ok {
 			writeAPIError(writer, http.StatusInternalServerError, errors.New("streaming is unavailable"))
@@ -197,45 +201,49 @@ func handleApplicationEvents(api application.API) http.HandlerFunc {
 			writeApplicationError(writer, err)
 			return
 		}
-		defer subscription.Close()
-		writer.Header().Set("Content-Type", "text/event-stream")
-		writer.Header().Set("Cache-Control", "no-cache")
-		writer.Header().Set("Connection", "keep-alive")
-		writer.Header().Set("X-Accel-Buffering", "no")
-		if reset {
-			if err := writeSSE(writer, after, map[string]any{"type": "reset_required", "revision": after}); err != nil {
-				return
-			}
-		}
-		for _, event := range subscription.Replay {
-			if err := writeApplicationSSE(writer, event); err != nil {
-				return
-			}
-		}
-		if err := writeSSE(writer, subscription.Revision, map[string]any{"type": "connected", "revision": subscription.Revision}); err != nil {
+		serveApplicationEvents(writer, request, flusher, subscription, reset, false)
+	}
+}
+
+func serveApplicationEvents(writer http.ResponseWriter, request *http.Request, flusher http.Flusher, subscription *application.EventSubscription, reset, versioned bool) {
+	defer subscription.Close()
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Accel-Buffering", "no")
+	if reset {
+		if err := writeStreamControl(writer, subscription, "reset_required", versioned); err != nil {
 			return
 		}
-		flusher.Flush()
-		heartbeat := time.NewTicker(30 * time.Second)
-		defer heartbeat.Stop()
-		for {
-			select {
-			case event, ok := <-subscription.Events:
-				if !ok {
-					return
-				}
-				if err := writeApplicationSSE(writer, event); err != nil {
-					return
-				}
-				flusher.Flush()
-			case <-heartbeat.C:
-				if _, err := io.WriteString(writer, ":\n\n"); err != nil {
-					return
-				}
-				flusher.Flush()
-			case <-request.Context().Done():
+	}
+	for _, event := range subscription.Replay {
+		if err := writeStreamEvent(writer, event, versioned); err != nil {
+			return
+		}
+	}
+	if err := writeStreamControl(writer, subscription, "connected", versioned); err != nil {
+		return
+	}
+	flusher.Flush()
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case event, ok := <-subscription.Events:
+			if !ok {
 				return
 			}
+			if err := writeStreamEvent(writer, event, versioned); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := io.WriteString(writer, ":\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-request.Context().Done():
+			return
 		}
 	}
 }
