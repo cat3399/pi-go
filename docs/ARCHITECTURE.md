@@ -55,6 +55,11 @@ JSONL 会话文件是持久对话和会话树的事实源。SessionManager 将 e
 
 Application Service 管理每个活动会话的独立 Runtime。
 
+读取优化以资源边界为单位推进：历史条目、当前分支、模型上下文、运行态和目录摘要分别提供
+可验证的读取结果。缓存与索引是可重建的投影，不拥有第二份 Agent/Session 权威状态。
+完整历史浏览不改变模型上下文的压缩语义；编辑历史用户节点仍沿用创建新分支的语义。
+资源版本、分页、缓存失效和实施顺序见 [Surface 数据读取与同步改造](SURFACES.md#数据读取与同步改造)。
+
 ## 事件与并发
 
 - 每个 Agent 同时只有一个 active run；steering 和 follow-up 由 Agent 的队列交付。

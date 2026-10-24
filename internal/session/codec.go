@@ -120,9 +120,12 @@ func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Ent
 	sawBytes := false
 	lastTerminated := false
 	reader := bufio.NewReaderSize(source, sessionReadBufferSize)
+	// Tail validation only needs scratch storage. Reuse it across physical
+	// records instead of allocating 32 KiB for every message in the session.
+	whitespaceBuffer := make([]byte, 32*1024)
 
 	for {
-		line, readErr := nextStreamedJSONLine(reader)
+		line, readErr := nextStreamedJSONLine(reader, whitespaceBuffer)
 		if readErr != nil {
 			return Header{}, nil, nil, false, diagnostics, fmt.Errorf("%w: read %s: %v", ErrStorage, path, readErr)
 		}
@@ -418,27 +421,37 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			}
 			return Entry{}, fmt.Errorf("message entry is missing message")
 		}
-		if messageObject, objectErr := decodeObject(messageRaw); objectErr == nil {
-			if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
-				entry.messageRole = role
-				entry.hasMsgRole = true
-				if _, hasContent := messageObject["content"]; hasContent && (role == "user" || role == "assistant") {
-					var milliseconds int64
-					entry.messageActivity = timestamp
-					if json.Unmarshal(messageObject["timestamp"], &milliseconds) == nil {
-						entry.messageActivity = time.UnixMilli(milliseconds)
-					}
+		// Decode the message envelope once. Compatibility defaults and typed
+		// projections share this owned map; the original entry bytes remain
+		// untouched for persistence and forward-compatible round trips.
+		messageObject, objectErr := decodeObject(messageRaw)
+		if objectErr != nil {
+			if compatible {
+				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
+				return entry, nil
+			}
+			return Entry{}, objectErr
+		}
+		if role, roleErr := requiredString(messageObject, "role"); roleErr == nil {
+			entry.messageRole = role
+			entry.hasMsgRole = true
+			if _, hasContent := messageObject["content"]; hasContent && (role == "user" || role == "assistant") {
+				var milliseconds int64
+				entry.messageActivity = timestamp
+				if json.Unmarshal(messageObject["timestamp"], &milliseconds) == nil {
+					entry.messageActivity = time.UnixMilli(milliseconds)
 				}
 			}
 		}
+		normalized := false
 		if compatible {
 			var omittedOptionalMetadata int
-			messageRaw, omittedOptionalMetadata = normalizeCompatibleMessage(messageRaw, timestamp)
+			messageObject, normalized, omittedOptionalMetadata = normalizeCompatibleMessage(messageObject, timestamp)
 			for range omittedOptionalMetadata {
 				entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticOptionalMetadataOmitted, EntryID: id, ContentIndex: -1})
 			}
 		}
-		entry.assistant, entry.hasAssistant, err = decodeAssistantProvenance(messageRaw)
+		entry.assistant, entry.hasAssistant, err = decodeAssistantProvenance(messageObject)
 		if err != nil && !compatible {
 			return Entry{}, err
 		}
@@ -447,7 +460,7 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			entry.hasAssistant = false
 		}
 		var messageDiagnostics []Diagnostic
-		entry.message, messageDiagnostics, err = decodeMessage(id, messageRaw)
+		entry.message, messageDiagnostics, err = decodeMessage(id, messageObject)
 		entry.diagnostics = append(entry.diagnostics, messageDiagnostics...)
 		if err != nil {
 			if compatible {
@@ -463,7 +476,6 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 			}
 			entry.payload = MessagePayload{Message: wrapped}
 		} else {
-			messageObject, _ := decodeObject(messageRaw)
 			role, _ := requiredString(messageObject, "role")
 			if role == "user" || role == "assistant" || role == "toolResult" {
 				if compatible {
@@ -471,7 +483,7 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 				}
 				return entry, nil
 			}
-			message, messageErr := decodeCodingAgentMessage(messageRaw)
+			message, messageErr := decodeCodingAgentMessage(messageObject, messageRaw, normalized)
 			if messageErr != nil {
 				if compatible {
 					entry.diagnostics = append(entry.diagnostics, Diagnostic{Code: DiagnosticUnprojectablePayload, EntryID: id, ContentIndex: -1})
@@ -530,14 +542,10 @@ func decodeEntryWithMode(semantic, retainedRaw []byte, compatible bool) (Entry, 
 	return entry, nil
 }
 
-func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) ([]byte, int) {
-	object, err := decodeObject(raw)
-	if err != nil {
-		return raw, 0
-	}
+func normalizeCompatibleMessage(object map[string]json.RawMessage, entryTimestamp time.Time) (map[string]json.RawMessage, bool, int) {
 	role, err := requiredString(object, "role")
 	if err != nil {
-		return raw, 0
+		return object, false, 0
 	}
 	changed := false
 	omittedOptionalMetadata := 0
@@ -574,14 +582,7 @@ func normalizeCompatibleMessage(raw []byte, entryTimestamp time.Time) ([]byte, i
 			omittedOptionalMetadata++
 		}
 	}
-	if !changed {
-		return raw, omittedOptionalMetadata
-	}
-	encoded, err := json.Marshal(object)
-	if err != nil {
-		return raw, 0
-	}
-	return encoded, omittedOptionalMetadata
+	return object, changed, omittedOptionalMetadata
 }
 
 func normalizeCompatibleAssistantUsage(message map[string]json.RawMessage) (bool, bool) {
@@ -709,11 +710,7 @@ func normalizeCompatibleCustomMessage(object map[string]json.RawMessage) map[str
 	return clone
 }
 
-func decodeCodingAgentMessage(raw []byte) (agentmsg.Message, error) {
-	object, err := decodeObject(raw)
-	if err != nil {
-		return nil, err
-	}
+func decodeCodingAgentMessage(object map[string]json.RawMessage, raw []byte, normalized bool) (agentmsg.Message, error) {
 	role, err := requiredString(object, "role")
 	if err != nil {
 		return nil, err
@@ -767,6 +764,15 @@ func decodeCodingAgentMessage(raw []byte) (agentmsg.Message, error) {
 		result, e := agentmsg.NewCustom(value)
 		return result, e
 	default:
+		if normalized {
+			// Unknown roles expose their semantic envelope through OpaqueMessage.
+			// Only this path needs encoded compatibility defaults; known message
+			// variants were already constructed directly from the decoded fields.
+			raw, err = json.Marshal(object)
+			if err != nil {
+				return nil, err
+			}
+		}
 		result, e := agentmsg.NewOpaque(agentmsg.OpaqueSpec{Type: role, Data: bytes.Clone(raw), At: timestamp})
 		return result, e
 	}
@@ -979,11 +985,7 @@ func validateIndexedCompactionEntry(index int, entry Entry, byID map[string]int,
 	return nil
 }
 
-func decodeAssistantProvenance(raw []byte) (AssistantProvenance, bool, error) {
-	object, err := decodeObject(raw)
-	if err != nil {
-		return AssistantProvenance{}, false, err
-	}
+func decodeAssistantProvenance(object map[string]json.RawMessage) (AssistantProvenance, bool, error) {
 	role, err := requiredString(object, "role")
 	if err != nil || role != "assistant" {
 		return AssistantProvenance{}, false, nil
@@ -1036,11 +1038,7 @@ func decodeParentID(object map[string]json.RawMessage) (string, bool, error) {
 	return parent, true, nil
 }
 
-func decodeMessage(entryID string, raw []byte) (llm.ConversationMessage, []Diagnostic, error) {
-	object, err := decodeObject(raw)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid message object: %w", err)
-	}
+func decodeMessage(entryID string, object map[string]json.RawMessage) (llm.ConversationMessage, []Diagnostic, error) {
 	role, err := requiredString(object, "role")
 	if err != nil {
 		return nil, nil, err

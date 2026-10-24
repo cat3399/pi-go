@@ -124,14 +124,6 @@ func discoveredSessionInfo(info session.SessionInfo, pathIDs map[string]string) 
 	}
 }
 
-func activeSessionInfo(manager *session.SessionManager, managed *managedSession, pathIDs map[string]string) SessionInfo {
-	info := manager.Summary()
-	if info.Path == "" {
-		_, _, info.Path = managed.identity()
-	}
-	return discoveredSessionInfo(info, pathIDs)
-}
-
 func cleanPathKey(value string) string {
 	if value == "" {
 		return ""
@@ -214,18 +206,33 @@ func (s *Service) RenameSession(ctx context.Context, id, name string) error {
 }
 
 func (s *Service) sessionManagerForRead(id string) (*session.SessionManager, *managedSession, SessionInfo, bool, error) {
-	discovered, err := s.discoveredSessions()
-	if err != nil {
-		return nil, nil, SessionInfo{}, false, err
-	}
-	pathIDs := discoveredSessionPathIDs(discovered)
 	if managed, ok := s.active(id); ok {
 		manager := managed.manager()
 		if manager == nil {
 			return nil, nil, SessionInfo{}, false, errors.New("active session manager is unavailable")
 		}
-		return manager, managed, activeSessionInfo(manager, managed, pathIDs), false, nil
+		info := manager.Summary()
+		if info.Path == "" {
+			_, _, info.Path = managed.identity()
+		}
+		// A known active session owns its metadata already. Discovery is only
+		// needed to resolve a recorded parent file into a catalog session ID;
+		// ordinary history/media reads must not scan every unrelated session.
+		var pathIDs map[string]string
+		if info.HasParentSession {
+			discovered, err := s.discoveredSessions()
+			if err != nil {
+				return nil, nil, SessionInfo{}, false, err
+			}
+			pathIDs = discoveredSessionPathIDs(discovered)
+		}
+		return manager, managed, discoveredSessionInfo(info, pathIDs), false, nil
 	}
+	discovered, err := s.discoveredSessions()
+	if err != nil {
+		return nil, nil, SessionInfo{}, false, err
+	}
+	pathIDs := discoveredSessionPathIDs(discovered)
 	info, found := findDiscoveredSession(discovered, id)
 	if !found {
 		return nil, nil, SessionInfo{}, false, os.ErrNotExist

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,37 @@ func TestUnchangedHistoryProjectionRetainsEncodingAndOwnsBytes(t *testing.T) {
 		if raw[0] != ' ' {
 			t.Fatal("returned bytes alias input")
 		}
+	}
+}
+
+// Keep unchanged text and changed rich blocks in the same benchmark: a fast
+// history path must not hide a regression when large media needs projection.
+func BenchmarkHistoryProjection(b *testing.B) {
+	for _, shape := range []struct {
+		name, format string
+		bytes        int
+	}{
+		{"text10KiB", `{"role":"assistant","content":[{"type":"text","text":"%s"}]}`, 10 * 1024},
+		{"text1MiB", `{"role":"assistant","content":[{"type":"text","text":"%s"}]}`, 1024 * 1024},
+		{"tool10KiB", `{"role":"assistant","content":[{"type":"toolCall","id":"call","name":"read","arguments":{"text":"%s"}}]}`, 10 * 1024},
+		{"thinking1MiB", `{"role":"assistant","content":[{"type":"thinking","thinking":"%s"}]}`, 1024 * 1024},
+		{"image1MiB", `{"role":"user","content":[{"type":"image","mimeType":"image/png","data":"%s"}]}`, 1024 * 1024},
+	} {
+		b.Run(shape.name, func(b *testing.B) {
+			raw := json.RawMessage(strings.Replace(shape.format, "%s", strings.Repeat("A", shape.bytes), 1))
+			var wireBytes int
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				projected, err := projectHistoryMessage(raw, true, true, true, "entry")
+				if err != nil {
+					b.Fatal(err)
+				}
+				wireBytes = len(projected)
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(wireBytes), "wire-B/op")
+		})
 	}
 }

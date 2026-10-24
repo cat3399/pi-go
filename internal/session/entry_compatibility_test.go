@@ -264,6 +264,43 @@ func TestModelChangeMissingModelIDKeepsEnvelopeAndIsDiagnosed(t *testing.T) {
 		t.Fatalf("compatible model diagnostics = %#v", diagnostics)
 	}
 }
+
+func TestUnknownMessageTimestampDefaultPreservesDurableEnvelope(t *testing.T) {
+	for _, timestamp := range []string{"", `,"timestamp":null`} {
+		t.Run(timestamp, func(t *testing.T) {
+			raw := `{"type":"message","id":"unknown","parentId":null,"timestamp":"2026-08-01T00:00:01Z","message":{"role":"extensionEvent","content":{"counter":9007199254740993}` + timestamp + `}}`
+			path := writeSessionFixture(t, testHeader+"\n"+raw+"\n")
+			s, err := Open(path, OpenOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			entries := s.Entries()
+			if len(entries) != 1 || string(entries[0].RawJSON()) != raw {
+				t.Fatalf("timestamp default rewrote durable envelope: %#v", entries)
+			}
+			messages := s.BuildContext().AgentMessages()
+			if len(messages) != 1 {
+				t.Fatalf("unknown message was dropped: %#v", messages)
+			}
+			opaque, ok := messages[0].(agentmsg.OpaqueMessage)
+			if !ok || !opaque.Timestamp().Equal(entries[0].Timestamp()) {
+				t.Fatalf("opaque message timestamp = %#v", messages[0])
+			}
+			var payload struct {
+				Timestamp int64           `json:"timestamp"`
+				Content   json.RawMessage `json:"content"`
+			}
+			if err := json.Unmarshal(opaque.Data(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Timestamp != entries[0].Timestamp().UnixMilli() || string(payload.Content) != `{"counter":9007199254740993}` {
+				t.Fatalf("semantic envelope lost defaults or unknown data: %s", opaque.Data())
+			}
+		})
+	}
+}
+
 func mustSessionText(t *testing.T, text string) llm.TextBlock {
 	t.Helper()
 	value, err := llm.NewTextBlock(text)

@@ -294,3 +294,52 @@ func TestRunningIDsReadsLifecycleWithoutProjectingHistory(t *testing.T) {
 		t.Fatalf("settled prompt IDs = %v", ids)
 	}
 }
+
+func TestActiveSessionReadDoesNotDependOnUnrelatedCatalog(t *testing.T) {
+	service := newFileTestService(t, t.TempDir())
+	manager, err := session.InMemorySessionManager(service.DefaultCWD(), session.NewSessionOptions{ID: "active-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := appendCatalogMessage(t, manager, "owned history", time.UnixMilli(1), false)
+	addCatalogManagedSession(t, service, manager)
+	if err := service.sessionCatalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ListSessions(); !errors.Is(err, session.ErrClosed) {
+		t.Fatalf("fixture catalog is still available: %v", err)
+	}
+	snapshot, err := service.SnapshotSession("active-read", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Info.ID != "active-read" || snapshot.Info.FirstMessage != "owned history" || len(snapshot.Entries) != 1 || snapshot.Entries[0].ID() != entry.ID() {
+		t.Fatalf("active read lost owned state: %#v", snapshot)
+	}
+}
+
+func TestActiveSessionReadResolvesRecordedParentThroughCatalog(t *testing.T) {
+	service := newFileTestService(t, t.TempDir())
+	directory, err := session.SessionDirForAgentDir(service.DefaultCWD(), service.AgentDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := session.CreateSessionManager(service.DefaultCWD(), directory, session.NewSessionOptions{ID: "read-parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	entry := appendCatalogMessage(t, parent, "source answer", time.UnixMilli(1), true)
+	child, err := parent.CloneBranchedSession(context.Background(), entry.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	addCatalogManagedSession(t, service, child)
+	snapshot, err := service.SnapshotSession(child.SessionID(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Info.ParentSessionID != "read-parent" || len(snapshot.Entries) != 1 || snapshot.Entries[0].ID() != entry.ID() {
+		t.Fatalf("fork metadata or history changed: %#v", snapshot)
+	}
+}

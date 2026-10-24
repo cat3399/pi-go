@@ -89,7 +89,7 @@ type streamedJSONLine struct {
 // value is the only raw line allocation retained by the caller. Malformed
 // records are drained rather than accumulated, which is important for sparse
 // or externally damaged files with a very large unterminated tail.
-func nextStreamedJSONLine(reader *bufio.Reader) (streamedJSONLine, error) {
+func nextStreamedJSONLine(reader *bufio.Reader, whitespaceBuffer []byte) (streamedJSONLine, error) {
 	physical := &physicalJSONLineReader{reader: reader, capturing: true}
 	decoder := json.NewDecoder(physical)
 	var raw json.RawMessage
@@ -113,7 +113,7 @@ func nextStreamedJSONLine(reader *bufio.Reader) (streamedJSONLine, error) {
 	// whitespace instead of decoding a second value: the first non-whitespace
 	// byte already proves the line malformed, so even a huge second value can
 	// be discarded with bounded memory.
-	malformed, trailingErr := drainTrailingJSONWhitespace(decoder.Buffered(), physical)
+	malformed, trailingErr := drainTrailingJSONWhitespace(decoder.Buffered(), physical, whitespaceBuffer)
 	if trailingErr != nil {
 		return streamedJSONLine{}, trailingErr
 	}
@@ -130,10 +130,9 @@ func nextStreamedJSONLine(reader *bufio.Reader) (streamedJSONLine, error) {
 	return streamedJSONLine{raw: json.RawMessage(physical.captured), exists: physical.exists, terminated: physical.terminated}, nil
 }
 
-func drainTrailingJSONWhitespace(buffered io.Reader, physical *physicalJSONLineReader) (bool, error) {
+func drainTrailingJSONWhitespace(buffered io.Reader, physical *physicalJSONLineReader, buffer []byte) (bool, error) {
 	stream := io.MultiReader(buffered, physical)
 	malformed := false
-	buffer := make([]byte, 32*1024)
 	for {
 		read, err := stream.Read(buffer)
 		if !malformed {
