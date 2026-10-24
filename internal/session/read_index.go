@@ -223,10 +223,6 @@ func (r *ReadIndex) ReadNodes(query NodeQuery) (NodePage, error) {
 	return r.manager.ReadNodes(query)
 }
 
-func (r *ReadIndex) ReadEntryChunk(id, generation string, offset, length int) (EntryChunk, error) {
-	return r.manager.ReadEntryChunk(id, generation, offset, length)
-}
-
 func (r *ReadIndex) ReadEntry(id, generation string) (EntrySnapshot, error) {
 	return r.manager.ReadEntry(id, generation)
 }

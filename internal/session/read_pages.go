@@ -2,8 +2,10 @@ package session
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,7 +24,6 @@ const (
 	MaxPageEntries     = 256
 	DefaultPageBytes   = 512 << 10
 	MaxPageBytes       = 4 << 20
-	MaxEntryChunkBytes = 512 << 10
 )
 
 type PageDirection string
@@ -43,30 +44,34 @@ type HistoryCursor struct {
 }
 
 type HistoryQuery struct {
-	LeafID   *string // nil selects the current leaf; pointer to "" selects root
-	At       *ReadVersion
-	Cursor   *HistoryCursor
-	AroundID string // put this node at the end of the returned window
-	AfterID  string // stop before this ancestor when requesting a tail update
-	Limit    int
-	MaxBytes int
+	LeafID    *string // nil selects the current leaf; pointer to "" selects root
+	At        *ReadVersion
+	Cursor    *HistoryCursor
+	AroundID  string        // put this node at the end of the returned window
+	AfterID   string        // stop before this ancestor when requesting a tail update
+	Direction PageDirection // optional forward tail reads after AfterID
+	Limit     int
+	MaxBytes  int
 }
 
 type EntryNode struct {
-	ID          string
-	ParentID    *string
-	Type        string
-	Role        string
-	Timestamp   time.Time
-	Preview     string
-	Label       string
-	HasChildren bool
-	RawBytes    int
+	ID           string
+	ParentID     *string
+	Type         string
+	Role         string
+	Timestamp    time.Time
+	Preview      string
+	Label        string
+	HasChildren  bool
+	RawBytes     int
+	ContentToken string // raw immutable entry identity; supplied with history/entry reads
+	BranchDepth  int
+	Position     int // position in this node query
 }
 
 type PageEntry struct {
 	Node  EntryNode
-	Entry *Entry // nil for an oversized record; ReadEntryChunk supplies all bytes
+	Entry *Entry // complete entry; the byte budget is a soft page boundary
 }
 
 type HistoryPage struct {
@@ -112,7 +117,7 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 	}
 	var result HistoryPage
 	err = m.readView(func(store *Session, source ReadSnapshot) error {
-		if query.AroundID != "" && query.AfterID != "" {
+		if query.AroundID != "" && query.AfterID != "" || query.Direction != "" && query.Direction != PageOlder && query.Direction != PageNewer {
 			return ErrInvalidReadQuery
 		}
 		at := query.At
@@ -124,7 +129,7 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 			anchor = *query.LeafID
 		}
 		if cursor := query.Cursor; cursor != nil {
-			if query.AroundID != "" || query.AfterID != "" || query.At != nil || query.LeafID != nil && *query.LeafID != cursor.AnchorID {
+			if query.AroundID != "" || query.AfterID != "" || query.Direction != "" || query.At != nil || query.LeafID != nil && *query.LeafID != cursor.AnchorID {
 				return ErrInvalidReadQuery
 			}
 			at, anchor = &cursor.Version, cursor.AnchorID
@@ -139,6 +144,9 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 		}
 		result = HistoryPage{Source: source, Version: version, AnchorID: anchor, Total: len(path), Items: []PageEntry{}, Connected: query.AfterID == ""}
 		position, direction := len(path), PageOlder
+		if query.Direction == PageNewer {
+			position, direction = 0, PageNewer
+		}
 		if cursor := query.Cursor; cursor != nil {
 			position, direction = cursor.Position, cursor.Direction
 		}
@@ -152,6 +160,9 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 				}
 				if id == query.AfterID {
 					floor, result.Connected = i+1, true
+					if direction == PageNewer {
+						position = floor
+					}
 				}
 			}
 			if !foundAround {
@@ -171,26 +182,17 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 				break
 			}
 			entry := store.entries[path[index]]
-			// Metadata references remain small even for a single huge record.
-			// Do not eagerly copy/decode its payload just to return this page.
 			item := PageEntry{Node: entryReadNode(entry)}
-			// Bound reference metadata too, using a conservative upper bound
-			// for JSON escaping. The fixed page envelope is outside this budget.
 			metadataBytes := 256 + 6*(len(entry.id)+len(entry.parentID)+len(entry.typeName)+len(entry.messageRole)+len(item.Node.Preview))
-			cost, include := len(entry.raw)+metadataBytes, len(entry.raw)+metadataBytes <= budget
-			if !include {
-				cost = metadataBytes
-			}
-			if used+cost > budget {
-				if len(result.Items) == 0 {
-					return fmt.Errorf("%w: byte budget cannot fit an entry reference", ErrInvalidReadQuery)
-				}
+			cost := len(entry.raw) + metadataBytes
+			// A page always makes progress and returns a complete entry. Large
+			// text/thinking records occupy a page on their own, without truncation.
+			if len(result.Items) > 0 && used+cost > budget {
 				break
 			}
-			if include {
-				copy := entry.clone()
-				item.Entry = &copy
-			}
+			item.Node.ContentToken = entryContentToken(entry)
+			copy := entry.clone()
+			item.Entry = &copy
 			result.Items = append(result.Items, item)
 			used += cost
 			if direction == PageOlder {
@@ -250,26 +252,35 @@ func (s *Session) readPathLocked(anchor string, log uint64) ([]int, error) {
 
 type NodeQuery struct {
 	ParentID *string // nil is the complete log, "" is the forest roots
+	LeafID   *string // non-nil restricts candidates to this complete branch
+	AfterID  string  // tail since an ancestor; requires LeafID
+	Type     string
 	Role     string
 	Search   string
+	Tree     bool // timestamp-ordered depth-first forest, as returned by Tree
 	At       *ReadVersion
 	Cursor   *NodeCursor
 	Limit    int
 }
 
 type NodeCursor struct {
+	LeafID   *string
+	AfterID  string
+	Type     string
 	Version  ReadVersion
 	Position int
 	ParentID *string
 	Role     string
 	Search   string
+	Tree     bool
 }
 
 type NodePage struct {
-	Source  ReadSnapshot
-	Version ReadVersion
-	Items   []EntryNode
-	Next    *NodeCursor
+	Connected bool // AfterID was an ancestor of the selected branch
+	Source    ReadSnapshot
+	Version   ReadVersion
+	Items     []EntryNode
+	Next      *NodeCursor
 }
 
 func (m *SessionManager) ReadNodes(query NodeQuery) (NodePage, error) {
@@ -277,11 +288,14 @@ func (m *SessionManager) ReadNodes(query NodeQuery) (NodePage, error) {
 	if err != nil {
 		return NodePage{}, err
 	}
+	if query.AfterID != "" && query.LeafID == nil || query.LeafID != nil && query.Tree {
+		return NodePage{}, ErrInvalidReadQuery
+	}
 	var result NodePage
 	err = m.readView(func(store *Session, source ReadSnapshot) error {
 		position, at := 0, query.At
 		if cursor := query.Cursor; cursor != nil {
-			if query.At != nil || !equalReadString(query.ParentID, cursor.ParentID) || query.Role != cursor.Role || query.Search != cursor.Search {
+			if query.At != nil || !equalReadString(query.ParentID, cursor.ParentID) || query.Role != cursor.Role || query.Search != cursor.Search || query.Tree != cursor.Tree || !equalReadString(query.LeafID, cursor.LeafID) || query.AfterID != cursor.AfterID || query.Type != cursor.Type {
 				return ErrInvalidReadQuery
 			}
 			position, at = cursor.Position, &cursor.Version
@@ -310,61 +324,133 @@ func (m *SessionManager) ReadNodes(query NodeQuery) (NodePage, error) {
 		// Node candidates and labels depend on the immutable log prefix, not
 		// the manager's selected leaf. Branch selection must not invalidate it.
 		version.View = 0
-		result = NodePage{Source: source, Version: version, Items: []EntryNode{}}
+		result = NodePage{Source: source, Version: version, Items: []EntryNode{}, Connected: query.AfterID == ""}
+		var order, depths []int
+		if query.Tree {
+			order, depths = readNodeOrder(store.entries[:version.Log])
+		}
+		total := int(version.Log)
+		if query.LeafID != nil {
+			order, err = store.readPathLocked(*query.LeafID, version.Log)
+			if err != nil {
+				return err
+			}
+			total = len(order)
+			if query.AfterID != "" {
+				for index, physical := range order {
+					if store.entries[physical].id == query.AfterID {
+						result.Connected = true
+						if query.Cursor == nil {
+							position = index + 1
+						}
+						break
+					}
+				}
+			}
+		}
+		if position > total {
+			return ErrReadCursorUnavailable
+		}
 		needle := []byte(strings.ToLower(query.Search))
-		for position < int(version.Log) {
-			entry := store.entries[position]
+		for position < total {
+			entryIndex := position
+			if query.Tree || query.LeafID != nil {
+				entryIndex = order[position]
+			}
+			entry := store.entries[entryIndex]
 			position++
 			parent := ""
 			if parentIndex, exists := store.byID[entry.parentID]; entry.hasParent && exists && uint64(parentIndex) < version.Log {
 				parent = entry.parentID
 			}
-			if query.ParentID != nil && *query.ParentID != parent || query.Role != "" && query.Role != entry.messageRole {
+			if query.ParentID != nil && *query.ParentID != parent || query.Role != "" && query.Role != entry.messageRole || query.Type != "" && query.Type != entry.typeName {
 				continue
 			}
 			if len(needle) != 0 && !bytes.Contains(bytes.ToLower(entry.raw), needle) {
 				continue
 			}
 			node := entryReadNode(entry)
+			node.Position = position - 1
 			node.Label, node.HasChildren = labels[entry.id], children[entry.id]
+			if query.Tree {
+				node.BranchDepth = depths[entryIndex]
+			}
 			result.Items = append(result.Items, node)
 			if len(result.Items) == limit {
 				break
 			}
 		}
-		if position < int(version.Log) {
+		if position < total {
 			var parent *string
 			if query.ParentID != nil {
 				value := *query.ParentID
 				parent = &value
 			}
-			result.Next = &NodeCursor{Version: version, Position: position, ParentID: parent, Role: query.Role, Search: query.Search}
+			var leaf *string
+			if query.LeafID != nil {
+				value := *query.LeafID
+				leaf = &value
+			}
+			result.Next = &NodeCursor{Version: version, Position: position, ParentID: parent, LeafID: leaf, AfterID: query.AfterID, Type: query.Type, Role: query.Role, Search: query.Search, Tree: query.Tree}
 		}
 		return nil
 	})
 	return result, err
 }
 
-func equalReadString(left, right *string) bool {
-	return left == nil && right == nil || left != nil && right != nil && *left == *right
+// This metadata traversal follows Tree's repaired parent graph and sibling
+// ordering without cloning message payloads or constructing the full tree.
+func readNodeOrder(entries []Entry) ([]int, []int) {
+	order, depths := make([]int, 0, len(entries)), make([]int, len(entries))
+	byID := make(map[string]int, len(entries))
+	for index, entry := range entries {
+		byID[entry.id] = index
+	}
+	parents := compatibleTreeParents(entries, byID)
+	children, roots := make([][]int, len(entries)), []int{}
+	for index, parent := range parents {
+		if parent < 0 {
+			roots = append(roots, index)
+		} else {
+			children[parent] = append(children[parent], index)
+		}
+	}
+	for _, siblings := range children {
+		sort.SliceStable(siblings, func(i, j int) bool { return entries[siblings[i]].timestamp.Before(entries[siblings[j]].timestamp) })
+	}
+	stack := make([]int, 0, len(roots))
+	for i := len(roots) - 1; i >= 0; i-- {
+		stack = append(stack, roots[i])
+	}
+	for len(stack) > 0 {
+		index := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		order = append(order, index)
+		depth := depths[index]
+		if len(children[index]) > 1 {
+			depth++
+		}
+		for i := len(children[index]) - 1; i >= 0; i-- {
+			child := children[index][i]
+			depths[child] = depth
+			stack = append(stack, child)
+		}
+	}
+	return order, depths
 }
 
-type EntryChunk struct {
-	Version   ReadVersion
-	SessionID string
-	EntryID   string
-	Offset    int
-	Total     int
-	Data      []byte
+func equalReadString(left, right *string) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 // EntrySnapshot reads one immutable entry and its source identity together.
 // Media readers must validate here, rather than checking a version before a
 // separate Entry call which could race a logical session replacement.
 type EntrySnapshot struct {
-	Version   ReadVersion
-	SessionID string
-	Entry     Entry
+	ContentToken string
+	Version      ReadVersion
+	SessionID    string
+	Entry        Entry
 }
 
 func (m *SessionManager) ReadEntry(id, generation string) (EntrySnapshot, error) {
@@ -377,39 +463,13 @@ func (m *SessionManager) ReadEntry(id, generation string) (EntrySnapshot, error)
 		if !ok {
 			return ErrEntryNotFound
 		}
-		result = EntrySnapshot{Version: source.Version, SessionID: source.Info.ID, Entry: store.entries[index].clone()}
+		result = EntrySnapshot{Version: source.Version, SessionID: source.Info.ID, Entry: store.entries[index].clone(), ContentToken: entryContentToken(store.entries[index])}
 		return nil
 	})
 	return result, err
 }
 
-func (m *SessionManager) ReadEntryChunk(id, generation string, offset, length int) (EntryChunk, error) {
-	if offset < 0 || length < 0 {
-		return EntryChunk{}, ErrInvalidReadQuery
-	}
-	if length == 0 {
-		length = 64 << 10
-	}
-	length = min(length, MaxEntryChunkBytes)
-	var result EntryChunk
-	err := m.readView(func(store *Session, source ReadSnapshot) error {
-		if generation != "" && generation != source.Version.Generation {
-			return ErrReadCursorUnavailable
-		}
-		index, exists := store.byID[id]
-		if !exists {
-			return ErrEntryNotFound
-		}
-		raw := store.entries[index].raw
-		if offset > len(raw) {
-			return ErrInvalidReadQuery
-		}
-		end := offset + min(length, len(raw)-offset)
-		result = EntryChunk{Version: source.Version, SessionID: source.Info.ID, EntryID: id, Offset: offset, Total: len(raw), Data: bytes.Clone(raw[offset:end])}
-		return nil
-	})
-	return result, err
-}
+func entryContentToken(entry Entry) string { return fmt.Sprintf("%x", sha256.Sum256(entry.raw)) }
 
 func entryReadNode(entry Entry) EntryNode {
 	node := EntryNode{ID: entry.id, Type: entry.typeName, Role: entry.messageRole, Timestamp: entry.timestamp, RawBytes: len(entry.raw), Preview: entryPreview(entry)}

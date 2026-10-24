@@ -4,7 +4,6 @@ import type {
   ApplicationClient,
   ApplicationEventEnvelope,
   ApplicationSnapshot,
-  EventSubscription,
   DirectoryView,
   ImageAttachment,
   ModelsView,
@@ -13,7 +12,10 @@ import type {
   SelectedModel,
   SessionStatsInfo,
   SessionRuntimeState,
-  SessionView,
+  SessionInfo,
+  NodesPage,
+  ReadResourceRequest,
+  LiveSnapshot,
   SlashCommandInfo,
 } from "../contracts";
 import {
@@ -22,20 +24,39 @@ import {
   type ToolEntry,
   type ToolPreset,
 } from "../tool-presets";
-import { assistantResponseKey, assistantUsage, messageText } from "./message";
+import { assistantResponseKey, assistantUsage } from "./message";
 import { SessionImageCache } from "./session-images";
 import { RefreshScheduler } from "./refresh-scheduler";
+import { applicationDataFor, type ApplicationDataStore, type DirectoryWindow, type HistoryWindow } from "./application-data";
 
 type ControllerStatus = "connecting" | "auth" | "ready" | "error";
 export type SendBehavior = "prompt" | "steer" | "follow_up";
 
+interface WorkbenchSession {
+  sessionId: string;
+  filePath: string;
+  info: SessionInfo;
+  leafId: string | null;
+  context: { messages: AgentMessage[]; entryIds: string[]; thinkingLevel: string; model: SelectedModel | null };
+  running: boolean;
+  state?: SessionRuntimeState;
+}
+
 export interface ApplicationController {
+  data: ApplicationDataStore;
+  historyWindow: HistoryWindow | null;
+  toolProgress: LiveSnapshot["toolsRunning"];
+  loadHistory(direction: "older" | "newer" | "latest", aroundId?: string): Promise<void>;
+  loadNodes(query?: ReadResourceRequest): Promise<NodesPage>;
+  directory(project: string, search?: string): DirectoryWindow | undefined;
+  watchDirectory(project: string, search?: string): () => void;
+  loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
   imageCache: SessionImageCache;
   status: ControllerStatus;
   error: string;
   snapshot: ApplicationSnapshot | null;
   models: ModelsView | null;
-  sessionView: SessionView | null;
+  sessionView: WorkbenchSession | null;
   sessionLoading: boolean;
   runtimeState: SessionRuntimeState | null;
   activeSessionId: string | null;
@@ -88,15 +109,6 @@ function errorMessage(error: unknown): string {
 
 const emptyQueue: QueuedMessages = { steering: [], followUp: [] };
 
-interface PendingQueueMessage {
-  id: string;
-  sessionId: string;
-  text: string;
-  behavior: "steer" | "follow_up";
-  timestamp: number;
-  expectedOccurrence: number;
-}
-
 export interface AssistantGenerationSpeed {
   responseKey: string;
   tokensPerSecond: number;
@@ -123,12 +135,6 @@ function hasEffectiveAssistantDelta(event: ApplicationEventEnvelope["event"]): b
   ) && typeof update.delta === "string" && update.delta.length > 0;
 }
 
-function userTextCount(messages: AgentMessage[], text: string): number {
-  return messages.reduce((count, message) => (
-    message.role === "user" && messageText(message) === text ? count + 1 : count
-  ), 0);
-}
-
 function defaultModel(models: ModelsView | null): SelectedModel | null {
   if (models?.defaultModel) return models.defaultModel;
   const first = models?.modelList[0];
@@ -146,12 +152,16 @@ function sameProjectPath(left: string, right: string): boolean {
 }
 
 export function useApplicationController(client: ApplicationClient): ApplicationController {
-  const imageCache = useMemo(() => new SessionImageCache(), [client]);
+  const data = useMemo(() => applicationDataFor(client), [client]);
+  const scopeOwner = useMemo(() => Symbol("workbench"), [client]);
+  const imageCache = useMemo(() => new SessionImageCache((id, query, known) => client.readResource(id, "image", query, known), data.cache), [client, data]);
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow | null>(null);
+  const [toolProgress, setToolProgress] = useState<LiveSnapshot["toolsRunning"]>([]);
   const [status, setStatus] = useState<ControllerStatus>("connecting");
   const [error, setError] = useState("");
   const [snapshot, setSnapshot] = useState<ApplicationSnapshot | null>(null);
   const [models, setModels] = useState<ModelsView | null>(null);
-  const [sessionView, setSessionView] = useState<SessionView | null>(null);
+  const [sessionView, setSessionView] = useState<WorkbenchSession | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -164,51 +174,26 @@ export function useApplicationController(client: ApplicationClient): Application
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
   const [sessionStatsOpen, setSessionStatsOpen] = useState(false);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
-  const [pendingQueueMessages, setPendingQueueMessages] = useState<PendingQueueMessage[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<AgentMessage | null>(null);
   const [latestGenerationSpeed, setLatestGenerationSpeed] = useState<AssistantGenerationSpeed | null>(null);
   const [busy, setBusy] = useState(false);
 
   const activeSessionRef = useRef<string | null>(null);
-  const messagesRef = useRef<AgentMessage[]>([]);
-  const pendingQueueMessagesRef = useRef<PendingQueueMessage[]>([]);
-  const pendingQueueSequenceRef = useRef(0);
-  const revisionRef = useRef(0);
-  const subscriptionRef = useRef<EventSubscription | null>(null);
   const generationRef = useRef(0);
-  const subscribeRef = useRef<(after: number, generation: number) => void>(() => undefined);
-  const pendingSessionTitlesRef = useRef(new Map<string, string>());
   const newSessionModelOverriddenRef = useRef(false);
   const newSessionThinkingOverriddenRef = useRef(false);
   const sessionStatsOpenRef = useRef(false);
-  const turnProjectionRequestRef = useRef(0);
   const activeGenerationTimingRef = useRef<ActiveGenerationTiming | null>(null);
-
-  messagesRef.current = messages;
-
-  const updatePendingQueueMessages = useCallback((
-    update: (current: PendingQueueMessage[]) => PendingQueueMessage[],
-  ) => {
-    const next = update(pendingQueueMessagesRef.current);
-    pendingQueueMessagesRef.current = next;
-    setPendingQueueMessages(next);
-  }, []);
-
-  const removeDeliveredPendingMessage = useCallback((sessionId: string, text: string, occurrence: number) => {
-    updatePendingQueueMessages((current) => {
-      const index = current.findIndex((message) => (
-        message.sessionId === sessionId
-        && message.text === text
-        && message.expectedOccurrence <= occurrence
-      ));
-      if (index < 0) return current;
-      return current.filter((_, candidateIndex) => candidateIndex !== index);
-    });
-  }, [updatePendingQueueMessages]);
+  const modelsRequestRef = useRef(0);
+  const modelsCwdRef = useRef("");
+  const configurationRevisionRef = useRef(data.configurationVersion);
+  const storeErrorRef = useRef("");
 
   const loadModels = useCallback(async (cwd: string, generation = generationRef.current) => {
-    const value = await client.models(cwd);
-    if (generation !== generationRef.current) return null;
+    const request = ++modelsRequestRef.current;
+    modelsCwdRef.current = cwd;
+    const value = await data.cached("models", cwd, () => client.models(cwd));
+    if (generation !== generationRef.current || request !== modelsRequestRef.current) return null;
     setModels(value);
     if (activeSessionRef.current === null) {
       const model = defaultModel(value);
@@ -218,13 +203,13 @@ export function useApplicationController(client: ApplicationClient): Application
       }
     }
     return value;
-  }, [client]);
+  }, [client, data]);
 
   const loadTools = useCallback(async (sessionId: string, generation = generationRef.current) => {
-    const tools = await client.dispatch<ToolEntry[]>(sessionId, { type: "get_tools" });
+    const tools = await data.cached("tools", sessionId, () => client.dispatch<ToolEntry[]>(sessionId, { type: "get_tools" }));
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return;
     setToolPresetState(getPresetFromTools(tools ?? []));
-  }, [client]);
+  }, [client, data]);
 
   const loadSlashCommands = useCallback(async (
     sessionId: string,
@@ -232,9 +217,7 @@ export function useApplicationController(client: ApplicationClient): Application
   ) => {
     setSlashCommandsLoading(true);
     try {
-      const result = await client.dispatch<{ commands?: SlashCommandInfo[] }>(sessionId, {
-        type: "get_commands",
-      });
+      const result = await data.cached("commands", sessionId, () => client.dispatch<{ commands?: SlashCommandInfo[] }>(sessionId, { type: "get_commands" }));
       if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return;
       setSlashCommands(result?.commands ?? []);
     } finally {
@@ -242,93 +225,107 @@ export function useApplicationController(client: ApplicationClient): Application
         setSlashCommandsLoading(false);
       }
     }
-  }, [client]);
+  }, [client, data]);
 
   const loadSessionStats = useCallback(async (
     sessionId: string,
     generation = generationRef.current,
   ) => {
-    const value = await client.dispatch<SessionStatsInfo>(sessionId, { type: "get_session_stats" });
+    const value = await data.cached("stats", sessionId, () => client.dispatch<SessionStatsInfo>(sessionId, { type: "get_session_stats" }));
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return null;
     setSessionStats(value);
     return value;
-  }, [client]);
+  }, [client, data]);
 
-  const refreshTurnProjection = useCallback(async (
-    sessionId: string,
-    generation = generationRef.current,
-  ) => {
-    const request = ++turnProjectionRequestRef.current;
-    const [stateResult, statsResult] = await Promise.allSettled([
-      client.dispatch<SessionRuntimeState>(sessionId, { type: "get_state" }),
-      client.dispatch<SessionStatsInfo>(sessionId, { type: "get_session_stats" }),
-    ]);
-    if (
-      request !== turnProjectionRequestRef.current
-      || generation !== generationRef.current
-      || activeSessionRef.current !== sessionId
-    ) return;
-    if (stateResult.status === "fulfilled") {
-      const state = stateResult.value;
-      setRuntimeState((current) => current
-        ? { ...current, contextUsage: state.contextUsage ?? null }
-        : state);
+  const applyCachedSession = useCallback((sessionId: string): WorkbenchSession | null => {
+    const cached = data.session(sessionId);
+    if (!cached || activeSessionRef.current !== sessionId) return null;
+    const { metadata, live, window } = cached;
+    const generation = window.version.generation;
+    imageCache.selectSession(sessionId, generation);
+    const loaded: AgentMessage[] = [], entryIds: string[] = [];
+    for (const page of window.pages) {
+      for (const item of page.items) {
+        const message = data.messageFor(sessionId, generation, item);
+        if (message) { loaded.push(message); entryIds.push(item.node.id); }
+      }
     }
-    if (statsResult.status === "fulfilled") {
-      setSessionStats(statsResult.value);
+    for (const message of cached.pending) {
+      imageCache.rememberMessage(sessionId, message.id, message.message);
+      if (window.following && (!message.entryId || !entryIds.includes(message.entryId))) {
+        loaded.push({ ...message.message, id: message.id });
+        entryIds.push(message.entryId ?? "");
+      }
     }
-  }, [client]);
+    const state = live.state;
+    const view: WorkbenchSession = {
+      sessionId, filePath: metadata.filePath, info: metadata.info,
+      leafId: live.active && live.history ? live.history.leafId : metadata.leafId,
+      context: { messages: loaded, entryIds, thinkingLevel: state?.thinkingLevel ?? "off",
+        model: state?.model ? { provider: state.model.provider, modelId: state.model.id } : null },
+      running: live.active, state,
+    };
+    setSessionView(view);
+    setHistoryWindow(window);
+    setMessages(loaded);
+    setStreamingMessage(window.following && live.streaming ? { ...live.streaming.message, id: live.streaming.id } : null);
+    setToolProgress(window.following ? live.toolsRunning : []);
+    setRuntimeState(state ?? null);
+    setBusy(Boolean(state && (state.isPromptRunning || state.isStreaming || state.isBashRunning || state.isCompacting || state.retryWaiting)));
+    return view;
+  }, [data, imageCache]);
 
   const loadSession = useCallback(async (
     sessionId: string,
     generation = generationRef.current,
-    leafId = "",
+    _leafId = "",
+    force = true,
   ) => {
-    const view = await client.sessionView(sessionId, leafId);
+    await data.loadSession(sessionId, force);
     if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return null;
-    revisionRef.current = Math.max(revisionRef.current, view.revision);
-    imageCache.selectSession(sessionId);
-    imageCache.reconcile(messagesRef.current, view.context.messages ?? []);
-    setSessionView(view);
-    const loadedMessages = view.context.messages ?? [];
-    messagesRef.current = loadedMessages;
-    setMessages(loadedMessages);
-    updatePendingQueueMessages((current) => current.filter((message) => (
-      message.sessionId !== sessionId
-      || userTextCount(loadedMessages, message.text) < message.expectedOccurrence
-    )));
-    setStreamingMessage(null);
-    const state = view.state ?? null;
-    setRuntimeState(state);
-    setBusy(Boolean(view.running && state && (
-      state.isPromptRunning || state.isStreaming || state.isBashRunning || state.isCompacting
-    )));
-    return view;
-  }, [client, imageCache, updatePendingQueueMessages]);
+    return applyCachedSession(sessionId);
+  }, [data, applyCachedSession]);
 
   const refreshSnapshot = useCallback(async (generation = generationRef.current) => {
-    const value = await client.snapshot();
+    const value = await data.refreshOverview(true);
     if (generation !== generationRef.current) return null;
-    revisionRef.current = Math.max(revisionRef.current, value.revision);
-    const projected = {
-      ...value,
-      sessions: value.sessions.map((session) => {
-        const pendingTitle = pendingSessionTitlesRef.current.get(session.id);
-        if (!pendingTitle) return session;
-        if (session.firstMessage && session.firstMessage !== "(no messages)") {
-          pendingSessionTitlesRef.current.delete(session.id);
-          return session;
-        }
-        return {
-          ...session,
-          firstMessage: pendingTitle,
-          messageCount: Math.max(1, session.messageCount),
-        };
-      }),
-    };
-    setSnapshot(projected);
-    return projected;
-  }, [client]);
+    setSnapshot(value);
+    return value;
+  }, [data]);
+
+  const refreshTurnProjection = useCallback(async (sessionId: string, generation = generationRef.current) => {
+    data.cache.invalidate(JSON.stringify(["configuration", "stats", sessionId]));
+    await loadSessionStats(sessionId, generation);
+  }, [data, loadSessionStats]);
+
+  useEffect(() => data.observe(() => {
+    setSnapshot(data.snapshot);
+    const activeId = activeSessionRef.current;
+    if (activeId && data.isMissing(activeId)) {
+      activeSessionRef.current = null;
+      setActiveSessionId(null);
+      setSessionView(null); setRuntimeState(null); setHistoryWindow(null);
+      setMessages([]); setStreamingMessage(null); setBusy(false); setSessionLoading(false);
+      setSlashCommands([]); setSessionStats(null); setLatestGenerationSpeed(null);
+      sessionStatsOpenRef.current = false; setSessionStatsOpen(false);
+    } else if (activeId) applyCachedSession(activeId);
+    const previousError = storeErrorRef.current;
+    storeErrorRef.current = data.lastError;
+    if (data.lastError) setError(data.lastError);
+    else if (previousError) setError((current) => current === previousError ? "" : current);
+    if (configurationRevisionRef.current !== data.configurationVersion) {
+      configurationRevisionRef.current = data.configurationVersion;
+      const id = activeSessionRef.current;
+      const cwd = id ? data.session(id)?.metadata.info.cwd : modelsCwdRef.current;
+      const work: Promise<unknown>[] = [];
+      if (cwd) work.push(loadModels(cwd));
+      if (id) work.push(loadTools(id), loadSlashCommands(id), loadSessionStats(id));
+      void Promise.allSettled(work).then((results) => {
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected" && activeSessionRef.current === id) setError(errorMessage(failure.reason));
+      });
+    }
+  }), [data, applyCachedSession, loadModels, loadTools, loadSlashCommands, loadSessionStats]);
 
   const eventRefreshes = useMemo(() => new RefreshScheduler(async (requests) => {
     const generation = generationRef.current;
@@ -355,207 +352,42 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [eventRefreshes]);
 
   const handleEvent = useCallback((envelope: ApplicationEventEnvelope) => {
-    revisionRef.current = Math.max(revisionRef.current, envelope.sequence);
     const event = envelope.event;
-    if (event.type === "session_catalog" || event.type === "project_catalog") {
-      eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
+    if (event.type === "message_end" && typeof event.messageId === "string" && event.message && typeof event.message === "object") {
+      imageCache.rememberMessage(envelope.sessionId, event.messageId, event.message as AgentMessage);
+    }
+    if (event.type === "message_receipt" && event.accepted && typeof event.messageId === "string" && typeof event.entryId === "string" && typeof event.generation === "string") {
+      imageCache.associate(envelope.sessionId, event.messageId, event.entryId, event.generation);
     }
     if (envelope.sessionId !== activeSessionRef.current) return;
-
-    switch (event.type) {
-      case "agent_start":
-        setBusy(true);
-        setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
-        break;
-      case "message_start": {
-        const message = event.message;
-        if (message && typeof message === "object" && (message as AgentMessage).role !== "user") {
-          const assistant = message as AgentMessage;
-          setStreamingMessage(assistant);
-          if (assistant.role === "assistant") {
-            activeGenerationTimingRef.current = {
-              sessionId: envelope.sessionId,
-              firstOutputAt: null,
-            };
-          }
-        }
-        break;
+    if (event.type === "message_start" && (event.message as AgentMessage | undefined)?.role === "assistant") {
+      activeGenerationTimingRef.current = { sessionId: envelope.sessionId, firstOutputAt: null };
+    } else if (event.type === "message_update" && hasEffectiveAssistantDelta(event)) {
+      const timing = activeGenerationTimingRef.current;
+      if (!timing || timing.sessionId !== envelope.sessionId) activeGenerationTimingRef.current = { sessionId: envelope.sessionId, firstOutputAt: generationClockNow() };
+      else if (timing.firstOutputAt === null) timing.firstOutputAt = generationClockNow();
+    } else if (event.type === "message_end" && (event.message as AgentMessage | undefined)?.role === "assistant") {
+      const message = event.message as AgentMessage, timing = activeGenerationTimingRef.current;
+      activeGenerationTimingRef.current = null;
+      const usage = assistantUsage(message), responseKey = assistantResponseKey(message);
+      if (timing?.sessionId === envelope.sessionId && timing.firstOutputAt !== null && usage && responseKey && usage.output > 0) {
+        const duration = generationClockNow() - timing.firstOutputAt;
+        if (duration > 0) setLatestGenerationSpeed({ responseKey, tokensPerSecond: usage.output * 1000 / duration });
       }
-      case "message_update": {
-        const message = event.message;
-        if (message && typeof message === "object" && (message as AgentMessage).role !== "user") {
-          const assistant = message as AgentMessage;
-          setStreamingMessage(assistant);
-          if (assistant.role === "assistant" && hasEffectiveAssistantDelta(event)) {
-            const timing = activeGenerationTimingRef.current;
-            if (!timing || timing.sessionId !== envelope.sessionId) {
-              activeGenerationTimingRef.current = {
-                sessionId: envelope.sessionId,
-                firstOutputAt: generationClockNow(),
-              };
-            } else if (timing.firstOutputAt === null) {
-              timing.firstOutputAt = generationClockNow();
-            }
-          }
-        }
-        break;
-      }
-      case "message_end": {
-        const completed = event.message;
-        if (!completed || typeof completed !== "object") break;
-        const message = completed as AgentMessage;
-        if (message.role === "assistant") {
-          const timing = activeGenerationTimingRef.current;
-          activeGenerationTimingRef.current = null;
-          const usage = assistantUsage(message);
-          const responseKey = assistantResponseKey(message);
-          if (
-            timing?.sessionId === envelope.sessionId
-            && timing.firstOutputAt !== null
-            && usage
-            && responseKey
-            && usage.output > 0
-          ) {
-            // Tool execution starts after assistant message_end, so command time is outside this window.
-            const durationMs = generationClockNow() - timing.firstOutputAt;
-            const tokensPerSecond = usage.output * 1_000 / durationMs;
-            if (durationMs > 0 && Number.isFinite(tokensPerSecond)) {
-              setLatestGenerationSpeed({ responseKey, tokensPerSecond });
-            }
-          }
-        }
-        const currentMessages = messagesRef.current;
-        let nextMessages: AgentMessage[];
-        if (message.role === "user") {
-          const text = messageText(message);
-          const optimisticIndex = currentMessages.findIndex((candidate) => (
-            candidate.pendingPrompt === true && messageText(candidate) === text
-          ));
-          if (optimisticIndex >= 0) {
-            nextMessages = [...currentMessages];
-            nextMessages[optimisticIndex] = message;
-          } else {
-            nextMessages = [...currentMessages, message];
-          }
-          removeDeliveredPendingMessage(envelope.sessionId, text, userTextCount(nextMessages, text));
-        } else {
-          nextMessages = [...currentMessages, message];
-        }
-        messagesRef.current = nextMessages;
-        setMessages(nextMessages);
-        setStreamingMessage(null);
-        break;
-      }
-      case "turn_end":
-        if (activeSessionRef.current) {
-          eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, turn: true });
-        }
-        break;
-      case "agent_end":
-        activeGenerationTimingRef.current = null;
-        setStreamingMessage(null);
-        break;
-      case "agent_settled":
-        turnProjectionRequestRef.current += 1;
-        setBusy(false);
-        setRuntimeState((current) => ({
-          ...current,
-          isPromptRunning: false,
-          isStreaming: false,
-          isCompacting: false,
-          retryWaiting: false,
-        }));
-        eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
-        if (activeSessionRef.current) {
-          eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, session: true });
-        }
-        break;
-      case "queue_update":
-        setRuntimeState((current) => ({
-          ...current,
-          queuedMessages: {
-            steering: Array.isArray(event.steering) ? event.steering.filter((value): value is string => typeof value === "string") : [],
-            followUp: Array.isArray(event.followUp) ? event.followUp.filter((value): value is string => typeof value === "string") : [],
-          },
-        }));
-        break;
-      case "thinking_level_changed":
-        if (typeof event.level === "string") {
-          setRuntimeState((current) => ({ ...current, thinkingLevel: event.level as string }));
-        }
-        break;
-      case "compaction_start":
-        setBusy(true);
-        setRuntimeState((current) => ({ ...current, isCompacting: true }));
-        break;
-      case "compaction_end":
-        setRuntimeState((current) => ({ ...current, isCompacting: false }));
-        break;
-      case "auto_retry_start":
-        setRuntimeState((current) => ({
-          ...current,
-          retryWaiting: true,
-          retryAttempt: typeof event.attempt === "number" ? event.attempt : current?.retryAttempt,
-        }));
-        break;
-      case "auto_retry_end":
-        setRuntimeState((current) => ({ ...current, retryWaiting: false }));
-        break;
-      case "session_info_changed":
-        eventRefreshes.request({ generation: generationRef.current, sessionId: activeSessionRef.current, snapshot: true });
-        break;
-      case "operation":
-        if ((event.command === "prompt" || event.command === "edit_and_resend") && event.status === "failed") {
-          setBusy(false);
-          setRuntimeState((current) => ({ ...current, isPromptRunning: false, isStreaming: false }));
-          setError(typeof event.errorMessage === "string" ? event.errorMessage : "指令执行失败");
-        }
-        break;
-      default:
-        break;
+    } else if (event.type === "turn_end" || event.type === "agent_settled") {
+      eventRefreshes.request({ generation: generationRef.current, sessionId: envelope.sessionId, turn: true });
+    } else if (event.type === "operation" && event.status === "failed") {
+      setError(typeof event.errorMessage === "string" ? event.errorMessage : "指令执行失败");
     }
-  }, [eventRefreshes, removeDeliveredPendingMessage]);
+  }, [eventRefreshes, imageCache]);
 
-  const subscribe = useCallback((after: number, generation: number) => {
-    subscriptionRef.current?.close();
-    const subscription = client.subscribe(after, {
-      onEvent: (envelope) => {
-        if (generation === generationRef.current) handleEvent(envelope);
-      },
-      onReset: (revision, reason) => {
-        if (generation !== generationRef.current) return;
-        revisionRef.current = revision;
-        if (reason) setError(reason);
-        void (async () => {
-          try {
-            const value = await refreshSnapshot(generation);
-            if (!value || generation !== generationRef.current) return;
-            const sessionID = activeSessionRef.current;
-            if (sessionID) await loadSession(sessionID, generation);
-            if (generation !== generationRef.current) return;
-            setError("");
-            subscribeRef.current(value.revision, generation);
-          } catch (resetError) {
-            if (generation === generationRef.current) setError(errorMessage(resetError));
-          }
-        })();
-      },
-    });
-    subscriptionRef.current = subscription;
-    void subscription.ready.catch((eventError) => {
-      if (generation !== generationRef.current) return;
-      setError(errorMessage(eventError));
-    });
-  }, [client, handleEvent, loadSession, refreshSnapshot]);
-  subscribeRef.current = subscribe;
+  useEffect(() => data.observeEvents(handleEvent), [data, handleEvent]);
 
   const connect = useCallback(async () => {
     const generation = ++generationRef.current;
-    subscriptionRef.current?.close();
-    subscriptionRef.current = null;
+    data.stop();
+    data.select(scopeOwner, null);
     activeSessionRef.current = null;
-    revisionRef.current = 0;
-    pendingSessionTitlesRef.current.clear();
     newSessionModelOverriddenRef.current = false;
     newSessionThinkingOverriddenRef.current = false;
     setStatus("connecting");
@@ -575,9 +407,6 @@ export function useApplicationController(client: ApplicationClient): Application
     setSessionStats(null);
     sessionStatsOpenRef.current = false;
     setSessionStatsOpen(false);
-    pendingQueueMessagesRef.current = [];
-    setPendingQueueMessages([]);
-    messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
     activeGenerationTimingRef.current = null;
@@ -590,10 +419,11 @@ export function useApplicationController(client: ApplicationClient): Application
         setStatus("auth");
         return;
       }
-      const value = await refreshSnapshot(generation);
+      await data.start();
+      const value = data.snapshot;
       if (!value || generation !== generationRef.current) return;
+      setSnapshot(value);
       setNewSessionCwd(value.defaultCwd);
-      subscribe(value.revision, generation);
       setStatus("ready");
       void loadModels(value.defaultCwd, generation).catch((modelsError) => {
         if (generation === generationRef.current) setError(errorMessage(modelsError));
@@ -603,25 +433,25 @@ export function useApplicationController(client: ApplicationClient): Application
       setError(errorMessage(connectError));
       setStatus("error");
     }
-  }, [client, loadModels, refreshSnapshot, subscribe]);
+  }, [client, data, scopeOwner, loadModels]);
 
   useEffect(() => {
     void connect();
     return () => {
       generationRef.current++;
-      subscriptionRef.current?.close();
-      subscriptionRef.current = null;
+      data.select(scopeOwner, null);
+      data.stop();
     };
-  }, [connect]);
+  }, [connect, data, scopeOwner]);
 
   const cancelConnection = useCallback(() => {
     generationRef.current++;
-    subscriptionRef.current?.close();
-    subscriptionRef.current = null;
+    data.stop();
+    data.select(scopeOwner, null);
     client.close();
     setError("连接已停止");
     setStatus("error");
-  }, [client]);
+  }, [client, data]);
 
   const login = useCallback(async (password: string) => {
     const generation = generationRef.current;
@@ -639,23 +469,21 @@ export function useApplicationController(client: ApplicationClient): Application
 
   const selectSession = useCallback(async (sessionId: string) => {
     activeSessionRef.current = sessionId;
+    data.select(scopeOwner, sessionId);
     setActiveSessionId(sessionId);
-    setSessionLoading(true);
-    setSessionView(null);
-    setRuntimeState(null);
+    const cached = applyCachedSession(sessionId);
+    setSessionLoading(!cached);
+    if (!cached) { setSessionView(null); setRuntimeState(null); setHistoryWindow(null); setMessages([]); setStreamingMessage(null); }
     setSlashCommands([]);
     setSlashCommandsLoading(false);
     setSessionStats(null);
     sessionStatsOpenRef.current = false;
     setSessionStatsOpen(false);
-    messagesRef.current = [];
-    setMessages([]);
-    setStreamingMessage(null);
     activeGenerationTimingRef.current = null;
     setLatestGenerationSpeed(null);
     setError("");
     try {
-      const view = await loadSession(sessionId);
+      const view = await loadSession(sessionId, generationRef.current, "", false);
       if (view) {
         setSessionLoading(false);
         const capabilities = await Promise.allSettled([
@@ -664,6 +492,12 @@ export function useApplicationController(client: ApplicationClient): Application
           loadSlashCommands(sessionId),
           loadSessionStats(sessionId),
         ]);
+        if (activeSessionRef.current === sessionId) {
+          // Capabilities may admit the Runtime. Validate its owner first, then
+          // read the full metadata index once instead of downloading both generations.
+          await data.loadSession(sessionId, true);
+          await data.ensureNavigation(sessionId);
+        }
         const failure = capabilities.find((result) => result.status === "rejected");
         if (failure?.status === "rejected" && activeSessionRef.current === sessionId) {
           setError(errorMessage(failure.reason));
@@ -674,11 +508,13 @@ export function useApplicationController(client: ApplicationClient): Application
     } finally {
       if (activeSessionRef.current === sessionId) setSessionLoading(false);
     }
-  }, [loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
+  }, [data, scopeOwner, applyCachedSession, loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
   const beginNewSession = useCallback((cwd?: string) => {
     const nextCwd = cwd?.trim() || sessionView?.info.cwd || newSessionCwd || snapshot?.defaultCwd || "";
     activeSessionRef.current = null;
+    data.select(scopeOwner, null);
+    setHistoryWindow(null);
     newSessionModelOverriddenRef.current = false;
     newSessionThinkingOverriddenRef.current = false;
     setActiveSessionId(null);
@@ -695,7 +531,6 @@ export function useApplicationController(client: ApplicationClient): Application
     setNewSessionModel(model);
     setNewSessionThinkingLevel(defaultThinkingLevel(models, model));
     setToolPresetState("default");
-    messagesRef.current = [];
     setMessages([]);
     setStreamingMessage(null);
     activeGenerationTimingRef.current = null;
@@ -707,7 +542,7 @@ export function useApplicationController(client: ApplicationClient): Application
         if (activeSessionRef.current === null) setError(errorMessage(modelsError));
       });
     }
-  }, [loadModels, models, newSessionCwd, sessionView?.info.cwd, snapshot?.defaultCwd]);
+  }, [data, scopeOwner, loadModels, models, newSessionCwd, sessionView?.info.cwd, snapshot?.defaultCwd]);
 
   const runCompact = useCallback(async (sessionId: string, customInstructions = "") => {
     setBusy(true);
@@ -726,6 +561,7 @@ export function useApplicationController(client: ApplicationClient): Application
 
   const reloadSessionResources = useCallback(async (sessionId: string) => {
     await client.dispatch(sessionId, { type: "reload" });
+    data.invalidateConfiguration();
     const view = await loadSession(sessionId);
     if (!view) return;
     const capabilities = await Promise.allSettled([
@@ -735,7 +571,7 @@ export function useApplicationController(client: ApplicationClient): Application
     ]);
     const failure = capabilities.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
-  }, [client, loadModels, loadSession, loadSlashCommands, loadTools]);
+  }, [client, data, loadModels, loadSession, loadSlashCommands, loadTools]);
 
   const handleBuiltinSlashCommand = useCallback(async (sessionId: string, text: string) => {
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -828,7 +664,6 @@ export function useApplicationController(client: ApplicationClient): Application
     setError("");
     let sessionID = activeSessionRef.current;
     let createdSession = false;
-    let optimisticPromptID = "";
     try {
       if (!sessionID) {
         if (behavior !== "prompt") return;
@@ -846,6 +681,7 @@ export function useApplicationController(client: ApplicationClient): Application
         sessionID = created.sessionId;
         createdSession = true;
         activeSessionRef.current = sessionID;
+        data.select(scopeOwner, sessionID);
         setActiveSessionId(sessionID);
         setRuntimeState({
           sessionId: sessionID,
@@ -860,56 +696,11 @@ export function useApplicationController(client: ApplicationClient): Application
       }
 
       if (behavior === "steer" || behavior === "follow_up") {
-        const queueKey = behavior === "steer" ? "steering" : "followUp";
-        const samePendingCount = pendingQueueMessagesRef.current.filter((message) => (
-          message.sessionId === sessionID && message.text === text
-        )).length;
-        const pendingMessage: PendingQueueMessage = {
-          id: `pending-${Date.now()}-${++pendingQueueSequenceRef.current}`,
-          sessionId: sessionID,
-          text,
-          behavior,
-          timestamp: Date.now(),
-          expectedOccurrence: userTextCount(messagesRef.current, text) + samePendingCount + 1,
-        };
-        updatePendingQueueMessages((current) => [...current, pendingMessage]);
-        setRuntimeState((current) => ({
-          ...current,
-          queuedMessages: {
-            steering: [...(current?.queuedMessages?.steering ?? [])],
-            followUp: [...(current?.queuedMessages?.followUp ?? [])],
-            [queueKey]: [...(current?.queuedMessages?.[queueKey] ?? []), text],
-          },
-        }));
-        try {
-          await client.dispatch(sessionID, {
-            type: behavior,
-            message: text,
-            ...(images.length ? {
-              images: images.map((image) => ({
-                type: "image",
-                data: image.data,
-                mimeType: image.mimeType,
-              })),
-            } : {}),
-          });
-        } catch (queueError) {
-          updatePendingQueueMessages((current) => current.filter((message) => message.id !== pendingMessage.id));
-          setRuntimeState((current) => {
-            const values = [...(current?.queuedMessages?.[queueKey] ?? [])];
-            const index = values.lastIndexOf(text);
-            if (index >= 0) values.splice(index, 1);
-            return {
-              ...current,
-              queuedMessages: {
-                steering: [...(current?.queuedMessages?.steering ?? [])],
-                followUp: [...(current?.queuedMessages?.followUp ?? [])],
-                [queueKey]: values,
-              },
-            };
-          });
-          throw queueError;
-        }
+        await client.dispatch(sessionID, {
+          type: behavior, message: text,
+          ...(images.length ? { images: images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })) } : {}),
+        });
+        await loadSession(sessionID);
         return;
       }
 
@@ -927,10 +718,6 @@ export function useApplicationController(client: ApplicationClient): Application
         ? text.slice(bashExcluded ? 2 : 1).trim()
         : "";
       if (!busy && bashCommand) {
-        if (createdSession) {
-          pendingSessionTitlesRef.current.set(sessionID, text);
-          await refreshSnapshot();
-        }
         setBusy(true);
         setRuntimeState((current) => ({ ...current, isBashRunning: true }));
         try {
@@ -957,22 +744,6 @@ export function useApplicationController(client: ApplicationClient): Application
         return;
       }
 
-      if (createdSession) {
-        pendingSessionTitlesRef.current.set(sessionID, text);
-        await refreshSnapshot();
-      }
-      optimisticPromptID = `prompt-${Date.now()}-${++pendingQueueSequenceRef.current}`;
-      setMessages((current) => {
-        const next = [...current, {
-          id: optimisticPromptID,
-          role: "user",
-          content: text,
-          timestamp: Date.now(),
-          pendingPrompt: true,
-        }];
-        messagesRef.current = next;
-        return next;
-      });
       setBusy(true);
       setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
       await client.dispatch(sessionID, {
@@ -992,13 +763,6 @@ export function useApplicationController(client: ApplicationClient): Application
         });
       }
     } catch (sendError) {
-      if (optimisticPromptID) {
-        setMessages((current) => {
-          const next = current.filter((message) => message.id !== optimisticPromptID);
-          messagesRef.current = next;
-          return next;
-        });
-      }
       if (!busy) setBusy(false);
       setError(errorMessage(sendError));
       throw sendError;
@@ -1015,7 +779,8 @@ export function useApplicationController(client: ApplicationClient): Application
     refreshSnapshot,
     snapshot,
     toolPreset,
-    updatePendingQueueMessages,
+    data,
+    scopeOwner,
   ]);
 
   const abort = useCallback(async () => {
@@ -1042,25 +807,14 @@ export function useApplicationController(client: ApplicationClient): Application
     try {
       const queue = await client.dispatch<QueuedMessages>(sessionID, { type: "clear_queue" });
       setRuntimeState((current) => ({ ...current, queuedMessages: emptyQueue }));
-      const recalled = [
-        ...(queue?.steering ?? []).map((text) => ({ behavior: "steer" as const, text })),
-        ...(queue?.followUp ?? []).map((text) => ({ behavior: "follow_up" as const, text })),
-      ];
-      updatePendingQueueMessages((current) => current.filter((message) => {
-        if (message.sessionId !== sessionID) return true;
-        const index = recalled.findIndex((candidate) => (
-          candidate.behavior === message.behavior && candidate.text === message.text
-        ));
-        if (index < 0) return true;
-        recalled.splice(index, 1);
-        return false;
-      }));
+      data.invalidateSession(sessionID, false);
+      await data.loadSession(sessionID);
       return [...(queue?.steering ?? []), ...(queue?.followUp ?? [])];
     } catch (queueError) {
       setError(errorMessage(queueError));
       throw queueError;
     }
-  }, [client, updatePendingQueueMessages]);
+  }, [client, data]);
 
   const changeModel = useCallback(async (model: SelectedModel) => {
     setError("");
@@ -1107,7 +861,7 @@ export function useApplicationController(client: ApplicationClient): Application
       setError(errorMessage(thinkingError));
       throw thinkingError;
     }
-  }, [client]);
+  }, [client, data]);
 
   const changeToolPreset = useCallback(async (preset: ToolPreset) => {
     setError("");
@@ -1123,11 +877,11 @@ export function useApplicationController(client: ApplicationClient): Application
       setError(errorMessage(toolsError));
       throw toolsError;
     }
-  }, [client]);
+  }, [client, data]);
 
   const browseDirectories = useCallback((path = "") => {
     return client.browseDirectories(path);
-  }, [client]);
+  }, [client, data]);
 
   const addProject = useCallback(async (path: string) => {
     setError("");
@@ -1208,7 +962,7 @@ export function useApplicationController(client: ApplicationClient): Application
       setError(errorMessage(copyError));
       throw copyError;
     }
-  }, [client]);
+  }, [client, data]);
 
   const forkAt = useCallback(async (entryId: string, position: "at" | "before") => {
     const sessionID = activeSessionRef.current;
@@ -1255,11 +1009,12 @@ export function useApplicationController(client: ApplicationClient): Application
         loadSession(sessionID, generationRef.current, entryId),
         loadSessionStats(sessionID),
       ]);
+      await data.pageHistory(sessionID, "latest");
     } catch (navigateError) {
       setError(errorMessage(navigateError));
       throw navigateError;
     }
-  }, [client, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
+  }, [client, data, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
 
   const editAndResend = useCallback(async (entryId: string, text: string): Promise<void> => {
     const sessionID = activeSessionRef.current;
@@ -1287,7 +1042,8 @@ export function useApplicationController(client: ApplicationClient): Application
       loadSession(sessionID),
       loadSessionStats(sessionID),
     ]);
-  }, [busy, client, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
+    await data.pageHistory(sessionID, "latest");
+  }, [busy, client, data, loadSession, loadSessionStats, runtimeState?.isBashRunning]);
 
   const openSessionStats = useCallback(async () => {
     const sessionID = activeSessionRef.current;
@@ -1344,18 +1100,35 @@ export function useApplicationController(client: ApplicationClient): Application
     : newSessionThinkingLevel;
   const queuedMessages = runtimeState?.queuedMessages ?? emptyQueue;
   const pendingMessages: AgentMessage[] = activeSessionId
-    ? pendingQueueMessages
-        .filter((message) => message.sessionId === activeSessionId)
-        .map((message) => ({
-          id: message.id,
-          role: "user",
-          content: message.text,
-          timestamp: message.timestamp,
-          pending: true,
-        }))
+    ? [...queuedMessages.steering, ...queuedMessages.followUp].map((text, index) => ({ id: `queue-${index}`, role: "user", content: text, pending: true }))
     : [];
+  const loadHistory = useCallback(async (direction: "older" | "newer" | "latest", aroundId?: string) => {
+    const id = activeSessionRef.current;
+    if (!id) return;
+    try { await data.pageHistory(id, direction, aroundId); }
+    catch (error) { setError(errorMessage(error)); throw error; }
+  }, [data]);
+  const loadNodes = useCallback((query: ReadResourceRequest = {}) => {
+    const id = activeSessionRef.current;
+    if (!id) return Promise.reject(new Error("请选择会话"));
+    return data.nodes(id, query);
+  }, [data]);
+  const loadDirectory = useCallback(async (project: string, search = "", more = false, force = false) => {
+    try { return await data.loadDirectory(project, search, more, force); }
+    catch (error) { setError(errorMessage(error)); throw error; }
+  }, [data]);
+  const directory = useCallback((project: string, search = "") => data.directory(project, search), [data]);
+  const watchDirectory = useCallback((project: string, search = "") => data.watchDirectory(project, search), [data]);
 
   return {
+    data,
+    historyWindow,
+    toolProgress,
+    loadHistory,
+    loadNodes,
+    loadDirectory,
+    directory,
+    watchDirectory,
     imageCache,
     status,
     error,

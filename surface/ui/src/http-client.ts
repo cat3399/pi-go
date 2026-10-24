@@ -181,7 +181,7 @@ export class RemoteApplicationClient implements ApplicationClient {
       for (const block of message.content) {
         if (block.type !== "image" || !block.imageRef) continue;
         const { entryId, blockIndex } = block.imageRef;
-        const url = new URL(`/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/image`, this.endpoint);
+        const url = new URL(`${this.endpoint}/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/image`);
         url.searchParams.set("blockIndex", String(blockIndex));
         if (this.token) url.searchParams.set("token", this.token);
         block.url = url.toString();
@@ -379,7 +379,7 @@ export class RemoteApplicationClient implements ApplicationClient {
   }
 
   private fileURL(path: string, type: "read"): string {
-    const url = new URL(this.filePath(path, type), this.endpoint);
+    const url = new URL(`${this.endpoint}${this.filePath(path, type)}`);
     if (this.token) url.searchParams.set("token", this.token);
     return url.toString();
   }
@@ -447,7 +447,7 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
     if (token) headers.set("Authorization", `Bearer ${token}`);
     try {
-      const response = await fetch(new URL(path, endpoint), {
+      const response = await fetch(new URL(`${endpoint}${path}`), {
         method: init.method ?? "GET",
         body: init.body,
         headers,
@@ -479,7 +479,7 @@ class BrowserRemoteTransport implements RemoteApplicationTransport {
     const headers = new Headers({ Accept: "application/json" });
     if (token) headers.set("Authorization", `Bearer ${token}`);
     try {
-      const response = await fetch(new URL(path, endpoint), {
+      const response = await fetch(new URL(`${endpoint}${path}`), {
         method: "POST",
         body: form,
         headers,
@@ -570,9 +570,10 @@ export function applyEventData(
   try {
     value = JSON.parse(data);
   } catch {
+    observer.onReset(0, "事件数据无法解析，正在恢复同步");
     return;
   }
-  if (!value || typeof value !== "object") return;
+  if (!value || typeof value !== "object") { observer.onReset(0, "事件格式无效，正在恢复同步"); return; }
   const object = value as Record<string, unknown>;
   if (object.type === "connected") {
     if (typeof object.cursor === "string") observer.onConnected?.(object.cursor);

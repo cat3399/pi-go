@@ -6,12 +6,16 @@ import { IconAction, InlineActions } from "../primitives/InlineActions";
 import { InlineConfirmation } from "../primitives/InlineConfirmation";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { FileTree } from "./FileTree";
+import type { DirectoryWindow } from "./application-data";
 
 interface SidebarProps {
   open: boolean;
   section: "sessions" | "files";
   projects: ProjectInfo[];
   sessions: SessionInfo[];
+  directory(project: string, search?: string): DirectoryWindow | undefined;
+  watchDirectory(project: string, search?: string): () => void;
+  loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
   runningSessionIds: string[];
   activeSessionId: string | null;
   activePreviewPath: string;
@@ -193,6 +197,9 @@ function ProjectSessions(props: {
   project: ProjectGroup;
   activeSessionId: string | null;
   runningSessionIds: Set<string>;
+  directory(project: string, search?: string): DirectoryWindow | undefined;
+  watchDirectory(project: string, search?: string): () => void;
+  loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
   onNewSession(cwd: string): void;
   onRemoveProject(path: string): Promise<void>;
   onSelect(sessionId: string): void;
@@ -204,11 +211,47 @@ function ProjectSessions(props: {
   const [menuOpen, setMenuOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const directory = props.directory(props.project.root);
+  const sessions = directory?.sessions ?? props.project.sessions;
+  const listRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const loadingRef = useRef(false);
+  const retryAtRef = useRef(0);
+  const [retryKey, setRetryKey] = useState(0);
+
+  useEffect(() => { if (containsActive) setOpen(true); }, [containsActive]);
 
   useEffect(() => {
-    if (containsActive) setOpen(true);
-  }, [containsActive]);
+    if (!open) return;
+    const release = props.watchDirectory(props.project.root);
+    let current = true;
+    loadingRef.current = true;
+    setLoading(true);
+    void props.loadDirectory(props.project.root).catch(() => undefined).finally(() => {
+      if (current) { loadingRef.current = false; setLoading(false); }
+    });
+    return () => { current = false; loadingRef.current = false; release(); };
+  }, [open, props.project.root, props.loadDirectory, props.watchDirectory]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    const last = list?.lastElementChild;
+    if (!open || !directory?.next || !last || loading) return;
+    if (retryAtRef.current > Date.now()) {
+      const timer = setTimeout(() => setRetryKey((value) => value + 1), retryAtRef.current - Date.now());
+      return () => clearTimeout(timer);
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting) || loadingRef.current) return;
+      loadingRef.current = true;
+      setLoading(true);
+      void props.loadDirectory(props.project.root, "", true).catch(() => { retryAtRef.current = Date.now() + 2000; })
+        .finally(() => { loadingRef.current = false; setLoading(false); });
+    }, { root: list.closest(".pi-session-list"), rootMargin: "250px" });
+    observer.observe(last);
+    return () => observer.disconnect();
+  }, [open, loading, directory?.next, sessions.length, props.loadDirectory, props.project.root, retryKey]);
 
   const removeProject = async () => {
     setRemoving(true);
@@ -281,8 +324,8 @@ function ProjectSessions(props: {
         </InlineActions>
       </div>
       {open && (
-        <div className="pi-project-sessions">
-          {props.project.sessions.map((session) => (
+        <div ref={listRef} className="pi-project-sessions" aria-busy={loading || undefined}>
+          {sessions.map((session) => (
             <SessionRow
               key={session.id}
               session={session}
@@ -293,6 +336,7 @@ function ProjectSessions(props: {
               onDelete={() => props.onDelete(session.id)}
             />
           ))}
+
         </div>
       )}
     </div>
@@ -440,6 +484,9 @@ export function Sidebar(props: SidebarProps) {
                     project={project}
                     activeSessionId={props.activeSessionId}
                     runningSessionIds={runningSessionIds}
+                    directory={props.directory}
+                    watchDirectory={props.watchDirectory}
+                    loadDirectory={props.loadDirectory}
                     onNewSession={props.onNewSession}
                     onRemoveProject={props.onRemoveProject}
                     onSelect={props.onSelect}

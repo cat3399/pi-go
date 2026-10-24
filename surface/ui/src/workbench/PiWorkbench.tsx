@@ -426,6 +426,9 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         projects={controller.snapshot?.projects ?? []}
         sessions={sessions}
         runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
+        directory={controller.directory}
+        watchDirectory={controller.watchDirectory}
+        loadDirectory={controller.loadDirectory}
         activeSessionId={controller.activeSessionId}
         activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}
@@ -501,12 +504,16 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           ) : !empty && controller.activeSessionId ? (
             <MessageList
               imageCache={controller.imageCache}
+              data={controller.data}
+              historyWindow={controller.historyWindow}
+              toolProgress={controller.toolProgress}
+              onLoadHistory={controller.loadHistory}
               sessionId={controller.activeSessionId}
               messages={controller.messages}
               pendingMessages={controller.pendingMessages}
               entryIds={controller.sessionView?.context.entryIds ?? []}
               streamingMessage={controller.streamingMessage}
-              busy={controller.busy}
+              busy={controller.busy && controller.historyWindow?.following !== false}
               compacting={Boolean(controller.runtimeState?.isCompacting)}
               mobile={mobile}
               anchorsEnabled={!mobile || anchorGesturesEnabled}
@@ -573,9 +580,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
       )}
       <SessionPointPicker
         mode={pointPicker}
-        messages={controller.messages}
-        entryIds={controller.sessionView?.context.entryIds ?? []}
-        tree={controller.sessionView?.tree ?? []}
+        sessionId={controller.activeSessionId}
+        loadNodes={controller.loadNodes}
         activeLeafId={controller.sessionView?.leafId ?? null}
         onClose={closePointPicker}
         onSelect={(entryId) => pointPicker === "fork" ? controller.forkBefore(entryId) : controller.navigateTree(entryId)}

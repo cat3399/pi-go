@@ -105,7 +105,7 @@ func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing
 	if err := json.Unmarshal(first.Data, &page); err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Items) != 2 || page.Total != 10 || page.Start != 8 || page.Older == "" || !page.Items[0].Deferred || len(page.Items[0].Message) != 0 {
+	if len(page.Items) != 1 || page.Total != 10 || page.Start != 9 || page.Older == "" || len(page.Items[0].Message) == 0 {
 		t.Fatalf("bounded page = %s", first.Data)
 	}
 	if bytes.Contains(first.Data, []byte("YWJjZA==")) || !bytes.Contains(first.Data, []byte(page.Version.Generation)) || !bytes.Contains(first.Data, []byte(`"imageRef"`)) {
@@ -126,7 +126,7 @@ func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing
 	older, value := get("paged", "history", surfacewire.ReadResourceRequest{Cursor: page.Older, Limit: 2}, "", "")
 	var previous surfacewire.HistoryPage
 	_ = json.Unmarshal(value.Data, &previous)
-	if older.Code != 200 || previous.Version != page.Version || previous.End != page.Start {
+	if older.Code != 200 || previous.Version != page.Version || previous.End != page.Start || !bytes.Contains(value.Data, []byte(strings.Repeat("大", 4096))) {
 		t.Fatalf("older page = %s", older.Body)
 	}
 	wrong, _ := get("other", "history", surfacewire.ReadResourceRequest{Cursor: page.Older}, "", "")
@@ -143,7 +143,7 @@ func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing
 	}
 	entry, entryValue := get("paged", "entry", surfacewire.ReadResourceRequest{EntryID: "n8", Generation: page.Version.Generation}, "", "")
 	if entry.Code != 200 || !bytes.Contains(entryValue.Data, []byte(strings.Repeat("大", 4096))) {
-		t.Fatal("deferred entry lost original content")
+		t.Fatal("single entry lost original content")
 	}
 	imageURL := "/api/v1/sessions/paged/entries/n9/image?blockIndex=1&generation=" + page.Version.Generation
 	image := httptest.NewRecorder()

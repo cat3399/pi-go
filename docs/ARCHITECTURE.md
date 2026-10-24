@@ -69,7 +69,9 @@ Agent 的配置和队列另有可合并通知；AgentSession 在 lifecycle 与 b
 覆盖原版事件之前或之后发生的实际状态变化，例如 `auto_retry_start` 之后进入等待。相关事件
 附带当时的 activity 快照与版本，读取时分别校验 Agent、activity 和 bash，不用 Agent 的状态
 版本代替整个产品生命周期。Runtime control 写入与 reload 发出配置失效通知；有效配置仍由
-原有 settings 解析器提供。Application 在 Runtime 入驻、回收和替换时通知资源可用性变化。
+原有 settings 解析器提供。Application 在 Runtime 入驻、回收和替换时通知资源可用性变化；
+模型定义、认证、项目信任和技能配置写入后，按全局或工作目录发布配置失效通知，不替代 AgentSession
+执行 reload。
 资源失效、写入回执与运行消息身份用于 Application 资源同步；JSONL RPC 保留原版事件词汇，
 不转发这组新增同步元数据。
 Application 的会话快照保留这组版本，并校验历史与运行态来自同一 Runtime binding；运行态和
@@ -77,7 +79,8 @@ Application 的会话快照保留这组版本，并校验历史与运行态来�
 
 `ReadHistory` 沿完整分支返回有界页面，`ReadNodes` 独立查询完整日志中的节点；二者不改变
 模型使用的压缩上下文。历史游标固定数据代次、日志前缀、分支锚点与位置，支持前后翻页、
-节点定位和尾部补读。超过页面预算的条目返回引用，`ReadEntryChunk` 按原始字节完整读取。
+节点定位和尾部补读。正文与思考随页完整返回；字节预算是软边界，超大单条记录独占一页。
+节点查询可以沿用原有树的深度优先顺序与分支缩进，读取元数据而不复制整棵树的消息正文。
 Application 对未打开的会话使用不可变只读索引，合并同一来源的并发加载，并按估算字节量淘汰
 索引载荷；它不保留 Runtime、文件句柄或 writer claim。轻量来源身份可跨载荷淘汰保留，使大文件
 仍能继续翻页。每次复用检查文件身份、大小、mtime 与变更时间，不支持变更时间的平台校验内容摘要。

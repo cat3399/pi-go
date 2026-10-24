@@ -32,7 +32,6 @@ type API interface {
 	ReadHistory(string, session.HistoryQuery) (HistorySnapshot, error)
 	ReadNodes(string, session.NodeQuery) (NodesSnapshot, error)
 	ReadSessionMetadata(string) (SessionSnapshot, error)
-	ReadEntryChunk(string, string, string, int, int) (session.EntryChunk, error)
 	ReadEntry(string, string, string) (session.EntrySnapshot, error)
 
 	ListSessions() ([]SessionInfo, error)

@@ -45,45 +45,48 @@ func sessionVersion(value session.ReadVersion) SessionVersion {
 }
 
 type ReadResourceRequest struct {
-	LeafID     *string         `json:"leafId,omitempty"`
-	At         *SessionVersion `json:"at,omitempty"`
-	Cursor     string          `json:"cursor,omitempty"`
-	AroundID   string          `json:"aroundId,omitempty"`
-	AfterID    string          `json:"afterId,omitempty"`
-	Limit      int             `json:"limit,omitempty"`
-	MaxBytes   int             `json:"maxBytes,omitempty"`
-	ParentID   *string         `json:"parentId,omitempty"`
-	Role       string          `json:"role,omitempty"`
-	Search     string          `json:"search,omitempty"`
-	EntryID    string          `json:"entryId,omitempty"`
-	Generation string          `json:"generation,omitempty"`
-	Offset     int             `json:"offset,omitempty"`
-	Length     int             `json:"length,omitempty"`
-	BlockIndex int             `json:"blockIndex,omitempty"`
+	LeafID     *string               `json:"leafId,omitempty"`
+	At         *SessionVersion       `json:"at,omitempty"`
+	Cursor     string                `json:"cursor,omitempty"`
+	AroundID   string                `json:"aroundId,omitempty"`
+	Direction  session.PageDirection `json:"direction,omitempty"`
+	AfterID    string                `json:"afterId,omitempty"`
+	Limit      int                   `json:"limit,omitempty"`
+	MaxBytes   int                   `json:"maxBytes,omitempty"`
+	EntryType  string                `json:"entryType,omitempty"`
+	Tree       bool                  `json:"tree,omitempty"`
+	ParentID   *string               `json:"parentId,omitempty"`
+	Role       string                `json:"role,omitempty"`
+	Search     string                `json:"search,omitempty"`
+	EntryID    string                `json:"entryId,omitempty"`
+	Generation string                `json:"generation,omitempty"`
+	BlockIndex int                   `json:"blockIndex,omitempty"`
 }
 
 type EntryNode struct {
-	ID          string  `json:"id"`
-	ParentID    *string `json:"parentId"`
-	Type        string  `json:"type"`
-	Role        string  `json:"role,omitempty"`
-	Timestamp   string  `json:"timestamp"`
-	Preview     string  `json:"preview"`
-	Label       string  `json:"label,omitempty"`
-	HasChildren bool    `json:"hasChildren"`
-	RawBytes    int     `json:"rawBytes"`
+	ID           string  `json:"id"`
+	ParentID     *string `json:"parentId"`
+	Type         string  `json:"type"`
+	Role         string  `json:"role,omitempty"`
+	Timestamp    string  `json:"timestamp"`
+	Preview      string  `json:"preview"`
+	Label        string  `json:"label,omitempty"`
+	HasChildren  bool    `json:"hasChildren"`
+	RawBytes     int     `json:"rawBytes"`
+	ContentToken string  `json:"contentToken,omitempty"`
+	BranchDepth  int     `json:"branchDepth,omitempty"`
+	Position     int     `json:"position,omitempty"`
 }
 
 func readNode(value session.EntryNode) EntryNode {
 	return EntryNode{ID: value.ID, ParentID: value.ParentID, Type: value.Type, Role: value.Role,
 		Timestamp: formatWebTime(value.Timestamp), Preview: value.Preview, Label: value.Label,
-		HasChildren: value.HasChildren, RawBytes: value.RawBytes}
+		HasChildren: value.HasChildren, RawBytes: value.RawBytes, ContentToken: value.ContentToken, BranchDepth: value.BranchDepth, Position: value.Position}
 }
 
 type HistoryItem struct {
-	Node     EntryNode       `json:"node"`
-	Message  json.RawMessage `json:"message,omitempty"`
-	Deferred bool            `json:"deferred,omitempty"`
+	Node    EntryNode       `json:"node"`
+	Message json.RawMessage `json:"message,omitempty"`
 }
 
 type HistoryPage struct {
@@ -100,6 +103,7 @@ type HistoryPage struct {
 }
 
 type NodesPage struct {
+	Connected bool           `json:"connected"`
 	SessionID string         `json:"sessionId"`
 	Version   SessionVersion `json:"version"`
 	Items     []EntryNode    `json:"items"`
@@ -151,7 +155,7 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 			return ResourceResponse{}, err
 		}
 		value, err := api.ReadHistory(id, session.HistoryQuery{LeafID: query.LeafID, At: at, Cursor: cursor.History,
-			AroundID: query.AroundID, AfterID: query.AfterID, Limit: query.Limit, MaxBytes: query.MaxBytes})
+			AroundID: query.AroundID, AfterID: query.AfterID, Direction: query.Direction, Limit: query.Limit, MaxBytes: query.MaxBytes})
 		if err != nil {
 			return ResourceResponse{}, err
 		}
@@ -160,7 +164,7 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 			Start: page.Start, End: page.End, Total: page.Total, Connected: page.Connected, Items: []HistoryItem{},
 			Older: encodeReadCursor(readCursor{SessionID: id, History: page.Older}), Newer: encodeReadCursor(readCursor{SessionID: id, History: page.Newer})}
 		for _, item := range page.Items {
-			projected := HistoryItem{Node: readNode(item.Node), Deferred: item.Entry == nil}
+			projected := HistoryItem{Node: readNode(item.Node)}
 			if item.Entry != nil {
 				projected.Message, _, err = ProjectEntryAt(*item.Entry, page.Version.Generation)
 				if err != nil {
@@ -175,11 +179,11 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 		if err != nil {
 			return ResourceResponse{}, err
 		}
-		value, err := api.ReadNodes(id, session.NodeQuery{ParentID: query.ParentID, Role: query.Role, Search: query.Search, At: at, Cursor: cursor.Nodes, Limit: query.Limit})
+		value, err := api.ReadNodes(id, session.NodeQuery{ParentID: query.ParentID, LeafID: query.LeafID, AfterID: query.AfterID, Type: query.EntryType, Role: query.Role, Search: query.Search, Tree: query.Tree, At: at, Cursor: cursor.Nodes, Limit: query.Limit})
 		if err != nil {
 			return ResourceResponse{}, err
 		}
-		result := NodesPage{SessionID: id, Version: sessionVersion(value.Page.Version), Items: []EntryNode{}, Next: encodeReadCursor(readCursor{SessionID: id, Nodes: value.Page.Next})}
+		result := NodesPage{Connected: value.Page.Connected, SessionID: id, Version: sessionVersion(value.Page.Version), Items: []EntryNode{}, Next: encodeReadCursor(readCursor{SessionID: id, Nodes: value.Page.Next})}
 		for _, item := range value.Page.Items {
 			result.Items = append(result.Items, readNode(item))
 		}
@@ -209,20 +213,7 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 		if err != nil {
 			return ResourceResponse{}, err
 		}
-		return resourceResponse(map[string]any{"sessionId": id, "generation": value.Version.Generation, "entryId": query.EntryID, "message": message}, known)
-	case "chunk":
-		value, err := api.ReadEntryChunk(id, query.EntryID, query.Generation, query.Offset, query.Length)
-		if err != nil {
-			return ResourceResponse{}, err
-		}
-		// Data is base64: a chunk boundary may split a UTF-8 sequence.
-		return resourceResponse(map[string]any{"sessionId": id, "generation": value.Version.Generation, "entryId": value.EntryID, "offset": value.Offset, "total": value.Total, "data": value.Data}, known)
-	case "thinking":
-		value, err := api.SessionThinkingAt(ctx, id, query.EntryID, query.Generation, query.BlockIndex)
-		if err != nil {
-			return ResourceResponse{}, err
-		}
-		return resourceResponse(map[string]any{"sessionId": id, "generation": query.Generation, "entryId": query.EntryID, "thinking": value}, known)
+		return resourceResponse(map[string]any{"sessionId": id, "generation": value.Version.Generation, "entryId": query.EntryID, "contentToken": value.ContentToken, "message": message}, known)
 	case "image":
 		value, err := api.SessionImageAt(ctx, id, query.EntryID, query.Generation, query.BlockIndex)
 		if err != nil {
@@ -237,7 +228,7 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 // Every deferred block carries the source generation as well as entry/block
 // identity. Old pages cannot silently load media from a replacement source.
 func ProjectEntryAt(entry session.Entry, generation string) (json.RawMessage, bool, error) {
-	message, ok, err := ProjectEntry(entry, true, true)
+	message, ok, err := ProjectEntry(entry, false, true)
 	if err != nil || !ok {
 		return message, ok, err
 	}
@@ -258,9 +249,7 @@ func ProjectEntryAt(entry session.Entry, generation string) (json.RawMessage, bo
 		if _, exists := block["imageRef"]; exists {
 			block["imageRef"], changed = ref, true
 		}
-		if string(block["deferred"]) == "true" && string(block["type"]) == `"thinking"` {
-			block["thinkingRef"], changed = ref, true
-		}
+
 	}
 	if !changed {
 		return message, true, nil

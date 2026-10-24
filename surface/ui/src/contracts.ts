@@ -210,15 +210,16 @@ export interface ReadResourceRequest {
   cursor?: string;
   aroundId?: string;
   afterId?: string;
+  direction?: "older" | "newer";
   limit?: number;
   maxBytes?: number;
   parentId?: string;
+  tree?: boolean;
+  entryType?: string;
   role?: string;
   search?: string;
   entryId?: string;
   generation?: string;
-  offset?: number;
-  length?: number;
   blockIndex?: number;
 }
 
@@ -267,12 +268,14 @@ export interface EntryNode {
   label?: string;
   hasChildren: boolean;
   rawBytes: number;
+  contentToken?: string;
+  branchDepth?: number;
+  position?: number;
 }
 
 export interface HistoryItem {
   node: EntryNode;
   message?: AgentMessage;
-  deferred?: boolean;
 }
 
 export interface HistoryPage {
@@ -289,6 +292,7 @@ export interface HistoryPage {
 }
 
 export interface NodesPage {
+  connected: boolean;
   sessionId: string;
   version: SessionVersion;
   items: EntryNode[];
@@ -312,6 +316,8 @@ export interface LiveSnapshot {
   sessionId: string;
   active: boolean;
   version?: AgentReadVersion;
+  activityVersion?: ResourceRevision;
+  bashVersion?: ResourceRevision;
   history?: SessionVersion & { leafId: string | null };
   state?: SessionRuntimeState;
   streaming?: ReadMessage | null;
@@ -322,14 +328,17 @@ export interface LiveSnapshot {
   errorMessage?: string;
 }
 
+export interface ResourceRevision {
+  generation: string;
+  revision: number;
+}
+
 export interface SessionResources {
   history: HistoryPage;
   nodes: NodesPage;
   metadata: SessionMetadata;
   live: LiveSnapshot;
-  entry: { sessionId: string; generation: string; entryId: string; message: AgentMessage | null };
-  chunk: { sessionId: string; generation: string; entryId: string; offset: number; total: number; data: string };
-  thinking: { sessionId: string; generation: string; entryId: string; thinking: string };
+  entry: { sessionId: string; generation: string; entryId: string; contentToken: string; message: AgentMessage | null };
   image: { sessionId: string; generation: string; entryId: string; mimeType: string; data: string };
 }
 
@@ -447,7 +456,6 @@ export interface ApplicationClient {
 
 export type MessageContentBlock = {
   imageRef?: { entryId: string; blockIndex: number; generation?: string };
-  thinkingRef?: { entryId: string; blockIndex: number; generation: string };
   byteSize?: number;
   type?: string;
   text?: string;

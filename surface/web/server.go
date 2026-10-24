@@ -112,7 +112,8 @@ func allowAuthenticatedCrossOrigin(next http.Handler, enabled bool) http.Handler
 			writer.Header().Set("Access-Control-Allow-Origin", origin)
 			writer.Header().Set("Access-Control-Allow-Credentials", "true")
 			writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, X-Pi-Go-Token")
+			writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID, If-None-Match, X-Pi-Go-Token")
+			writer.Header().Set("Access-Control-Expose-Headers", "ETag, X-Pi-Event-Cursor, Retry-After")
 			writer.Header().Add("Vary", "Origin")
 			if request.Method == http.MethodOptions && strings.HasPrefix(request.URL.Path, "/api/") {
 				writer.WriteHeader(http.StatusNoContent)

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
-import type { AgentMessage, MessageContentBlock } from "../contracts";
+import type { AgentMessage, LiveSnapshot, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
@@ -20,11 +20,30 @@ import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
 import type { SessionImageCache } from "./session-images";
+import type { ApplicationDataStore, HistoryWindow, ScrollPosition } from "./application-data";
 
 const ImageCacheContext = createContext<SessionImageCache | null>(null);
+const HistoryContext = createContext<{ data: ApplicationDataStore; sessionId: string; generation: string } | null>(null);
+const ToolCallsContext = createContext<Set<string>>(new Set());
+const ToolResultEntriesContext = createContext<Map<string, string>>(new Map());
+
+function useDisclosure(kind: string, identity: string, initial: boolean): [boolean, (value: boolean | ((previous: boolean) => boolean)) => void] {
+  const history = useContext(HistoryContext);
+  const key = history && identity ? JSON.stringify([history.sessionId, history.generation, kind, identity]) : "";
+  const [value, setValue] = useState(() => key ? history?.data.disclosures.get(key) ?? initial : initial);
+  return [value, (next) => setValue((previous) => {
+    const result = typeof next === "function" ? next(previous) : next;
+    if (key) history?.data.disclosures.set(key, result);
+    return result;
+  })];
+}
 
 interface MessageListProps {
   imageCache: SessionImageCache;
+  data: ApplicationDataStore;
+  historyWindow: HistoryWindow | null;
+  toolProgress: LiveSnapshot["toolsRunning"];
+  onLoadHistory(direction: "older" | "newer" | "latest", aroundId?: string): Promise<void>;
   sessionId: string;
   messages: AgentMessage[];
   pendingMessages: AgentMessage[];
@@ -90,12 +109,18 @@ function contentBlocks(message: AgentMessage): MessageContentBlock[] {
 
 function MessageImage({ block, alt }: { block: MessageContentBlock; alt: string }) {
   const cache = useContext(ImageCacheContext)!;
-  const src = cache.source(block);
+  const [src, setSource] = useState(() => cache.source(block));
   const [status, setStatus] = useState<"idle" | "loading" | "loaded" | "error">(
     block.imageRef && !cache.availableSource(block) ? "idle" : "loaded",
   );
   const [preview, setPreview] = useState(false);
-  if (!src) return null;
+  const identity = JSON.stringify(block.imageRef ?? block.url ?? block.source ?? block.data);
+  useEffect(() => {
+    setSource(cache.source(block));
+    setStatus(block.imageRef && !cache.availableSource(block) ? "idle" : "loaded");
+    setPreview(false);
+  }, [cache, identity]);
+  if (!src && !block.imageRef) return null;
   const size = typeof block.byteSize === "number"
     ? block.byteSize >= 1024 * 1024
       ? `${(block.byteSize / (1024 * 1024)).toFixed(1)} MB`
@@ -108,9 +133,13 @@ function MessageImage({ block, alt }: { block: MessageContentBlock; alt: string 
         type="button"
         aria-label={status === "loaded" ? `预览${alt}` : `加载${alt}`}
         aria-busy={status === "loading"}
-        onClick={() => status === "loaded" ? setPreview(true) : setStatus("loading")}
+        onClick={() => {
+          if (status === "loaded") { setPreview(true); return; }
+          setStatus("loading");
+          void cache.load(block).then(setSource).catch(() => setStatus("error"));
+        }}
       >
-        {(status === "loading" || status === "loaded") && (
+        {src && (status === "loading" || status === "loaded") && (
           <img className="pi-message-image" src={src} alt={alt}
             onLoad={() => { cache.rememberLoaded(block, src); setStatus("loaded"); }} onError={() => setStatus("error")} />
         )}
@@ -127,7 +156,7 @@ function MessageImage({ block, alt }: { block: MessageContentBlock; alt: string 
 }
 
 function imageBlockKey(block: MessageContentBlock, index: number): string {
-  return block.imageRef ? `${block.imageRef.entryId}:${block.imageRef.blockIndex}` : `inline-${index}`;
+  return block.imageRef ? `${block.imageRef.generation}:${block.imageRef.entryId}:${block.imageRef.blockIndex}` : `inline-${index}`;
 }
 
 function toolCallID(block: MessageContentBlock): string {
@@ -303,6 +332,8 @@ function FileChangeCard({
   const removals = rows.filter((line) => line.kind === "removed").length;
   const copyValue = fileChangeCopyValue(name, input, result);
   const failed = result?.isError === true;
+  const complete = Boolean(result && !result.partial);
+  const running = streaming || result?.partial === true;
 
   const copy = async () => {
     await writeClipboardText(copyValue);
@@ -319,8 +350,8 @@ function FileChangeCard({
           <span className="is-removed">-{removals}</span>
         </span>
         <span className="pi-file-change-status">
-          {result && !failed && <Check size={12} />}
-          {streaming && !result ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : result ? "成功" : "等待"}
+          {complete && !failed && <Check size={12} />}
+          {running && !complete ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : complete ? "成功" : "等待"}
         </span>
         <button
           type="button"
@@ -382,6 +413,7 @@ function toolPresentation(name: string, input: Record<string, unknown>, complete
 }
 
 function ToolDataSection(props: {
+  entryId?: string;
   kind: "input" | "output";
   value: string;
   children: ReactNode;
@@ -397,7 +429,7 @@ function ToolDataSection(props: {
   };
 
   return (
-    <div className={`pi-tool-section pi-overlay-scroll-host is-${props.kind}`}>
+    <div className={`pi-tool-section pi-overlay-scroll-host is-${props.kind}`} data-entry-id={props.entryId}>
       <div ref={viewportRef} className="pi-tool-section-content pi-overlay-scroll-viewport">{props.children}</div>
       <button
         className="pi-tool-section-copy"
@@ -424,11 +456,13 @@ function ToolCall({
   streaming: boolean;
 }) {
   const name = toolCallName(block);
-  const [expanded, setExpanded] = useState(() => name === "edit" || name === "write");
+  const resultEntryId = useContext(ToolResultEntriesContext).get(toolCallID(block));
+  const [expanded, setExpanded] = useDisclosure("tool", toolCallID(block), name === "edit" || name === "write");
   const input = toolInputRecord(block);
   const output = resultText(result);
   const failed = result?.isError === true;
-  const complete = Boolean(result);
+  const complete = Boolean(result && !result.partial);
+  const running = streaming || result?.partial === true;
   const presentation = toolPresentation(name, input, complete);
   const Icon = presentation.icon;
   const serializedInput = JSON.stringify(input, null, 2);
@@ -442,7 +476,7 @@ function ToolCall({
   const hasFileChange = name === "edit" || name === "write";
 
   return (
-    <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`}>
+    <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`} data-entry-id={!output || hasFileChange && !failed ? resultEntryId : undefined}>
       <div className="pi-tool-heading">
         <button className="pi-tool-summary" type="button" aria-expanded={canOpenTerminal ? undefined : expanded} title={canOpenTerminal ? "打开终端" : undefined} onClick={() => canOpenTerminal ? onOpenTerminal?.(terminalId) : setExpanded((value) => !value)}>
           <Icon size={15} />
@@ -461,8 +495,8 @@ function ToolCall({
               <div className="pi-tool-card-header">
                 <span>{presentation.card}</span>
                 <span className="pi-tool-card-status">
-                  {result && !failed && <Check size={12} />}
-                  {streaming && !result ? "运行中" : failed ? "失败" : result ? "成功" : "等待"}
+                  {complete && !failed && <Check size={12} />}
+                  {running && !complete ? "运行中" : failed ? "失败" : complete ? "成功" : "等待"}
                 </span>
               </div>
               <ToolDataSection kind="input" value={inputCopyValue}>
@@ -471,7 +505,7 @@ function ToolCall({
             </>
           )}
           {output && (!hasFileChange || failed) && (
-            <ToolDataSection kind="output" value={output}>
+            <ToolDataSection kind="output" value={output} entryId={resultEntryId}>
               <pre className="pi-tool-output">{output}</pre>
             </ToolDataSection>
           )}
@@ -499,8 +533,8 @@ function ProcessGroup(props: {
   toolResults: Map<string, AgentMessage>;
   streaming: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
-  const complete = props.blocks.every((block) => props.toolResults.has(toolCallID(block)));
+  const [expanded, setExpanded] = useDisclosure("process", props.blocks.map(toolCallID).join(":"), true);
+  const complete = props.blocks.every((block) => { const result = props.toolResults.get(toolCallID(block)); return Boolean(result && !result.partial); });
   const failed = props.blocks.some((block) => props.toolResults.get(toolCallID(block))?.isError === true);
   const labels = {
     bash: "运行了命令",
@@ -537,8 +571,8 @@ function ProcessGroup(props: {
   );
 }
 
-function ThinkingBlock({ block, streaming }: { block: MessageContentBlock; streaming: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+function ThinkingBlock({ block, streaming, identity }: { block: MessageContentBlock; streaming: boolean; identity: string }) {
+  const [expanded, setExpanded] = useDisclosure("thinking", identity, false);
   const value = typeof block.thinking === "string" ? block.thinking.trim() : "";
   if (!value) return null;
   const [summary, ...remainder] = value.split("\n");
@@ -589,6 +623,8 @@ function Message({
   onEdit?(entryId: string, text: string): Promise<void>;
   process?: boolean;
 }) {
+  const history = useContext(HistoryContext);
+  const linkedToolCalls = useContext(ToolCallsContext);
   const [copied, setCopied] = useState(false);
   const [userActionsVisible, setUserActionsVisible] = useState(false);
   const [draft, setDraft] = useState("");
@@ -598,6 +634,7 @@ function Message({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const blocks = contentBlocks(message);
   const text = messageText(message);
+  const draftKey = history && entryId ? history.data.draftKey(history.sessionId, history.generation, entryId) : "";
 
   useEffect(() => () => {
     if (actionsHideTimerRef.current !== null) window.clearTimeout(actionsHideTimerRef.current);
@@ -606,17 +643,18 @@ function Message({
 
   useEffect(() => {
     if (!editing) return;
-    setDraft(text);
+    const value = draftKey ? history?.data.drafts.get(draftKey)?.text ?? text : text;
+    setDraft(value);
     setSubmitting(false);
     requestAnimationFrame(() => {
       const textarea = textareaRef.current;
       if (!textarea) return;
-      textarea.focus();
-      textarea.setSelectionRange(text.length, text.length);
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(value.length, value.length);
       textarea.style.height = "auto";
       textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 76), 180)}px`;
     });
-  }, [editing, text]);
+  }, [editing, text, draftKey, history?.data]);
 
   useEffect(() => {
     if (!editing) return;
@@ -626,6 +664,14 @@ function Message({
     textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 76), 180)}px`;
   }, [draft, editing]);
 
+  if (message.role === "toolResult") {
+    if (linkedToolCalls.has(String(message.toolCallId ?? ""))) return null;
+    const output = resultText(message);
+    return <article className="pi-message" data-entry-id={entryId}>
+      {output && <ToolDataSection kind="output" value={output}><pre className="pi-tool-output">{output}</pre></ToolDataSection>}
+      {blocks.map((image, index) => image.type === "image" ? <MessageImage key={imageBlockKey(image, index)} block={image} alt={`工具结果图片 ${index + 1}`} /> : null)}
+    </article>;
+  }
   if (!visibleMessage(message)) return null;
   const role = message.role === "user"
     ? "user"
@@ -663,8 +709,8 @@ function Message({
     }
     if (block.type === "text" && typeof block.text === "string" && block.text && !(message.role === "user" && editing)) {
       renderedBlocks.push(<MarkdownBody key={index} isStreaming={streaming}>{block.text}</MarkdownBody>);
-    } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
-      renderedBlocks.push(<ThinkingBlock key={index} block={block} streaming={streaming} />);
+    } else if (block.type === "thinking" && block.thinking) {
+      renderedBlocks.push(<ThinkingBlock key={index} block={block} streaming={streaming} identity={entryId ? `${entryId}:${index}` : ""} />);
     } else if (block.type === "toolCall") {
       const id = toolCallID(block);
       renderedBlocks.push(
@@ -733,6 +779,7 @@ function Message({
   return (
     <>
       <article
+        data-entry-id={entryId}
         className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userActionsVisible ? "is-actions-visible" : ""} ${editing ? "is-editing" : ""}`}
         onPointerEnter={(event) => {
           if (userActionsAvailable && event.pointerType === "mouse") showUserActions();
@@ -762,7 +809,10 @@ function Message({
           value={draft}
           disabled={submitting}
           aria-label="编辑消息"
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            if (draftKey && history) history.data.drafts.set(draftKey, { ...history.data.drafts.get(draftKey), text: event.target.value, original: text });
+          }}
           onKeyDown={(event) => {
             if (event.key === "Escape" && !submitting) {
               event.preventDefault();
@@ -999,7 +1049,7 @@ function hasDisplayableProcessMessage(message: AgentMessage): boolean {
       ? message.content.trim().length > 0
       : displayableAssistantBlocks(message).length > 0;
   }
-  return visibleMessage(message);
+  return message.role === "toolResult" || visibleMessage(message);
 }
 
 function Turn(props: {
@@ -1008,6 +1058,7 @@ function Turn(props: {
   streamingMessage: AgentMessage | null;
   busy: boolean;
   active: boolean;
+  revealHistory: boolean;
   onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
   editingEntryId: string | null;
@@ -1017,12 +1068,15 @@ function Turn(props: {
   onEditCancel(): void;
   onEdit(entryId: string, text: string): Promise<void>;
 }) {
-  const [expanded, setExpanded] = useState(props.active && props.busy);
+  const [expanded, setExpanded] = useDisclosure("turn", props.turn.anchor.entryId ?? "", props.revealHistory || props.active && props.busy);
+  const mountedRef = useRef(false);
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    setExpanded(props.active && props.busy);
-  }, [props.active, props.busy]);
+    if (props.revealHistory) setExpanded(true);
+    else if (mountedRef.current) setExpanded(props.active && props.busy);
+    mountedRef.current = true;
+  }, [props.active, props.busy, props.revealHistory]);
 
   useEffect(() => {
     if (!props.active || !props.busy) return;
@@ -1059,7 +1113,7 @@ function Turn(props: {
     <div className="pi-turn-process-body">
       {processMessages.map(({ message, entryId }, index) => (
         <Message
-          key={String(message.id ?? `process-${index}`)}
+          key={entryId || String(message.id ?? `process-${index}`)}
           message={message}
           entryId={entryId}
           toolResults={props.toolResults}
@@ -1120,7 +1174,7 @@ function Turn(props: {
       )}
       {trailingMessages.map(({ message, entryId }, index) => (
         <Message
-          key={String(message.id ?? `trailing-${index}`)}
+          key={entryId || String(message.id ?? `trailing-${index}`)}
           message={message}
           entryId={entryId}
           toolResults={props.toolResults}
@@ -1139,14 +1193,35 @@ function Turn(props: {
 }
 
 export function MessageList(props: MessageListProps) {
+  const history = useMemo(() => ({ data: props.data, sessionId: props.sessionId, generation: props.historyWindow?.version.generation ?? "" }), [props.data, props.sessionId, props.historyWindow?.version.generation]);
+  const toolCalls = useMemo(() => new Set([...props.messages, ...(props.streamingMessage ? [props.streamingMessage] : [])]
+    .flatMap(contentBlocks).filter((block) => block.type === "toolCall").map(toolCallID)), [props.messages, props.streamingMessage]);
+  const resultEntries = useMemo(() => {
+    const entries = new Map<string, string>();
+    props.messages.forEach((message, index) => {
+      const id = props.entryIds[index];
+      if (id && message.role === "toolResult" && typeof message.toolCallId === "string") entries.set(message.toolCallId, id);
+    });
+    return entries;
+  }, [props.messages, props.entryIds]);
   return (
     <ImageCacheContext.Provider value={props.imageCache}>
-      <MessageListContent {...props} />
+      <HistoryContext.Provider value={history}>
+        <ToolCallsContext.Provider value={toolCalls}>
+          <ToolResultEntriesContext.Provider value={resultEntries}>
+            <MessageListContent key={`${props.sessionId}:${history.generation}`} {...props} />
+          </ToolResultEntriesContext.Provider>
+        </ToolCallsContext.Provider>
+      </HistoryContext.Provider>
     </ImageCacheContext.Provider>
   );
 }
 
 function MessageListContent({
+  data,
+  historyWindow,
+  toolProgress,
+  onLoadHistory,
   sessionId,
   messages,
   pendingMessages,
@@ -1172,14 +1247,29 @@ function MessageListContent({
   const [activeAnchorIndex, setActiveAnchorIndex] = useState(0);
   const [anchorOpen, setAnchorOpen] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const loadingHistoryRef = useRef(false);
+  const currentWindowRef = useRef(historyWindow);
+  currentWindowRef.current = historyWindow;
+  const scrollScope = JSON.stringify([sessionId, historyWindow?.version.generation ?? ""]);
+  const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition } | null>(null);
+  const revealedEntriesRef = useRef(new Set<string>());
+  const previousScrollTopRef = useRef(0);
+  const toolCalls = useContext(ToolCallsContext);
   const toolResults = useMemo(() => {
     const values = new Map<string, AgentMessage>();
     for (const message of messages) {
       if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
       values.set(message.toolCallId, message);
     }
+    for (const tool of toolProgress ?? []) {
+      if (values.has(tool.toolCallId)) continue;
+      values.set(tool.toolCallId, { role: "toolResult", toolCallId: tool.toolCallId, toolName: tool.toolName,
+        ...tool.partialResult, partial: true,
+        content: (tool.partialResult?.content as MessageContentBlock[] | undefined) ?? String(tool.partialResult?.text ?? "") });
+    }
     return values;
-  }, [messages]);
+  }, [messages, toolProgress]);
   const { turns, leading } = useMemo(() => {
     const nextTurns: ConversationTurn[] = [];
     const nextLeading: IndexedMessage[] = [];
@@ -1197,39 +1287,98 @@ function MessageListContent({
     });
     return { turns: nextTurns, leading: nextLeading };
   }, [entryIds, messages]);
-  const activeTurnIndex = turns.length - 1;
-  const anchors = useMemo(() => turns.map((turn, index) => ({
-    id: turn.anchor.entryId || String(turn.anchor.message.id ?? `turn-${index}`),
-    label: messageText(turn.anchor.message).replace(/\s+/g, " ").trim(),
-  })), [turns]);
+  const activeTurnIndex = historyWindow && (historyWindow.end < historyWindow.total || historyWindow.preview || historyWindow.latestAvailable) ? -1 : turns.length - 1;
+  const anchors = data.navigation(sessionId)?.items ?? [];
+  const anchorIndices = useMemo(() => new Map(anchors.map((anchor, index) => [anchor.id, index])), [anchors]);
+  const anchorIndexRef = useRef(anchorIndices);
+  anchorIndexRef.current = anchorIndices;
 
-  useEffect(() => {
-    setEditingEntryId(null);
-  }, [sessionId]);
 
-  useEffect(() => {
-    if (editingEntryId && !entryIds.includes(editingEntryId)) {
-      setEditingEntryId(null);
-    }
-  }, [editingEntryId, entryIds]);
+  const retainedEditingEntry = data.editing.get(scrollScope) ?? null;
+  useEffect(() => { setEditingEntryId(retainedEditingEntry); }, [retainedEditingEntry]);
 
   const beginMessageEdit = (entryId: string) => {
+    const key = data.draftKey(sessionId, historyWindow?.version.generation ?? "", entryId);
+    if (!data.drafts.has(key)) {
+      const item = historyWindow?.pages.flatMap((page) => page.items).find((item) => item.node.id === entryId);
+      if (item?.message) {
+        const original = messageText(item.message);
+        data.drafts.set(key, { text: original, original, contentToken: item.node.contentToken });
+      }
+    }
+    data.editing.set(scrollScope, entryId);
     setEditingEntryId(entryId);
   };
 
   const cancelMessageEdit = () => {
+    if (editingEntryId) data.drafts.delete(data.draftKey(sessionId, historyWindow?.version.generation ?? "", editingEntryId));
+    data.editing.delete(scrollScope);
     setEditingEntryId(null);
   };
 
   const submitMessageEdit = async (entryId: string, text: string) => {
     await onEdit(entryId, text);
+    data.drafts.delete(data.draftKey(sessionId, historyWindow?.version.generation ?? "", entryId));
+    data.editing.delete(scrollScope);
     setEditingEntryId(null);
   };
+
+  const capturePosition = (): ScrollPosition => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return { entryId: "", offset: 0, bottom: true };
+    const top = transcript.getBoundingClientRect().top;
+    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((item) => item.getBoundingClientRect().bottom > top + 8);
+    return { entryId: element?.dataset.entryId ?? "", offset: (element?.getBoundingClientRect().top ?? top) - top, bottom: atBottomRef.current && currentWindowRef.current?.following !== false };
+  };
+
+  const restorePosition = (position: ScrollPosition): boolean => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return false;
+    if (position.bottom) {
+      transcript.scrollTop = transcript.scrollHeight;
+      atBottomRef.current = currentWindowRef.current?.following !== false;
+      return true;
+    }
+    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((item) => item.dataset.entryId === position.entryId);
+    if (!element) return false;
+    transcript.scrollTop += element.getBoundingClientRect().top - transcript.getBoundingClientRect().top - position.offset;
+    atBottomRef.current = false;
+    return true;
+  };
+
+  const loadHistory = async (direction: "older" | "newer" | "latest", aroundId?: string) => {
+    if (loadingHistoryRef.current) return;
+    loadingHistoryRef.current = true;
+    setLoadingHistory(true);
+    const position = direction === "latest" && !aroundId ? { entryId: "", offset: 0, bottom: true } : capturePosition();
+    const retainedId = aroundId ?? position.entryId;
+    if (retainedId) {
+      revealedEntriesRef.current.add(retainedId);
+      const retained = messages[entryIds.indexOf(retainedId)];
+      if (retained?.role === "toolResult" && typeof retained.toolCallId === "string") {
+        data.disclosures.set(JSON.stringify([sessionId, historyWindow?.version.generation ?? "", "tool", retained.toolCallId]), true);
+      }
+    }
+    for (const id of revealedEntriesRef.current) if (!entryIds.includes(id) && id !== aroundId) revealedEntriesRef.current.delete(id);
+    pendingScrollRef.current = { scope: scrollScope, position: aroundId ? { entryId: aroundId, offset: 24, bottom: false } : position };
+    atBottomRef.current = false;
+    try {
+      await onLoadHistory(direction, aroundId);
+      if (aroundId && !data.session(sessionId)?.window.pages.some((page) => page.items.some((item) => item.node.id === aroundId))) pendingScrollRef.current = null;
+    }
+    catch { pendingScrollRef.current = null; /* Keep the successful window scrollable. */ }
+    finally { loadingHistoryRef.current = false; setLoadingHistory(false); }
+  };
+  const loadHistoryRef = useRef(loadHistory);
+  loadHistoryRef.current = loadHistory;
 
   const syncActiveAnchor = () => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
-    atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
+    atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96 && currentWindowRef.current?.following !== false;
+    const position = capturePosition();
+    data.scroll.set(scrollScope, position);
+    data.lastScroll.set(sessionId, position);
     setShowScrollToBottom(!atBottomRef.current);
     if (turns.length === 0) return;
     const focus = transcript.getBoundingClientRect().top + transcript.clientHeight * 0.28;
@@ -1240,21 +1389,19 @@ function MessageListContent({
       const nextDistance = Math.abs(element.getBoundingClientRect().top - focus);
       if (nextDistance < distance) {
         distance = nextDistance;
-        nearest = index;
+        nearest = anchorIndexRef.current.get(turns[index]?.anchor.entryId ?? "") ?? nearest;
       }
     });
     setActiveAnchorIndex(nearest);
   };
 
   const scrollToAnchor = (index: number) => {
-    const transcript = transcriptRef.current;
-    const target = turnRefs.current[index];
-    if (!transcript || !target) return;
-    const top = target.getBoundingClientRect().top
-      - transcript.getBoundingClientRect().top
-      + transcript.scrollTop
-      - 20;
+    const transcript = transcriptRef.current, anchor = anchors[index];
+    if (!transcript || !anchor) return;
+    const target = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((element) => element.dataset.entryId === anchor.id);
     setActiveAnchorIndex(index);
+    if (!target) { void loadHistory("latest", anchor.id); return; }
+    const top = target.getBoundingClientRect().top - transcript.getBoundingClientRect().top + transcript.scrollTop - 20;
     transcript.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   };
 
@@ -1413,8 +1560,15 @@ function MessageListContent({
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
-    transcript.scrollTop = transcript.scrollHeight;
-    atBottomRef.current = true;
+    const saved = data.scroll.get(scrollScope) ?? data.lastScroll.get(sessionId);
+    if (!saved || !restorePosition(saved)) {
+      transcript.scrollTop = transcript.scrollHeight;
+      atBottomRef.current = currentWindowRef.current?.following !== false;
+      if (saved?.entryId) {
+        pendingScrollRef.current = { scope: scrollScope, position: saved };
+        void data.pageHistory(sessionId, "latest", saved.entryId).catch(() => { pendingScrollRef.current = null; });
+      }
+    }
     setShowScrollToBottom(false);
     anchorGestureRef.current = null;
     messageAnchorsRef.current?.setGestureIndex(null);
@@ -1423,12 +1577,26 @@ function MessageListContent({
     messageAnchorsRef.current?.setPreviewIndex(null);
     messageAnchorsRef.current?.setPreviewPosition(null);
     setAnchorOpen(false);
-    setActiveAnchorIndex(Math.max(0, turns.length - 1));
+    setActiveAnchorIndex(Math.max(0, anchors.length - 1));
     const frame = requestAnimationFrame(() => {
-      transcript.scrollTop = transcript.scrollHeight;
+      if (saved) restorePosition(saved);
+      else transcript.scrollTop = transcript.scrollHeight;
     });
     return () => cancelAnimationFrame(frame);
-  }, [sessionId]);
+  }, [scrollScope]);
+
+  useLayoutEffect(() => {
+    if (loadingHistoryRef.current) return;
+    const pending = pendingScrollRef.current;
+    if (!pending) return;
+    if (pending.scope !== scrollScope) { pendingScrollRef.current = null; return; }
+    if (restorePosition(pending.position)) {
+      pendingScrollRef.current = null;
+      data.scroll.set(scrollScope, pending.position);
+      data.lastScroll.set(sessionId, pending.position);
+      previousScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
+    }
+  }, [entryIds, loadingHistory, scrollScope]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
@@ -1467,7 +1635,18 @@ function MessageListContent({
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const composer = stageRef.current?.closest(".pi-conversation")?.querySelector(".pi-composer-wrap");
-    const onScroll = () => syncActiveAnchor();
+    const onScroll = () => {
+      if (loadingHistoryRef.current || pendingScrollRef.current) return;
+      const upwards = transcript.scrollTop < previousScrollTopRef.current;
+      const downwards = transcript.scrollTop > previousScrollTopRef.current;
+      previousScrollTopRef.current = transcript.scrollTop;
+      syncActiveAnchor();
+      const window = currentWindowRef.current;
+      if (upwards && transcript.scrollTop < 320 && window?.older) void loadHistoryRef.current("older");
+      else if (downwards && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 320 && window && !window.following) {
+        if (window.newer || window.end < window.total || window.latestAvailable && !window.preview) void loadHistoryRef.current("newer");
+      }
+    };
     const onResize = () => {
       if (composer) {
         stageRef.current?.style.setProperty("--pi-composer-height", `${composer.getBoundingClientRect().height}px`);
@@ -1485,7 +1664,7 @@ function MessageListContent({
       transcript.removeEventListener("scroll", onScroll);
       observer.disconnect();
     };
-  }, [turns.length]);
+  }, [turns.length, scrollScope]);
 
   return (
     <div
@@ -1497,11 +1676,11 @@ function MessageListContent({
       onPointerCancelCapture={(event) => finishAnchorGesture(event, true)}
     >
       <div className="pi-transcript-scroll pi-overlay-scroll-host">
-        <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite">
+        <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite" data-history-start={historyWindow?.start} data-history-end={historyWindow?.end} data-history-loading={loadingHistory || undefined}>
           <div className="pi-transcript-inner">
             {leading.map(({ message, entryId }, index) => (
               <Message
-                key={String(message.id ?? `leading-${message.role}-${index}`)}
+                key={entryId || String(message.id ?? `leading-${message.role}-${index}`)}
                 message={message}
                 toolResults={toolResults}
                 entryId={entryId}
@@ -1518,7 +1697,7 @@ function MessageListContent({
             {turns.map((turn, index) => (
               <div
                 className="pi-turn-anchor"
-                key={String(turn.anchor.message.id ?? `turn-${index}`)}
+                key={turn.anchor.entryId || String(turn.anchor.message.id ?? `turn-${index}`)}
                 ref={(element) => {
                   turnRefs.current[index] = element;
                 }}
@@ -1529,6 +1708,7 @@ function MessageListContent({
                   streamingMessage={index === activeTurnIndex ? streamingMessage : null}
                   busy={index === activeTurnIndex && busy && !compacting}
                   active={index === activeTurnIndex}
+                  revealHistory={turn.tail.some((item) => item.entryId && revealedEntriesRef.current.has(item.entryId))}
                   onFork={onFork}
                   onOpenTerminal={onOpenTerminal}
                   editingEntryId={editingEntryId}
@@ -1551,6 +1731,9 @@ function MessageListContent({
               </div>
             )}
             {compacting && <CompactionStatus />}
+            {(toolProgress ?? []).filter((tool) => !toolCalls.has(tool.toolCallId)).map((tool) => <ToolCall key={tool.toolCallId}
+              block={{ type: "toolCall", id: tool.toolCallId, name: tool.toolName, arguments: tool.args }}
+              result={toolResults.get(tool.toolCallId)} streaming onOpenTerminal={onOpenTerminal} />)}
             {pendingMessages.map((message, index) => (
               <Message
                 key={String(message.id ?? `pending-${index}`)}
@@ -1560,6 +1743,7 @@ function MessageListContent({
                 onOpenTerminal={onOpenTerminal}
               />
             ))}
+
           </div>
         </div>
         <OverlayScrollbar viewportRef={transcriptRef} />
@@ -1573,6 +1757,10 @@ function MessageListContent({
             onClick={() => {
               const transcript = transcriptRef.current;
               if (!transcript) return;
+              if (currentWindowRef.current?.following === false || currentWindowRef.current?.latestAvailable) {
+                void loadHistory("latest");
+                return;
+              }
               atBottomRef.current = true;
               transcript.scrollTop = transcript.scrollHeight;
               setShowScrollToBottom(false);

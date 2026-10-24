@@ -1,8 +1,10 @@
 package surfacewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,5 +81,30 @@ func TestFixedHistoryAndNodeTokensIgnoreUnrelatedRevisions(t *testing.T) {
 	var page HistoryPage
 	if json.Unmarshal(current.Data, &page) != nil || len(page.Items) != 2 || page.Items[0].Node.ID != first.ID() || page.Items[1].Node.ID == last.ID() {
 		t.Fatalf("new path = %s", current.Data)
+	}
+}
+
+func TestHistoryPageKeepsLargeTextAndThinkingInline(t *testing.T) {
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	text, thinking := strings.Repeat("完整正文", 4000), strings.Repeat("完整思考", 4000)
+	textBlock, _ := llm.NewTextBlock(text)
+	thinkingBlock, _ := llm.NewThinkingBlock(thinking)
+	message, err := llm.NewAssistantRichMessage([]llm.AssistantBlock{thinkingBlock, textBlock}, llm.FinishStop, llm.Usage{}, time.UnixMilli(1), llm.AssistantProvenance{Provider: "test", API: "test", Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.AppendLLMMessage(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	value, err := ReadSessionResource(context.Background(), &resourceReadAPI{manager: manager}, manager.SessionID(), "history", ReadResourceRequest{MaxBytes: 4096}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(value.Data, []byte(text)) || !bytes.Contains(value.Data, []byte(thinking)) || bytes.Contains(value.Data, []byte(`"deferred"`)) || bytes.Contains(value.Data, []byte(`"thinkingRef"`)) {
+		t.Fatal("large message text or thinking was deferred/truncated")
 	}
 }

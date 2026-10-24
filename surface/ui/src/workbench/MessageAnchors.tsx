@@ -102,6 +102,9 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
               key={item.id}
               type="button"
               className={index === displayedActiveIndex ? "is-active" : ""}
+              // Long indexes use the same proportional slots as mobile. The
+              // normal desktop spacing stays intact; the track cannot overflow.
+              style={!props.mobile && props.items.length > 30 ? { minHeight: 0, flexBasis: 0 } : undefined}
               tabIndex={props.mobile ? -1 : 0}
               aria-label={`第 ${index + 1} 轮：${item.label}`}
               onClick={() => props.onSelect(index)}

@@ -19,7 +19,6 @@ type sessionResourceReader interface {
 	ReadSnapshot(session.SnapshotOptions) (session.ReadSnapshot, error)
 	ReadHistory(session.HistoryQuery) (session.HistoryPage, error)
 	ReadNodes(session.NodeQuery) (session.NodePage, error)
-	ReadEntryChunk(string, string, int, int) (session.EntryChunk, error)
 	ReadEntry(string, string) (session.EntrySnapshot, error)
 }
 
@@ -105,18 +104,6 @@ func (s *Service) ReadSessionMetadata(id string) (SessionSnapshot, error) {
 		result.Version, result.FilePath, result.LeafID = value.Version, value.Info.Path, value.LeafID
 		result.Info = discoveredSessionInfo(value.Info, pathIDs)
 		return value.Info.ID, nil
-	})
-	return result, err
-}
-
-func (s *Service) ReadEntryChunk(id, entryID, generation string, offset, length int) (session.EntryChunk, error) {
-	var result session.EntryChunk
-	err := s.readSessionResource(id, func(reader sessionResourceReader) (string, error) {
-		var err error
-		result, err = reader.ReadEntryChunk(entryID, generation, offset, length)
-		// Readers are resolved by this session ID. Entry chunks additionally
-		// require their source generation to prevent cross-replacement assembly.
-		return result.SessionID, err
 	})
 	return result, err
 }

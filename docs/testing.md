@@ -66,7 +66,8 @@ go test ./internal/surfacewire -run '^$' \
 不包含 wire 编码；`entry-json-B/op` 是返回的内联原始条目字节数，不能与 `wire-B/op` 混用。
 `HistoryPageWireUnopenedWarm`、`HistoryPageWireActive` 和 `LiveReadWireActive` 包含共享
 HTTP/IPC 资源投影与响应编码；`HistoryPageWireUnchanged` 测未变化响应，仍包含服务端页投影、
-编码和 token 计算。它们不包含 HTTP、SSE、IPC 或 UI 渲染耗时。
+编码和 token 计算。`NavigationFirstWire` 和 `NavigationTailWire` 分别读取固定分支的用户节点
+索引首批和已知叶节点之后的索引尾部，不包含消息正文。它们不包含 HTTP、SSE、IPC 或 UI 渲染耗时。
 `BenchmarkDataEventReplay` 独立测 Application 事件缓冲的最近 64/4,096 条事件回放和
 保留窗口已满时的发布，不包含 SSE 编码和网络传输。
 `B/op` 是每次查询的分配量，不是进程峰值内存；`wire-B/op` 包含临时目录路径，跨运行可能

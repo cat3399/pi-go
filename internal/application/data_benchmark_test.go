@@ -218,6 +218,21 @@ func BenchmarkDataReads(b *testing.B) {
 					}
 				}
 			})
+			for _, kind := range []string{"NavigationFirstWire", "NavigationTailWire"} {
+				b.Run(kind, func(b *testing.B) {
+					metadata, err := api.ReadSessionMetadata(corpus.firstID)
+					if err != nil {
+						b.Fatal(err)
+					}
+					query := surfacewire.ReadResourceRequest{LeafID: metadata.LeafID, Role: "user", Limit: 256}
+					if kind == "NavigationTailWire" && metadata.LeafID != nil {
+						query.AfterID = *metadata.LeafID
+					}
+					benchmarkDataQuery(b, func() (any, error) {
+						return surfacewire.ReadSessionResource(context.Background(), api, corpus.firstID, "nodes", query, "")
+					})
+				})
+			}
 			b.Run("ContextActive", func(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) {
 					return surfacewire.SessionContextFor(api, corpus.firstID, "", false, true)

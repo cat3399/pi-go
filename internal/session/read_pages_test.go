@@ -91,6 +91,10 @@ func TestHistoryPagesLocateNodesMoveBothWaysAndReadOnlyNewTail(t *testing.T) {
 	if err != nil || !tail.Connected || len(tail.Items) != 2 || tail.Items[0].Node.ID != entries[18].ID() {
 		t.Fatalf("tail = %#v, %v", tail, err)
 	}
+	forward, err := m.ReadHistory(HistoryQuery{AfterID: entries[9].ID(), Direction: PageNewer, Limit: 4})
+	if err != nil || !forward.Connected || forward.Start != 10 || forward.End != 14 || forward.Items[0].Node.ID != entries[10].ID() || forward.Newer == nil {
+		t.Fatalf("forward tail = %#v, %v", forward, err)
+	}
 	root := ""
 	empty, err := m.ReadHistory(HistoryQuery{LeafID: &root})
 	if err != nil || len(empty.Items) != 0 || empty.Total != 0 {
@@ -134,33 +138,39 @@ func TestHistoryCursorDoesNotResolveParentsAddedAfterItsLogPrefix(t *testing.T) 
 	}
 }
 
-func TestOversizedHistoryEntryRemainsAvailableThroughBoundedChunks(t *testing.T) {
+func TestOversizedHistoryEntryIsCompleteAndPagesMakeProgress(t *testing.T) {
 	m, err := InMemorySessionManager(t.TempDir(), NewSessionOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	entry, err := m.AppendLLMMessage(context.Background(), mustUserMessage(t, strings.Repeat("正文", 20000), time.UnixMilli(1)))
+	first, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, "before", time.UnixMilli(1)))
+	large, err := m.AppendLLMMessage(context.Background(), mustUserMessage(t, strings.Repeat("正文", 20000), time.UnixMilli(2)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	last, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, "after", time.UnixMilli(3)))
 	page, err := m.ReadHistory(HistoryQuery{MaxBytes: 8 << 10})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Entry != nil || page.Items[0].Node.ID != entry.ID() || page.Items[0].Node.Preview == "" {
-		t.Fatalf("oversized page = %#v, %v", page, err)
+	if err != nil || len(page.Items) != 1 || page.Items[0].Node.ID != last.ID() || page.Older == nil {
+		t.Fatalf("latest page = %#v, %v", page, err)
 	}
-	var raw []byte
-	for len(raw) < page.Items[0].Node.RawBytes {
-		chunk, err := m.ReadEntryChunk(entry.ID(), page.Version.Generation, len(raw), 4096)
-		if err != nil || len(chunk.Data) == 0 || len(chunk.Data) > 4096 {
-			t.Fatalf("chunk = %#v, %v", chunk, err)
-		}
-		raw = append(raw, chunk.Data...)
+	middle, err := m.ReadHistory(HistoryQuery{Cursor: page.Older, MaxBytes: 8 << 10})
+	if err != nil || len(middle.Items) != 1 || middle.Items[0].Entry == nil || middle.Items[0].Node.ID != large.ID() || middle.Older == nil || middle.Newer == nil {
+		t.Fatalf("oversized page = %#v, %v", middle, err)
 	}
-	if !bytes.Equal(raw, entry.RawJSON()) {
-		t.Fatal("chunked entry was truncated or re-encoded")
+	if !bytes.Equal(middle.Items[0].Entry.RawJSON(), large.RawJSON()) {
+		t.Fatal("oversized content was changed")
 	}
-	if _, err := m.ReadEntryChunk(entry.ID(), "wrong-generation", 0, 4096); !errors.Is(err, ErrReadCursorUnavailable) {
-		t.Fatalf("chunk accepted another generation: %v", err)
+	older, err := m.ReadHistory(HistoryQuery{Cursor: middle.Older, MaxBytes: 8 << 10})
+	if err != nil || len(older.Items) != 1 || older.Items[0].Node.ID != first.ID() || older.Older != nil {
+		t.Fatalf("older page = %#v, %v", older, err)
+	}
+	newer, err := m.ReadHistory(HistoryQuery{Cursor: older.Newer, MaxBytes: 8 << 10})
+	if err != nil || len(newer.Items) != 1 || newer.Items[0].Node.ID != large.ID() || newer.Items[0].Entry == nil {
+		t.Fatalf("newer page = %#v, %v", newer, err)
+	}
+	if _, err := m.ReadEntry(large.ID(), "wrong-generation"); !errors.Is(err, ErrReadCursorUnavailable) {
+		t.Fatalf("entry accepted another generation: %v", err)
 	}
 }
 
@@ -260,5 +270,153 @@ func TestReadIndexOwnsNoWriterAndDetectsSameSizeTimestampReplacement(t *testing.
 	}
 	if valid, err := next.ValidateSource(); err != nil || valid {
 		t.Fatalf("in-place rewrite with restored mtime validated old data: %t, %v", valid, err)
+	}
+}
+
+func TestPagedTreeNodesPreserveCompleteTreeOrderAndBranchDepth(t *testing.T) {
+	m, err := InMemorySessionManager(t.TempDir(), NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	root, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, "root", time.UnixMilli(1)))
+	_, _ = m.AppendLLMMessage(context.Background(), mustUserMessage(t, "later branch", time.UnixMilli(20)))
+	_, _ = m.AppendLLMMessage(context.Background(), mustUserMessage(t, "later child", time.UnixMilli(21)))
+	if err := m.Branch(root.ID()); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = m.AppendLLMMessage(context.Background(), mustUserMessage(t, "earlier branch", time.UnixMilli(10)))
+	_, _ = m.AppendLLMMessage(context.Background(), mustUserMessage(t, "earlier child", time.UnixMilli(11)))
+	var want []string
+	var wantDepth []int
+	var visit func([]TreeNode, int)
+	visit = func(nodes []TreeNode, depth int) {
+		for _, node := range nodes {
+			want = append(want, node.Entry.ID())
+			wantDepth = append(wantDepth, depth)
+			childDepth := depth
+			if len(node.Children) > 1 {
+				childDepth++
+			}
+			visit(node.Children, childDepth)
+		}
+	}
+	visit(m.Tree(), 0)
+	var got []string
+	var gotDepth []int
+	query := NodeQuery{Tree: true, Limit: 2}
+	for {
+		page, err := m.ReadNodes(query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, node := range page.Items {
+			got = append(got, node.ID)
+			gotDepth = append(gotDepth, node.BranchDepth)
+		}
+		if page.Next == nil {
+			break
+		}
+		query.Cursor = page.Next
+	}
+	if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(gotDepth, wantDepth) {
+		t.Fatalf("paged nodes = %v/%v, tree = %v/%v", got, gotDepth, want, wantDepth)
+	}
+	query.Tree = false
+	if _, err := m.ReadNodes(query); !errors.Is(err, ErrInvalidReadQuery) {
+		t.Fatalf("tree cursor accepted a different order: %v", err)
+	}
+}
+
+func TestPathNodeIndexAndTailKeepTheirBranchWithoutReadingBodies(t *testing.T) {
+	m, err := InMemorySessionManager(t.TempDir(), NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	var entries []Entry
+	for i := 0; i < 10; i++ {
+		entry, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, fmt.Sprintf("node %d", i), time.UnixMilli(int64(i+1))))
+		entries = append(entries, entry)
+	}
+	anchor := entries[9].ID()
+	page, err := m.ReadNodes(NodeQuery{LeafID: &anchor, Role: "user", Limit: 3})
+	if err != nil || len(page.Items) != 3 || page.Next == nil {
+		t.Fatalf("page = %#v, %v", page, err)
+	}
+	if err := m.Branch(entries[1].ID()); err != nil {
+		t.Fatal(err)
+	}
+	off, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, "off branch", time.UnixMilli(100)))
+	next, err := m.ReadNodes(NodeQuery{LeafID: &anchor, Role: "user", Limit: 20, Cursor: page.Next})
+	if err != nil || len(next.Items) != 7 || next.Items[0].ID != entries[3].ID() || next.Items[0].Position != 3 || next.Items[6].ID != anchor {
+		t.Fatalf("fixed branch index = %#v, %v", next, err)
+	}
+	if err := m.Branch(anchor); err != nil {
+		t.Fatal(err)
+	}
+	added, _ := m.AppendLLMMessage(context.Background(), mustUserMessage(t, "new tail", time.UnixMilli(101)))
+	leaf := added.ID()
+	tail, err := m.ReadNodes(NodeQuery{LeafID: &leaf, AfterID: anchor, Role: "user"})
+	if err != nil || !tail.Connected || len(tail.Items) != 1 || tail.Items[0].ID != leaf || tail.Items[0].Position != 10 {
+		t.Fatalf("tail = %#v, %v", tail, err)
+	}
+	offLeaf := off.ID()
+	diverged, err := m.ReadNodes(NodeQuery{LeafID: &offLeaf, AfterID: leaf, Role: "user"})
+	if err != nil || diverged.Connected || len(diverged.Items) != 3 {
+		t.Fatalf("changed branch = %#v, %v", diverged, err)
+	}
+	if _, err := m.ReadNodes(NodeQuery{LeafID: &offLeaf, Cursor: page.Next, Role: "user"}); !errors.Is(err, ErrInvalidReadQuery) {
+		t.Fatalf("cursor accepted another path: %v", err)
+	}
+	if _, err := m.AppendCompaction(context.Background(), "summary", entries[8].ID(), 10, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ = m.LeafID()
+	controls, err := m.ReadNodes(NodeQuery{LeafID: &leaf, Type: "compaction"})
+	if err != nil || len(controls.Items) != 1 || controls.Items[0].Type != "compaction" {
+		t.Fatalf("control nodes = %#v, %v", controls, err)
+	}
+}
+
+func TestEntryContentIdentitySurvivesReadOwnerChangeAndRejectsReusedID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.jsonl")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(testHeader+"\n"+userEntryJSON(body, "same-id", "null", 1)+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() (ReadVersion, string) {
+		t.Helper()
+		manager, err := InMemorySessionManager(dir, NewSessionOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer manager.Close()
+		if err := manager.SetSessionFile(path); err != nil {
+			t.Fatal(err)
+		}
+		page, err := manager.ReadHistory(HistoryQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := manager.ReadEntry("same-id", page.Version.Generation)
+		if err != nil || entry.ContentToken == "" || entry.ContentToken != page.Items[0].Node.ContentToken {
+			t.Fatalf("entry/page identity differs: %v", err)
+		}
+		return page.Version, entry.ContentToken
+	}
+	write("original")
+	first, original := read()
+	second, reopened := read()
+	if first.Generation == second.Generation || original != reopened {
+		t.Fatal("an owner change changed immutable entry identity")
+	}
+	write("replacement")
+	_, replacement := read()
+	if replacement == original {
+		t.Fatal("same entry ID with new content reused immutable identity")
 	}
 }

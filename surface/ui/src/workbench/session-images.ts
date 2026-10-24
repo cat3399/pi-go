@@ -1,8 +1,5 @@
-import type { AgentMessage, MessageContentBlock } from "../contracts";
-
-function referenceKey(block: MessageContentBlock): string | null {
-  return block.imageRef ? JSON.stringify([block.imageRef.entryId, block.imageRef.blockIndex]) : null;
-}
+import type { AgentMessage, MessageContentBlock, ReadResourceRequest, ResourceResponse, SessionResources } from "../contracts";
+import { ResourceCache } from "./resource-cache.ts";
 
 function inlineSource(block: MessageContentBlock): string | null {
   if (typeof block.data === "string" && typeof block.mimeType === "string") {
@@ -15,35 +12,31 @@ function inlineSource(block: MessageContentBlock): string | null {
   return null;
 }
 
-function liveMessageKey(message: AgentMessage): string | null {
-  if (message.pendingPrompt || typeof message.timestamp !== "number") return null;
-  const content = Array.isArray(message.content) ? message.content.map((block) => {
-    if (block.type !== "image") return [block.type, block.text];
-    const source = block.source as Record<string, unknown> | undefined;
-    const data = typeof block.data === "string" ? block.data : source?.data;
-    const size = typeof data === "string"
-      ? Math.floor(data.length * 3 / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0)
-      : block.byteSize;
-    return ["image", block.mimeType ?? source?.media_type, size];
-  }) : message.content;
-  return JSON.stringify([message.role, message.timestamp, message.toolCallId, message.customType, content]);
-}
+type ImageLoader = (id: string, query: ReadResourceRequest, known: string) => Promise<ResourceResponse<SessionResources["image"]>>;
 
-// Display-only cache for the current session. History remains authoritative for
-// messages; refreshing it must not discard image bytes already held by the UI.
+// Media uses the same byte budget as the shared presentation cache. A live
+// image becomes an entry image only through the core's exact append receipt.
 export class SessionImageCache {
   private sessionId = "";
-  private readonly sources = new Map<string, string>();
+  private generation = "";
+  private readonly cache: ResourceCache;
+  private readonly loader?: ImageLoader;
 
-  selectSession(sessionId: string): void {
-    if (this.sessionId === sessionId) return;
+  constructor(loader?: ImageLoader, cache = new ResourceCache(24 * 1024 * 1024)) { this.loader = loader; this.cache = cache; }
+
+  selectSession(sessionId: string, generation = ""): void {
     this.sessionId = sessionId;
-    this.sources.clear();
+    this.generation = generation;
+  }
+
+  private referenceKey(block: MessageContentBlock): string | null {
+    const ref = block.imageRef;
+    return ref ? JSON.stringify(["image", this.sessionId, ref.generation ?? this.generation, ref.entryId, ref.blockIndex]) : null;
   }
 
   availableSource(block: MessageContentBlock): string | null {
-    const key = referenceKey(block);
-    return (key ? this.sources.get(key) : null) ?? inlineSource(block);
+    const key = this.referenceKey(block);
+    return (key ? this.cache.peek<string>(key) : null) ?? inlineSource(block);
   }
 
   source(block: MessageContentBlock): string {
@@ -55,43 +48,36 @@ export class SessionImageCache {
   }
 
   rememberLoaded(block: MessageContentBlock, source: string): void {
-    const key = referenceKey(block);
-    if (key && source) this.sources.set(key, source);
+    const key = this.referenceKey(block);
+    if (key && source) this.cache.put(key, source);
   }
 
-  reconcile(current: AgentMessage[], history: AgentMessage[]): void {
-    const live = new Map<string, AgentMessage | null>();
-    for (const message of current) {
-      const key = liveMessageKey(message);
-      // Live events do not carry entry IDs. Only use an unambiguous identity
-      // until the first history refresh supplies the durable image reference.
-      if (key) live.set(key, live.has(key) ? null : message);
-      if (!Array.isArray(message.content)) continue;
-      for (const block of message.content) {
-        if (!block.imageRef) continue;
-        const available = this.availableSource(block);
-        if (available) this.rememberLoaded(block, available);
-      }
-    }
-    const occurrences = new Map<string, number>();
-    for (const message of history) {
-      const key = liveMessageKey(message);
-      if (key) occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
-    }
-    for (const message of history) {
-      const key = liveMessageKey(message);
-      const previous = key && occurrences.get(key) === 1 ? live.get(key) : null;
-      if (!previous || !Array.isArray(previous.content) || !Array.isArray(message.content)) continue;
-      if (previous.content.length !== message.content.length) continue;
-      for (let index = 0; index < message.content.length; index++) {
-        const block = message.content[index];
-        const before = previous.content[index];
-        if (block?.type !== "image" || !block.imageRef || before?.type !== "image") continue;
-        // Existing references must match exactly across branch changes.
-        if (before.imageRef && referenceKey(before) !== referenceKey(block)) continue;
-        const available = this.availableSource(before);
-        if (available) this.rememberLoaded(block, available);
-      }
-    }
+  rememberMessage(sessionId: string, messageId: string, message: AgentMessage): void {
+    if (!Array.isArray(message.content) || !message.content.some((block) => block.type === "image")) return;
+    this.cache.put(JSON.stringify(["live-images", sessionId, messageId]), message.content.map(inlineSource));
+  }
+
+  associate(sessionId: string, messageId: string, entryId: string, generation: string): void {
+    const key = JSON.stringify(["live-images", sessionId, messageId]);
+    const sources = this.cache.peek<(string | null)[]>(key);
+    sources?.forEach((source, blockIndex) => {
+      if (source) this.cache.put(JSON.stringify(["image", sessionId, generation, entryId, blockIndex]), source);
+    });
+    this.cache.forget(key);
+  }
+
+  async load(block: MessageContentBlock): Promise<string> {
+    const source = this.source(block);
+    if (source) return source;
+    const ref = block.imageRef, key = this.referenceKey(block), id = this.sessionId;
+    if (!ref || !key || !this.loader) throw new Error("图片引用不可用");
+    const generation = ref.generation ?? this.generation;
+    const result = await this.cache.read(JSON.stringify(["image-resource", id, generation, ref.entryId, ref.blockIndex]), (known) => this.loader!(id, {
+      entryId: ref.entryId, blockIndex: ref.blockIndex, generation,
+    }, known));
+    if (!result.data) throw new Error("图片数据不可用");
+    const url = `data:${result.data.mimeType};base64,${result.data.data}`;
+    this.cache.put(key, url);
+    return url;
   }
 }
