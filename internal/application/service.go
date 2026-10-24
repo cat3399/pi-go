@@ -531,6 +531,10 @@ func (s *Service) Dispatch(ctx context.Context, id string, command Command) (Com
 
 func (s *Service) publishCommandEffect(managed *managedSession, command Command, result CommandResult) {
 	id, _, _ := managed.identity()
+	if command.Type() == CommandReload {
+		_, cwd, _ := managed.identity()
+		s.publishConfiguration(cwd, true, true)
+	}
 	switch value := result.(type) {
 	case ForkResult:
 		if !value.Cancelled && value.SessionID != nil {

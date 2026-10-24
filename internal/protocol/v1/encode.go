@@ -436,6 +436,8 @@ func encodeApplicationEvent(value application.Event) (any, error) {
 		}, nil
 	case application.ProjectCatalogEvent:
 		return map[string]any{"type": "project_catalog", "change": event.Change, "path": event.Path}, nil
+	case application.ConfigurationResourceEvent:
+		return map[string]any{"type": "configuration_resource", "cwd": event.CWD, "models": event.Models, "resources": event.Resources}, nil
 	default:
 		return nil, fmt.Errorf("unsupported application event %T", value.Value)
 	}

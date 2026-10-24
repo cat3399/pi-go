@@ -218,6 +218,7 @@ func (s *Service) InstallSkill(ctx context.Context, request SkillInstallRequest)
 	if err := s.publishSkill(ctx, cwd, request.Scope, remote, false); err != nil {
 		return SkillInfo{}, err
 	}
+	s.publishSkillConfiguration(cwd, request.Scope)
 	return s.findInstalledSkill(ctx, cwd, request.Scope, parsed.Source+"@"+parsed.Name)
 }
 
@@ -290,6 +291,7 @@ func (s *Service) UpdateSkill(ctx context.Context, request SkillUpdateRequest) (
 	if err := s.publishSkill(ctx, cwd, request.Scope, remote, true); err != nil {
 		return SkillInfo{}, err
 	}
+	s.publishSkillConfiguration(cwd, request.Scope)
 	return s.findInstalledSkill(ctx, cwd, request.Scope, request.Package)
 }
 

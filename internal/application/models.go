@@ -266,7 +266,11 @@ func (s *Service) SetProviderAPIKey(ctx context.Context, providerID, apiKey stri
 	}
 	s.modelMu.Lock()
 	defer s.modelMu.Unlock()
-	return store.SetAPIKey(normalizeContext(ctx), providerID, apiKey, nil)
+	err = store.SetAPIKey(normalizeContext(ctx), providerID, apiKey, nil)
+	if err == nil {
+		s.publishConfiguration("", true, false)
+	}
+	return err
 }
 
 func (s *Service) DeleteProviderCredential(ctx context.Context, providerID, expectedType string) error {
@@ -287,7 +291,11 @@ func (s *Service) DeleteProviderCredential(ctx context.Context, providerID, expe
 	if expectedType != "" && credential.Type != expectedType {
 		return fmt.Errorf("%w: %s is authenticated with %s", ErrCredentialTypeMismatch, providerID, credential.Type)
 	}
-	return store.Delete(normalizeContext(ctx), providerID)
+	err = store.Delete(normalizeContext(ctx), providerID)
+	if err == nil {
+		s.publishConfiguration("", true, false)
+	}
+	return err
 }
 
 func (s *Service) ReadModelsConfig(ctx context.Context) (ModelsConfigDocument, error) {
@@ -342,7 +350,11 @@ func (s *Service) WriteModelsConfig(ctx context.Context, document ModelsConfigDo
 	if err := os.MkdirAll(s.paths.AgentDir, 0o700); err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(s.paths.AgentDir, "models.json"), encoded, 0o600)
+	err = writeFileAtomic(filepath.Join(s.paths.AgentDir, "models.json"), encoded, 0o600)
+	if err == nil {
+		s.publishConfiguration("", true, false)
+	}
+	return err
 }
 
 func cloneApplicationThinkingMap(values map[provider.ThinkingLevel]*string) map[provider.ThinkingLevel]*string {

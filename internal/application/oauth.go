@@ -131,6 +131,9 @@ func (s *Service) StartProviderOAuth(ctx context.Context, providerID string) (*P
 				s.modelMu.Unlock()
 			}
 		}
+		if waitErr == nil {
+			s.publishConfiguration("", true, false)
+		}
 		login.complete(waitErr)
 		cancel(context.Canceled)
 	}()

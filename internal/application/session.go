@@ -280,6 +280,8 @@ func cloneEventValue(value EventValue) EventValue {
 		return value
 	case ProjectCatalogEvent:
 		return value
+	case ConfigurationResourceEvent:
+		return value
 	case OperationEvent:
 		return value
 	default:

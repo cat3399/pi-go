@@ -372,14 +372,15 @@ type State struct {
 type EventType string
 
 const (
-	EventAgentSession        EventType = "agent_session"
-	EventOperation           EventType = "operation"
-	EventSessionCatalog      EventType = "session_catalog"
-	EventProjectCatalog      EventType = "project_catalog"
-	EventSessionResource     EventType = "session_resource"
-	EventMessageReceipt      EventType = "message_receipt"
-	EventLiveResource        EventType = "live_resource"
-	EventSessionAvailability EventType = "session_availability"
+	EventAgentSession          EventType = "agent_session"
+	EventOperation             EventType = "operation"
+	EventSessionCatalog        EventType = "session_catalog"
+	EventProjectCatalog        EventType = "project_catalog"
+	EventSessionResource       EventType = "session_resource"
+	EventMessageReceipt        EventType = "message_receipt"
+	EventLiveResource          EventType = "live_resource"
+	EventSessionAvailability   EventType = "session_availability"
+	EventConfigurationResource EventType = "configuration_resource"
 )
 
 type OperationStatus string

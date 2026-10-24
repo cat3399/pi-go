@@ -74,6 +74,7 @@ func (s *Service) TrustProject(ctx context.Context, cwd string) (ProjectTrustSta
 	if err := store.Set(ctx, cwd, true); err != nil {
 		return ProjectTrustStatus{}, err
 	}
+	defer s.publishConfiguration(cwd, true, true)
 
 	ids := make(map[string]struct{})
 	for _, managed := range s.activeSessions() {

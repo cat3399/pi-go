@@ -209,6 +209,11 @@ func (s *Service) SetSkillModelInvocation(ctx context.Context, cwd, filePath str
 	if err := writeFileAtomic(requested, updated, info.Mode().Perm()); err != nil {
 		return err
 	}
+	scope := cwd
+	if selected.SourceInfo.Scope == "user" || selected.SourceInfo.Scope == "global" {
+		scope = ""
+	}
+	defer s.publishConfiguration(scope, false, true)
 	verified, verifyErr := s.ListSkills(ctx, cwd)
 	if verifyErr == nil {
 		for _, value := range verified.Skills {

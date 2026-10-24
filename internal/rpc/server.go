@@ -48,7 +48,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		// protocol. Keep pi's JSONL RPC lifecycle vocabulary and settlement
 		// boundary unchanged, including asynchronous manager invalidations.
 		switch event.Value.(type) {
-		case application.SessionResourceEvent, application.MessageReceiptEvent, application.LiveResourceEvent, application.SessionAvailabilityEvent:
+		case application.SessionResourceEvent, application.MessageReceiptEvent, application.LiveResourceEvent, application.SessionAvailabilityEvent, application.ConfigurationResourceEvent:
 			return
 		}
 		record, err := encodeApplicationEvent(event)
