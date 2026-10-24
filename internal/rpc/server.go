@@ -44,6 +44,13 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer cancel()
 
 	unsubscribe := s.backend.Subscribe(func(_ context.Context, event application.Event) {
+		// Read invalidations/receipts belong to the resource synchronization
+		// protocol. Keep pi's JSONL RPC lifecycle vocabulary and settlement
+		// boundary unchanged, including asynchronous manager invalidations.
+		switch event.Value.(type) {
+		case application.SessionResourceEvent, application.MessageReceiptEvent:
+			return
+		}
 		record, err := encodeApplicationEvent(event)
 		if err == nil {
 			err = s.output.Write(record)

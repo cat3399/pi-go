@@ -23,6 +23,7 @@ type activeRun struct {
 	turn             uint32
 	phase            Phase
 	pendingToolCalls []string
+	toolProgress     map[string]ReadToolProgress
 	// messagePrecommitted is set only while the stateful MessageEnd hook is
 	// running. The original Agent has already appended the finalized message
 	// when AgentSession's message_end listener executes; this marker lets the Go
@@ -44,7 +45,7 @@ const (
 	agentRunContinuation
 )
 
-type agentListener func(context.Context, AgentEvent) error
+type agentListener func(context.Context, Observation) error
 
 type observerEntry struct {
 	id       uint64
@@ -89,6 +90,7 @@ type Agent struct {
 	isStreaming   bool
 	streaming     agentmsg.Message
 	errorMessage  string
+	read          agentReadState
 
 	observers        []observerEntry
 	controlObservers []controlObserverEntry
@@ -136,12 +138,19 @@ func (a *Agent) Subscribe(observer any) func() {
 	var listener agentListener
 	switch value := observer.(type) {
 	case Observer:
-		listener = func(ctx context.Context, event AgentEvent) error { value(ctx, event); return nil }
+		listener = func(ctx context.Context, observed Observation) error { value(ctx, observed.Event); return nil }
 	case func(context.Context, AgentEvent):
-		listener = func(ctx context.Context, event AgentEvent) error { value(ctx, event); return nil }
+		listener = func(ctx context.Context, observed Observation) error { value(ctx, observed.Event); return nil }
 	case func(context.Context, AgentEvent) error:
-		listener = value
+		listener = func(ctx context.Context, observed Observation) error { return value(ctx, observed.Event) }
 	default:
+		return func() {}
+	}
+	return a.subscribeObserved(listener)
+}
+
+func (a *Agent) subscribeObserved(listener agentListener) func() {
+	if a == nil || listener == nil {
 		return func() {}
 	}
 	a.mu.Lock()
@@ -245,6 +254,7 @@ func (a *Agent) SetSystemPrompt(prompt string) error {
 	}
 	a.mu.Lock()
 	a.systemPrompt = prompt
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -259,6 +269,7 @@ func (a *Agent) SetModel(model provider.Model) error {
 	a.mu.Lock()
 	a.model = model
 	a.hasModel = true
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -280,6 +291,7 @@ func (a *Agent) SetModelAndThinking(model provider.Model, level provider.Thinkin
 	a.model = model
 	a.hasModel = true
 	a.thinkingLevel = level
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -290,6 +302,7 @@ func (a *Agent) SetThinkingLevel(level provider.ThinkingLevel) error {
 	}
 	a.mu.Lock()
 	a.thinkingLevel = level
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -304,6 +317,7 @@ func (a *Agent) SetTools(executor ToolExecutor, tools []provider.ToolDefinition)
 	a.mu.Lock()
 	a.tool = executor
 	a.tools = append([]provider.ToolDefinition(nil), tools...)
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -323,6 +337,7 @@ func (a *Agent) setPromptAndTools(prompt string, executor ToolExecutor, tools []
 	a.systemPrompt = prompt
 	a.tool = executor
 	a.tools = append([]provider.ToolDefinition(nil), tools...)
+	a.touchReadLocked(true, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -341,6 +356,8 @@ func (a *Agent) SetMessages(messages []agentmsg.Message) error {
 	}
 	a.mu.Lock()
 	a.messages = append([]agentmsg.Message(nil), messages...)
+	a.read.pending = nil
+	a.touchReadLocked(false, false)
 	a.mu.Unlock()
 	return nil
 }
@@ -349,20 +366,21 @@ func (a *Agent) SetMessages(messages []agentmsg.Message) error {
 // into Agent state. AgentSession uses this for extension custom messages that
 // participate in context without triggering a turn, matching pi.sendMessage's
 // idle path. The session lifecycle reservation guarantees no low run is active.
-func (a *Agent) appendSettledMessage(message agentmsg.Message) error {
+func (a *Agent) appendSettledMessage(message agentmsg.Message) (Observation, error) {
 	if a == nil || isNilInterface(message) {
-		return fmt.Errorf("%w: invalid settled message", ErrInvalidRun)
+		return Observation{}, fmt.Errorf("%w: invalid settled message", ErrInvalidRun)
 	}
 	if isAssistantPartialMessage(message) {
-		return fmt.Errorf("%w: partial settled message", ErrInvalidRun)
+		return Observation{}, fmt.Errorf("%w: partial settled message", ErrInvalidRun)
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.active != nil {
-		return ErrBusy
+		return Observation{}, ErrBusy
 	}
 	a.messages = append(a.messages, agentmsg.CloneOne(message))
-	return nil
+	a.touchReadLocked(false, false)
+	return Observation{Version: a.readVersionLocked(), MessageID: a.newReadMessageLocked()}, nil
 }
 
 // Reset mirrors the original mutable wrapper: it neither aborts nor rejects
@@ -373,6 +391,9 @@ func (a *Agent) Reset() {
 	}
 	a.mu.Lock()
 	a.messages = nil
+	a.read.pending = nil
+	a.read.messageID = ""
+	a.touchReadLocked(false, true)
 	a.isStreaming = false
 	a.streaming = nil
 	a.errorMessage = ""
@@ -380,6 +401,7 @@ func (a *Agent) Reset() {
 	a.followUpQueue = nil
 	if a.active != nil {
 		a.active.pendingToolCalls = nil
+		a.active.toolProgress = nil
 	}
 	a.mu.Unlock()
 }
@@ -393,6 +415,7 @@ func (a *Agent) setQueueModes(steering, followUp QueueMode) error {
 	a.mu.Lock()
 	a.steeringMode = steering
 	a.followUpMode = followUp
+	a.touchReadLocked(true, true)
 	a.mu.Unlock()
 	return nil
 }
@@ -422,6 +445,7 @@ func (a *Agent) setQueueMode(mode QueueMode, steering bool) error {
 	} else {
 		a.followUpMode = mode
 	}
+	a.touchReadLocked(true, true)
 	a.mu.Unlock()
 	return nil
 }
@@ -618,6 +642,8 @@ func (a *Agent) beginRunLocked(ctx context.Context) (*activeRun, error) {
 	a.isStreaming = true
 	a.streaming = nil
 	a.errorMessage = ""
+	a.read.messageID = ""
+	a.touchReadLocked(false, false)
 	return active, nil
 }
 
@@ -922,10 +948,18 @@ func (a *Agent) processEvent(active *activeRun, ctx context.Context, event Agent
 		return fmt.Errorf("%w: event for inactive run", ErrInvariant)
 	}
 	a.reduceEventLocked(event)
+	a.touchReadLocked(false, false)
+	observed := Observation{Version: a.readVersionLocked()}
+	switch event.(type) {
+	case MessageStartEvent, MessageUpdateEvent, MessageEndEvent:
+		observed.MessageID = a.read.messageID
+	}
 	var queueUpdate *QueueUpdateEvent
 	if started, ok := event.(MessageStartEvent); ok && len(active.queueDelivery) != 0 &&
 		reflect.DeepEqual(active.queueDelivery[0].message, started.Message) {
 		active.queueDelivery = active.queueDelivery[1:]
+		a.touchReadLocked(false, true)
+		observed.Version = a.readVersionLocked()
 		steering, followUp := a.richQueueMessagesLocked()
 		value := QueueUpdateEvent{
 			RunID: active.id, Turn: active.turn,
@@ -944,14 +978,15 @@ func (a *Agent) processEvent(active *activeRun, ctx context.Context, event Agent
 		a.notifyControl(ctx, *queueUpdate)
 	}
 	for _, listener := range listeners {
-		if err := callAgentListener(listener, ctx, cloneAgentEvent(event)); err != nil {
+		observed.Event = cloneAgentEvent(event)
+		if err := callAgentListener(listener, ctx, observed); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func callAgentListener(listener agentListener, ctx context.Context, event AgentEvent) (err error) {
+func callAgentListener(listener agentListener, ctx context.Context, event Observation) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("agent listener panicked: %s", safeValueText(recovered))
@@ -980,8 +1015,10 @@ func (a *Agent) reduceEventLocked(event AgentEvent) {
 	case TurnStartEvent:
 		active.turn, active.phase = value.Turn, PhaseProvider
 	case MessageStartEvent:
+		a.read.messageID = a.newReadMessageLocked()
 		a.streaming = agentmsg.CloneOne(value.Message)
 	case MessageUpdateEvent:
+		a.ensureReadMessageLocked()
 		a.streaming = agentmsg.CloneOne(value.Message)
 	case MessageEndEvent:
 		a.streaming = nil
@@ -993,16 +1030,29 @@ func (a *Agent) reduceEventLocked(event AgentEvent) {
 				// Agent state reentrantly from the hook; retain a safe state while
 				// the invariant error is surfaced by processFinalMessage.
 				a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+				a.appendPendingReadMessageLocked()
 			} else {
 				a.messages[len(a.messages)-1] = agentmsg.CloneOne(value.Message)
 			}
 		} else {
 			a.messages = append(a.messages, agentmsg.CloneOne(value.Message))
+			a.appendPendingReadMessageLocked()
 		}
 	case ToolExecutionStartEvent:
 		active.phase = PhaseTool
 		active.pendingToolCalls = append(active.pendingToolCalls, value.ToolCallID)
+		if active.toolProgress == nil {
+			active.toolProgress = make(map[string]ReadToolProgress)
+		}
+		active.toolProgress[value.ToolCallID] = ReadToolProgress{ToolCallID: value.ToolCallID, ToolName: value.ToolName, Arguments: append(json.RawMessage(nil), value.Arguments...)}
+	case ToolExecutionUpdateEvent:
+		if progress, exists := active.toolProgress[value.ToolCallID]; exists {
+			update := cloneToolUpdate(value.PartialResult)
+			progress.Update = &update
+			active.toolProgress[value.ToolCallID] = progress
+		}
 	case ToolExecutionEndEvent:
+		delete(active.toolProgress, value.ToolCallID)
 		for index, id := range active.pendingToolCalls {
 			if id == value.ToolCallID {
 				active.pendingToolCalls = append(active.pendingToolCalls[:index], active.pendingToolCalls[index+1:]...)
@@ -1039,6 +1089,9 @@ func (a *Agent) processFinalMessage(active *activeRun, ctx context.Context, mess
 	}
 	a.streaming = nil
 	a.messages = append(a.messages, raw)
+	a.appendPendingReadMessageLocked()
+	messageID := a.read.messageID
+	a.touchReadLocked(false, false)
 	index := len(a.messages) - 1
 	active.messagePrecommitted = true
 	a.mu.Unlock()
@@ -1049,7 +1102,9 @@ func (a *Agent) processFinalMessage(active *activeRun, ctx context.Context, mess
 			active.messagePrecommitted = false
 			if len(a.messages) == index+1 {
 				a.messages = a.messages[:index]
+				a.forgetPendingReadMessageLocked(messageID)
 			}
+			a.touchReadLocked(false, false)
 		}
 		a.mu.Unlock()
 	}
@@ -1076,6 +1131,7 @@ func (a *Agent) processFinalMessage(active *activeRun, ctx context.Context, mess
 		return nil, fmt.Errorf("%w: Agent state changed during message_end hook", ErrInvariant)
 	}
 	a.messages[index] = agentmsg.CloneOne(processed)
+	a.touchReadLocked(false, false)
 	a.mu.Unlock()
 	return processed, nil
 }
@@ -1150,8 +1206,10 @@ func (a *Agent) finishRun(active *activeRun) {
 	if a.active == active {
 		a.isStreaming = false
 		a.streaming = nil
+		a.read.messageID = ""
 		active.pendingToolCalls = nil
 		a.active = nil
+		a.touchReadLocked(false, false)
 		close(active.done)
 	}
 	a.mu.Unlock()
@@ -1221,6 +1279,7 @@ func (a *Agent) enqueueAgentMessage(message agentmsg.Message, steering bool) err
 	} else {
 		a.followUpQueue = append(a.followUpQueue, message)
 	}
+	a.touchReadLocked(false, true)
 	a.mu.Unlock()
 	return nil
 }
@@ -1248,6 +1307,7 @@ func (a *Agent) drainQueueLocked(steering bool) []agentmsg.Message {
 	result := append([]agentmsg.Message(nil), (*queue)[:count]...)
 	copy(*queue, (*queue)[count:])
 	*queue = (*queue)[:len(*queue)-count]
+	a.touchReadLocked(false, true)
 	return result
 }
 
@@ -1255,6 +1315,7 @@ func (a *Agent) stageQueueDeliveryLocked(active *activeRun, messages []agentmsg.
 	if active == nil {
 		return
 	}
+	a.touchReadLocked(false, true)
 	for _, message := range messages {
 		active.queueDelivery = append(active.queueDelivery, queuedDelivery{
 			message: agentmsg.CloneOne(message), steering: steering,
@@ -1352,6 +1413,7 @@ func (a *Agent) clearAllQueues() (steering, followUp []agentmsg.Message) {
 	if a.active != nil {
 		a.active.queueDelivery = nil
 	}
+	a.touchReadLocked(false, true)
 	a.mu.Unlock()
 	return steering, followUp
 }
@@ -1375,6 +1437,7 @@ func (a *Agent) clearQueue(steering bool) {
 		}
 		a.active.queueDelivery = kept
 	}
+	a.touchReadLocked(false, true)
 	a.mu.Unlock()
 }
 

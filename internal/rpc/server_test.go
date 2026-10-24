@@ -65,7 +65,9 @@ func TestServerCorrelatesPromptOperationAndAgentEvents(t *testing.T) {
 			t.Errorf("prompt source = %q", prompt.Source)
 		}
 		started := application.PromptStartedResult{OperationID: 7}
-		backend.emit(application.Event{Sequence: 1, SessionID: "session", Value: application.AgentSessionEvent{Event: agent.AgentStartEvent{RunID: 1}}})
+		backend.emit(application.Event{Value: application.SessionResourceEvent{}})
+		backend.emit(application.Event{Value: application.MessageReceiptEvent{}})
+		backend.emit(application.Event{Sequence: 1, SessionID: "session", Value: application.AgentSessionEvent{Event: agent.AgentStartEvent{RunID: 1}, Version: agent.ReadVersion{Generation: "read-only"}, MessageID: "transient"}})
 		return started, nil
 	}
 	var output bytes.Buffer
@@ -94,6 +96,9 @@ func TestServerCorrelatesPromptOperationAndAgentEvents(t *testing.T) {
 	}
 	if event == nil {
 		t.Fatalf("Agent event missing from %#v", records)
+	}
+	if _, ok := event["readVersion"]; ok || event["messageId"] != nil {
+		t.Fatalf("resource metadata changed canonical RPC events: %#v", event)
 	}
 }
 

@@ -272,10 +272,15 @@ func (s *AgentSession) recordBashMessage(ctx context.Context, message agentmsg.B
 func (s *AgentSession) appendSettledBashMessage(ctx context.Context, message agentmsg.BashExecution) error {
 	settlement, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.settlementTimeout)
 	defer cancel()
-	if _, err := s.sessionManager.AppendMessage(settlement, message); err != nil {
+	s.transcriptReadMu.Lock()
+	_, err := s.sessionManager.AppendMessageWithReceipt(settlement, message)
+	if err != nil {
+		s.transcriptReadMu.Unlock()
 		return fmt.Errorf("%w: bash execution: %w", ErrTranscriptCommit, err)
 	}
-	if err := s.loop.appendSettledMessage(message); err != nil {
+	_, err = s.loop.appendSettledMessage(message)
+	s.transcriptReadMu.Unlock()
+	if err != nil {
 		_ = s.reloadAgentMessagesFromSession()
 		return fmt.Errorf("%w: publish bash execution: %w", ErrInvariant, err)
 	}

@@ -154,6 +154,17 @@ func BenchmarkDataReads(b *testing.B) {
 					return surfacewire.DispatchJSON(context.Background(), api, corpus.firstID, []byte(`{"type":"get_state"}`), "interactive")
 				})
 			})
+			b.Run("LiveActive", func(b *testing.B) {
+				// Core resource read only; wire size is measured by surface
+				// projections. This must not scale with settled history length.
+				b.ReportAllocs()
+				for b.Loop() {
+					value, active, err := api.ReadLiveSession(corpus.firstID)
+					if err != nil || !active || value.State.Agent.Version.Generation == "" {
+						b.Fatalf("live read: active=%t err=%v", active, err)
+					}
+				}
+			})
 			b.Run("StatsActive", func(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) {
 					return surfacewire.DispatchJSON(context.Background(), api, corpus.firstID, []byte(`{"type":"get_session_stats"}`), "interactive")

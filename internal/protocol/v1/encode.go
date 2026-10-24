@@ -375,7 +375,25 @@ func agentSourceWire(value agent.SystemPromptSourceInfo) map[string]any {
 func encodeApplicationEvent(value application.Event) (any, error) {
 	switch event := value.Value.(type) {
 	case application.AgentSessionEvent:
-		return sessionEventWire(event.Event)
+		record, err := sessionEventWire(event.Event)
+		if err != nil {
+			return nil, err
+		}
+		if event.Version.Generation != "" {
+			record["readVersion"] = AgentReadVersion(event.Version)
+		}
+		if event.MessageID != "" {
+			record["messageId"] = event.MessageID
+		}
+		return record, nil
+	case application.MessageReceiptEvent:
+		receipt := event.Receipt
+		return map[string]any{
+			"type": "message_receipt", "messageId": receipt.MessageID, "entryId": receipt.EntryID,
+			"generation": receipt.Version.Generation, "logVersion": receipt.Version.Log, "viewVersion": receipt.Version.View,
+			"accepted": receipt.Accepted, "durable": receipt.Durable, "uncertain": receipt.Uncertain,
+			"readVersion": AgentReadVersion(event.Version),
+		}, nil
 	case application.OperationEvent:
 		result := map[string]any{
 			"type": "operation", "operationId": event.OperationID,
@@ -400,6 +418,10 @@ func encodeApplicationEvent(value application.Event) (any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported application event %T", value.Value)
 	}
+}
+
+func AgentReadVersion(version agent.ReadVersion) map[string]any {
+	return map[string]any{"generation": version.Generation, "state": version.State, "configuration": version.Configuration, "queue": version.Queue}
 }
 
 func sessionEventWire(event agent.SessionEvent) (map[string]any, error) {

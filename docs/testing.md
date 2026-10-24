@@ -59,6 +59,8 @@ go test ./internal/surfacewire -run '^$' \
 `HistoryUnopened` 每次通过未驻留的 SessionManager 读取，表示解析冷读，不声称 OS 页缓存
 或物理磁盘处于冷态。`HistoryActive`、`ContextActive`、`StateActive` 与 `StatsActive`
 测已打开 Runtime；`CatalogAfterAppend` 在计时外追加一条真实内存会话记录，再测目录读取。
+`LiveActive` 单独测带版本的当前运行态读取，不编码 wire，也不复制已完成的历史；其成本不应
+随旧消息数量增长。它与完整 `StateActive` 的字段和测量边界不同，不能直接当成同一响应的加速比。
 `BenchmarkDataEventReplay` 独立测 Application 事件缓冲的最近 64/4,096 条事件回放和
 保留窗口已满时的发布，不包含 SSE 编码和网络传输。
 `B/op` 是每次查询的分配量，不是进程峰值内存；`wire-B/op` 包含临时目录路径，跨运行可能

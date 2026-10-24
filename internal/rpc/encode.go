@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
 	protocolv1 "github.com/cat3399/pi-go/internal/protocol/v1"
 )
@@ -40,5 +41,9 @@ func encodeResult(result application.CommandResult) (any, error) {
 }
 
 func encodeApplicationEvent(event application.Event) (any, error) {
+	if value, ok := event.Value.(application.AgentSessionEvent); ok {
+		value.Version, value.MessageID = agent.ReadVersion{}, ""
+		event.Value = value
+	}
 	return protocolv1.EncodeEvent(event)
 }

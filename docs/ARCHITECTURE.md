@@ -61,6 +61,12 @@ Application Service 管理每个活动会话的独立 Runtime。
 `SubscribeChanges` 提供可合并的版本失效通知，Application 将其转发为独立资源事件；它不替代
 原版 Agent 事件。`AppendMessageWithReceipt` 区分条目已接受、已落盘和写入结果不确定，首次
 落盘失败时仍返回已进入内存视图的条目身份，不把 `message_end` 当成提交回执。
+Agent 在自身状态锁内分配运行消息身份与运行态、配置、队列版本；`ReadSnapshot` 只投影当前
+生成内容、待确认消息和工具进度，不复制已完成的历史。AgentSession 的独立观察接口将原版事件
+附上这些身份，并在实际写入后发出 `MessageReceipt`。读取与写入确认共用短期串行边界，避免
+同一消息既出现在已接受历史中，又留在待确认快照中。Application 转发这些元数据，不另建消息状态。
+资源失效、写入回执与运行消息身份用于 Application 资源同步；JSONL RPC 保留原版事件词汇，
+不转发这组新增同步元数据。
 Application 的会话快照保留这组版本，并校验历史与运行态来自同一 Runtime binding；运行态和
 目录解析出的父会话关系仍是独立资源，不能用会话日志版本把它们宣称为全局原子快照。
 

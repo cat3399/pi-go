@@ -602,7 +602,7 @@ func (s *AgentSession) reserveStandaloneMutation() (*standaloneReservation, erro
 	return &standaloneReservation{session: s, done: done}, nil
 }
 
-func (s *AgentSession) emitStandaloneMessage(ctx context.Context, message agentmsg.Message) {
+func (s *AgentSession) emitStandaloneMessage(ctx context.Context, message agentmsg.Message, metadata Observation) {
 	s.mu.RLock()
 	observers := make([]SessionObserver, 0, len(s.observers))
 	for _, entry := range s.observers {
@@ -611,8 +611,8 @@ func (s *AgentSession) emitStandaloneMessage(ctx context.Context, message agentm
 		}
 	}
 	s.mu.RUnlock()
-	s.emitToObservers(ctx, observers, MessageStartEvent{Message: agentmsg.CloneOne(message)})
-	s.emitToObservers(ctx, observers, MessageEndEvent{Message: agentmsg.CloneOne(message)})
+	s.emitToObservers(ctx, observers, MessageStartEvent{Message: agentmsg.CloneOne(message)}, metadata)
+	s.emitToObservers(ctx, observers, MessageEndEvent{Message: agentmsg.CloneOne(message)}, metadata)
 }
 
 func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agentmsg.Custom) (Result, error) {
@@ -626,10 +626,15 @@ func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agent
 			reservation.finish(false)
 		}
 	}()
-	if _, err := s.sessionManager.AppendCustomMessage(ctx, message); err != nil {
+	s.transcriptReadMu.Lock()
+	receipt, err := s.sessionManager.AppendCustomMessageWithReceipt(ctx, message)
+	if err != nil {
+		s.transcriptReadMu.Unlock()
 		return Result{}, fmt.Errorf("%w: custom message: %w", ErrTranscriptCommit, err)
 	}
-	if err := s.loop.appendSettledMessage(message); err != nil {
+	metadata, err := s.loop.appendSettledMessage(message)
+	s.transcriptReadMu.Unlock()
+	if err != nil {
 		// The durable append is authoritative. Rebuild state before surfacing the
 		// invariant failure so transcript and future provider context cannot split.
 		_ = s.reloadAgentMessagesFromSession()
@@ -649,7 +654,8 @@ func (s *AgentSession) appendStandaloneCustom(ctx context.Context, message agent
 		s.lifecycleMu.Unlock()
 		s.resolveSessionIdle()
 	}()
-	s.emitStandaloneMessage(ctx, message)
+	s.emitStandaloneMessage(ctx, message, metadata)
+	s.emitMessageReceipt(ctx, metadata, receipt)
 	return handledPromptResult(), nil
 }
 

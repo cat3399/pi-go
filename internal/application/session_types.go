@@ -377,6 +377,7 @@ const (
 	EventSessionCatalog  EventType = "session_catalog"
 	EventProjectCatalog  EventType = "project_catalog"
 	EventSessionResource EventType = "session_resource"
+	EventMessageReceipt  EventType = "message_receipt"
 )
 
 type OperationStatus string
@@ -393,7 +394,16 @@ type EventValue interface {
 
 // AgentSessionEvent retains the complete concrete AgentSessionEvent union.
 // Wire adapters are responsible only for encoding the contained event.
-type AgentSessionEvent struct{ Event agent.SessionEvent }
+type AgentSessionEvent struct {
+	Event     agent.SessionEvent
+	Version   agent.ReadVersion
+	MessageID string
+}
+
+type MessageReceiptEvent struct {
+	Receipt agent.MessageReceipt
+	Version agent.ReadVersion
+}
 
 // SessionResourceEvent forwards the owning manager's coalescible read
 // invalidation. It is separate from the canonical AgentSession event union.
@@ -428,12 +438,14 @@ type OperationEvent struct {
 
 func (AgentSessionEvent) Type() EventType    { return EventAgentSession }
 func (SessionResourceEvent) Type() EventType { return EventSessionResource }
+func (MessageReceiptEvent) Type() EventType  { return EventMessageReceipt }
 func (SessionCatalogEvent) Type() EventType  { return EventSessionCatalog }
 func (ProjectCatalogEvent) Type() EventType  { return EventProjectCatalog }
 func (OperationEvent) Type() EventType       { return EventOperation }
 
 func (AgentSessionEvent) applicationEvent()    {}
 func (SessionResourceEvent) applicationEvent() {}
+func (MessageReceiptEvent) applicationEvent()  {}
 func (SessionCatalogEvent) applicationEvent()  {}
 func (ProjectCatalogEvent) applicationEvent()  {}
 func (OperationEvent) applicationEvent()       {}

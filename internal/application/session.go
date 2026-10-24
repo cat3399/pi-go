@@ -140,14 +140,18 @@ func (s *ApplicationSession) bind(next *agent.AgentSession) error {
 	generation := s.binding
 	s.session = next
 	sessionID := next.SessionManager().SessionID()
-	s.unsubscribe = next.Subscribe(func(ctx context.Context, event agent.SessionEvent) {
+	s.unsubscribe = next.SubscribeObserved(func(ctx context.Context, observed agent.SessionObservation) {
 		s.bindMu.RLock()
 		current := s.binding == generation && s.session == next
 		s.bindMu.RUnlock()
 		if !current {
 			return
 		}
-		s.enqueue(ctx, sessionID, AgentSessionEvent{Event: event})
+		if observed.Event != nil {
+			s.enqueue(ctx, sessionID, AgentSessionEvent{Event: observed.Event, Version: observed.Version, MessageID: observed.MessageID})
+		} else if observed.Receipt != nil {
+			s.enqueue(ctx, sessionID, MessageReceiptEvent{Receipt: *observed.Receipt, Version: observed.Version})
+		}
 	})
 	_, changes, cancelChanges := next.SessionManager().SubscribeChanges()
 	// The initial state is available through reads. Install the watch before
@@ -212,8 +216,11 @@ func (s *ApplicationSession) sameBinding(session *agent.AgentSession, generation
 func cloneEventValue(value EventValue) EventValue {
 	switch value := value.(type) {
 	case AgentSessionEvent:
-		return AgentSessionEvent{Event: agent.CloneSessionEvent(value.Event)}
+		value.Event = agent.CloneSessionEvent(value.Event)
+		return value
 	case SessionResourceEvent:
+		return value
+	case MessageReceiptEvent:
 		return value
 	case SessionCatalogEvent:
 		return value

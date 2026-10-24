@@ -394,7 +394,10 @@ type AgentSession struct {
 	// selectionMu keeps selection readers outside the final in-memory publish
 	// step of a durable/settings transaction. The selected values themselves
 	// live only in Agent state.
-	selectionMu            sync.RWMutex
+	selectionMu sync.RWMutex
+	// transcriptReadMu excludes reads only across message append + identity
+	// acknowledgement. No hooks/observers run under it; it owns no transcript.
+	transcriptReadMu       sync.Mutex
 	loop                   *Agent
 	sessionManager         *session.SessionManager
 	systemOptions          BuildSystemPromptOptions
@@ -476,6 +479,7 @@ type AgentSession struct {
 	branchSummaryReserve    uint64
 	settlementTimeout       time.Duration
 	observers               []sessionObserverEntry
+	readObservers           []sessionReadObserver
 	nextObserver            uint64
 	loopUnsubscribe         func()
 }
@@ -670,8 +674,8 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		return nil, err
 	}
 	s.loop = loop
-	unsubscribeEvents := loop.Subscribe(func(ctx context.Context, event AgentEvent) error {
-		return s.handleLoopEvent(ctx, event)
+	unsubscribeEvents := loop.SubscribeObserved(func(ctx context.Context, observed Observation) error {
+		return s.handleLoopEvent(ctx, observed)
 	})
 	unsubscribeControl := loop.SubscribeControl(s.handleLoopControlEvent)
 	s.loopUnsubscribe = func() {
@@ -763,12 +767,13 @@ func (s *AgentSession) requireModelAccess(ctx context.Context) error {
 	return nil
 }
 
-func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) error {
+func (s *AgentSession) handleLoopEvent(ctx context.Context, observed Observation) error {
+	event := observed.Event
 	if runtimeEvent, ok := event.(agentRuntimeEvent); ok {
-		s.handleLoopRuntimeEvent(ctx, runtimeEvent)
+		s.handleLoopRuntimeEvent(ctx, runtimeEvent, observed)
 	}
 	if ended, ok := event.(MessageEndEvent); ok {
-		if err := s.persistAgentMessage(ctx, ended.Message); err != nil {
+		if err := s.persistAgentMessage(ctx, ended.Message, observed); err != nil {
 			return err
 		}
 		if standard, ok := ended.Message.(agentmsg.LLM); ok && retrySucceededMessage(standard.Conversation()) {
@@ -778,20 +783,20 @@ func (s *AgentSession) handleLoopEvent(ctx context.Context, event AgentEvent) er
 	return nil
 }
 
-func (s *AgentSession) persistAgentMessage(ctx context.Context, message agentmsg.Message) error {
+func (s *AgentSession) persistAgentMessage(ctx context.Context, message agentmsg.Message, observed Observation) error {
 	if s == nil || s.sessionManager == nil || message == nil {
 		return fmt.Errorf("%w: invalid session message", ErrTranscriptCommit)
 	}
 	settlement, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.settlementTimeout)
 	defer cancel()
-	if standard, ok := message.(agentmsg.LLM); ok {
-		_, err := s.sessionManager.AppendLLMMessage(settlement, standard.Conversation())
-		if err != nil {
-			return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
-		}
-		return nil
+	s.transcriptReadMu.Lock()
+	receipt, err := s.sessionManager.AppendMessageWithReceipt(settlement, message)
+	if receipt.Accepted {
+		observed.Version = s.loop.acknowledgeReadMessage(observed.MessageID)
 	}
-	if _, err := s.sessionManager.AppendMessage(settlement, message); err != nil {
+	s.transcriptReadMu.Unlock()
+	s.emitMessageReceipt(ctx, observed, receipt)
+	if err != nil {
 		return fmt.Errorf("%w: %s message: %w", ErrTranscriptCommit, message.Role(), err)
 	}
 	return nil
@@ -803,7 +808,7 @@ func (s *AgentSession) handleLoopControlEvent(ctx context.Context, event AgentCo
 	}
 }
 
-func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRuntimeEvent) {
+func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRuntimeEvent, metadata ...Observation) {
 	if s == nil {
 		return
 	}
@@ -937,7 +942,7 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 			}
 		}
 		if emitted != nil {
-			s.emitToObservers(ctx, observers, emitted)
+			s.emitToObservers(ctx, observers, emitted, metadata...)
 		}
 	}
 	// A successful retry ends only in handleLoopEvent after this pre-persist
@@ -2907,10 +2912,17 @@ func (s *AgentSession) emitCompactionRetry(ctx context.Context, kind string, rea
 // emitToObservers gives every observer a fresh event. Session observers are
 // user callbacks, so a mutation by one must never affect another observer or
 // the session's retained state.
-func (s *AgentSession) emitToObservers(ctx context.Context, observers []SessionObserver, event SessionEvent) {
+func (s *AgentSession) emitToObservers(ctx context.Context, observers []SessionObserver, event SessionEvent, metadata ...Observation) {
+	observed := SessionObservation{Event: event}
+	if len(metadata) != 0 {
+		observed.Version, observed.MessageID = metadata[0].Version, metadata[0].MessageID
+	} else {
+		observed.Version = s.loop.ReadVersion()
+	}
 	for _, observer := range observers {
 		observer(ctx, cloneSessionEvent(event))
 	}
+	s.emitReadObservation(ctx, observed)
 }
 
 func cloneSessionEvent(event SessionEvent) SessionEvent {
@@ -3631,6 +3643,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	unsubscribe := s.loopUnsubscribe
 	s.loopUnsubscribe = nil
 	s.observers = nil
+	s.readObservers = nil
 	s.mu.Unlock()
 	if unsubscribe != nil {
 		unsubscribe()

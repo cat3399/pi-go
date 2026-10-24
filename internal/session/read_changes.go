@@ -120,12 +120,22 @@ type AppendReceipt struct {
 }
 
 func (m *SessionManager) AppendMessageWithReceipt(ctx context.Context, message agentmsg.Message) (AppendReceipt, error) {
+	return m.appendWithReceipt(ctx, func(s *Session) (Entry, error) {
+		return s.AppendAgentMessage(ctx, message, AppendOptions{})
+	})
+}
+
+func (m *SessionManager) AppendCustomMessageWithReceipt(ctx context.Context, message agentmsg.Custom) (AppendReceipt, error) {
+	return m.appendWithReceipt(ctx, func(s *Session) (Entry, error) {
+		return s.AppendPayload(ctx, CustomMessagePayload{Message: message})
+	})
+}
+
+func (m *SessionManager) appendWithReceipt(ctx context.Context, appendFn func(*Session) (Entry, error)) (AppendReceipt, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer m.notifyReadChangeLocked()
-	entry, err := m.appendAndFlushReceipt(ctx, func(s *Session) (Entry, error) {
-		return s.AppendAgentMessage(ctx, message, AppendOptions{})
-	})
+	entry, err := m.appendAndFlushReceipt(ctx, appendFn)
 	change := m.readChangeLocked()
 	return AppendReceipt{
 		Entry: entry, Version: change.Version, Accepted: entry.ID() != "",

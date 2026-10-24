@@ -27,6 +27,7 @@ type API interface {
 	NewSession(context.Context, NewSessionOptions) (State, error)
 	Dispatch(context.Context, string, Command) (CommandResult, error)
 	LiveState(string) (State, bool, error)
+	ReadLiveSession(string) (LiveSnapshot, bool, error)
 
 	ListSessions() ([]SessionInfo, error)
 	ListProjects() ([]ProjectInfo, error)
