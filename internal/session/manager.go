@@ -21,18 +21,21 @@ import (
 // durable aggregate: the manager chooses the active leaf, projects context,
 // resolves labels, extracts branches, and manages session lifecycle.
 type SessionManager struct {
-	mu          sync.RWMutex
-	cwd         string
-	sessionDir  string
-	sessionFile string
-	persist     bool
-	flushed     bool
-	runtime     runtimeConfig
-	store       *Session
-	summaryMu   sync.Mutex
-	summary     managerSummary
-	readEpoch   string
-	readOnce    sync.Once
+	mu              sync.RWMutex
+	cwd             string
+	sessionDir      string
+	sessionFile     string
+	persist         bool
+	flushed         bool
+	runtime         runtimeConfig
+	store           *Session
+	summaryMu       sync.Mutex
+	summary         managerSummary
+	readEpoch       string
+	readOnce        sync.Once
+	readWatchers    map[uint64]chan ReadChange
+	nextReadWatcher uint64
+	lastReadChange  ReadChange
 }
 
 var managerLineBreakPattern = regexp.MustCompile(`[\r\n]+`)
@@ -243,6 +246,7 @@ func (m *SessionManager) Close() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	if m.store == nil {
 		return nil
 	}
@@ -252,6 +256,7 @@ func (m *SessionManager) Close() error {
 func (m *SessionManager) SetSessionFile(path string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	resolved, err := resolveSessionPath(path)
 	if err != nil {
 		return err
@@ -305,6 +310,7 @@ func (m *SessionManager) setVolatileSessionFile(path string) error {
 func (m *SessionManager) NewSession(options NewSessionOptions) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	if err := m.startNew(options); err != nil {
 		return "", false, err
 	}
@@ -335,6 +341,14 @@ func managerSessionFilename(timestamp time.Time, id string) string {
 }
 
 func (m *SessionManager) appendAndFlush(ctx context.Context, appendFn func(*Session) (Entry, error)) (Entry, error) {
+	entry, err := m.appendAndFlushReceipt(ctx, appendFn)
+	if err != nil {
+		return Entry{}, err
+	}
+	return entry, nil
+}
+
+func (m *SessionManager) appendAndFlushReceipt(ctx context.Context, appendFn func(*Session) (Entry, error)) (Entry, error) {
 	entry, err := appendFn(m.store)
 	if err != nil {
 		return Entry{}, err
@@ -344,7 +358,9 @@ func (m *SessionManager) appendAndFlush(ctx context.Context, appendFn func(*Sess
 	}
 	durable, err := createSessionSnapshot(m.sessionFile, m.store.Header(), m.store.Entries(), m.runtime)
 	if err != nil {
-		return Entry{}, err
+		// The volatile append already succeeded. Receipt callers must be able
+		// to distinguish this visible entry from a rejected/uncertain append.
+		return entry, err
 	}
 	old := m.store
 	m.adoptDurableStore(durable)
@@ -365,6 +381,7 @@ func managerHasAssistant(entries []Entry) bool {
 func (m *SessionManager) AppendMessage(ctx context.Context, message agentmsg.Message) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	return m.appendAndFlush(ctx, func(s *Session) (Entry, error) { return s.AppendAgentMessage(ctx, message, AppendOptions{}) })
 }
 
@@ -389,6 +406,7 @@ func (m *SessionManager) AppendModelChange(ctx context.Context, provider, modelI
 func (m *SessionManager) AppendModelControlChange(ctx context.Context, provider, modelID string, thinkingLevel *string) ([]Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	// If an earlier assistant left this manager in its delayed volatile form,
 	// publish that existing snapshot before adding the coupled control records.
 	// A snapshot failure therefore cannot leave either new control entry in the
@@ -435,6 +453,7 @@ func (m *SessionManager) AppendSessionInfo(ctx context.Context, name string) (En
 func (m *SessionManager) AppendLabelChange(ctx context.Context, targetID string, label *string) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	if _, ok := m.store.Entry(targetID); !ok {
 		return Entry{}, fmt.Errorf("%w: %s", ErrEntryNotFound, targetID)
 	}
@@ -446,6 +465,7 @@ func (m *SessionManager) AppendLabelChange(ctx context.Context, targetID string,
 func (m *SessionManager) appendPayload(ctx context.Context, payload EntryPayload) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	return m.appendAndFlush(ctx, func(s *Session) (Entry, error) { return s.AppendPayload(ctx, payload) })
 }
 
@@ -504,11 +524,13 @@ func (m *SessionManager) Label(id string) (string, bool) {
 func (m *SessionManager) Branch(fromID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	return m.store.SelectLeaf(fromID)
 }
 func (m *SessionManager) ResetLeaf() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	return m.store.ResetLeaf()
 }
 
@@ -519,6 +541,7 @@ func (m *SessionManager) ResetLeaf() error {
 func (m *SessionManager) NavigateTreePosition(ctx context.Context, newLeafID *string, labelTargetID string, label *string) (*Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	if label != nil && *label != "" {
 		if _, ok := m.store.Entry(labelTargetID); !ok {
 			return nil, fmt.Errorf("%w: %s", ErrEntryNotFound, labelTargetID)
@@ -593,6 +616,7 @@ func (m *SessionManager) PrepareCompactionWithOptions(ctx context.Context, optio
 func (m *SessionManager) CommitCompaction(ctx context.Context, input SummaryInput, output SummaryOutput) (CompactResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -650,6 +674,7 @@ func managerContextEntries(path []Entry) []Entry {
 func (m *SessionManager) BranchWithSummary(ctx context.Context, branchFromID *string, summary string, details json.RawMessage, fromHook *bool, usage *CompactionUsage) (Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	fromID := "root"
 	if branchFromID != nil {
 		fromID = *branchFromID
@@ -674,6 +699,7 @@ func optionalManagerBool(value *bool) (bool, bool) {
 func (m *SessionManager) CreateBranchedSession(ctx context.Context, leafID string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer m.notifyReadChangeLocked()
 	next, err := m.cloneBranchedManagerLocked(ctx, leafID)
 	if err != nil {
 		return "", false, err

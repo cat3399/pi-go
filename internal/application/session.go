@@ -47,10 +47,11 @@ type ApplicationSession struct {
 	promptCount uint64
 	nextOpID    uint64
 
-	bindMu      sync.RWMutex
-	session     *agent.AgentSession
-	binding     uint64
-	unsubscribe func()
+	bindMu           sync.RWMutex
+	session          *agent.AgentSession
+	binding          uint64
+	unsubscribe      func()
+	unsubscribeReads func()
 
 	eventIngress chan queuedEvent
 	eventStop    chan struct{}
@@ -131,6 +132,10 @@ func (s *ApplicationSession) bind(next *agent.AgentSession) error {
 		s.unsubscribe()
 		s.unsubscribe = nil
 	}
+	if s.unsubscribeReads != nil {
+		s.unsubscribeReads()
+		s.unsubscribeReads = nil
+	}
 	s.binding++
 	generation := s.binding
 	s.session = next
@@ -144,7 +149,19 @@ func (s *ApplicationSession) bind(next *agent.AgentSession) error {
 		}
 		s.enqueue(ctx, sessionID, AgentSessionEvent{Event: event})
 	})
+	_, changes, cancelChanges := next.SessionManager().SubscribeChanges()
+	// The initial state is available through reads. Install the watch before
+	// releasing the binding so later mutations cannot fall between them.
+	s.unsubscribeReads = cancelChanges
 	s.bindMu.Unlock()
+	go func() {
+		for change := range changes {
+			if !s.sameBinding(next, generation) {
+				return
+			}
+			s.enqueue(s.ctx, change.SessionID, SessionResourceEvent{Change: change})
+		}
+	}()
 	return nil
 }
 
@@ -156,6 +173,10 @@ func (s *ApplicationSession) unbind() {
 	if s.unsubscribe != nil {
 		s.unsubscribe()
 		s.unsubscribe = nil
+	}
+	if s.unsubscribeReads != nil {
+		s.unsubscribeReads()
+		s.unsubscribeReads = nil
 	}
 	s.binding++
 	s.session = nil
@@ -192,6 +213,8 @@ func cloneEventValue(value EventValue) EventValue {
 	switch value := value.(type) {
 	case AgentSessionEvent:
 		return AgentSessionEvent{Event: agent.CloneSessionEvent(value.Event)}
+	case SessionResourceEvent:
+		return value
 	case SessionCatalogEvent:
 		return value
 	case ProjectCatalogEvent:

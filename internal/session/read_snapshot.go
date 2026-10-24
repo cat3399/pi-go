@@ -1,7 +1,6 @@
 package session
 
 import (
-	"crypto/rand"
 	"fmt"
 )
 
@@ -72,9 +71,8 @@ func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, er
 			return ReadSnapshot{}, fmt.Errorf("%w: %s", ErrEntryNotFound, options.LeafID)
 		}
 	}
-	m.readOnce.Do(func() { m.readEpoch = rand.Text() })
 	result := ReadSnapshot{
-		Version: ReadVersion{Generation: m.readEpoch, Log: uint64(len(store.entries)), View: store.generation},
+		Version: m.readVersionLocked(),
 		Info:    info,
 	}
 	if store.leaf >= 0 {

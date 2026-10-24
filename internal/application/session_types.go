@@ -372,10 +372,11 @@ type State struct {
 type EventType string
 
 const (
-	EventAgentSession   EventType = "agent_session"
-	EventOperation      EventType = "operation"
-	EventSessionCatalog EventType = "session_catalog"
-	EventProjectCatalog EventType = "project_catalog"
+	EventAgentSession    EventType = "agent_session"
+	EventOperation       EventType = "operation"
+	EventSessionCatalog  EventType = "session_catalog"
+	EventProjectCatalog  EventType = "project_catalog"
+	EventSessionResource EventType = "session_resource"
 )
 
 type OperationStatus string
@@ -393,6 +394,10 @@ type EventValue interface {
 // AgentSessionEvent retains the complete concrete AgentSessionEvent union.
 // Wire adapters are responsible only for encoding the contained event.
 type AgentSessionEvent struct{ Event agent.SessionEvent }
+
+// SessionResourceEvent forwards the owning manager's coalescible read
+// invalidation. It is separate from the canonical AgentSession event union.
+type SessionResourceEvent struct{ Change session.ReadChange }
 type SessionCatalogChange string
 
 const (
@@ -421,15 +426,17 @@ type OperationEvent struct {
 	Error       string
 }
 
-func (AgentSessionEvent) Type() EventType   { return EventAgentSession }
-func (SessionCatalogEvent) Type() EventType { return EventSessionCatalog }
-func (ProjectCatalogEvent) Type() EventType { return EventProjectCatalog }
-func (OperationEvent) Type() EventType      { return EventOperation }
+func (AgentSessionEvent) Type() EventType    { return EventAgentSession }
+func (SessionResourceEvent) Type() EventType { return EventSessionResource }
+func (SessionCatalogEvent) Type() EventType  { return EventSessionCatalog }
+func (ProjectCatalogEvent) Type() EventType  { return EventProjectCatalog }
+func (OperationEvent) Type() EventType       { return EventOperation }
 
-func (AgentSessionEvent) applicationEvent()   {}
-func (SessionCatalogEvent) applicationEvent() {}
-func (ProjectCatalogEvent) applicationEvent() {}
-func (OperationEvent) applicationEvent()      {}
+func (AgentSessionEvent) applicationEvent()    {}
+func (SessionResourceEvent) applicationEvent() {}
+func (SessionCatalogEvent) applicationEvent()  {}
+func (ProjectCatalogEvent) applicationEvent()  {}
+func (OperationEvent) applicationEvent()       {}
 
 // Event is an immutable application event envelope. ApplicationSession assigns
 // a session-local Sequence across replacement and reload; Service republishes

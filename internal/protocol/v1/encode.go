@@ -387,6 +387,14 @@ func encodeApplicationEvent(value application.Event) (any, error) {
 		return result, nil
 	case application.SessionCatalogEvent:
 		return map[string]any{"type": "session_catalog", "change": event.Change}, nil
+	case application.SessionResourceEvent:
+		change := event.Change
+		return map[string]any{
+			"type": "session_resource", "generation": change.Version.Generation,
+			"logVersion": change.Version.Log, "viewVersion": change.Version.View,
+			"leafId": change.LeafID, "durable": change.Durable,
+			"closed": change.Closed, "uncertain": change.Uncertain,
+		}, nil
 	case application.ProjectCatalogEvent:
 		return map[string]any{"type": "project_catalog", "change": event.Change, "path": event.Path}, nil
 	default:

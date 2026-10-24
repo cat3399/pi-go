@@ -58,6 +58,9 @@ Application Service 管理每个活动会话的独立 Runtime。
 `SessionManager.ReadSnapshot` 在同一读取边界取得摘要、选中 leaf、按需生成的上下文和树，
 并返回数据代次、条目日志版本与分支视图版本。追加和切分支分别推进对应版本；首次 assistant
 触发落盘时延续原数据代次，重新打开、替换或新建会话则使用新代次。版本不写入原版 JSONL。
+`SubscribeChanges` 提供可合并的版本失效通知，Application 将其转发为独立资源事件；它不替代
+原版 Agent 事件。`AppendMessageWithReceipt` 区分条目已接受、已落盘和写入结果不确定，首次
+落盘失败时仍返回已进入内存视图的条目身份，不把 `message_end` 当成提交回执。
 Application 的会话快照保留这组版本，并校验历史与运行态来自同一 Runtime binding；运行态和
 目录解析出的父会话关系仍是独立资源，不能用会话日志版本把它们宣称为全局原子快照。
 
