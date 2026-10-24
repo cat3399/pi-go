@@ -39,38 +39,58 @@ type ReadSnapshot struct {
 }
 
 func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, error) {
+	var result ReadSnapshot
+	err := m.readView(func(store *Session, metadata ReadSnapshot) error {
+		leaf := store.leaf
+		if options.LeafID != "" {
+			var exists bool
+			leaf, exists = store.byID[options.LeafID]
+			if !exists {
+				return fmt.Errorf("%w: %s", ErrEntryNotFound, options.LeafID)
+			}
+		}
+		result = metadata
+		if options.IncludeContext {
+			if leaf >= 0 {
+				result.Entries = managerContextEntries(store.pathLocked(leaf))
+			}
+			result.Context = store.buildContextAtLocked(leaf)
+		}
+		if options.IncludeTree {
+			result.Tree = store.treeLocked()
+		}
+		return nil
+	})
+	return result, err
+}
+
+// readView holds one owner boundary while a read-only projection runs. Only
+// projections internal to this package are passed here, never user callbacks.
+func (m *SessionManager) readView(project func(*Session, ReadSnapshot) error) error {
 	if m == nil {
-		return ReadSnapshot{}, fmt.Errorf("%w: nil session manager", ErrInvalidSession)
+		return fmt.Errorf("%w: nil session manager", ErrInvalidSession)
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	store := m.store
 	if store == nil {
-		return ReadSnapshot{}, ErrClosed
+		return ErrClosed
 	}
 	m.summaryMu.Lock()
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	if store.closed {
 		m.summaryMu.Unlock()
-		return ReadSnapshot{}, ErrClosed
+		return ErrClosed
 	}
 	if store.poisoned {
 		m.summaryMu.Unlock()
 		// The durable tail is uncertain. Never validate a cached read against a
 		// version that could conceal an accepted but unreconciled disk write.
-		return ReadSnapshot{}, ErrPoisoned
+		return ErrPoisoned
 	}
 	info := m.summaryLocked(store)
 	m.summaryMu.Unlock()
-	leaf := store.leaf
-	if options.LeafID != "" {
-		var exists bool
-		leaf, exists = store.byID[options.LeafID]
-		if !exists {
-			return ReadSnapshot{}, fmt.Errorf("%w: %s", ErrEntryNotFound, options.LeafID)
-		}
-	}
 	result := ReadSnapshot{
 		Version: m.readVersionLocked(),
 		Info:    info,
@@ -79,14 +99,5 @@ func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, er
 		id := store.entries[store.leaf].id
 		result.LeafID = &id
 	}
-	if options.IncludeContext {
-		if leaf >= 0 {
-			result.Entries = managerContextEntries(store.pathLocked(leaf))
-		}
-		result.Context = store.buildContextAtLocked(leaf)
-	}
-	if options.IncludeTree {
-		result.Tree = store.treeLocked()
-	}
-	return result, nil
+	return project(store, result)
 }

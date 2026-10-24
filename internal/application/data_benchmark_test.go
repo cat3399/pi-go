@@ -136,6 +136,21 @@ func BenchmarkDataReads(b *testing.B) {
 					return surfacewire.SessionViewFor(api, corpus.firstID, "", false, true)
 				})
 			})
+			b.Run("HistoryPageUnopenedWarm", func(b *testing.B) {
+				if _, err := api.ReadHistory(corpus.firstID, session.HistoryQuery{}); err != nil {
+					b.Fatal(err)
+				}
+				benchmarkHistoryPage(b, api, corpus.firstID)
+			})
+			b.Run("HistoryPageUnopenedCold", func(b *testing.B) {
+				cold, _ := openDataBenchmarkService(b, corpus, -1)
+				// Prime discovery/identity only. Payload retention is disabled,
+				// so every timed query decodes the file again.
+				if _, err := cold.ReadHistory(corpus.firstID, session.HistoryQuery{}); err != nil {
+					b.Fatal(err)
+				}
+				benchmarkHistoryPage(b, cold, corpus.firstID)
+			})
 			if _, err := api.Dispatch(context.Background(), corpus.firstID, application.GetStateCommand{}); err != nil {
 				b.Fatal(err)
 			}
@@ -143,6 +158,18 @@ func BenchmarkDataReads(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) {
 					return surfacewire.SessionViewFor(api, corpus.firstID, "", false, true)
 				})
+			})
+			b.Run("HistoryPageActive", func(b *testing.B) {
+				benchmarkHistoryPage(b, api, corpus.firstID)
+			})
+			b.Run("NodesPageActive", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					page, err := api.ReadNodes(corpus.firstID, session.NodeQuery{Limit: 64})
+					if err != nil || len(page.Page.Items) == 0 || len(page.Page.Items) > 64 {
+						b.Fatalf("nodes page: %v", err)
+					}
+				}
 			})
 			b.Run("ContextActive", func(b *testing.B) {
 				benchmarkDataQuery(b, func() (any, error) {
@@ -203,6 +230,26 @@ func BenchmarkDataReads(b *testing.B) {
 			})
 		})
 	}
+}
+
+func benchmarkHistoryPage(b *testing.B, api *application.Service, id string) {
+	b.Helper()
+	var rawBytes int
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		page, err := api.ReadHistory(id, session.HistoryQuery{Limit: 64, MaxBytes: 512 << 10})
+		if err != nil || len(page.Page.Items) == 0 || len(page.Page.Items) > 64 {
+			b.Fatalf("history page: %v", err)
+		}
+		rawBytes = 0
+		for _, item := range page.Page.Items {
+			if item.Entry != nil {
+				rawBytes += item.Node.RawBytes
+			}
+		}
+	}
+	b.ReportMetric(float64(rawBytes), "entry-json-B/op")
 }
 
 func benchmarkDataQuery(b *testing.B, query func() (any, error)) {
@@ -309,7 +356,7 @@ func makeDataBenchmarkCorpus(b testing.TB, shape dataBenchmarkShape) dataBenchma
 	return corpus
 }
 
-func openDataBenchmarkService(b testing.TB, corpus dataBenchmarkCorpus) (*application.Service, map[string]*session.SessionManager) {
+func openDataBenchmarkService(b testing.TB, corpus dataBenchmarkCorpus, readBudget ...int64) (*application.Service, map[string]*session.SessionManager) {
 	b.Helper()
 	managers := make(map[string]*session.SessionManager)
 	opener := func(ctx context.Context, config app.ProductionConfig, selection app.ProductionRuntimeOptions) (*agentruntime.Runtime, error) {
@@ -344,8 +391,12 @@ func openDataBenchmarkService(b testing.TB, corpus dataBenchmarkCorpus) (*applic
 		managers[manager.SessionID()] = manager
 		return runtime, nil
 	}
-	api, err := application.NewService(application.ServiceOptions{Production: app.ProductionConfig{WorkingDir: corpus.cwd, AgentDir: corpus.agentDir, Environment: []string{}},
-		DisableReaper: true, OpenRuntime: opener})
+	options := application.ServiceOptions{Production: app.ProductionConfig{WorkingDir: corpus.cwd, AgentDir: corpus.agentDir, Environment: []string{}},
+		DisableReaper: true, OpenRuntime: opener}
+	if len(readBudget) != 0 {
+		options.ReadIndexBytes = readBudget[0]
+	}
+	api, err := application.NewService(options)
 	if err != nil {
 		b.Fatal(err)
 	}

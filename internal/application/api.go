@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 // API is the process-local boundary consumed by GUI, TUI, WebUI, and CLI
@@ -28,6 +29,10 @@ type API interface {
 	Dispatch(context.Context, string, Command) (CommandResult, error)
 	LiveState(string) (State, bool, error)
 	ReadLiveSession(string) (LiveSnapshot, bool, error)
+	ReadHistory(string, session.HistoryQuery) (HistorySnapshot, error)
+	ReadNodes(string, session.NodeQuery) (NodesSnapshot, error)
+	ReadSessionMetadata(string) (SessionSnapshot, error)
+	ReadEntryChunk(string, string, string, int, int) (session.EntryChunk, error)
 
 	ListSessions() ([]SessionInfo, error)
 	ListProjects() ([]ProjectInfo, error)

@@ -93,6 +93,66 @@ func TestCatalogProjectionMatchesCompatibleDiscoveryMetadata(t *testing.T) {
 	}
 }
 
+func TestCatalogDetectsReplacementAndRewriteWithUnchangedSizeAndMtime(t *testing.T) {
+	root := t.TempDir()
+	cwd, agentDir := filepath.Join(root, "workspace"), filepath.Join(root, "agent")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := SessionDirForAgentDir(cwd, agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := createCatalogTestSession(t, cwd, dir, "replaced", "before", 1)
+	cachePath := filepath.Join(root, "catalog.json")
+	catalog, err := newCatalogAt(agentDir, cachePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := catalog.ListAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err = newCatalogAt(agentDir, cachePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	info, _ := os.Stat(path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.ReplaceAll(raw, []byte("before"), []byte("after!"))
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	values, err := catalog.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCatalogSession(t, values, "replaced", 2, "after!")
+	if err := os.Rename(path, path+".previous"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	values, err = catalog.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCatalogSession(t, values, "replaced", 2, "before")
+}
+
 func TestCatalogPersistsAndRefreshesOnlyChangedSessionFiles(t *testing.T) {
 	root := t.TempDir()
 	cwd := filepath.Join(root, "workspace")

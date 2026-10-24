@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	// v2 retains a literal "(no messages)" first user message, rather than
-	// treating that text as an unset value and replacing it with a later one.
-	sessionCatalogSnapshotVersion  = 2
+	// v3 validates source identity/change time as well as size and mtime, so
+	// replacing a file cannot silently retain a previous session's summary.
+	sessionCatalogSnapshotVersion  = 3
 	maxSessionCatalogSnapshotBytes = 64 << 20
 )
 
@@ -47,6 +47,7 @@ type Catalog struct {
 type catalogFingerprint struct {
 	size       int64
 	modifiedNS int64
+	source     string
 }
 
 type catalogFile struct {
@@ -70,6 +71,7 @@ type catalogSnapshotEntry struct {
 	Path           string               `json:"path"`
 	FileSize       int64                `json:"fileSize"`
 	FileModifiedNS int64                `json:"fileModifiedNs"`
+	FileSource     string               `json:"fileSource"`
 	Valid          bool                 `json:"valid"`
 	Info           *catalogSnapshotInfo `json:"info,omitempty"`
 }
@@ -280,7 +282,7 @@ func decodeCatalogSnapshot(agentDir string, data []byte) (map[string]catalogReco
 			return nil, fmt.Errorf("session catalog snapshot contains duplicate path %q", path)
 		}
 		record := catalogRecord{fingerprint: catalogFingerprint{
-			size: entry.FileSize, modifiedNS: entry.FileModifiedNS,
+			size: entry.FileSize, modifiedNS: entry.FileModifiedNS, source: entry.FileSource,
 		}}
 		if entry.Valid {
 			if entry.Info == nil || strings.TrimSpace(entry.Info.ID) == "" {
@@ -408,10 +410,17 @@ func catalogFilesInAgentDir(agentDir string) ([]catalogFile, error) {
 			if info.IsDir() {
 				continue
 			}
+			source, sourceErr := fileSourceSignature(path, info)
+			if errors.Is(sourceErr, os.ErrNotExist) {
+				continue
+			}
+			if sourceErr != nil {
+				return nil, fmt.Errorf("validate session source %s: %w", path, sourceErr)
+			}
 			files = append(files, catalogFile{
 				path: path,
 				fingerprint: catalogFingerprint{
-					size: info.Size(), modifiedNS: info.ModTime().UnixNano(),
+					size: info.Size(), modifiedNS: info.ModTime().UnixNano(), source: source,
 				},
 			})
 		}
@@ -464,7 +473,7 @@ func encodeCatalogSnapshot(agentDir string, records map[string]catalogRecord) ([
 		record := records[path]
 		entry := catalogSnapshotEntry{
 			Path: path, FileSize: record.fingerprint.size,
-			FileModifiedNS: record.fingerprint.modifiedNS, Valid: record.valid,
+			FileModifiedNS: record.fingerprint.modifiedNS, FileSource: record.fingerprint.source, Valid: record.valid,
 		}
 		if record.valid {
 			entry.Info = newCatalogSnapshotInfo(record.info)

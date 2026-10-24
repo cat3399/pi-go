@@ -27,11 +27,14 @@ const defaultSessionIdleTimeout = 10 * time.Minute
 type RuntimeOpener func(context.Context, app.ProductionConfig, app.ProductionRuntimeOptions) (*agentruntime.Runtime, error)
 
 type ServiceOptions struct {
-	Context         context.Context
-	Production      app.ProductionConfig
-	IdleTimeout     time.Duration
-	OpenRuntime     RuntimeOpener
-	DisableReaper   bool
+	Context       context.Context
+	Production    app.ProductionConfig
+	IdleTimeout   time.Duration
+	OpenRuntime   RuntimeOpener
+	DisableReaper bool
+	// ReadIndexBytes budgets rebuildable inactive-session index payloads.
+	// Zero uses the default; a negative value disables payload retention.
+	ReadIndexBytes  int64
 	SkillHTTP       HTTPDoer
 	ModelHTTP       HTTPDoer
 	ModelCatalogURL string
@@ -148,6 +151,7 @@ type Service struct {
 	fileIndexCache      map[string]*fileIndexCacheEntry
 	fileIndexLoads      map[string]*fileIndexLoad
 	sessionCatalog      *session.Catalog
+	readCache           readIndexCache
 	skillHTTP           HTTPDoer
 	skillsAPI           string
 	githubAPI           string
@@ -205,6 +209,10 @@ func NewService(options ServiceOptions) (*Service, error) {
 		return nil, fmt.Errorf("open session catalog: %w", err)
 	}
 	serviceCtx, cancel := context.WithCancel(ctx)
+	readBudget := options.ReadIndexBytes
+	if readBudget == 0 {
+		readBudget = defaultReadIndexBytes
+	}
 	s := &Service{
 		ctx: serviceCtx, cancel: cancel, production: cloneProductionConfig(options.Production),
 		paths: paths, idle: idle, openRuntime: opener,
@@ -214,6 +222,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 		fileIndexCache: make(map[string]*fileIndexCacheEntry),
 		fileIndexLoads: make(map[string]*fileIndexLoad),
 		sessionCatalog: sessionCatalog,
+		readCache:      readIndexCache{budget: readBudget},
 		sessions:       make(map[string]*managedSession), opening: make(map[string]*openCall),
 		events: newEventStream(defaultEventHistoryCapacity), reaperDone: make(chan struct{}),
 	}
@@ -701,5 +710,9 @@ func (s *Service) Close(ctx context.Context) error {
 		closeErr = errors.Join(closeErr, err)
 	}
 	s.events.close()
+	s.readCache.mu.Lock()
+	s.readCache.entries = nil
+	s.readCache.bytes = 0
+	s.readCache.mu.Unlock()
 	return closeErr
 }
