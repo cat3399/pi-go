@@ -1,7 +1,7 @@
 import type {
   AgentMessage, AgentReadVersion, ApplicationClient, ApplicationEventEnvelope, ApplicationOverview,
-  ApplicationReadRequest, ApplicationResources, ApplicationSnapshot, EventSubscription, HistoryItem,
-  EntryNode, HistoryPage, LiveSnapshot, NodesPage, ReadMessage, ReadResourceRequest, ResourceResponse, ResourceRevision,
+  ApplicationReadRequest, ApplicationResources, ApplicationSnapshot, EventSubscription, HistoryItem, HistoryRun, RunsPage,
+  HistoryPage, LiveSnapshot, NodesPage, ReadMessage, ReadResourceRequest, ResourceResponse, ResourceRevision,
   ProjectDirectoryPage, ProjectInfo, SessionDirectoryPage, SessionInfo, SessionMetadata, SessionResources, SessionRuntimeState, SessionVersion,
 } from "../contracts";
 import { ResourceCache, retainedBytes } from "./resource-cache.ts";
@@ -16,7 +16,7 @@ const revalidateAfter = 30_000;
 const maxBufferedBytes = 8 * 1024 * 1024;
 
 export interface HistoryWindow {
-  pages: HistoryPage[];
+  pages: RunsPage[];
   version: SessionVersion;
   anchorId: string;
   start: number;
@@ -32,7 +32,21 @@ export interface HistoryWindow {
 export interface NavigationIndex {
   version: SessionVersion;
   leafId: string;
-  items: { id: string; label: string; position: number }[];
+  items: { id: string; label: string; position: number; runId: string }[];
+}
+
+export interface RunDetailWindow {
+  pages: HistoryPage[];
+  version: SessionVersion;
+  anchorId: string;
+  run: HistoryRun;
+  start: number;
+  end: number;
+  total: number;
+  older?: string;
+  newer?: string;
+  following: boolean;
+  latestAvailable: boolean;
 }
 
 interface PendingReadMessage extends ReadMessage { entryId?: string; generation?: string }
@@ -62,7 +76,7 @@ interface ProjectDirectoryWindow {
 
 const projectDirectoryKey = '["project-directory"]';
 
-export interface ScrollPosition { entryId: string; offset: number; bottom: boolean }
+export interface ScrollPosition { entryId: string; offset: number; bottom: boolean; target?: "process" }
 export interface EditDraft { text: string; original: string; contentToken?: string }
 
 type BufferedEvent = { envelope: ApplicationEventEnvelope } | { connected: string };
@@ -78,6 +92,7 @@ function navigationKey(id: string): string { return JSON.stringify(["navigation"
 function viewKey(id: string): string { return JSON.stringify(["view", id]); }
 function directoryKey(project: string, search: string): string { return JSON.stringify(["directory", project, search.trim().toLowerCase()]); }
 function entityKey(id: string, generation: string, entryId: string): string { return JSON.stringify(["entry", id, generation, entryId]); }
+function runWindowKey(id: string, generation: string, runId: string): string { return JSON.stringify(["run-window", id, generation, runId]); }
 function sameVersion(a: SessionVersion | undefined, b: SessionVersion | undefined): boolean {
   return Boolean(a && b && a.generation === b.generation && a.log === b.log && a.view === b.view);
 }
@@ -102,10 +117,35 @@ function isMissing(error: unknown): boolean {
 function newerRevision(value: ResourceRevision | undefined, current: ResourceRevision | undefined): boolean {
   return Boolean(value && (!current || value.generation === current.generation && value.revision > current.revision));
 }
-function makeWindow(pages: HistoryPage[], following: boolean, latestAvailable = false): HistoryWindow {
+function makeWindow(pages: RunsPage[], following: boolean, latestAvailable = false): HistoryWindow {
   const first = pages[0]!, last = pages[pages.length - 1]!;
   return { pages, version: last.version, anchorId: last.anchorId, start: first.start, end: last.end, total: last.total,
     older: first.older, newer: last.newer, following, latestAvailable };
+}
+
+function makeRunWindow(pages: HistoryPage[], following: boolean, latestAvailable = false): RunDetailWindow {
+  const first = pages[0]!, last = pages.at(-1)!;
+  if (!last.run) throw new Error("历史详情缺少所属运行信息");
+  return { pages, version: last.version, anchorId: last.anchorId, run: last.run, start: first.start, end: last.end, total: last.total,
+    older: first.older, newer: last.newer, following, latestAvailable };
+}
+
+function appendRunPages(pages: RunsPage[], tail: RunsPage): RunsPage[] {
+  const preceding: RunsPage[] = [];
+  for (const page of pages) {
+    if (page.end <= tail.start) { preceding.push(page); continue; }
+    if (page.start >= tail.start) break;
+    const runs = page.runs.slice(0, tail.start - page.start);
+    const ids = new Set(runs.flatMap((run) => [run.header.id, run.result?.id]));
+    preceding.push({ ...page, runs, items: page.items.filter((item) => ids.has(item.node.id)), end: tail.start, newer: undefined });
+  }
+  const previous = preceding.at(-1);
+  if (previous && previous.end === tail.start && previous.runs.length + tail.runs.length <= pageLimit
+    && retainedBytes(previous.items) + retainedBytes(tail.items) <= pageBytes) {
+    return [...preceding.slice(0, -1), { ...tail, start: previous.start, older: previous.older,
+      items: [...previous.items, ...tail.items], runs: [...previous.runs, ...tail.runs] }].slice(-maxWindowPages);
+  }
+  return [...preceding, tail].slice(-maxWindowPages);
 }
 function appendHistoryPages(pages: HistoryPage[], tail: HistoryPage): HistoryPage[] {
   const previous = pages.at(-1);
@@ -140,10 +180,15 @@ export class ApplicationDataStore {
   private readonly scopePins = new Map<symbol, () => void>();
   private readonly navigationFlights = new Map<string, Promise<void>>();
   private readonly sessionFlights = new Map<string, Promise<SessionReadView>>();
+  private readonly runFlights = new Map<string, Promise<void>>();
+  private readonly navigationRequests = new Map<string, number>();
+  private readonly runRequests = new Map<string, number>();
+  private readonly resetSessions = new Set<string>();
   private readonly dirtySessions = new Set<string>();
   private readonly summaryReads = new Set<string>();
   private readonly directoryQueries = new Map<string, { project: string; search: string }>();
   private readonly visibleDirectories = new Map<string, number>();
+  private readonly visibleRuns = new Map<string, number>();
   private subscription: EventSubscription | null = null;
   private streamSerial = 0;
   private lifecycle = 0;
@@ -182,6 +227,29 @@ export class ApplicationDataStore {
   session(id: string): SessionReadView | undefined { return this.cache.peek(viewKey(id)); }
   navigation(id: string): NavigationIndex | undefined { return this.cache.peek(navigationKey(id)); }
   directory(project: string, search = ""): DirectoryWindow | undefined { return this.cache.peek(directoryKey(project, search)); }
+  runDetails(id: string, runId: string): RunDetailWindow | undefined {
+    const generation = this.session(id)?.window.version.generation;
+    return generation ? this.cache.peek(runWindowKey(id, generation, runId)) : undefined;
+  }
+  watchRun(id: string, runId: string): () => void {
+    const generation = this.session(id)?.window.version.generation ?? "";
+    const key = runWindowKey(id, generation, runId), release = this.cache.pin(key);
+    this.visibleRuns.set(key, (this.visibleRuns.get(key) ?? 0) + 1);
+    return () => {
+      const count = this.visibleRuns.get(key) ?? 0;
+      if (count > 1) this.visibleRuns.set(key, count - 1); else this.visibleRuns.delete(key);
+      release();
+    };
+  }
+  focusedEntry(id: string): { runId: string; entryId: string; serial: number } | undefined {
+    return this.cache.peek(JSON.stringify(["history-focus", id]));
+  }
+  containsEntry(id: string, entryId: string): boolean {
+    const window = this.session(id)?.window;
+    if (!window) return false;
+    if (window.pages.some((page) => page.items.some((item) => item.node.id === entryId))) return true;
+    return window.pages.flatMap((page) => page.runs).some((run) => this.runDetails(id, run.id)?.pages.some((page) => page.items.some((item) => item.node.id === entryId)));
+  }
   watchDirectory(project: string, search = ""): () => void {
     const key = directoryKey(project, search);
     this.visibleDirectories.set(key, (this.visibleDirectories.get(key) ?? 0) + 1);
@@ -231,6 +299,7 @@ export class ApplicationDataStore {
     this.bufferBytes = 0;
     this.sessionFlights.clear();
     this.navigationFlights.clear();
+    this.runFlights.clear();
   }
 
   select(owner: symbol, id: string | null): void {
@@ -547,6 +616,7 @@ export class ApplicationDataStore {
         if (draft && !draft.contentToken && item.node.contentToken) this.drafts.set(key, { ...draft, contentToken: item.node.contentToken });
       }
       this.cache.put(viewKey(id), view);
+      this.resetSessions.delete(id);
       if (this.selectedIDs().includes(id)) {
         if (view.live.active) void this.ensureNavigation(id).catch((error) => this.fail(error));
         void this.restoreEditingSource(id, view.window.version.generation).catch((error) => this.fail(error));
@@ -566,6 +636,26 @@ export class ApplicationDataStore {
     return done;
   }
 
+  async refreshSession(id: string): Promise<SessionReadView> {
+    await this.sessionFlights.get(id)?.catch(() => undefined);
+    const view = this.session(id);
+    this.cancelHistoryNavigation(id);
+    this.resetSessions.add(id);
+    this.cache.invalidate((key) => {
+      const parts = JSON.parse(key);
+      return parts[0] === "session" && parts[1] === id;
+    });
+    this.cache.forget(navigationKey(id));
+    this.cache.forget((key) => { const parts = JSON.parse(key); return (parts[0] === "run-window" || parts[0] === "entry") && parts[1] === id; });
+    for (const [key, serial] of this.runRequests) if (JSON.parse(key)[1] === id) this.runRequests.set(key, serial + 1);
+    this.invalidateConfiguration(id);
+    if (view) this.invalidateConfiguration(view.metadata.info.cwd);
+    const result = await this.loadSession(id, true);
+    this.cache.put(JSON.stringify(["history-focus", id]), { runId: "", entryId: "", serial: this.navigationRequests.get(id) ?? 0 });
+    this.emit();
+    return result;
+  }
+
   private async readSessionBaseline(id: string): Promise<SessionReadView> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const [metadataResult, liveResult] = await Promise.all([this.read(id, "metadata"), this.read(id, "live")]);
@@ -573,19 +663,25 @@ export class ApplicationDataStore {
       const head = live.active && live.history ? live.history : { ...metadata.version, leafId: metadata.leafId };
       if (metadata.version.generation !== head.generation) { this.invalidateSession(id); continue; }
       const old = this.session(id);
-      let window = old?.window;
+      let window = this.resetSessions.has(id) ? undefined : old?.window;
       try {
         if (!window || window.version.generation !== head.generation) {
           this.cache.forget(navigationKey(id));
-          window = makeWindow([await this.history(id, { at: head, leafId: head.leafId ?? "" })], true);
+          window = makeWindow([await this.runs(id, { at: head, leafId: head.leafId ?? "" })], true);
         } else if (window.preview) {
           window = { ...window, latestAvailable: true };
         } else if (!sameVersion(window.version, head) || window.anchorId !== (head.leafId ?? "")) {
-          const tail = await this.history(id, { at: head, leafId: head.leafId ?? "", afterId: window.anchorId });
-          if (!tail.connected) { this.cache.forget(navigationKey(id)); window = makeWindow([tail], true); }
+          const tail = await this.runs(id, { at: head, leafId: head.leafId ?? "", afterId: window.anchorId });
+          if (!tail.connected) {
+            this.cache.forget(navigationKey(id));
+            this.cache.forget((key) => { const parts = JSON.parse(key); return parts[0] === "run-window" && parts[1] === id; });
+            this.navigationRequests.set(id, (this.navigationRequests.get(id) ?? 0) + 1);
+            window = makeWindow([tail], true);
+          }
           else if (!window.following) window = { ...window, latestAvailable: tail.total > window.total || tail.anchorId !== window.anchorId };
-          else if (tail.start === window.end && window.end === window.total) {
-            if (tail.items.length) window = makeWindow(appendHistoryPages(window.pages, tail), true);
+          else if (tail.start <= window.end && tail.start >= window.start && window.end === window.total
+            && (tail.start === window.end || window.pages.flatMap((page) => page.runs)[tail.start-window.start]?.id === tail.runs[0]?.id)) {
+            if (tail.runs.length) window = makeWindow(appendRunPages(window.pages, tail), true);
             else window = { ...window, version: tail.version, anchorId: tail.anchorId, total: tail.total };
           } else window = makeWindow([tail], true);
         }
@@ -594,6 +690,17 @@ export class ApplicationDataStore {
         throw error;
       }
       this.forgetOldGeneration(id, head.generation);
+      // Refresh visible process windows before replacing pending receipts. The
+      // completed tool/assistant must not disappear between these two reads.
+      for (const run of window.pages.flatMap((page) => page.runs)) {
+        const key = runWindowKey(id, head.generation, run.id), detail = this.cache.peek<RunDetailWindow>(key);
+        if (!detail || detail.run.lastEntryId === run.lastEntryId) continue;
+        if (!detail.following || !this.visibleRuns.has(key)) { this.cache.put(key, { ...detail, latestAvailable: true }); continue; }
+        const page = await this.history(id, { runId: run.id, at: window.version, leafId: window.anchorId,
+          afterId: detail.pages.at(-1)?.items.at(-1)?.node.id });
+        if (this.cache.peek(key) !== detail) continue;
+        this.cache.put(key, makeRunWindow(page.connected && page.start === detail.end ? appendHistoryPages(detail.pages, page) : [page], true));
+      }
       return { metadata, live, window, pending: [...(live.pending ?? [])], controls: old?.controls };
     }
     throw new Error("会话正在切换，读取尚未稳定");
@@ -605,7 +712,7 @@ export class ApplicationDataStore {
     this.cache.forget((key) => {
       const parts: unknown[] = JSON.parse(key);
       if (parts[1] !== id) return false;
-      if (parts[0] === "entry") return parts[2] !== generation;
+      if (parts[0] === "entry" || parts[0] === "run-window") return parts[2] !== generation;
       if (parts[0] !== "session" || parts[2] === "metadata" || parts[2] === "live") return false;
       return !key.includes(generation);
     });
@@ -624,39 +731,58 @@ export class ApplicationDataStore {
     return { ...page, items };
   }
 
+  private async runs(id: string, query: ReadResourceRequest): Promise<RunsPage> {
+    const page = (await this.read(id, "runs", { limit: pageLimit, maxBytes: pageBytes, ...query })).data;
+    return { ...page, items: page.items.map((item) => {
+      if (item.projection === "answer") return item;
+      const key = entityKey(id, page.version.generation, item.node.id), cached = this.cache.peek<AgentMessage>(key);
+      if (cached) return { ...item, message: cached };
+      if (item.message) this.cache.put(key, item.message);
+      return item;
+    }) };
+  }
+
   async pageHistory(id: string, direction: "older" | "newer" | "latest", aroundId?: string): Promise<void> {
+    const serial = (this.navigationRequests.get(id) ?? 0) + 1;
+    this.navigationRequests.set(id, serial);
     const value = await this.loadSession(id);
     const previous = value.window;
-    let page: HistoryPage;
+    if (this.navigationRequests.get(id) !== serial) return;
+    if (direction === "older" && previous.following) {
+      this.cache.put(viewKey(id), { ...value, window: { ...previous, following: false } });
+      this.emit();
+    }
+    let page: RunsPage;
     let preview = false;
     if (direction === "latest" || aroundId) {
       const head = value.live.active && value.live.history ? value.live.history : { ...value.metadata.version, leafId: value.metadata.leafId };
-      try { page = await this.history(id, { at: head, leafId: head.leafId ?? "", ...(aroundId ? { aroundId } : {}) }); }
+      try { page = await this.runs(id, { at: head, leafId: head.leafId ?? "", ...(aroundId ? { aroundId } : {}) }); }
       catch (error) {
         if (!aroundId || !/outside the selected path|entry not found/.test(errorText(error))) throw error;
-        page = await this.history(id, { at: head, leafId: aroundId, aroundId });
+        page = await this.runs(id, { at: head, leafId: aroundId, aroundId });
         preview = true;
       }
     } else {
       let cursor = direction === "older" ? previous.older : previous.newer;
       if (!cursor && direction === "newer" && previous.end < previous.total) {
         const last = previous.pages.at(-1)?.items.at(-1)?.node.id;
-        if (last) cursor = (await this.history(id, { at: previous.version, leafId: previous.anchorId, aroundId: last, limit: 1 })).newer;
+        if (last) cursor = (await this.runs(id, { at: previous.version, leafId: previous.anchorId, aroundId: last, limit: 1 })).newer;
       }
-      if (cursor) page = await this.history(id, { cursor });
+      if (cursor) page = await this.runs(id, { cursor });
       else if (direction === "newer" && previous.latestAvailable && !previous.preview) {
         const head = value.live.active && value.live.history ? value.live.history : { ...value.metadata.version, leafId: value.metadata.leafId };
-        const afterId = previous.pages.at(-1)?.items.at(-1)?.node.id;
-        page = await this.history(id, { at: head, leafId: head.leafId ?? "", afterId, direction: "newer" });
+        const afterId = previous.pages.at(-1)?.runs.at(-1)?.lastEntryId;
+        page = await this.runs(id, { at: head, leafId: head.leafId ?? "", afterId, direction: "newer" });
         if (!page.connected) { this.invalidateSession(id); return; }
       } else return;
     }
     const current = this.session(id);
-    if (!current || current.window !== previous) return;
-    let pages: HistoryPage[];
+    if (!current || this.navigationRequests.get(id) !== serial || current.window.version.generation !== previous.version.generation
+      || direction !== "latest" && !aroundId && current.window.pages !== previous.pages) return;
+    let pages: RunsPage[];
     if (direction === "latest" || aroundId) pages = [page];
     else if (direction === "older" && page.end === previous.start) pages = [page, ...previous.pages].slice(0, maxWindowPages);
-    else if (direction === "newer" && page.start === previous.end) pages = [...previous.pages, page].slice(-maxWindowPages);
+    else if (direction === "newer" && page.start <= previous.end && page.start >= previous.start) pages = appendRunPages(previous.pages, page);
     else return;
     const advanced = direction === "newer" && page.version.log > previous.version.log;
     const window = makeWindow(pages, direction !== "older" && !aroundId && page.end === page.total, previous.latestAvailable && direction !== "latest" && !advanced);
@@ -667,7 +793,83 @@ export class ApplicationDataStore {
     window.version = direction === "latest" || aroundId || advanced ? page.version : previous.version;
     window.anchorId = direction === "latest" || aroundId || advanced ? page.anchorId : previous.anchorId;
     this.cache.put(viewKey(id), { ...current, window });
+    if (aroundId) {
+      const target = page.runs.at(-1);
+      if (target) {
+        this.cache.put(JSON.stringify(["history-focus", id]), { runId: target.id, entryId: aroundId, serial });
+        if (target.header.id !== aroundId && target.result?.id !== aroundId) {
+          this.disclosures.set(JSON.stringify([id, window.version.generation, "turn", target.id]), true);
+          this.emit();
+          await this.loadRun(id, target.id, "initial", aroundId);
+        }
+      }
+    }
     this.emit();
+  }
+
+  cancelHistoryNavigation(id: string): void {
+    this.navigationRequests.set(id, (this.navigationRequests.get(id) ?? 0) + 1);
+  }
+
+  loadRun(id: string, runId: string, direction: "initial" | "older" | "newer" | "latest" = "initial", aroundId?: string): Promise<void> {
+    const view = this.session(id);
+    if (!view) return Promise.resolve();
+    const window = view.window, key = runWindowKey(id, window.version.generation, runId);
+    const run = window.pages.flatMap((page) => page.runs).find((run) => run.id === runId);
+    if (!run) return Promise.resolve();
+    const previous = this.cache.peek<RunDetailWindow>(key);
+    if (direction === "initial" && !aroundId) {
+      if (previous && (!previous.following || previous.run.lastEntryId === run.lastEntryId)) return Promise.resolve();
+      const pending = this.runFlights.get(key);
+      if (pending) return pending;
+    }
+    const serial = (this.runRequests.get(key) ?? 0) + 1, lifecycle = this.lifecycle;
+    this.runRequests.set(key, serial);
+    if (direction === "older" && previous?.following) {
+      this.cache.put(key, { ...previous, following: false });
+      this.emit();
+    }
+    const query: ReadResourceRequest = { runId, at: window.version, leafId: window.anchorId };
+    const work = (async () => {
+      let page: HistoryPage;
+      if (aroundId) page = await this.history(id, { ...query, aroundId });
+      else if ((direction === "older" || direction === "newer") && previous) {
+        const cursor = direction === "older" ? previous.older : previous.newer;
+        if (cursor) page = await this.history(id, { runId, cursor });
+        else if (direction === "newer" && previous.latestAvailable) {
+          page = await this.history(id, { ...query, direction: "newer", afterId: previous.pages.at(-1)?.items.at(-1)?.node.id });
+        } else return;
+      } else {
+        const active = run.id === window.pages.at(-1)?.runs.at(-1)?.id && window.following
+          && Boolean(view.live.state?.isStreaming || view.live.state?.isPromptRunning);
+        page = await this.history(id, { ...query, direction: direction === "latest" || active || previous?.following ? "older" : "newer" });
+      }
+      const current = this.session(id)?.window;
+      const currentRun = current?.pages.flatMap((page) => page.runs).find((run) => run.id === runId);
+      if (lifecycle !== this.lifecycle || this.runRequests.get(key) !== serial || current?.version.generation !== window.version.generation
+        || !currentRun) return;
+      let pages = [page];
+      if (!aroundId && previous && direction === "older" && page.end === previous.start) pages = [page, ...previous.pages].slice(0, maxWindowPages);
+      if (!aroundId && previous && direction === "newer" && page.start === previous.end) pages = appendHistoryPages(previous.pages, page);
+      const detail = makeRunWindow(pages, direction !== "older" && !aroundId && page.end === page.total);
+      detail.latestAvailable = page.run?.lastEntryId !== currentRun.lastEntryId;
+      if (previous && (direction === "older" || direction === "newer") && page.version.log < previous.version.log) {
+        detail.version = previous.version; detail.anchorId = previous.anchorId; detail.total = previous.total; detail.run = previous.run;
+      }
+      this.cache.put(key, detail);
+      if (aroundId) {
+        const item = page.items.find((item) => item.node.id === aroundId), callId = item?.message?.toolCallId;
+        if (typeof callId === "string") this.disclosures.set(JSON.stringify([id, window.version.generation, "tool", callId]), true);
+      }
+      this.emit();
+      if (detail.latestAvailable && detail.following) {
+        this.invalidateSession(id, false);
+        this.schedule();
+      }
+    })();
+    const done = work.finally(() => { if (this.runFlights.get(key) === done) this.runFlights.delete(key); });
+    this.runFlights.set(key, done);
+    return done;
   }
 
   async loadEntry(id: string, generation: string, entryId: string): Promise<AgentMessage | null> {
@@ -678,6 +880,7 @@ export class ApplicationDataStore {
   }
 
   messageFor(id: string, generation: string, item: HistoryItem): AgentMessage | undefined {
+    if (item.projection === "answer") return item.message;
     return this.cache.peek<AgentMessage>(entityKey(id, generation, item.node.id)) ?? item.message;
   }
 
@@ -698,26 +901,26 @@ export class ApplicationDataStore {
     if (running) return running;
     const lifecycle = this.lifecycle;
     const afterId = previous?.version.generation === head.generation ? previous.leafId : "";
-    const collect = async (filter: ReadResourceRequest): Promise<{ items: EntryNode[]; connected: boolean }> => {
-      const items: EntryNode[] = [];
+    const collect = async (): Promise<{ items: NavigationIndex["items"]; connected: boolean }> => {
+      const items: NavigationIndex["items"] = [];
       let cursor: string | undefined, connected = true;
       do {
-        const page = await this.nodes(id, { ...filter, leafId, ...(afterId ? { afterId } : {}), limit: 256,
-          ...(cursor ? { cursor } : { at: head }) });
-        items.push(...page.items); connected = page.connected;
-        cursor = page.next;
+        const page = await this.runs(id, { metadataOnly: true, limit: 256,
+          ...(cursor ? { cursor } : { at: head, direction: "newer", leafId, ...(afterId ? { afterId } : {}) }) });
+        items.push(...page.runs.flatMap((run) => run.anchors.map((node) => ({ id: node.id, label: node.preview, position: node.position ?? 0, runId: run.id }))));
+        connected = page.connected;
+        cursor = page.newer;
         if (lifecycle !== this.lifecycle) return { items: [], connected: false };
       } while (cursor);
       return { items, connected };
     };
     const work = (async () => {
-      const [users, compactions] = await Promise.all([collect({ role: "user" }), collect({ entryType: "compaction" })]);
+      const result = await collect();
       const current = this.session(id), currentHead = current?.live.history ?? current?.metadata.version;
       const currentLeaf = current?.live.history ? current.live.history.leafId ?? "" : current?.metadata.leafId ?? "";
       if (lifecycle !== this.lifecycle || currentHead?.generation !== head.generation || currentLeaf !== leafId) return;
-      const base = previous && afterId && users.connected && compactions.connected ? previous.items : [];
-      const added = [...users.items, ...compactions.items].map((node) => ({ id: node.id, label: node.preview, position: node.position ?? 0 }));
-      const byID = new Map([...base, ...added].map((item) => [item.id, item]));
+      const base = previous && afterId && result.connected ? previous.items : [];
+      const byID = new Map([...base, ...result.items].map((item) => [item.id, item]));
       this.cache.put(navigationKey(id), { version: head, leafId, items: [...byID.values()].sort((a, b) => a.position - b.position) } satisfies NavigationIndex);
       this.emit();
     })();
@@ -787,7 +990,7 @@ export class ApplicationDataStore {
         this.summaryReads.add(id);
         if (!head || version.generation !== head.generation || version.log > head.log || event.uncertain) this.cache.invalidate((key) => {
           const parts = JSON.parse(key);
-          return parts[0] === "session" && parts[1] === id && parts[2] === "nodes" && !String(parts[3]).includes('"cursor"');
+          return parts[0] === "session" && parts[1] === id && (parts[2] === "nodes" || parts[2] === "runs") && !String(parts[3]).includes('"cursor"');
         });
         this.cache.invalidate(JSON.stringify(["configuration", "stats", id]));
         this.cache.invalidate(applicationKey("overview"));

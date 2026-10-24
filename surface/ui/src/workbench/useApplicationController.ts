@@ -60,6 +60,7 @@ export interface ApplicationController {
   models: ModelsView | null;
   sessionView: WorkbenchSession | null;
   sessionLoading: boolean;
+  sessionRefreshing: boolean;
   runtimeState: SessionRuntimeState | null;
   activeSessionId: string | null;
   workingDirectory: string;
@@ -165,6 +166,7 @@ export function useApplicationController(client: ApplicationClient): Application
   const [models, setModels] = useState<ModelsView | null>(null);
   const [sessionView, setSessionView] = useState<WorkbenchSession | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionRefreshing, setSessionRefreshing] = useState(false);
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [newSessionCwd, setNewSessionCwd] = useState("");
@@ -470,11 +472,13 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [client, connect]);
 
   const selectSession = useCallback(async (sessionId: string) => {
+    const refreshing = activeSessionRef.current === sessionId;
     activeSessionRef.current = sessionId;
     data.select(scopeOwner, sessionId);
     setActiveSessionId(sessionId);
     const cached = applyCachedSession(sessionId);
     setSessionLoading(!cached);
+    setSessionRefreshing(refreshing && Boolean(cached));
     if (!cached) { setSessionView(null); setRuntimeState(null); setHistoryWindow(null); setMessages([]); setStreamingMessage(null); }
     setSlashCommands([]);
     setSlashCommandsLoading(false);
@@ -485,6 +489,7 @@ export function useApplicationController(client: ApplicationClient): Application
     setLatestGenerationSpeed(null);
     setError("");
     try {
+      if (refreshing) await data.refreshSession(sessionId);
       const view = await loadSession(sessionId, generationRef.current, "", false);
       if (view) {
         setSessionLoading(false);
@@ -508,7 +513,7 @@ export function useApplicationController(client: ApplicationClient): Application
     } catch (sessionError) {
       if (activeSessionRef.current === sessionId) setError(errorMessage(sessionError));
     } finally {
-      if (activeSessionRef.current === sessionId) setSessionLoading(false);
+      if (activeSessionRef.current === sessionId) { setSessionLoading(false); setSessionRefreshing(false); }
     }
   }, [data, scopeOwner, applyCachedSession, loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
@@ -1145,6 +1150,7 @@ export function useApplicationController(client: ApplicationClient): Application
     models,
     sessionView,
     sessionLoading,
+    sessionRefreshing,
     runtimeState,
     activeSessionId,
     workingDirectory: activeSessionId

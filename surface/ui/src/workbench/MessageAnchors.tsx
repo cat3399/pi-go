@@ -49,6 +49,9 @@ function positionPreview(element: HTMLDivElement | null, position: AnchorPreview
 export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsProps>(function MessageAnchors(props, ref) {
   const [gestureIndex, setGestureIndex] = useState<number | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
   const previewPositionRef = useRef<AnchorPreviewPosition | null>(null);
 
@@ -77,6 +80,10 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
   useLayoutEffect(() => {
     positionPreview(previewRef.current, previewPositionRef.current);
   }, [displayedPreviewIndex, preview?.label]);
+  useLayoutEffect(() => {
+    if (expandedIndex === null || !trackRef.current) return;
+    trackRef.current.scrollTop = (expandedIndex + 0.5) * 36 - trackRef.current.clientHeight / 2;
+  }, [expandedIndex]);
   if (props.items.length === 0) return null;
   const desktopHeight = Math.min(320, 16 + props.items.length * 18);
   const mobileHeight = Math.max(40, 16 + props.items.length * 24);
@@ -86,8 +93,16 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
     <>
       <aside
         id="pi-message-anchors"
-        className={`pi-message-anchors ${props.mobile ? "is-mobile" : "is-desktop"} ${props.open ? "is-open" : ""} ${gestureIndex !== null ? "is-scrubbing" : ""}`}
+        className={`pi-message-anchors ${props.mobile ? "is-mobile" : "is-desktop"} ${props.open ? "is-open" : ""} ${gestureIndex !== null ? "is-scrubbing" : ""} ${expandedIndex !== null ? "is-expanded" : ""}`}
         aria-label="消息锚点"
+        onPointerEnter={(event) => {
+          if (props.mobile || props.items.length <= 30 || expandedIndex !== null) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          const index = Math.floor((event.clientY - bounds.top - 8) / Math.max(1, bounds.height - 16) * props.items.length);
+          setExpandedIndex(Math.max(0, Math.min(props.items.length - 1, index)));
+        }}
+        onPointerLeave={() => { setExpandedIndex(null); setHoveredIndex(null); }}
+        onKeyDown={(event) => { if (event.key === "Escape") setExpandedIndex(null); }}
         style={props.mobile
           ? {
               "--pi-anchor-mobile-height": `${mobileHeight}px`,
@@ -95,7 +110,7 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
             } as CSSProperties
           : { height: `min(${desktopHeight}px, calc(100% - 112px))` }}
       >
-        <div className="pi-anchor-track" aria-label="快速定位到对话">
+        <div ref={trackRef} className="pi-anchor-track" aria-label="快速定位到对话">
           {props.items.length > 1 && <span className="pi-anchor-line" />}
           {props.items.map((item, index) => (
             <button
@@ -104,13 +119,16 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
               className={index === displayedActiveIndex ? "is-active" : ""}
               // Long indexes use the same proportional slots as mobile. The
               // normal desktop spacing stays intact; the track cannot overflow.
-              style={!props.mobile && props.items.length > 30 ? { minHeight: 0, flexBasis: 0 } : undefined}
+              style={!props.mobile && props.items.length > 30 && expandedIndex === null ? { minHeight: 0, flexBasis: 0 } : undefined}
               tabIndex={props.mobile ? -1 : 0}
               aria-label={`第 ${index + 1} 轮：${item.label}`}
-              onClick={() => props.onSelect(index)}
+              onPointerEnter={() => setHoveredIndex(index)}
+              onFocus={() => setHoveredIndex(index)}
+              onBlur={() => setHoveredIndex(null)}
+              onClick={() => { props.onSelect(index); setExpandedIndex(null); }}
             >
               <span className="pi-anchor-dot" />
-              {!props.mobile && (
+              {!props.mobile && (expandedIndex !== null || hoveredIndex === index) && (
                 <span className="pi-anchor-preview">
                   <small>{String(index + 1).padStart(2, "0")}</small>
                   <span>{item.label || "（无文字消息）"}</span>

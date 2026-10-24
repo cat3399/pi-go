@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
-import type { AgentMessage, LiveSnapshot, MessageContentBlock } from "../contracts";
+import type { AgentMessage, HistoryRun, LiveSnapshot, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
@@ -30,12 +30,13 @@ const ToolResultEntriesContext = createContext<Map<string, string>>(new Map());
 function useDisclosure(kind: string, identity: string, initial: boolean): [boolean, (value: boolean | ((previous: boolean) => boolean)) => void] {
   const history = useContext(HistoryContext);
   const key = history && identity ? JSON.stringify([history.sessionId, history.generation, kind, identity]) : "";
-  const [value, setValue] = useState(() => key ? history?.data.disclosures.get(key) ?? initial : initial);
-  return [value, (next) => setValue((previous) => {
-    const result = typeof next === "function" ? next(previous) : next;
+  const [value, setValue] = useState(initial);
+  const current = key ? history?.data.disclosures.get(key) ?? value : value;
+  return [current, (next) => {
+    const result = typeof next === "function" ? next(current) : next;
     if (key) history?.data.disclosures.set(key, result);
-    return result;
-  })];
+    setValue(result);
+  }];
 }
 
 interface MessageListProps {
@@ -533,7 +534,18 @@ function ProcessGroup(props: {
   toolResults: Map<string, AgentMessage>;
   streaming: boolean;
 }) {
+  const history = useContext(HistoryContext);
+  const resultEntries = useContext(ToolResultEntriesContext);
+  const focus = history?.data.focusedEntry(history.sessionId);
+  const retainedEntry = history?.data.scroll.get(JSON.stringify([history.sessionId, history.generation]))?.entryId;
   const [expanded, setExpanded] = useDisclosure("process", props.blocks.map(toolCallID).join(":"), true);
+  const containsFocus = props.blocks.some((block) => {
+    const entry = resultEntries.get(toolCallID(block));
+    return Boolean(entry && (entry === focus?.entryId || entry === retainedEntry));
+  });
+  useLayoutEffect(() => {
+    if (containsFocus) setExpanded(true);
+  }, [focus?.serial, containsFocus]);
   const complete = props.blocks.every((block) => { const result = props.toolResults.get(toolCallID(block)); return Boolean(result && !result.partial); });
   const failed = props.blocks.some((block) => props.toolResults.get(toolCallID(block))?.isError === true);
   const labels = {
@@ -640,6 +652,14 @@ function Message({
     if (actionsHideTimerRef.current !== null) window.clearTimeout(actionsHideTimerRef.current);
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (history && message.role === "toolResult" && typeof message.toolCallId === "string" && !linkedToolCalls.has(message.toolCallId)) {
+      // An orphan result is visible at a page boundary. When its call arrives
+      // on the preceding page, retain that output inside the associated card.
+      history.data.disclosures.set(JSON.stringify([history.sessionId, history.generation, "tool", message.toolCallId]), true);
+    }
+  }, [history, message.role, message.toolCallId, linkedToolCalls]);
 
   useEffect(() => {
     if (!editing) return;
@@ -920,7 +940,10 @@ interface IndexedMessage {
 }
 
 interface ConversationTurn {
+  id: string;
+  run?: HistoryRun;
   anchor: IndexedMessage;
+  result?: IndexedMessage;
   tail: IndexedMessage[];
 }
 
@@ -1017,32 +1040,6 @@ function splitFinalAssistant(message: AgentMessage): { answer: AgentMessage | nu
   };
 }
 
-function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  if (!Array.isArray(message.content)) return messageText(message).trim().length > 0;
-  const split = splitFinalAssistant(message);
-  return Boolean(split.answer && contentBlocks(split.answer).some((block) => (
-    block.type === "image"
-    || (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0)
-  )));
-}
-
-function completedFinalIndex(messages: IndexedMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]?.message;
-    if (message && hasFinalAssistantAnswer(message)) return index;
-  }
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]?.message;
-    if (message?.role === "assistant") return index;
-  }
-  return -1;
-}
-
-function isGroupAnchor(message: AgentMessage): boolean {
-  return message.role === "user" || (message.role === "custom" && message.customType === "compaction");
-}
-
 function hasDisplayableProcessMessage(message: AgentMessage): boolean {
   if (message.role === "assistant") {
     return typeof message.content === "string"
@@ -1058,7 +1055,8 @@ function Turn(props: {
   streamingMessage: AgentMessage | null;
   busy: boolean;
   active: boolean;
-  revealHistory: boolean;
+  onLoadProcess(runId: string, direction: "initial" | "older" | "newer"): Promise<void>;
+  onExpand(runId: string): void;
   onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
   editingEntryId: string | null;
@@ -1068,142 +1066,104 @@ function Turn(props: {
   onEditCancel(): void;
   onEdit(entryId: string, text: string): Promise<void>;
 }) {
-  const [expanded, setExpanded] = useDisclosure("turn", props.turn.anchor.entryId ?? "", props.revealHistory || props.active && props.busy);
-  const mountedRef = useRef(false);
+  const history = useContext(HistoryContext)!;
+  const { turn } = props;
+  const [expanded, setExpanded] = useDisclosure("turn", turn.id, props.active && props.busy);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [now, setNow] = useState(() => Date.now());
-
+  const wasBusy = useRef(props.active && props.busy);
+  const loadingRef = useRef(false);
+  const lastDirectionRef = useRef<"initial" | "older" | "newer">("initial");
+  const processRef = useRef<HTMLDivElement>(null);
+  const detail = turn.run ? history.data.runDetails(history.sessionId, turn.run.id) : undefined;
+  const processMessages = turn.tail.filter((item) => item.entryId !== turn.result?.entryId || !item.entryId);
+  const fullFinal = turn.result && turn.tail.find((item) => item.entryId === turn.result?.entryId);
+  const finalProcess = fullFinal && splitFinalAssistant(fullFinal.message).process;
+  if (finalProcess) processMessages.push({ ...fullFinal, message: finalProcess });
+  if (props.active && props.streamingMessage) processMessages.push({ message: props.streamingMessage });
+  const processVisible = Boolean(turn.run?.processCount) || processMessages.some(({ message }) => hasDisplayableProcessMessage(message));
+  const processLabel = elapsedLabel(turn.anchor.message, props.active && props.busy ? now : messageTimestamp(turn.result?.message))
+    ?? (props.busy ? "正在处理" : "查看过程");
+  const load = async (direction: "initial" | "older" | "newer") => {
+    if (!turn.run || loadingRef.current) return;
+    lastDirectionRef.current = direction;
+    loadingRef.current = true;
+    setLoading(true); setError("");
+    try { await props.onLoadProcess(turn.run.id, direction); }
+    catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { loadingRef.current = false; setLoading(false); }
+  };
   useEffect(() => {
-    if (props.revealHistory) setExpanded(true);
-    else if (mountedRef.current) setExpanded(props.active && props.busy);
-    mountedRef.current = true;
-  }, [props.active, props.busy, props.revealHistory]);
-
-  useEffect(() => {
-    if (!props.active || !props.busy) return;
+    const running = props.active && props.busy;
+    if (running && !wasBusy.current) setExpanded(true);
+    wasBusy.current = running;
+    if (!running) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [props.active, props.busy]);
-
-  const tail = props.turn.tail;
-  const historicalFinalIndex = props.active && props.busy ? -1 : completedFinalIndex(tail);
-  const historicalFinal = historicalFinalIndex >= 0 ? tail[historicalFinalIndex] : undefined;
-  const finalSplit = historicalFinal ? splitFinalAssistant(historicalFinal.message) : null;
-  const finalAnswer = finalSplit?.answer && historicalFinal
-    ? { ...historicalFinal, message: finalSplit.answer }
-    : undefined;
-  const processMessages = historicalFinalIndex >= 0
-    ? tail.slice(0, historicalFinalIndex)
-    : [...tail];
-  if (finalSplit?.process && historicalFinal) {
-    processMessages.push({ ...historicalFinal, message: finalSplit.process });
-  }
-  if (props.active && props.streamingMessage) {
-    processMessages.push({ message: props.streamingMessage });
-  }
-  const trailingMessages = historicalFinalIndex >= 0 ? tail.slice(historicalFinalIndex + 1) : [];
-  const processVisible = processMessages.some(({ message }) => hasDisplayableProcessMessage(message));
-  const elapsedEndTime = props.active && props.busy
-    ? now
-    : messageTimestamp(historicalFinal?.message)
-      ?? [...tail].reverse().map(({ message }) => messageTimestamp(message)).find((value) => value !== null)
-      ?? null;
-  const processLabel = elapsedLabel(props.turn.anchor.message, elapsedEndTime);
-  const processBody = (
-    <div className="pi-turn-process-body">
-      {processMessages.map(({ message, entryId }, index) => (
-        <Message
-          key={entryId || String(message.id ?? `process-${index}`)}
-          message={message}
-          entryId={entryId}
-          toolResults={props.toolResults}
-          onFork={props.onFork}
-          onOpenTerminal={props.onOpenTerminal}
-          editing={props.editingEntryId === entryId}
-          editAvailable={props.editAvailable}
-          editEnabled={props.editEnabled}
-          onEditStart={props.onEditStart}
-          onEditCancel={props.onEditCancel}
-          onEdit={props.onEdit}
-          streaming={message === props.streamingMessage}
-          process
-        />
-      ))}
-    </div>
-  );
-
+  useEffect(() => {
+    if (!expanded || !turn.run) return;
+    const release = history.data.watchRun(history.sessionId, turn.run.id);
+    void load("initial");
+    return release;
+  }, [expanded, turn.run?.id, turn.run?.lastEntryId, history.generation, Boolean(detail)]);
+  useEffect(() => {
+    if (!expanded || loading || error || lastDirectionRef.current !== "newer") return;
+    const frame = requestAnimationFrame(() => {
+      const button = processRef.current?.querySelector<HTMLButtonElement>(`[data-run-page="${lastDirectionRef.current}"]`);
+      const transcript = processRef.current?.closest(".pi-transcript");
+      if (!button || !transcript) return;
+      const bounds = transcript.getBoundingClientRect(), box = button.getBoundingClientRect();
+      // A result may only update an already visible tool card. If this adds no
+      // scrollable height, continue until the requested edge leaves the view.
+      if (box.bottom > bounds.top && box.top < bounds.bottom - 80) void load(lastDirectionRef.current);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [expanded, loading, error, detail?.start, detail?.end]);
+  const messageProps = { toolResults: props.toolResults, onFork: props.onFork, onOpenTerminal: props.onOpenTerminal,
+    editAvailable: props.editAvailable, editEnabled: props.editEnabled, onEditStart: props.onEditStart,
+    onEditCancel: props.onEditCancel, onEdit: props.onEdit };
   return (
-    <section className="pi-turn">
-      <Message
-        message={props.turn.anchor.message}
-        entryId={props.turn.anchor.entryId}
-        toolResults={props.toolResults}
-        onFork={props.onFork}
-        onOpenTerminal={props.onOpenTerminal}
-        editing={props.editingEntryId === props.turn.anchor.entryId}
-        editAvailable={props.editAvailable}
-        editEnabled={props.editEnabled}
-        onEditStart={props.onEditStart}
-        onEditCancel={props.onEditCancel}
-        onEdit={props.onEdit}
-      />
-      {(processVisible || (props.active && props.busy)) && processLabel && (
+    <section className="pi-turn" data-run-id={turn.id}>
+      <Message {...messageProps} message={turn.anchor.message} entryId={turn.anchor.entryId} editing={props.editingEntryId === turn.anchor.entryId} />
+      {(processVisible || props.active && props.busy) && (
         <div className={`pi-turn-process ${expanded ? "is-open" : ""}`}>
-          <button className="pi-turn-process-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+          <button className="pi-turn-process-summary" data-run-summary={turn.id} type="button" aria-expanded={expanded}
+            onClick={() => { props.onExpand(turn.id); setExpanded((value) => !value); }}>
             <span>{processLabel}</span>
+            {loading && <LoaderCircle className="pi-loading-spinner" size={13} aria-label="加载过程" />}
             <ChevronRight className="pi-disclosure" size={14} />
           </button>
-          {expanded && processBody}
+          {expanded && <div ref={processRef} className="pi-turn-process-body" data-run-start={detail?.start} data-run-end={detail?.end}>
+            {detail?.older && <button className="pi-history-more" data-run-page="older" type="button" disabled={loading} aria-busy={loading} onClick={() => void load("older")}>{loading && <LoaderCircle className="pi-loading-spinner" size={13} />}{loading ? "正在加载过程…" : "查看更早的过程"}</button>}
+            {processMessages.map(({ message, entryId }, index) => <Message {...messageProps}
+              key={entryId || String(message.id ?? `process-${index}`)} message={message} entryId={entryId}
+              editing={props.editingEntryId === entryId} streaming={message === props.streamingMessage} process />)}
+            {loading && !detail && <div className="pi-process-loading" role="status"><LoaderCircle className="pi-loading-spinner" size={14} />正在加载过程…</div>}
+            {error && <button className="pi-history-more is-error" type="button" onClick={() => void load(lastDirectionRef.current)}>加载失败，点击重试</button>}
+            {(detail?.newer || detail?.latestAvailable) && <button className="pi-history-more" data-run-page="newer" type="button" disabled={loading} aria-busy={loading} onClick={() => void load("newer")}>{loading && <LoaderCircle className="pi-loading-spinner" size={13} />}{loading ? "正在加载过程…" : "查看后续过程"}</button>}
+          </div>}
         </div>
       )}
-      {processVisible && !processLabel && processBody}
-      {finalAnswer && (
-        <Message
-          message={finalAnswer.message}
-          entryId={finalAnswer.entryId}
-          toolResults={props.toolResults}
-          onFork={props.onFork}
-          onOpenTerminal={props.onOpenTerminal}
-          editing={props.editingEntryId === finalAnswer.entryId}
-          editAvailable={props.editAvailable}
-          editEnabled={props.editEnabled}
-          onEditStart={props.onEditStart}
-          onEditCancel={props.onEditCancel}
-          onEdit={props.onEdit}
-        />
-      )}
-      {trailingMessages.map(({ message, entryId }, index) => (
-        <Message
-          key={entryId || String(message.id ?? `trailing-${index}`)}
-          message={message}
-          entryId={entryId}
-          toolResults={props.toolResults}
-          onFork={props.onFork}
-          onOpenTerminal={props.onOpenTerminal}
-          editing={props.editingEntryId === entryId}
-          editAvailable={props.editAvailable}
-          editEnabled={props.editEnabled}
-          onEditStart={props.onEditStart}
-          onEditCancel={props.onEditCancel}
-          onEdit={props.onEdit}
-        />
-      ))}
+      {turn.result && <Message {...messageProps} message={turn.result.message} entryId={turn.result.entryId} editing={props.editingEntryId === turn.result.entryId} />}
     </section>
   );
 }
 
 export function MessageList(props: MessageListProps) {
   const history = useMemo(() => ({ data: props.data, sessionId: props.sessionId, generation: props.historyWindow?.version.generation ?? "" }), [props.data, props.sessionId, props.historyWindow?.version.generation]);
-  const toolCalls = useMemo(() => new Set([...props.messages, ...(props.streamingMessage ? [props.streamingMessage] : [])]
-    .flatMap(contentBlocks).filter((block) => block.type === "toolCall").map(toolCallID)), [props.messages, props.streamingMessage]);
-  const resultEntries = useMemo(() => {
-    const entries = new Map<string, string>();
-    props.messages.forEach((message, index) => {
-      const id = props.entryIds[index];
-      if (id && message.role === "toolResult" && typeof message.toolCallId === "string") entries.set(message.toolCallId, id);
-    });
-    return entries;
-  }, [props.messages, props.entryIds]);
+  const detailed = props.historyWindow?.pages.flatMap((page) => page.runs.flatMap((run) =>
+    props.data.runDetails(props.sessionId, run.id)?.pages.flatMap((page) => page.items) ?? [])) ?? [];
+  const allMessages = [...props.messages, ...detailed.flatMap((item) => item.message ? [item.message] : [])];
+  const toolCalls = new Set([...allMessages, ...(props.streamingMessage ? [props.streamingMessage] : [])]
+    .flatMap(contentBlocks).filter((block) => block.type === "toolCall").map(toolCallID));
+  const resultEntries = new Map<string, string>();
+  [...props.messages.map((message, index) => ({ message, entryId: props.entryIds[index] })),
+    ...detailed.map((item) => ({ message: item.message, entryId: item.node.id }))].forEach(({ message, entryId }) => {
+    if (entryId && message?.role === "toolResult" && typeof message.toolCallId === "string") resultEntries.set(message.toolCallId, entryId);
+  });
   return (
     <ImageCacheContext.Provider value={props.imageCache}>
       <HistoryContext.Provider value={history}>
@@ -1248,45 +1208,59 @@ function MessageListContent({
   const [anchorOpen, setAnchorOpen] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [, updateProcessScroll] = useState(0);
   const loadingHistoryRef = useRef(false);
   const currentWindowRef = useRef(historyWindow);
   currentWindowRef.current = historyWindow;
   const scrollScope = JSON.stringify([sessionId, historyWindow?.version.generation ?? ""]);
-  const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition } | null>(null);
-  const revealedEntriesRef = useRef(new Set<string>());
+  const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition; scrollTop?: number; ready?: boolean; runRange?: { id: string; start: number; end: number } } | null>(null);
+  const historyRequestRef = useRef(0);
+  const stablePositionRef = useRef<ScrollPosition | null>(null);
   const previousScrollTopRef = useRef(0);
   const toolCalls = useContext(ToolCallsContext);
-  const toolResults = useMemo(() => {
-    const values = new Map<string, AgentMessage>();
-    for (const message of messages) {
-      if (message.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
-      values.set(message.toolCallId, message);
-    }
-    for (const tool of toolProgress ?? []) {
-      if (values.has(tool.toolCallId)) continue;
-      values.set(tool.toolCallId, { role: "toolResult", toolCallId: tool.toolCallId, toolName: tool.toolName,
-        ...tool.partialResult, partial: true,
-        content: (tool.partialResult?.content as MessageContentBlock[] | undefined) ?? String(tool.partialResult?.text ?? "") });
-    }
-    return values;
-  }, [messages, toolProgress]);
-  const { turns, leading } = useMemo(() => {
+  const { turns, leading } = (() => {
     const nextTurns: ConversationTurn[] = [];
     const nextLeading: IndexedMessage[] = [];
-    let current: ConversationTurn | null = null;
-    messages.forEach((message, index) => {
-      const indexed = { message, entryId: entryIds[index] };
-      if (isGroupAnchor(message)) {
-        current = { anchor: indexed, tail: [] };
-        nextTurns.push(current);
-      } else if (current) {
-        current.tail.push(indexed);
-      } else {
-        nextLeading.push(indexed);
-      }
-    });
+    const generation = historyWindow?.version.generation ?? "";
+    const messagesByID = new Map(messages.map((message, index) => [entryIds[index], message]));
+    const covered = new Set<string>();
+    for (const run of historyWindow?.pages.flatMap((page) => page.runs) ?? []) {
+      const header = messagesByID.get(run.header.id);
+      if (!header) continue;
+      covered.add(run.header.id);
+      if (run.result) covered.add(run.result.id);
+      const detail = data.runDetails(sessionId, run.id);
+      const tail = (detail?.pages.flatMap((page) => page.items) ?? []).flatMap((item) => {
+        covered.add(item.node.id);
+        const message = data.messageFor(sessionId, generation, item);
+        return message && item.node.id !== run.header.id ? [{ message, entryId: item.node.id }] : [];
+      });
+      const final = run.result && messagesByID.get(run.result.id);
+      nextTurns.push({ id: run.id, run, anchor: { message: header, entryId: run.header.id }, tail,
+        result: final && run.result ? { message: final, entryId: run.result.id } : undefined });
+    }
+    // Only unsettled live messages need provisional groups. Durable boundaries
+    // and final answers always come from the complete core read projection.
+    for (let index = 0; index < messages.length; index++) {
+      const entryId = entryIds[index], message = messages[index]!;
+      if (entryId && covered.has(entryId)) continue;
+      const item = { message, entryId };
+      if (message.role === "user") nextTurns.push({ id: entryId || String(message.id ?? `live-${index}`), anchor: item, tail: [] });
+      else if (nextTurns.length) nextTurns.at(-1)!.tail.push(item);
+      else nextLeading.push(item);
+    }
     return { turns: nextTurns, leading: nextLeading };
-  }, [entryIds, messages]);
+  })();
+  const toolResults = new Map<string, AgentMessage>();
+  for (const message of [...messages, ...turns.flatMap((turn) => turn.tail.map((item) => item.message))]) {
+    if (message.role === "toolResult" && typeof message.toolCallId === "string") toolResults.set(message.toolCallId, message);
+  }
+  for (const tool of toolProgress ?? []) {
+    if (toolResults.has(tool.toolCallId)) continue;
+    toolResults.set(tool.toolCallId, { role: "toolResult", toolCallId: tool.toolCallId, toolName: tool.toolName,
+      ...tool.partialResult, partial: true,
+      content: (tool.partialResult?.content as MessageContentBlock[] | undefined) ?? String(tool.partialResult?.text ?? "") });
+  }
   const activeTurnIndex = historyWindow && (historyWindow.end < historyWindow.total || historyWindow.preview || historyWindow.latestAvailable) ? -1 : turns.length - 1;
   const anchors = data.navigation(sessionId)?.items ?? [];
   const anchorIndices = useMemo(() => new Map(anchors.map((anchor, index) => [anchor.id, index])), [anchors]);
@@ -1327,8 +1301,8 @@ function MessageListContent({
     const transcript = transcriptRef.current;
     if (!transcript) return { entryId: "", offset: 0, bottom: true };
     const top = transcript.getBoundingClientRect().top;
-    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((item) => item.getBoundingClientRect().bottom > top + 8);
-    return { entryId: element?.dataset.entryId ?? "", offset: (element?.getBoundingClientRect().top ?? top) - top, bottom: atBottomRef.current && currentWindowRef.current?.following !== false };
+    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id], [data-run-summary]")].find((item) => item.getBoundingClientRect().bottom > top + 8);
+    return { entryId: element?.dataset.entryId ?? element?.dataset.runSummary ?? "", target: element?.dataset.runSummary ? "process" : undefined, offset: (element?.getBoundingClientRect().top ?? top) - top, bottom: atBottomRef.current && currentWindowRef.current?.following !== false };
   };
 
   const restorePosition = (position: ScrollPosition): boolean => {
@@ -1339,35 +1313,86 @@ function MessageListContent({
       atBottomRef.current = currentWindowRef.current?.following !== false;
       return true;
     }
-    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((item) => item.dataset.entryId === position.entryId);
+    const element = [...transcript.querySelectorAll<HTMLElement>(position.target === "process" ? "[data-run-summary]" : "[data-entry-id]")].find((item) => (position.target === "process" ? item.dataset.runSummary : item.dataset.entryId) === position.entryId);
     if (!element) return false;
     transcript.scrollTop += element.getBoundingClientRect().top - transcript.getBoundingClientRect().top - position.offset;
     atBottomRef.current = false;
     return true;
   };
 
-  const loadHistory = async (direction: "older" | "newer" | "latest", aroundId?: string) => {
+  const restorePendingPosition = () => {
     if (loadingHistoryRef.current) return;
+    const pending = pendingScrollRef.current;
+    if (!pending) return;
+    if (pending.scope !== scrollScope) { pendingScrollRef.current = null; return; }
+    if (pending.ready === false) return;
+    if (pending.runRange) {
+      const run = [...transcriptRef.current?.querySelectorAll<HTMLElement>("[data-run-id]") ?? []].find((element) => element.dataset.runId === pending.runRange!.id);
+      const body = run?.querySelector<HTMLElement>("[data-run-start]");
+      if (Number(body?.dataset.runStart) !== pending.runRange.start || Number(body?.dataset.runEnd) !== pending.runRange.end) return;
+    }
+    if (!restorePosition(pending.position)) return;
+    pendingScrollRef.current = null;
+    const position = capturePosition();
+    stablePositionRef.current = position;
+    data.scroll.set(scrollScope, position);
+    data.lastScroll.set(sessionId, position);
+    previousScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
+  };
+
+  const loadHistory = async (direction: "older" | "newer" | "latest", aroundId?: string) => {
+    if (loadingHistoryRef.current && direction !== "latest" && !aroundId) return;
+    const request = ++historyRequestRef.current;
     loadingHistoryRef.current = true;
     setLoadingHistory(true);
     const position = direction === "latest" && !aroundId ? { entryId: "", offset: 0, bottom: true } : capturePosition();
-    const retainedId = aroundId ?? position.entryId;
-    if (retainedId) {
-      revealedEntriesRef.current.add(retainedId);
-      const retained = messages[entryIds.indexOf(retainedId)];
-      if (retained?.role === "toolResult" && typeof retained.toolCallId === "string") {
-        data.disclosures.set(JSON.stringify([sessionId, historyWindow?.version.generation ?? "", "tool", retained.toolCallId]), true);
-      }
-    }
-    for (const id of revealedEntriesRef.current) if (!entryIds.includes(id) && id !== aroundId) revealedEntriesRef.current.delete(id);
-    pendingScrollRef.current = { scope: scrollScope, position: aroundId ? { entryId: aroundId, offset: 24, bottom: false } : position };
+    pendingScrollRef.current = { scope: scrollScope, position: aroundId ? { entryId: aroundId, offset: 24, bottom: false } : position, scrollTop: transcriptRef.current?.scrollTop };
     atBottomRef.current = false;
     try {
       await onLoadHistory(direction, aroundId);
-      if (aroundId && !data.session(sessionId)?.window.pages.some((page) => page.items.some((item) => item.node.id === aroundId))) pendingScrollRef.current = null;
+      if (request === historyRequestRef.current && aroundId && !data.containsEntry(sessionId, aroundId)) pendingScrollRef.current = null;
+    } catch { if (request === historyRequestRef.current) pendingScrollRef.current = null; }
+    finally {
+      if (request === historyRequestRef.current) { loadingHistoryRef.current = false; setLoadingHistory(false); }
     }
-    catch { pendingScrollRef.current = null; /* Keep the successful window scrollable. */ }
-    finally { loadingHistoryRef.current = false; setLoadingHistory(false); }
+  };
+  const loadProcess = async (runId: string, direction: "initial" | "older" | "newer") => {
+    let pending: typeof pendingScrollRef.current = null;
+    if (direction !== "initial") {
+      const position = capturePosition();
+      position.bottom = false;
+      const transcript = transcriptRef.current;
+      const run = transcript && [...transcript.querySelectorAll<HTMLElement>("[data-run-id]")].find((element) => element.dataset.runId === runId);
+      const entries = [...run?.querySelectorAll<HTMLElement>(".pi-turn-process-body [data-entry-id]") ?? []];
+      const bounds = transcript?.getBoundingClientRect();
+      const anchor = bounds && (entries.find((element) => { const box = element.getBoundingClientRect(); return box.bottom > bounds.top + 8 && box.top < bounds.bottom; })
+        ?? (direction === "newer" ? entries.at(-1) : entries[0]));
+      if (anchor && bounds) { position.entryId = anchor.dataset.entryId!; position.target = undefined; position.offset = anchor.getBoundingClientRect().top - bounds.top; }
+      stablePositionRef.current = position;
+      data.scroll.set(scrollScope, position);
+      pending = { scope: scrollScope, position, scrollTop: transcript?.scrollTop, ready: false };
+      pendingScrollRef.current = pending;
+      atBottomRef.current = false;
+    }
+    try {
+      await data.loadRun(sessionId, runId, direction);
+      if (pending && pendingScrollRef.current === pending) {
+        const detail = data.runDetails(sessionId, runId);
+        pending.ready = true;
+        if (detail) pending.runRange = { id: runId, start: detail.start, end: detail.end };
+        updateProcessScroll((revision) => revision + 1);
+      }
+    } catch (error) {
+      if (pendingScrollRef.current === pending) pendingScrollRef.current = null;
+      throw error;
+    }
+  };
+  const prepareExpansion = (runId: string) => {
+    const transcript = transcriptRef.current;
+    const summary = transcript && [...transcript.querySelectorAll<HTMLElement>("[data-run-summary]")].find((element) => element.dataset.runSummary === runId);
+    if (!transcript || !summary) return;
+    atBottomRef.current = false;
+    stablePositionRef.current = { entryId: runId, target: "process", offset: summary.getBoundingClientRect().top - transcript.getBoundingClientRect().top, bottom: false };
   };
   const loadHistoryRef = useRef(loadHistory);
   loadHistoryRef.current = loadHistory;
@@ -1377,6 +1402,7 @@ function MessageListContent({
     if (!transcript) return;
     atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96 && currentWindowRef.current?.following !== false;
     const position = capturePosition();
+    stablePositionRef.current = position;
     data.scroll.set(scrollScope, position);
     data.lastScroll.set(sessionId, position);
     setShowScrollToBottom(!atBottomRef.current);
@@ -1401,9 +1427,26 @@ function MessageListContent({
     const target = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((element) => element.dataset.entryId === anchor.id);
     setActiveAnchorIndex(index);
     if (!target) { void loadHistory("latest", anchor.id); return; }
+    historyRequestRef.current++;
+    data.cancelHistoryNavigation(sessionId);
+    pendingScrollRef.current = null;
+    loadingHistoryRef.current = false; setLoadingHistory(false);
+    atBottomRef.current = false;
     const top = target.getBoundingClientRect().top - transcript.getBoundingClientRect().top + transcript.scrollTop - 20;
     transcript.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   };
+
+  const focused = data.focusedEntry(sessionId);
+  useLayoutEffect(() => {
+    if (!focused || focused.entryId) return;
+    pendingScrollRef.current = null;
+    atBottomRef.current = true;
+    if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+    stablePositionRef.current = { entryId: "", offset: 0, bottom: true };
+    setShowScrollToBottom(false);
+  }, [focused?.serial]);
+
+  useLayoutEffect(() => { syncActiveAnchor(); }, [anchors.length]);
 
   const anchorTrackMetrics = () => {
     const track = document.querySelector<HTMLElement>("#pi-message-anchors .pi-anchor-track");
@@ -1585,18 +1628,7 @@ function MessageListContent({
     return () => cancelAnimationFrame(frame);
   }, [scrollScope]);
 
-  useLayoutEffect(() => {
-    if (loadingHistoryRef.current) return;
-    const pending = pendingScrollRef.current;
-    if (!pending) return;
-    if (pending.scope !== scrollScope) { pendingScrollRef.current = null; return; }
-    if (restorePosition(pending.position)) {
-      pendingScrollRef.current = null;
-      data.scroll.set(scrollScope, pending.position);
-      data.lastScroll.set(sessionId, pending.position);
-      previousScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
-    }
-  }, [entryIds, loadingHistory, scrollScope]);
+  useLayoutEffect(restorePendingPosition);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
@@ -1636,11 +1668,26 @@ function MessageListContent({
     if (!transcript) return;
     const composer = stageRef.current?.closest(".pi-conversation")?.querySelector(".pi-composer-wrap");
     const onScroll = () => {
-      if (loadingHistoryRef.current || pendingScrollRef.current) return;
+      const pending = pendingScrollRef.current;
+      if (pending) {
+        const selector = pending.position.target === "process" ? "[data-run-summary]" : "[data-entry-id]";
+        const element = [...transcript.querySelectorAll<HTMLElement>(selector)].find((element) => (pending.position.target === "process" ? element.dataset.runSummary : element.dataset.entryId) === pending.position.entryId);
+        // Only account for movement of the viewport while a read is pending.
+        // Sampling the element's new geometry here would mistake DOM eviction
+        // for user scrolling and cancel the compensation in the layout effect.
+        if (element && pending.scrollTop !== undefined) pending.position.offset -= transcript.scrollTop - pending.scrollTop;
+        pending.scrollTop = transcript.scrollTop;
+        return;
+      }
+      if (loadingHistoryRef.current) return;
       const upwards = transcript.scrollTop < previousScrollTopRef.current;
       const downwards = transcript.scrollTop > previousScrollTopRef.current;
       previousScrollTopRef.current = transcript.scrollTop;
       syncActiveAnchor();
+      const bounds = transcript.getBoundingClientRect();
+      const processPage = [...transcript.querySelectorAll<HTMLButtonElement>(`[data-run-page="${upwards ? "older" : "newer"}"]:not(:disabled)`)]
+        .find((button) => { const box = button.getBoundingClientRect(); return box.bottom > bounds.top - 100 && box.top < bounds.bottom + 100; });
+      if ((upwards || downwards) && processPage) { processPage.click(); return; }
       const window = currentWindowRef.current;
       if (upwards && transcript.scrollTop < 320 && window?.older) void loadHistoryRef.current("older");
       else if (downwards && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 320 && window && !window.following) {
@@ -1651,8 +1698,10 @@ function MessageListContent({
       if (composer) {
         stageRef.current?.style.setProperty("--pi-composer-height", `${composer.getBoundingClientRect().height}px`);
       }
+      restorePendingPosition();
       if (atBottomRef.current) transcript.scrollTop = transcript.scrollHeight;
-      syncActiveAnchor();
+      else if (!pendingScrollRef.current && stablePositionRef.current) restorePosition(stablePositionRef.current);
+      if (!loadingHistoryRef.current && !pendingScrollRef.current) syncActiveAnchor();
     };
     transcript.addEventListener("scroll", onScroll, { passive: true });
     const observer = new ResizeObserver(onResize);
@@ -1678,6 +1727,7 @@ function MessageListContent({
       <div className="pi-transcript-scroll pi-overlay-scroll-host">
         <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite" data-history-start={historyWindow?.start} data-history-end={historyWindow?.end} data-history-loading={loadingHistory || undefined}>
           <div className="pi-transcript-inner">
+            {historyWindow?.older && <button className="pi-history-more" type="button" disabled={loadingHistory} onClick={() => void loadHistory("older")}>查看更早的对话</button>}
             {leading.map(({ message, entryId }, index) => (
               <Message
                 key={entryId || String(message.id ?? `leading-${message.role}-${index}`)}
@@ -1697,7 +1747,7 @@ function MessageListContent({
             {turns.map((turn, index) => (
               <div
                 className="pi-turn-anchor"
-                key={turn.anchor.entryId || String(turn.anchor.message.id ?? `turn-${index}`)}
+                key={turn.id}
                 ref={(element) => {
                   turnRefs.current[index] = element;
                 }}
@@ -1706,9 +1756,10 @@ function MessageListContent({
                   turn={turn}
                   toolResults={toolResults}
                   streamingMessage={index === activeTurnIndex ? streamingMessage : null}
-                  busy={index === activeTurnIndex && busy && !compacting}
+                  busy={index === activeTurnIndex && busy && !compacting && (!turn.result || streamingMessage !== null)}
                   active={index === activeTurnIndex}
-                  revealHistory={turn.tail.some((item) => item.entryId && revealedEntriesRef.current.has(item.entryId))}
+                  onLoadProcess={loadProcess}
+                  onExpand={prepareExpansion}
                   onFork={onFork}
                   onOpenTerminal={onOpenTerminal}
                   editingEntryId={editingEntryId}
@@ -1743,10 +1794,11 @@ function MessageListContent({
                 onOpenTerminal={onOpenTerminal}
               />
             ))}
-
+            {(historyWindow?.newer || historyWindow?.latestAvailable && !historyWindow.preview) && <button className="pi-history-more" type="button" disabled={loadingHistory} onClick={() => void loadHistory("newer")}>查看后续对话</button>}
           </div>
         </div>
         <OverlayScrollbar viewportRef={transcriptRef} />
+        {loadingHistory && <div className="pi-history-loading" role="status"><LoaderCircle className="pi-loading-spinner" size={14} />正在加载历史…</div>}
         {showScrollToBottom && (
           <button
             className="pi-scroll-to-bottom"

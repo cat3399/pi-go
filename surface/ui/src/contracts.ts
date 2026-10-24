@@ -221,6 +221,8 @@ export interface ReadResourceRequest {
   entryId?: string;
   generation?: string;
   blockIndex?: number;
+  runId?: string;
+  metadataOnly?: boolean;
 }
 
 export interface ResourceResponse<T> {
@@ -287,6 +289,20 @@ export interface EntryNode {
 export interface HistoryItem {
   node: EntryNode;
   message?: AgentMessage;
+  projection?: "answer";
+}
+
+export interface HistoryRun {
+  id: string;
+  header: EntryNode;
+  result?: EntryNode;
+  start: number;
+  end: number;
+  lastEntryId: string;
+  processCount: number;
+  resultHasProcess: boolean;
+  stopReason?: string;
+  anchors: EntryNode[];
 }
 
 export interface HistoryPage {
@@ -300,7 +316,10 @@ export interface HistoryPage {
   connected: boolean;
   older?: string;
   newer?: string;
+  run?: HistoryRun;
 }
+
+export interface RunsPage extends HistoryPage { runs: HistoryRun[] }
 
 export interface NodesPage {
   connected: boolean;
@@ -345,6 +364,7 @@ export interface ResourceRevision {
 }
 
 export interface SessionResources {
+  runs: RunsPage;
   history: HistoryPage;
   nodes: NodesPage;
   metadata: SessionMetadata;

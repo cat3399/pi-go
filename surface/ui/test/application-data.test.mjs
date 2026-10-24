@@ -57,7 +57,7 @@ function fakeClient() {
   const calls = [], subscriptions = [];
   const info = { id: "one", cwd: "/project", projectRoot: "/project", path: "/one.jsonl", created: "2026-01-01T00:00:00Z", modified: "2026-01-02T00:00:00Z", messageCount: 1, firstMessage: "question" };
   const version = () => ({ generation, log, view: log });
-  const record = (index) => ({ node: { id: `n${index}`, parentId: index > 1 ? `n${index - 1}` : null, type: "message", role: index % 4 === 1 ? "user" : "assistant", timestamp: "2026-01-01T00:00:00Z", preview: `entry ${index}`, hasChildren: false, rawBytes: 100, contentToken: `entry-${index}-${payloadVersion}` }, message: { role: index % 4 === 1 ? "user" : "assistant", content: `entry ${index}` } });
+  const record = (index) => ({ node: { id: `n${index}`, parentId: index > 1 ? `n${index - 1}` : null, type: "message", role: (index - 1) % (client.runSize ?? 4) === 0 ? "user" : "assistant", timestamp: "2026-01-01T00:00:00Z", preview: `entry ${index}`, hasChildren: false, rawBytes: 100, contentToken: `entry-${index}-${payloadVersion}` }, message: { role: (index - 1) % (client.runSize ?? 4) === 0 ? "user" : "assistant", content: `entry ${index}` } });
   const live = () => ({ sessionId: "one", active: !client.inactive, version: { generation: "AgentA", state, configuration: 1, queue: 1 },
     activityVersion: { generation: "ActivityA", revision: 3 }, bashVersion: { generation: "ActivityA", revision: 1 },
     state: { cwd: "/project", phase: "provider", isStreaming: true, queuedMessages: { steering: [], followUp: [] } },
@@ -80,16 +80,37 @@ function fakeClient() {
       if (kind === "entry") data = { sessionId: id, generation, entryId: query.entryId, contentToken: record(Number(query.entryId.slice(1))).node.contentToken, message: record(Number(query.entryId.slice(1))).message };
       if (kind === "metadata") data = { sessionId: id, version: version(), info, filePath: info.path, leafId: `n${log}` };
       if (kind === "live") { data = live(); if (client.delayLive) { const wait = client.delayLive; client.delayLive = null; await wait.promise; } }
-      if (kind === "history") {
-        const cursor = query.cursor?.split(":");
-        const at = cursor ? { generation, log: Number(cursor[1]), view: Number(cursor[1]) } : query.at ?? version();
-        const after = query.afterId ? Number(query.afterId.slice(1)) : 0;
-        const total = Number((query.leafId ?? `n${at.log}`).slice(1));
-        const newer = cursor?.[0] === "newer" || query.direction === "newer";
-        const position = query.aroundId ? Number(query.aroundId.slice(1)) : cursor ? Number(cursor[2]) : newer ? after : total;
-        const start = newer ? position : Math.max(after, position - (query.limit ?? 64));
-        const end = newer ? Math.min(total, position + (query.limit ?? 64)) : position;
-        data = { sessionId: id, version: { generation: at.generation, log: at.log, view: at.view }, anchorId: `n${total}`, items: Array.from({ length: end - start }, (_, index) => record(start + index + 1)), start, end, total, connected: true, ...(start ? { older: `older:${at.log}:${start}` } : {}), ...(end < total ? { newer: `newer:${at.log}:${end}` } : {}) };
+      if (kind === "runs" || kind === "history") {
+        if (query.cursor) assert.ok(!query.at && !query.aroundId && !query.afterId && !query.direction, "fixed cursors cannot be combined with a fresh position query");
+        const cursor = query.cursor ? JSON.parse(query.cursor) : null;
+        const at = cursor?.at ?? query.at ?? version();
+        const rawTotal = cursor?.rawTotal ?? Number((query.leafId ?? `n${at.log}`).slice(1));
+        const size = client.runSize ?? 4;
+        const run = (index) => {
+          const start = index * size, end = Math.min(rawTotal, start + size), header = { ...record(start + 1).node, position: start };
+          return { id: header.id, header, result: end > start + 1 ? { ...record(end).node, position: end - 1 } : undefined,
+            start, end, lastEntryId: `n${end}`, processCount: Math.max(0, end - start - 2), resultHasProcess: false, anchors: [header] };
+        };
+        const runId = cursor?.runId ?? query.runId;
+        const scoped = runId ? run(Math.floor((Number(runId.slice(1)) - 1) / size)) : undefined;
+        const floor = kind === "history" ? scoped?.start ?? 0 : 0;
+        const total = kind === "runs" ? Math.ceil(rawTotal / size) : (scoped?.end ?? rawTotal) - floor;
+        const afterRaw = query.afterId ? Number(query.afterId.slice(1)) : 0;
+        const after = kind === "runs" ? Math.floor(afterRaw / size) : Math.max(0, afterRaw - floor);
+        const connected = afterRaw <= rawTotal;
+        const lower = connected ? Math.min(total, after) : 0;
+        const newer = cursor?.direction === "newer" || query.direction === "newer";
+        const position = query.aroundId ? (kind === "runs" ? Math.ceil(Number(query.aroundId.slice(1)) / size) : Number(query.aroundId.slice(1)) - floor)
+          : cursor ? cursor.position : newer ? lower : total;
+        const start = newer ? position : Math.max(lower, position - (query.limit ?? 128));
+        const end = newer ? Math.min(total, position + (query.limit ?? 128)) : position;
+        const runs = kind === "runs" ? Array.from({ length: end - start }, (_, index) => run(start + index)) : undefined;
+        const metadataOnly = cursor?.metadataOnly ?? query.metadataOnly;
+        const items = runs ? metadataOnly ? [] : runs.flatMap((run) => [record(run.start + 1), ...(run.result ? [{ ...record(run.end), projection: "answer" }] : [])])
+          : Array.from({ length: end - start }, (_, index) => record(floor + start + index + 1));
+        const token = (direction, position) => JSON.stringify({ at, rawTotal, direction, position, metadataOnly, runId });
+        data = { sessionId: id, version: at, anchorId: `n${rawTotal}`, items, start, end, total, connected, runs, run: scoped,
+          ...(start ? { older: token("older", start) } : {}), ...(end < total ? { newer: token("newer", end) } : {}) };
       }
       if (kind === "nodes") {
         const encoded = query.cursor ? JSON.parse(query.cursor) : null;
@@ -130,16 +151,16 @@ test("cached session revisits read no whole projection and reuse the fixed histo
   const client = fakeClient(), store = new ApplicationDataStore(client);
   client.setLog(12000);
   const view = await store.loadSession("one");
-  assert.equal(view.window.pages[0].items.length, 128);
-  assert.equal(view.window.start, 11872);
-  assert.equal(client.calls.find((call) => call.kind === "history").query.maxBytes, 512 * 1024);
+  assert.equal(view.window.pages[0].runs.length, 128);
+  assert.equal(view.window.start, 2872);
+  assert.equal(client.calls.find((call) => call.kind === "runs" && !call.query.metadataOnly).query.maxBytes, 512 * 1024);
   const count = client.calls.length;
   assert.equal(await store.loadSession("one"), view);
   assert.equal(client.calls.length, count);
   const owner = Symbol();
   store.select(owner, "one");
   await store.loadSession("one");
-  assert.equal(client.calls.filter((call) => call.kind === "history").length, 1);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length, 1);
   store.select(owner, null);
 });
 
@@ -163,10 +184,10 @@ test("snapshot overlap uses core message IDs and receipts; a tail read replaces 
   assert.equal(store.session("one").pending.length, 1);
   assert.equal(store.session("one").pending[0].entryId, "n2");
   assert.equal(store.session("one").live.streaming, null);
-  await until(() => store.session("one").window.total === 2);
+  await until(() => store.session("one").window.anchorId === "n2");
   assert.equal(store.session("one").pending.length, 0);
   assert.deepEqual(store.session("one").window.pages.flatMap((page) => page.items.map((item) => item.node.id)), ["n1", "n2"]);
-  const history = client.calls.filter((call) => call.kind === "history");
+  const history = client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly);
   assert.equal(history.length, 2);
   assert.equal(history[1].query.afterId, "n1");
   assert.equal(store.lastAppliedCursor, "EpochA:3");
@@ -209,26 +230,26 @@ test("history render windows stay bounded and old-node lookup skips all interven
   await store.loadSession("one");
   for (let index = 0; index < 5; index++) await store.pageHistory("one", "older");
   let value = store.session("one").window;
-  assert.ok(value.pages.flatMap((page) => page.items).length <= 384);
-  assert.equal(value.start, 11232);
-  assert.equal(value.end, 11616);
+  assert.ok(value.pages.flatMap((page) => page.items).length <= 768);
+  assert.equal(value.start, 2232);
+  assert.equal(value.end, 2616);
   await store.pageHistory("one", "newer");
   value = store.session("one").window;
-  assert.equal(value.end, 11744);
-  const previous = client.calls.filter((call) => call.kind === "history").length;
+  assert.equal(value.end, 2744);
+  const previous = client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length;
   await store.pageHistory("one", "latest", "n21");
-  assert.equal(client.calls.filter((call) => call.kind === "history").length, previous + 1);
-  assert.equal(store.session("one").window.end, 21);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length, previous + 1);
+  assert.equal(store.session("one").window.end, 6);
   assert.equal(store.session("one").window.following, false);
   await store.pageHistory("one", "latest");
-  assert.equal(store.session("one").window.end, 12000);
+  assert.equal(store.session("one").window.end, 3000);
 });
 
 test("small tail updates accumulate into a recent window instead of evicting one page per message", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);
-  client.setLog(128);
+  client.setLog(512);
   await store.loadSession("one");
-  for (let log = 129; log <= 138; log++) {
+  for (let log = 513; log <= 552; log++) {
     client.setLog(log);
     await store.loadSession("one", true);
   }
@@ -322,19 +343,19 @@ test("full navigation is metadata-only, appends only its tail, and distant jumps
   client.setLog(12000); store.select(Symbol(), "one");
   await store.loadSession("one");
   await until(() => store.navigation("one")?.items.length === 3000);
-  assert.equal(client.calls.filter((call) => call.kind === "history").length, 1);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length, 1);
   const original = store.navigation("one").items.map((item) => item.id);
   const count = client.calls.length;
   client.setLog(12004); await store.loadSession("one", true);
   await until(() => store.navigation("one")?.items.length === 3001);
   assert.deepEqual(store.navigation("one").items.slice(0, 3000).map((item) => item.id), original);
-  const nodes = client.calls.slice(count).filter((call) => call.kind === "nodes");
-  assert.equal(nodes.length, 2);
+  const nodes = client.calls.slice(count).filter((call) => call.kind === "runs" && call.query.metadataOnly);
+  assert.equal(nodes.length, 1);
   assert.ok(nodes.every((call) => call.query.afterId === "n12000"));
-  const bodyReads = client.calls.filter((call) => call.kind === "history").length;
+  const bodyReads = client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length;
   await store.pageHistory("one", "latest", "n21");
-  assert.equal(client.calls.filter((call) => call.kind === "history").length, bodyReads + 1);
-  assert.equal(client.calls.filter((call) => call.kind === "history").at(-1).query.aroundId, "n21");
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).length, bodyReads + 1);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).at(-1).query.aroundId, "n21");
   assert.equal(store.navigation("one").items.length, 3001, "paging never renumbers the full navigation index");
   store.stop();
 });
@@ -379,17 +400,17 @@ test("a session deleted during disconnection cannot trap all other synchronizati
 
 test("scrolling past an old snapshot reads the next new page without skipping the append gap", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);
-  client.setLog(256); await store.loadSession("one");
+  client.setLog(1024); await store.loadSession("one");
   await store.pageHistory("one", "older");
-  client.setLog(1024); await store.loadSession("one", true);
+  client.setLog(4096); await store.loadSession("one", true);
   assert.equal(store.session("one").window.end, 256);
   await store.pageHistory("one", "newer");
   const window = store.session("one").window;
   assert.equal(window.end, 384);
   assert.equal(window.total, 1024);
-  assert.equal(window.pages.at(-1).items[0].node.id, "n257");
-  const query = client.calls.filter((call) => call.kind === "history").at(-1).query;
-  assert.equal(query.afterId, "n256");
+  assert.equal(window.pages.at(-1).items[0].node.id, "n1025");
+  const query = client.calls.filter((call) => call.kind === "runs" && !call.query.metadataOnly).at(-1).query;
+  assert.equal(query.afterId, "n1024");
   assert.equal(query.direction, "newer");
   assert.equal(window.following, false);
 });
@@ -399,11 +420,11 @@ test("the first readonly paint does not download an index that Runtime admission
   const client = fakeClient(), store = new ApplicationDataStore(client);
   client.inactive = true; client.setLog(12000); store.select(Symbol(), "one");
   await store.loadSession("one"); await tick();
-  assert.equal(client.calls.filter((call) => call.kind === "nodes").length, 0);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && call.query.metadataOnly).length, 0);
   client.inactive = false; client.restart();
   await store.loadSession("one", true); await store.ensureNavigation("one");
   assert.equal(store.navigation("one").items.length, 3000);
-  assert.equal(client.calls.filter((call) => call.kind === "nodes").length, 13);
+  assert.equal(client.calls.filter((call) => call.kind === "runs" && call.query.metadataOnly).length, 12);
   store.stop();
 });
 
@@ -454,4 +475,118 @@ test("the first screen seeds both directory levels and expanding a project reuse
   assert.equal(store.directory("/project-0").sessions.length, 35);
   assert.equal(store.directory("/project-0").next, undefined);
   store.stop();
+});
+
+test("run overviews are complete and raw process pages are requested only after expansion", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 1200; client.setLog(4800);
+  await store.loadSession("one");
+  const overview = store.session("one").window;
+  assert.equal(overview.pages[0].runs.length, 4);
+  assert.deepEqual(overview.pages[0].items.map((item) => item.node.id), ["n1", "n1200", "n1201", "n2400", "n2401", "n3600", "n3601", "n4800"]);
+  assert.equal(client.calls.filter((call) => call.kind === "history").length, 0);
+  await store.loadRun("one", "n1201");
+  assert.equal(store.runDetails("one", "n1201").start, 0);
+  for (let i = 0; i < 5; i++) await store.loadRun("one", "n1201", "newer");
+  let detail = store.runDetails("one", "n1201");
+  assert.equal(detail.start, 384);
+  assert.equal(detail.end, 768);
+  assert.ok(detail.pages.flatMap((page) => page.items).length <= 384);
+  assert.equal(detail.run.header.id, "n1201");
+  assert.equal(detail.run.result.id, "n2400");
+  await store.loadRun("one", "n1201", "older");
+  detail = store.runDetails("one", "n1201");
+  assert.equal(detail.start, 256); assert.equal(detail.end, 640);
+  assert.equal(store.session("one").window, overview, "process paging cannot replace the run overview or its result");
+  const calls = client.calls.length;
+  await store.loadRun("one", "n1201");
+  assert.equal(client.calls.length, calls, "collapse and re-expand retains the process range");
+  assert.ok(client.calls.filter((call) => call.kind === "history").every((call) => call.query.runId === "n1201"));
+});
+
+test("the last requested anchor wins even when an earlier distant read finishes later", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.setLog(12000); await store.loadSession("one");
+  const wait = deferred(), read = client.readResource.bind(client);
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "runs" && args[2].aroundId === "n21") await wait.promise;
+    return result;
+  };
+  const older = store.pageHistory("one", "latest", "n21");
+  await tick();
+  await store.pageHistory("one", "latest", "n401");
+  wait.resolve(); await older;
+  assert.equal(store.session("one").window.pages.at(-1).runs.at(-1).header.id, "n401");
+  assert.equal(store.focusedEntry("one").entryId, "n401");
+});
+
+test("a deep process anchor reads its complete overview and just its scoped body range", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 1200; client.setLog(4800); await store.loadSession("one");
+  const count = client.calls.length;
+  await store.pageHistory("one", "latest", "n1800");
+  assert.equal(store.focusedEntry("one").runId, "n1201");
+  assert.equal(store.containsEntry("one", "n1800"), true);
+  assert.deepEqual(client.calls.slice(count).map((call) => call.kind), ["runs", "history"]);
+  assert.equal(store.session("one").window.pages.at(-1).runs.at(-1).result.id, "n2400");
+  assert.equal(store.runDetails("one", "n1201").pages[0].items.at(-1).node.id, "n1800");
+});
+
+test("explicit refresh rereads the current session and returns to the latest runs without losing drafts", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.setLog(12000); await store.loadSession("one");
+  await store.pageHistory("one", "latest", "n21");
+  await store.loadRun("one", "n21");
+  const key = store.draftKey("one", "SourceA", "n21");
+  store.drafts.set(key, { text: "my draft", original: "entry 21" });
+  const count = client.calls.length;
+  await store.refreshSession("one");
+  assert.equal(store.session("one").window.end, 3000);
+  assert.equal(store.session("one").window.following, true);
+  assert.equal(store.drafts.get(key).text, "my draft");
+  assert.equal(store.runDetails("one", "n21"), undefined);
+  assert.deepEqual(client.calls.slice(count).map((call) => call.kind), ["metadata", "live", "runs"]);
+  assert.equal(store.focusedEntry("one").entryId, "");
+});
+
+test("browsing an active run stays fixed while a new tail arrives during an older-page read", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(1000); await store.loadSession("one");
+  await store.loadRun("one", "n1");
+  assert.equal(store.runDetails("one", "n1").following, true);
+  const read = client.readResource.bind(client), wait = deferred();
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "history" && args[2].cursor) await wait.promise;
+    return result;
+  };
+  const older = store.loadRun("one", "n1", "older"); await tick();
+  client.setLog(1100); await store.loadSession("one", true);
+  assert.equal(store.runDetails("one", "n1").end, 1000);
+  wait.resolve(); await older;
+  const detail = store.runDetails("one", "n1");
+  assert.equal(detail.following, false);
+  assert.equal(detail.latestAvailable, true);
+  assert.equal(detail.end, 1000);
+  await store.loadRun("one", "n1", "newer");
+  assert.equal(store.runDetails("one", "n1").end, 1100);
+  assert.equal(store.runDetails("one", "n1").latestAvailable, false);
+});
+
+test("a collapsed run keeps its cached position without downloading changing process bodies", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(1000); await store.loadSession("one");
+  const release = store.watchRun("one", "n1");
+  await store.loadRun("one", "n1");
+  client.setLog(1001); await store.loadSession("one", true);
+  assert.equal(store.runDetails("one", "n1").end, 1001);
+  release();
+  const count = client.calls.filter((call) => call.kind === "history").length;
+  client.setLog(1002); await store.loadSession("one", true);
+  assert.equal(client.calls.filter((call) => call.kind === "history").length, count);
+  assert.equal(store.runDetails("one", "n1").latestAvailable, true);
+  await store.loadRun("one", "n1");
+  assert.equal(store.runDetails("one", "n1").end, 1002);
+  assert.equal(store.runDetails("one", "n1").latestAvailable, false);
 });

@@ -489,6 +489,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           <div className="pi-topbar-heading">
             {!mobile && <Folder size={18} />}
             <div className="pi-topbar-title" title={title}>{title}</div>
+            {controller.sessionRefreshing && <LoaderCircle className="pi-loading-spinner" size={15} aria-label="正在刷新会话" />}
           </div>
           {controller.activeSessionId && (
             <div className="pi-topbar-actions">

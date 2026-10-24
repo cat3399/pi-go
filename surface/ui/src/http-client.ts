@@ -206,7 +206,7 @@ export class RemoteApplicationClient implements ApplicationClient {
         block.url = url.toString();
       }
     };
-    if (kind === "history" && response.data) {
+    if ((kind === "history" || kind === "runs") && response.data) {
       for (const item of (response.data as SessionResources["history"]).items) attachImages(item.message);
     } else if (kind === "entry" && response.data) attachImages((response.data as SessionResources["entry"]).message);
     return response;
