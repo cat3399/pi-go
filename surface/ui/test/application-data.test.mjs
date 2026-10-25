@@ -188,6 +188,50 @@ test("latest usage survives receipt handoff, history paging, compaction and reco
   reopened.stop();
 });
 
+test("a new user-only run reuses its overview and hands later receipts into the process without a cold read", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  await store.start();
+  await store.loadSession("one");
+  store.select("test", "one");
+  const initial = store.runDetails("one", "n1");
+  assert.equal(initial.total, 1);
+  assert.deepEqual(initial.pages.flatMap((page) => page.items.map((item) => item.node.id)), ["n1"]);
+  const unwatch = store.watchRun("one", "n1");
+  await store.loadRun("one", "n1");
+  assert.equal(client.calls.filter((call) => call.kind === "history").length, 0, "the overview already contains this entire run");
+
+  client.emit({ type: "message_end", readVersion: { generation: "AgentA", state: 6, configuration: 1, queue: 1 },
+    messageId: "AgentA/next", message: { role: "assistant", content: "live process" } });
+  client.advance(); client.setLog(3);
+  client.emit({ type: "message_receipt", accepted: true, messageId: "AgentA/next", entryId: "n2", generation: "SourceA" });
+  await store.loadSession("one", true);
+  assert.equal(store.session("one").pending.length, 0);
+  const detail = store.runDetails("one", "n1");
+  assert.equal(detail.total, 3);
+  assert.deepEqual(detail.pages.flatMap((page) => page.items.map((item) => item.node.id)), ["n1", "n2", "n3"]);
+  assert.deepEqual(client.calls.filter((call) => call.kind === "history").map((call) => call.query.afterId), ["n1"], "append to the known prefix before discarding live receipts");
+  unwatch(); store.stop();
+});
+
+test("an overview cannot stand in for a run containing omitted metadata entries", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.setLog(2);
+  const read = client.readResource;
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "runs") {
+      // The second raw entry is a setting change, so it is absent from the
+      // overview's messages but still occupies a position in scoped history.
+      result.data.runs[0].result = undefined;
+      result.data.items = result.data.items.slice(0, 1);
+    }
+    return result;
+  };
+  await store.loadSession("one");
+  assert.equal(store.runDetails("one", "n1"), undefined);
+  store.stop();
+});
+
 test("cached session revisits read no whole projection and reuse the fixed history range", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);
   client.setLog(12000);

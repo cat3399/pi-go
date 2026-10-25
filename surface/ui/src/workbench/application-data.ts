@@ -694,7 +694,19 @@ export class ApplicationDataStore {
       // Refresh visible process windows before replacing pending receipts. The
       // completed tool/assistant must not disappear between these two reads.
       for (const run of window.pages.flatMap((page) => page.runs)) {
-        const key = runWindowKey(id, head.generation, run.id), detail = this.cache.peek<RunDetailWindow>(key);
+        const key = runWindowKey(id, head.generation, run.id);
+        let detail = this.cache.peek<RunDetailWindow>(key);
+        // A newly accepted user-only group is already complete in the overview.
+        // Seed that exact range before it mounts, so the live process can append
+        // to it without a redundant cold read or dropping pending receipts.
+        if (!detail && run.header.role === "user" && run.end === run.start + 1 && run.lastEntryId === run.header.id && run.processCount === 0) {
+          const header = window.pages.flatMap((page) => page.items).find((item) => item.node.id === run.header.id);
+          if (header?.message) {
+            detail = makeRunWindow([{ sessionId: id, version: window.version, anchorId: window.anchorId, run,
+              items: [header], start: 0, end: 1, total: 1, connected: true }], true);
+            this.cache.put(key, detail);
+          }
+        }
         if (!detail || detail.run.lastEntryId === run.lastEntryId) continue;
         if (!detail.following || !this.visibleRuns.has(key)) { this.cache.put(key, { ...detail, latestAvailable: true }); continue; }
         const page = await this.history(id, { runId: run.id, at: window.version, leafId: window.anchorId,

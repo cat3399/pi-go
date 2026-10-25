@@ -15,6 +15,7 @@ import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { messageText, visibleMessage } from "./message";
+import { ElapsedClock, elapsedBetween } from "./elapsed-time";
 import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
@@ -940,6 +941,7 @@ function Message({
 interface IndexedMessage {
   message: AgentMessage;
   entryId?: string;
+  pending?: boolean;
 }
 
 interface ConversationTurn {
@@ -968,9 +970,9 @@ function formatClock(timestamp: number): string {
   return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }
 
-function elapsedLabel(startTime: number | null, endTime: number | null): string | null {
-  if (startTime === null || endTime === null || endTime < startTime) return null;
-  const seconds = Math.max(1, Math.floor((endTime - startTime) / 1000));
+function elapsedLabel(elapsed: number | null): string | null {
+  if (elapsed === null) return null;
+  const seconds = Math.max(1, Math.floor(elapsed / 1000));
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return minutes > 0 ? `耗时 ${minutes}分钟 ${remainder}秒` : `耗时 ${seconds}秒`;
@@ -1089,7 +1091,8 @@ function Turn(props: {
   const [expanded, setExpanded] = useDisclosure("turn", turn.id, running);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [now, setNow] = useState(() => Date.now());
+  const [, refreshClock] = useState(0);
+  const [clock] = useState(() => new ElapsedClock());
   const wasBusy = useRef(running);
   const loadingRef = useRef(false);
   const lastDirectionRef = useRef<"initial" | "older" | "newer">("initial");
@@ -1104,7 +1107,13 @@ function Turn(props: {
   const startTime = messageTimestamp(turn.run ? { timestamp: turn.run.header.timestamp } : turn.anchor.message);
   const endTime = turn.run ? messageTimestamp({ timestamp: turn.run.lastActivity })
     : messageTimestamp(turn.tail.at(-1)?.message ?? turn.result?.message);
-  const processLabel = elapsedLabel(startTime, running ? now : endTime) ?? "耗时未知";
+  const historicalElapsed = elapsedBetween(startTime, endTime);
+  let elapsed = historicalElapsed;
+  if (running && startTime !== null) elapsed = clock.read(startTime, performance.now(), Date.now());
+  // Keep the last displayed duration while the final receipt is still handing
+  // off to history; the previous tool entry is not the end of this run.
+  else if (props.active && turn.tail.some((item) => item.pending)) elapsed = clock.lastElapsed ?? historicalElapsed;
+  const processLabel = elapsedLabel(elapsed) ?? "耗时未知";
   const load = async (direction: "initial" | "older" | "newer") => {
     if (!turn.run || loadingRef.current) return;
     lastDirectionRef.current = direction;
@@ -1118,8 +1127,7 @@ function Turn(props: {
     if (running && !wasBusy.current) setExpanded(true);
     wasBusy.current = running;
     if (!running) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    const timer = window.setInterval(() => refreshClock((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [running]);
   useEffect(() => {
@@ -1264,7 +1272,7 @@ function MessageListContent({
     for (let index = 0; index < messages.length; index++) {
       const entryId = entryIds[index], message = messages[index]!;
       if (entryId && covered.has(entryId)) continue;
-      const item = { message, entryId };
+      const item = { message, entryId, pending: true };
       if (message.role === "user") nextTurns.push({ id: entryId || String(message.id ?? `live-${index}`), anchor: item, tail: [] });
       else if (nextTurns.length) nextTurns.at(-1)!.tail.push(item);
       else nextLeading.push(item);
