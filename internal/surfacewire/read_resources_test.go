@@ -33,6 +33,53 @@ func (a *resourceReadAPI) ReadRuns(id string, query session.RunsQuery) (applicat
 	return application.RunsSnapshot{Revision: a.revision, SessionID: id, Page: page}, err
 }
 
+func (a *resourceReadAPI) ReadSessionMetadata(id string) (application.SessionSnapshot, error) {
+	value, err := a.manager.ReadSnapshot(session.SnapshotOptions{})
+	return application.SessionSnapshot{SessionID: id, Version: value.Version, LeafID: value.LeafID, LatestUsage: value.LatestUsage}, err
+}
+
+func TestMetadataCarriesUsageOfAnAssistantHiddenInsideTheProcess(t *testing.T) {
+	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	user, _ := llm.NewUserTextMessage("question", time.UnixMilli(1))
+	if _, err := manager.AppendLLMMessage(context.Background(), user); err != nil {
+		t.Fatal(err)
+	}
+	call, _ := llm.NewToolCallBlock("call", "read", []byte(`{}`))
+	usage, _ := llm.NewUsage(llm.UsageSpec{Input: 30, Output: 10, CacheRead: 90})
+	assistant, _ := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, usage, time.UnixMilli(2), llm.AssistantProvenance{Provider: "fixture", API: "scripted", Model: "test"})
+	entry, err := manager.AppendLLMMessage(context.Background(), assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &resourceReadAPI{manager: manager}
+	response, err := ReadSessionResource(context.Background(), api, manager.SessionID(), "metadata", ReadResourceRequest{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		LatestUsage struct {
+			EntryID   string                                                 `json:"entryId"`
+			Timestamp int64                                                  `json:"timestamp"`
+			Provider  string                                                 `json:"provider"`
+			Usage     struct{ Input, Output, CacheRead, TotalTokens uint64 } `json:"usage"`
+		} `json:"latestUsage"`
+	}
+	if err := json.Unmarshal(response.Data, &value); err != nil {
+		t.Fatal(err)
+	}
+	got := value.LatestUsage
+	if got.EntryID != entry.ID() || got.Timestamp != 2 || got.Provider != "fixture" || got.Usage.Input != 30 || got.Usage.Output != 10 || got.Usage.CacheRead != 90 || got.Usage.TotalTokens != 130 {
+		t.Fatalf("metadata lost response usage or identity: %s", response.Data)
+	}
+	if bytes.Contains(response.Data, []byte(`"content"`)) || bytes.Contains(response.Data, []byte(`"toolCall"`)) {
+		t.Fatal("usage metadata copied process content")
+	}
+}
+
 func TestRunOverviewDefersProcessAndDetailKeepsCompleteEntryAndGroupHeader(t *testing.T) {
 	manager, err := session.InMemorySessionManager(t.TempDir(), session.NewSessionOptions{})
 	if err != nil {

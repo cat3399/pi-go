@@ -24,7 +24,7 @@ import {
   type ToolEntry,
   type ToolPreset,
 } from "../tool-presets";
-import { assistantResponseKey, assistantUsage } from "./message";
+import { assistantResponseKey, assistantUsage, type LatestAssistantUsageInfo } from "./message";
 import { SessionImageCache } from "./session-images";
 import { RefreshScheduler } from "./refresh-scheduler";
 import { applicationDataFor, type ApplicationDataStore, type DirectoryWindow, type HistoryWindow } from "./application-data";
@@ -76,6 +76,7 @@ export interface ApplicationController {
   pendingMessages: AgentMessage[];
   streamingMessage: AgentMessage | null;
   latestGenerationSpeed: AssistantGenerationSpeed | null;
+  latestUsageInfo: LatestAssistantUsageInfo | null;
   busy: boolean;
   login(password: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
@@ -1168,6 +1169,7 @@ export function useApplicationController(client: ApplicationClient): Application
     pendingMessages,
     streamingMessage,
     latestGenerationSpeed,
+    latestUsageInfo: activeSessionId ? data.latestUsage(activeSessionId) : null,
     busy,
     login,
     selectSession,

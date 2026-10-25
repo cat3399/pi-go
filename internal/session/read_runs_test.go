@@ -147,8 +147,21 @@ func TestRunTailUpdatesReplaceOnlyChangedOverviewAndNeverPromoteToolCommentary(t
 		t.Fatal("tool commentary became a final result")
 	}
 	result, _ := llm.NewToolResultMessage("call", "read", []llm.TextBlock{comment}, false, time.UnixMilli(3))
-	if _, err := m.AppendLLMMessage(context.Background(), result); err != nil {
+	toolResult, err := m.AppendLLMMessage(context.Background(), result)
+	if err != nil {
 		t.Fatal(err)
+	}
+	unfinished, err := m.ReadRuns(RunsQuery{MetadataOnly: true})
+	if err != nil || unfinished.Items[0].Run.Result != nil || !unfinished.Items[0].Run.LastActivity.Equal(toolResult.Timestamp()) {
+		t.Fatal("group without a final answer lost its end time", err)
+	}
+	label := "label does not extend execution time"
+	if _, err := m.AppendLabelChange(context.Background(), user.ID(), &label); err != nil {
+		t.Fatal(err)
+	}
+	labeled, err := m.ReadRuns(RunsQuery{MetadataOnly: true})
+	if err != nil || !labeled.Items[0].Run.LastActivity.Equal(toolResult.Timestamp()) {
+		t.Fatal("metadata edit changed group duration", err)
 	}
 	answer, _ := newAssistantTextMessage([]llm.TextBlock{comment}, llm.FinishStop, llm.Usage{}, time.UnixMilli(4))
 	final, _ := m.AppendLLMMessage(context.Background(), answer)
@@ -169,7 +182,7 @@ func TestRunTailUpdatesReplaceOnlyChangedOverviewAndNeverPromoteToolCommentary(t
 		t.Fatal(err)
 	}
 	compacted, err := m.ReadRuns(RunsQuery{})
-	if err != nil || compacted.Total != 1 || len(compacted.Items[0].Run.Anchors) != 2 || compacted.Items[0].Run.Result.ID != final.ID() {
+	if err != nil || compacted.Total != 1 || len(compacted.Items[0].Run.Anchors) != 1 || compacted.Items[0].Run.Anchors[0].ID != user.ID() || compacted.Items[0].Run.Result.ID != final.ID() {
 		t.Fatal("compaction split or hid the original run", err)
 	}
 	appendReadRun(t, m, "next", 0)

@@ -5,6 +5,7 @@ import type {
   ProjectDirectoryPage, ProjectInfo, SessionDirectoryPage, SessionInfo, SessionMetadata, SessionResources, SessionRuntimeState, SessionVersion,
 } from "../contracts";
 import { ResourceCache, retainedBytes } from "./resource-cache.ts";
+import { latestAssistantUsageInfo, type LatestAssistantUsageInfo } from "./message.ts";
 
 const pageLimit = 128;
 const pageBytes = 512 * 1024;
@@ -882,6 +883,19 @@ export class ApplicationDataStore {
   messageFor(id: string, generation: string, item: HistoryItem): AgentMessage | undefined {
     if (item.projection === "answer") return item.message;
     return this.cache.peek<AgentMessage>(entityKey(id, generation, item.node.id)) ?? item.message;
+  }
+
+  latestUsage(id: string): LatestAssistantUsageInfo | null {
+    const view = this.session(id);
+    if (!view) return null;
+    // Read usage from its owner, including the receipt handoff. Overview pages
+    // deliberately omit tool-call assistants, and browsing must not select a
+    // different response's statistics. Incomplete streams retain the last result.
+    const source = view.live.active ? view.live.latestUsage : view.metadata.latestUsage;
+    return latestAssistantUsageInfo([
+      ...(source ? [{ role: "assistant", ...source }] : []),
+      ...view.pending.map((item) => item.message),
+    ]);
   }
 
   async nodes(id: string, query: ReadResourceRequest = {}): Promise<NodesPage> {

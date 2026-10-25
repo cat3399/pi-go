@@ -1622,6 +1622,42 @@ input:-webkit-autofill:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.pi-compaction-result {
+  margin: 10px 0;
+  color: var(--pi-text-secondary);
+  font-size: 13px;
+}
+
+.pi-compaction-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pi-compaction-tokens {
+  color: var(--pi-text-tertiary);
+  font-size: 12px;
+}
+
+.pi-compaction-result.is-open .pi-disclosure {
+  transform: rotate(90deg);
+}
+
+.pi-compaction-body {
+  padding: 6px 0 2px 20px;
+}
+
+.pi-turn-process-body .pi-compaction-status {
+  margin: 10px 0;
+}
+
 @keyframes pi-pulse {
   0%,
   70%,

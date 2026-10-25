@@ -299,6 +299,7 @@ export interface HistoryRun {
   start: number;
   end: number;
   lastEntryId: string;
+  lastActivity: string;
   processCount: number;
   resultHasProcess: boolean;
   stopReason?: string;
@@ -335,6 +336,16 @@ export interface SessionMetadata {
   info: SessionInfo;
   filePath: string;
   leafId: string | null;
+  latestUsage?: AssistantUsageSnapshot | null;
+}
+
+export interface AssistantUsageSnapshot {
+  entryId: string;
+  timestamp: number;
+  provider: string;
+  api: string;
+  model: string;
+  usage: TokenUsageInfo;
 }
 
 export interface ReadMessage {
@@ -349,6 +360,7 @@ export interface LiveSnapshot {
   activityVersion?: ResourceRevision;
   bashVersion?: ResourceRevision;
   history?: SessionVersion & { leafId: string | null };
+  latestUsage?: AssistantUsageSnapshot | null;
   state?: SessionRuntimeState;
   streaming?: ReadMessage | null;
   pending?: ReadMessage[];

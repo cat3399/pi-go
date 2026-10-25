@@ -2,6 +2,9 @@ package session
 
 import (
 	"fmt"
+	"time"
+
+	"github.com/cat3399/pi-go/internal/llm"
 )
 
 // ReadVersion identifies a manager's immutable append log and current branch
@@ -30,12 +33,23 @@ type SnapshotOptions struct {
 // (requested leaf, projection and, for pages, range) before reusing a result.
 // Entries is the compaction-aware context projection, not the complete log.
 type ReadSnapshot struct {
-	Version ReadVersion
-	Info    SessionInfo
-	LeafID  *string
-	Entries []Entry
-	Context Context
-	Tree    []TreeNode
+	Version     ReadVersion
+	Info        SessionInfo
+	LeafID      *string
+	Entries     []Entry
+	Context     Context
+	Tree        []TreeNode
+	LatestUsage *AssistantUsage
+}
+
+// AssistantUsage is the latest successful, nonzero assistant usage on the
+// selected branch, independent of compaction and historical message paging.
+// It retains response identity without copying the message's content.
+type AssistantUsage struct {
+	EntryID    string
+	Timestamp  time.Time
+	Provenance llm.AssistantProvenance
+	Usage      llm.Usage
 }
 
 func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, error) {
@@ -50,6 +64,7 @@ func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, er
 			}
 		}
 		result = metadata
+		result.LatestUsage = store.latestAssistantUsageLocked(leaf)
 		if options.IncludeContext {
 			if leaf >= 0 {
 				result.Entries = managerContextEntries(store.pathLocked(leaf))
@@ -62,6 +77,27 @@ func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, er
 		return nil
 	})
 	return result, err
+}
+
+func (s *Session) latestAssistantUsageLocked(index int) *AssistantUsage {
+	for remaining := len(s.entries); remaining > 0 && index >= 0 && index < len(s.entries); remaining-- {
+		entry := s.entries[index]
+		if message, ok := entry.message.(llm.AssistantTerminal); ok && message.FinishReason() != llm.FinishAborted && message.FinishReason() != llm.FinishError {
+			usage := message.Usage()
+			if usage.TotalTokens() > 0 || usage.Input() > 0 || usage.Output() > 0 || usage.CacheRead() > 0 || usage.CacheWrite() > 0 {
+				return &AssistantUsage{EntryID: entry.id, Timestamp: message.Timestamp(), Provenance: message.AssistantProvenance(), Usage: usage}
+			}
+		}
+		if !entry.hasParent {
+			break
+		}
+		parent, exists := s.byID[entry.parentID]
+		if !exists {
+			break
+		}
+		index = parent
+	}
+	return nil
 }
 
 // readView holds one owner boundary while a read-only projection runs. Only

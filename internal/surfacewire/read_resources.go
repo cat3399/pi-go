@@ -99,6 +99,7 @@ type HistoryRun struct {
 	Start            int         `json:"start"`
 	End              int         `json:"end"`
 	LastEntryID      string      `json:"lastEntryId"`
+	LastActivity     string      `json:"lastActivity"`
 	ProcessCount     int         `json:"processCount"`
 	ResultHasProcess bool        `json:"resultHasProcess"`
 	StopReason       string      `json:"stopReason,omitempty"`
@@ -107,7 +108,7 @@ type HistoryRun struct {
 
 func historyRun(value session.HistoryRun) HistoryRun {
 	run := HistoryRun{ID: value.ID, Header: readNode(value.Header), Start: value.Start, End: value.End,
-		LastEntryID: value.LastEntryID, ProcessCount: value.ProcessCount, ResultHasProcess: value.ResultHasProcess, StopReason: value.StopReason, Anchors: []EntryNode{}}
+		LastEntryID: value.LastEntryID, LastActivity: formatWebTime(value.LastActivity), ProcessCount: value.ProcessCount, ResultHasProcess: value.ResultHasProcess, StopReason: value.StopReason, Anchors: []EntryNode{}}
 	if value.Result != nil {
 		node := readNode(*value.Result)
 		run.Result = &node
@@ -266,7 +267,11 @@ func ReadSessionResource(ctx context.Context, api application.API, id, kind stri
 		if err != nil {
 			return ResourceResponse{}, err
 		}
-		return resourceResponse(map[string]any{"sessionId": id, "version": sessionVersion(value.Version), "info": SessionInfoFromApplication(value.Info), "filePath": value.FilePath, "leafId": value.LeafID}, known)
+		usage, err := protocolv1.EncodeAssistantUsage(value.LatestUsage)
+		if err != nil {
+			return ResourceResponse{}, err
+		}
+		return resourceResponse(map[string]any{"sessionId": id, "version": sessionVersion(value.Version), "info": SessionInfoFromApplication(value.Info), "filePath": value.FilePath, "leafId": value.LeafID, "latestUsage": usage}, known)
 	case "live":
 		value, active, err := api.ReadLiveSession(id)
 		if err != nil {

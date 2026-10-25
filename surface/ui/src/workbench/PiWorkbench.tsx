@@ -13,7 +13,6 @@ import { Composer, type ComposerHandle } from "./Composer";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import { MessageList } from "./MessageList";
-import { latestAssistantUsageInfo } from "./message";
 import { SessionPointPicker } from "./SessionPointPicker";
 import { SessionStatsPanel } from "./SessionStatsPanel";
 import { SettingsDrawer } from "./SettingsDrawer";
@@ -134,10 +133,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     () => activeTitle(controller.activeSessionId, sessions),
     [controller.activeSessionId, sessions],
   );
-  const latestUsageInfo = useMemo(
-    () => latestAssistantUsageInfo(controller.messages, controller.streamingMessage),
-    [controller.messages, controller.streamingMessage],
-  );
+  const latestUsageInfo = controller.latestUsageInfo;
   const latestUsage = latestUsageInfo?.usage ?? null;
   const latestTokensPerSecond = latestUsageInfo?.responseKey
     && latestUsageInfo.responseKey === controller.latestGenerationSpeed?.responseKey

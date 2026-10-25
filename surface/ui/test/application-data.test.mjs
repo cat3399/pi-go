@@ -61,7 +61,7 @@ function fakeClient() {
   const live = () => ({ sessionId: "one", active: !client.inactive, version: { generation: "AgentA", state, configuration: 1, queue: 1 },
     activityVersion: { generation: "ActivityA", revision: 3 }, bashVersion: { generation: "ActivityA", revision: 1 },
     state: { cwd: "/project", phase: "provider", isStreaming: true, queuedMessages: { steering: [], followUp: [] } },
-    history: { ...version(), leafId: `n${log}` }, streaming, pending: [], toolsRunning: [] });
+    history: { ...version(), leafId: `n${log}` }, latestUsage: client.latestUsage ?? null, streaming, pending: [], toolsRunning: [] });
   const client = {
     kind: "remote", endpoint: "https://fixture.invalid", calls, subscriptions,
     delayLive: null,
@@ -78,7 +78,7 @@ function fakeClient() {
       let data;
       if (client.deleted) throw Object.assign(new Error("session not found"), { status: 404 });
       if (kind === "entry") data = { sessionId: id, generation, entryId: query.entryId, contentToken: record(Number(query.entryId.slice(1))).node.contentToken, message: record(Number(query.entryId.slice(1))).message };
-      if (kind === "metadata") data = { sessionId: id, version: version(), info, filePath: info.path, leafId: `n${log}` };
+      if (kind === "metadata") data = { sessionId: id, version: version(), info, filePath: info.path, leafId: `n${log}`, latestUsage: client.latestUsage ?? null };
       if (kind === "live") { data = live(); if (client.delayLive) { const wait = client.delayLive; client.delayLive = null; await wait.promise; } }
       if (kind === "runs" || kind === "history") {
         if (query.cursor) assert.ok(!query.at && !query.aroundId && !query.afterId && !query.direction, "fixed cursors cannot be combined with a fresh position query");
@@ -89,7 +89,7 @@ function fakeClient() {
         const run = (index) => {
           const start = index * size, end = Math.min(rawTotal, start + size), header = { ...record(start + 1).node, position: start };
           return { id: header.id, header, result: end > start + 1 ? { ...record(end).node, position: end - 1 } : undefined,
-            start, end, lastEntryId: `n${end}`, processCount: Math.max(0, end - start - 2), resultHasProcess: false, anchors: [header] };
+            start, end, lastEntryId: `n${end}`, lastActivity: record(end).node.timestamp, processCount: Math.max(0, end - start - 2), resultHasProcess: false, anchors: [header] };
         };
         const runId = cursor?.runId ?? query.runId;
         const scoped = runId ? run(Math.floor((Number(runId.slice(1)) - 1) / size)) : undefined;
@@ -146,6 +146,47 @@ function fakeClient() {
   };
   return client;
 }
+
+test("latest usage survives receipt handoff, history paging, compaction and reconnect without process reads", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  const usage = { input: 20, output: 8, cacheRead: 100, cacheWrite: 0, totalTokens: 128 };
+  const source = { entryId: "n2", timestamp: 1790000000000, provider: "test", api: "test", model: "test", usage };
+  client.latestUsage = source;
+  client.setLog(1600);
+  await store.start();
+  await store.loadSession("one");
+  store.select("test", "one");
+  const expected = store.latestUsage("one");
+  assert.deepEqual(expected.usage, usage);
+  await store.pageHistory("one", "older");
+  assert.deepEqual(store.latestUsage("one"), expected, "scrolling history cannot select another response's statistics");
+  const completed = { role: "assistant", ...source, timestamp: source.timestamp + 1, usage: { ...usage, output: 12, totalTokens: 132 }, stopReason: "toolUse" };
+  client.emit({ type: "message_end", readVersion: { generation: "AgentA", state: 6, configuration: 1, queue: 1 }, messageId: "AgentA/next", message: completed });
+  const next = store.latestUsage("one");
+  assert.equal(next.usage.output, 12);
+  client.latestUsage = { ...completed, entryId: "n1601" };
+  client.setLog(1601);
+  client.advance(); client.setLog(1601);
+  client.emit({ type: "message_receipt", accepted: true, messageId: "AgentA/next", entryId: "n1601", generation: "SourceA" });
+  await store.loadSession("one", true);
+  assert.equal(store.session("one").pending.length, 0);
+  assert.deepEqual(store.latestUsage("one"), next, "persisted tool-call assistants need no overview message");
+  client.emit({ type: "message_start", readVersion: { generation: "AgentA", state: 9, configuration: 1, queue: 1 }, messageId: "AgentA/new", message: { role: "assistant", usage: { ...usage, output: 0 }, timestamp: source.timestamp + 2 } });
+  assert.deepEqual(store.latestUsage("one"), next, "unfinished usage must not clear or replace the last completed response");
+  client.emit({ type: "compaction_end" });
+  await store.loadSession("one", true);
+  assert.deepEqual(store.latestUsage("one"), next);
+  store.stop();
+  const reopened = new ApplicationDataStore(client);
+  client.inactive = true;
+  await reopened.loadSession("one");
+  assert.deepEqual(reopened.latestUsage("one"), next, "inactive metadata restores usage without admitting a runtime");
+  assert.equal(client.calls.filter((call) => call.kind === "history" || call.kind === "entry").length, 0);
+  client.restart(); client.latestUsage = null;
+  await reopened.loadSession("one", true);
+  assert.equal(reopened.latestUsage("one"), null, "replacement source cannot inherit stale usage");
+  reopened.stop();
+});
 
 test("cached session revisits read no whole projection and reuse the fixed history range", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);

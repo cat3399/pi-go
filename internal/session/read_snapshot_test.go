@@ -9,7 +9,71 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/cat3399/pi-go/internal/llm"
 )
+
+func TestLatestUsageSurvivesToolResultsCompactionAndReopenWithoutCopyingHistory(t *testing.T) {
+	dir := t.TempDir()
+	m, err := CreateSessionManager(dir, dir, NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	appendMessage := func(message llm.ConversationMessage, err error) Entry {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := m.AppendLLMMessage(context.Background(), message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entry
+	}
+	user := appendMessage(llm.NewUserTextMessage("inspect a long process", time.UnixMilli(1)))
+	if mustReadSnapshot(t, m, SnapshotOptions{}).LatestUsage != nil {
+		t.Fatal("user fabricated usage")
+	}
+	usage, _ := llm.NewUsage(llm.UsageSpec{Input: 12, Output: 8, CacheRead: 100})
+	call, _ := llm.NewToolCallBlock("call", "read", []byte(`{}`))
+	response := appendMessage(newAssistantToolUseMessage([]llm.AssistantBlock{call}, usage, time.UnixMilli(2)))
+	text, _ := llm.NewTextBlock("tool output")
+	appendMessage(llm.NewToolResultMessage("call", "read", []llm.TextBlock{text}, false, time.UnixMilli(3)))
+	if _, err := m.AppendCompaction(context.Background(), "checkpoint", user.ID(), 120, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	appendMessage(newAssistantTextMessage([]llm.TextBlock{text}, llm.FinishStop, llm.Usage{}, time.UnixMilli(4)))
+	appendMessage(newAssistantFailureMessage(nil, llm.FinishError, "failed request", usage, time.UnixMilli(5)))
+	assertUsage := func(value ReadSnapshot) {
+		t.Helper()
+		got := value.LatestUsage
+		if got == nil || got.EntryID != response.ID() || !got.Timestamp.Equal(time.UnixMilli(2)) || got.Usage != usage || got.Provenance != testLLMAssistantProvenance() {
+			t.Fatalf("latest completed tool request lost usage: %#v", got)
+		}
+		if value.Entries != nil || value.Tree != nil {
+			t.Fatal("usage read copied historical messages")
+		}
+	}
+	assertUsage(mustReadSnapshot(t, m, SnapshotOptions{}))
+	file, _ := m.SessionFile()
+	index, err := OpenReadIndex(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := index.ReadSnapshot(SnapshotOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertUsage(reopened)
+	if err := m.Branch(user.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if mustReadSnapshot(t, m, SnapshotOptions{}).LatestUsage != nil {
+		t.Fatal("future branch usage leaked into selected context")
+	}
+	assertUsage(mustReadSnapshot(t, m, SnapshotOptions{LeafID: response.ID()}))
+}
 
 func TestReadSnapshotVersionsPreserveDelayedPersistence(t *testing.T) {
 	dir := t.TempDir()

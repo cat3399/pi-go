@@ -119,6 +119,7 @@ func (s *Service) ReadSessionMetadata(id string) (SessionSnapshot, error) {
 			pathIDs = discoveredSessionPathIDs(discovered)
 		}
 		result.Version, result.FilePath, result.LeafID = value.Version, value.Info.Path, value.LeafID
+		result.LatestUsage = value.LatestUsage
 		result.Info = discoveredSessionInfo(value.Info, pathIDs)
 		return value.Info.ID, nil
 	})

@@ -3,6 +3,7 @@ package protocolv1
 import (
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/application"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 // EncodeLiveSnapshot omits settled history and global event revisions. Each
@@ -26,6 +27,11 @@ func EncodeLiveSnapshot(value application.LiveSnapshot, active bool) (map[string
 	result["state"], result["version"] = stateWire(state), AgentReadVersion(read.Version)
 	result["activityVersion"], result["bashVersion"] = resourceRevision(value.State.ActivityVersion), resourceRevision(value.State.BashVersion)
 	result["history"] = map[string]any{"generation": history.Version.Generation, "log": history.Version.Log, "view": history.Version.View, "leafId": history.LeafID}
+	usage, err := EncodeAssistantUsage(history.LatestUsage)
+	if err != nil {
+		return nil, err
+	}
+	result["latestUsage"] = usage
 	result["runId"], result["turn"], result["errorMessage"] = read.RunID, read.Turn, read.ErrorMessage
 	project := func(message agent.ReadMessage) (map[string]any, error) {
 		encoded, err := messageWire(message.Message)
@@ -62,6 +68,18 @@ func EncodeLiveSnapshot(value application.LiveSnapshot, active bool) (map[string
 	}
 	result["toolsRunning"] = tools
 	return result, nil
+}
+
+func EncodeAssistantUsage(value *session.AssistantUsage) (map[string]any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	usage, err := session.MarshalUsage(value.Usage)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"entryId": value.EntryID, "timestamp": value.Timestamp.UnixMilli(),
+		"provider": value.Provenance.Provider, "api": value.Provenance.API, "model": value.Provenance.Model, "usage": usage}, nil
 }
 
 func resourceRevision(value agent.ResourceRevision) map[string]any {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cat3399/pi-go/internal/llm"
 )
@@ -17,6 +18,7 @@ type HistoryRun struct {
 	Start            int
 	End              int
 	LastEntryID      string
+	LastActivity     time.Time
 	ProcessCount     int
 	ResultHasProcess bool
 	StopReason       string
@@ -137,7 +139,10 @@ func (s *Session) runNodeLocked(path []int, span historyRunSpan) HistoryRun {
 	header := entryReadNode(s.entries[path[span.start]])
 	header.Position = span.start
 	run := HistoryRun{ID: header.ID, Header: header, Start: span.start, End: span.end, ProcessCount: span.process,
-		LastEntryID: s.entries[path[span.end-1]].id, ResultHasProcess: span.resultHasProcess, StopReason: span.stopReason, Anchors: []EntryNode{header}}
+		LastEntryID: s.entries[path[span.end-1]].id, LastActivity: header.Timestamp, ResultHasProcess: span.resultHasProcess, StopReason: span.stopReason, Anchors: []EntryNode{}}
+	if header.Role == "user" {
+		run.Anchors = append(run.Anchors, header)
+	}
 	if span.result >= 0 {
 		result := entryReadNode(s.entries[path[span.result]])
 		result.Position = span.result
@@ -145,10 +150,8 @@ func (s *Session) runNodeLocked(path []int, span historyRunSpan) HistoryRun {
 	}
 	for position := span.start + 1; position < span.end; position++ {
 		entry := s.entries[path[position]]
-		if entry.typeName == "compaction" {
-			node := entryReadNode(entry)
-			node.Position = position
-			run.Anchors = append(run.Anchors, node)
+		if visibleRunEntry(entry) && !entry.timestamp.IsZero() {
+			run.LastActivity = entry.timestamp
 		}
 	}
 	return run

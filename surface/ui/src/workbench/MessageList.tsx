@@ -693,6 +693,9 @@ function Message({
     </article>;
   }
   if (!visibleMessage(message)) return null;
+  if (message.role === "custom" && message.customType === "compaction") {
+    return <CompactionResult message={message} entryId={entryId} />;
+  }
   const role = message.role === "user"
     ? "user"
     : message.role === "custom"
@@ -947,7 +950,7 @@ interface ConversationTurn {
   tail: IndexedMessage[];
 }
 
-function messageTimestamp(message: AgentMessage | undefined): number | null {
+function messageTimestamp(message: { timestamp?: unknown } | undefined): number | null {
   if (!message) return null;
   const value = message.timestamp;
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -965,13 +968,26 @@ function formatClock(timestamp: number): string {
   return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }
 
-function elapsedLabel(start: AgentMessage, endTime: number | null): string | null {
-  const startTime = messageTimestamp(start);
+function elapsedLabel(startTime: number | null, endTime: number | null): string | null {
   if (startTime === null || endTime === null || endTime < startTime) return null;
   const seconds = Math.max(1, Math.floor((endTime - startTime) / 1000));
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return minutes > 0 ? `耗时 ${minutes}分钟 ${remainder}秒` : `耗时 ${seconds}秒`;
+}
+
+function CompactionResult({ message, entryId }: IndexedMessage) {
+  const [expanded, setExpanded] = useDisclosure("compaction", entryId ?? String(message.id ?? message.timestamp ?? ""), false);
+  const tokens = recordValue(message.details)?.tokensBefore;
+  return <article className={`pi-compaction-result ${expanded ? "is-open" : ""}`} data-entry-id={entryId}>
+    <button className="pi-compaction-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+      <Check size={14} aria-hidden="true" />
+      <span>上下文已压缩</span>
+      {typeof tokens === "number" && <span className="pi-compaction-tokens">压缩前 {tokens.toLocaleString("zh-CN")} tokens</span>}
+      <ChevronRight className="pi-disclosure" size={14} aria-hidden="true" />
+    </button>
+    {expanded && <div className="pi-compaction-body"><MarkdownBody>{messageText(message)}</MarkdownBody></div>}
+  </article>;
 }
 
 function compactingElapsedLabel(seconds: number): string {
@@ -1054,6 +1070,7 @@ function Turn(props: {
   toolResults: Map<string, AgentMessage>;
   streamingMessage: AgentMessage | null;
   busy: boolean;
+  compacting: boolean;
   active: boolean;
   onLoadProcess(runId: string, direction: "initial" | "older" | "newer"): Promise<void>;
   onExpand(runId: string): void;
@@ -1068,11 +1085,12 @@ function Turn(props: {
 }) {
   const history = useContext(HistoryContext)!;
   const { turn } = props;
-  const [expanded, setExpanded] = useDisclosure("turn", turn.id, props.active && props.busy);
+  const running = props.active && (props.busy || props.compacting);
+  const [expanded, setExpanded] = useDisclosure("turn", turn.id, running);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const wasBusy = useRef(props.active && props.busy);
+  const wasBusy = useRef(running);
   const loadingRef = useRef(false);
   const lastDirectionRef = useRef<"initial" | "older" | "newer">("initial");
   const processRef = useRef<HTMLDivElement>(null);
@@ -1083,8 +1101,10 @@ function Turn(props: {
   if (finalProcess) processMessages.push({ ...fullFinal, message: finalProcess });
   if (props.active && props.streamingMessage) processMessages.push({ message: props.streamingMessage });
   const processVisible = Boolean(turn.run?.processCount) || processMessages.some(({ message }) => hasDisplayableProcessMessage(message));
-  const processLabel = elapsedLabel(turn.anchor.message, props.active && props.busy ? now : messageTimestamp(turn.result?.message))
-    ?? (props.busy ? "正在处理" : "查看过程");
+  const startTime = messageTimestamp(turn.run ? { timestamp: turn.run.header.timestamp } : turn.anchor.message);
+  const endTime = turn.run ? messageTimestamp({ timestamp: turn.run.lastActivity })
+    : messageTimestamp(turn.tail.at(-1)?.message ?? turn.result?.message);
+  const processLabel = elapsedLabel(startTime, running ? now : endTime) ?? "耗时未知";
   const load = async (direction: "initial" | "older" | "newer") => {
     if (!turn.run || loadingRef.current) return;
     lastDirectionRef.current = direction;
@@ -1095,14 +1115,13 @@ function Turn(props: {
     finally { loadingRef.current = false; setLoading(false); }
   };
   useEffect(() => {
-    const running = props.active && props.busy;
     if (running && !wasBusy.current) setExpanded(true);
     wasBusy.current = running;
     if (!running) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [props.active, props.busy]);
+  }, [running]);
   useEffect(() => {
     if (!expanded || !turn.run) return;
     const release = history.data.watchRun(history.sessionId, turn.run.id);
@@ -1128,12 +1147,11 @@ function Turn(props: {
   return (
     <section className="pi-turn" data-run-id={turn.id}>
       <Message {...messageProps} message={turn.anchor.message} entryId={turn.anchor.entryId} editing={props.editingEntryId === turn.anchor.entryId} />
-      {(processVisible || props.active && props.busy) && (
+      {(processVisible || running) && (
         <div className={`pi-turn-process ${expanded ? "is-open" : ""}`}>
           <button className="pi-turn-process-summary" data-run-summary={turn.id} type="button" aria-expanded={expanded}
             onClick={() => { props.onExpand(turn.id); setExpanded((value) => !value); }}>
             <span>{processLabel}</span>
-            {loading && <LoaderCircle className="pi-loading-spinner" size={13} aria-label="加载过程" />}
             <ChevronRight className="pi-disclosure" size={14} />
           </button>
           {expanded && <div ref={processRef} className="pi-turn-process-body" data-run-start={detail?.start} data-run-end={detail?.end}>
@@ -1144,6 +1162,7 @@ function Turn(props: {
             {loading && !detail && <div className="pi-process-loading" role="status"><LoaderCircle className="pi-loading-spinner" size={14} />正在加载过程…</div>}
             {error && <button className="pi-history-more is-error" type="button" onClick={() => void load(lastDirectionRef.current)}>加载失败，点击重试</button>}
             {(detail?.newer || detail?.latestAvailable) && <button className="pi-history-more" data-run-page="newer" type="button" disabled={loading} aria-busy={loading} onClick={() => void load("newer")}>{loading && <LoaderCircle className="pi-loading-spinner" size={13} />}{loading ? "正在加载过程…" : "查看后续过程"}</button>}
+            {props.compacting && <CompactionStatus />}
           </div>}
         </div>
       )}
@@ -1200,6 +1219,7 @@ function MessageListContent({
   const turnRefs = useRef<(HTMLDivElement | null)[]>([]);
   const messageAnchorsRef = useRef<MessageAnchorsHandle>(null);
   const atBottomRef = useRef(true);
+  const initializedScrollRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const anchorGestureRef = useRef<AnchorGesture | null>(null);
   const anchorPreviewTimerRef = useRef<number | null>(null);
@@ -1399,7 +1419,9 @@ function MessageListContent({
 
   const syncActiveAnchor = () => {
     const transcript = transcriptRef.current;
-    if (!transcript) return;
+    // Initial DOM geometry is not a saved browsing position. Restore the
+    // viewport before observations are allowed to overwrite its cache.
+    if (!transcript || !initializedScrollRef.current || pendingScrollRef.current) return;
     atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96 && currentWindowRef.current?.following !== false;
     const position = capturePosition();
     stablePositionRef.current = position;
@@ -1621,11 +1643,16 @@ function MessageListContent({
     messageAnchorsRef.current?.setPreviewPosition(null);
     setAnchorOpen(false);
     setActiveAnchorIndex(Math.max(0, anchors.length - 1));
+    initializedScrollRef.current = true;
+    previousScrollTopRef.current = transcript.scrollTop;
+    syncActiveAnchor();
     const frame = requestAnimationFrame(() => {
       if (saved) restorePosition(saved);
       else transcript.scrollTop = transcript.scrollHeight;
+      previousScrollTopRef.current = transcript.scrollTop;
+      syncActiveAnchor();
     });
-    return () => cancelAnimationFrame(frame);
+    return () => { initializedScrollRef.current = false; cancelAnimationFrame(frame); };
   }, [scrollScope]);
 
   useLayoutEffect(restorePendingPosition);
@@ -1668,6 +1695,7 @@ function MessageListContent({
     if (!transcript) return;
     const composer = stageRef.current?.closest(".pi-conversation")?.querySelector(".pi-composer-wrap");
     const onScroll = () => {
+      if (!initializedScrollRef.current) return;
       const pending = pendingScrollRef.current;
       if (pending) {
         const selector = pending.position.target === "process" ? "[data-run-summary]" : "[data-entry-id]";
@@ -1757,6 +1785,7 @@ function MessageListContent({
                   toolResults={toolResults}
                   streamingMessage={index === activeTurnIndex ? streamingMessage : null}
                   busy={index === activeTurnIndex && busy && !compacting && (!turn.result || streamingMessage !== null)}
+                  compacting={index === activeTurnIndex && compacting}
                   active={index === activeTurnIndex}
                   onLoadProcess={loadProcess}
                   onExpand={prepareExpansion}
@@ -1781,7 +1810,7 @@ function MessageListContent({
                 <span />
               </div>
             )}
-            {compacting && <CompactionStatus />}
+            {turns.length === 0 && compacting && <CompactionStatus />}
             {(toolProgress ?? []).filter((tool) => !toolCalls.has(tool.toolCallId)).map((tool) => <ToolCall key={tool.toolCallId}
               block={{ type: "toolCall", id: tool.toolCallId, name: tool.toolName, arguments: tool.args }}
               result={toolResults.get(tool.toolCallId)} streaming onOpenTerminal={onOpenTerminal} />)}

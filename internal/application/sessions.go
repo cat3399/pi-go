@@ -30,16 +30,17 @@ type SessionInfo struct {
 // validates the manager resource, not LiveState or catalog-resolved parent IDs.
 // Entries and trees retain canonical session types.
 type SessionSnapshot struct {
-	Revision  uint64
-	Version   session.ReadVersion
-	SessionID string
-	FilePath  string
-	Info      SessionInfo
-	LeafID    *string
-	Tree      []session.TreeNode
-	Entries   []session.Entry
-	Context   session.Context
-	LiveState *State
+	Revision    uint64
+	Version     session.ReadVersion
+	SessionID   string
+	FilePath    string
+	Info        SessionInfo
+	LeafID      *string
+	Tree        []session.TreeNode
+	Entries     []session.Entry
+	Context     session.Context
+	LiveState   *State
+	LatestUsage *session.AssistantUsage
 }
 
 func (s *Service) ListSessions() ([]SessionInfo, error) {
