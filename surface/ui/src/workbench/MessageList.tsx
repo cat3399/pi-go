@@ -1698,7 +1698,9 @@ function MessageListContent({
     }
   }, []);
 
-  useEffect(() => {
+  // The history owner can change while this conversation is already visible.
+  // Measure its composer and restore the viewport before the remounted list paints.
+  useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const composer = stageRef.current?.closest(".pi-conversation")?.querySelector(".pi-composer-wrap");
