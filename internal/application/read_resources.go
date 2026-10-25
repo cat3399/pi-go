@@ -233,8 +233,7 @@ func (s *Service) readIndex(id string) (*session.ReadIndex, error) {
 }
 
 func indexPath(index *session.ReadIndex) string {
-	value, _ := index.ReadSnapshot(session.SnapshotOptions{})
-	return value.Info.Path
+	return index.Path()
 }
 
 func (s *Service) loadReadIndex(id string, cached *cachedReadIndex) (*session.ReadIndex, error) {

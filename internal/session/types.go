@@ -354,6 +354,9 @@ type Entry struct {
 	compaction      *CompactionRecord
 	diagnostics     []Diagnostic
 	payload         EntryPayload
+	// Only immutable, file-backed ReadIndex entries use this projection.
+	// Runtime/store entries and all externally returned entries remain complete.
+	readRecord *readEntryRecord
 }
 
 // EntryPayload is the typed v3 session-entry union.  Entry.RawJSON remains

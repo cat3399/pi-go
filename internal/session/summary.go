@@ -85,29 +85,7 @@ func (m *SessionManager) summaryLocked(store *Session) SessionInfo {
 		m.summary = managerSummary{store: store}
 	}
 	for _, entry := range store.entries[m.summary.entries:] {
-		if entry.typeName == "message" {
-			m.summary.value.messageCount++
-			if entry.messageActivity.After(time.UnixMilli(0)) && entry.messageActivity.After(m.summary.value.lastActivity) {
-				m.summary.value.lastActivity = entry.messageActivity
-			}
-			if m.summary.value.firstMessage == "" && entry.messageRole == "user" {
-				var object map[string]json.RawMessage
-				semantic, _ := replaceInvalidUTF8LikeNode(entry.raw)
-				if json.Unmarshal(semantic, &object) == nil {
-					text, _, _, _ := sessionInfoMessage(object, true)
-					m.summary.value.firstMessage = text
-				}
-			}
-			continue
-		}
-		if entry.typeName != "session_info" {
-			continue
-		}
-		var object map[string]json.RawMessage
-		semantic, _ := replaceInvalidUTF8LikeNode(entry.raw)
-		if json.Unmarshal(semantic, &object) == nil {
-			m.summary.value.append(entry.typeName, object, false)
-		}
+		m.summary.value.appendEntry(entry)
 	}
 	m.summary.entries = len(store.entries)
 	header := store.header
@@ -115,6 +93,33 @@ func (m *SessionManager) summaryLocked(store *Session) SessionInfo {
 		Path: m.sessionFile, ID: header.id, Cwd: m.cwd, Created: header.timestamp,
 		ParentSessionPath: header.parentSession, HasParentSession: header.hasParentSession,
 	})
+}
+
+// appendEntry is shared by live summaries and the streaming read-index builder.
+// The builder calls it before dropping raw/decoded bodies from its projection.
+func (s *sessionInfoSummary) appendEntry(entry Entry) {
+	if entry.typeName == "message" {
+		s.messageCount++
+		if entry.messageActivity.After(time.UnixMilli(0)) && entry.messageActivity.After(s.lastActivity) {
+			s.lastActivity = entry.messageActivity
+		}
+		if s.firstMessage == "" && entry.messageRole == "user" {
+			var object map[string]json.RawMessage
+			semantic, _ := replaceInvalidUTF8LikeNode(entry.raw)
+			if json.Unmarshal(semantic, &object) == nil {
+				text, _, _, _ := sessionInfoMessage(object, true)
+				s.firstMessage = text
+			}
+		}
+		return
+	}
+	if entry.typeName == "session_info" {
+		var object map[string]json.RawMessage
+		semantic, _ := replaceInvalidUTF8LikeNode(entry.raw)
+		if json.Unmarshal(semantic, &object) == nil {
+			s.append(entry.typeName, object, false)
+		}
+	}
 }
 
 // setStore is called under m.mu exclusively (or during construction), excluding

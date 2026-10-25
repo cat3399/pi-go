@@ -71,6 +71,9 @@ type historyRunSpan struct {
 }
 
 func visibleRunEntry(entry Entry) bool {
+	if entry.readRecord != nil {
+		return entry.readRecord.visible
+	}
 	if entry.typeName == "compaction" || entry.typeName == "branch_summary" {
 		return true
 	}
@@ -104,8 +107,7 @@ func (s *Session) historyRunsLocked(path []int) []historyRunSpan {
 			// Only the last assistant in the complete group can be its result.
 			// A tool request with preceding commentary is not a final answer.
 			run.result, run.resultHasProcess, run.stopReason = -1, false, ""
-			if message, ok := entry.message.(interface{ FinishReason() llm.FinishReason }); ok {
-				reason := message.FinishReason()
+			if reason, ok := entryFinishReason(entry); ok {
 				if reason != llm.FinishToolUse && reason != llm.FinishPending {
 					run.result = position
 					run.stopReason = reason.String()
@@ -122,7 +124,20 @@ func (s *Session) historyRunsLocked(path []int) []historyRunSpan {
 	return runs
 }
 
+func entryFinishReason(entry Entry) (llm.FinishReason, bool) {
+	if entry.readRecord != nil {
+		return entry.readRecord.finish, entry.readRecord.finished
+	}
+	if message, ok := entry.message.(interface{ FinishReason() llm.FinishReason }); ok {
+		return message.FinishReason(), true
+	}
+	return llm.FinishPending, false
+}
+
 func assistantProcessPrefix(entry Entry) bool {
+	if entry.readRecord != nil {
+		return entry.readRecord.process
+	}
 	if message, ok := entry.message.(interface{ Blocks() []llm.AssistantBlock }); ok {
 		for _, block := range message.Blocks() {
 			switch block.(type) {
@@ -157,21 +172,27 @@ func (s *Session) runNodeLocked(path []int, span historyRunSpan) HistoryRun {
 	return run
 }
 
-func (s *Session) runOverviewLocked(path []int, span historyRunSpan, metadataOnly bool) RunOverview {
+func (s *Session) runOverviewLocked(path []int, span historyRunSpan, metadataOnly bool) (RunOverview, error) {
 	value := RunOverview{Run: s.runNodeLocked(path, span)}
 	if !metadataOnly {
 		header := s.entries[path[span.start]]
 		value.Run.Header.ContentToken = entryContentToken(header)
-		copy := header.clone()
+		copy, err := materializeReadEntry(header)
+		if err != nil {
+			return RunOverview{}, err
+		}
 		value.Header = &copy
 		if span.result >= 0 {
 			result := s.entries[path[span.result]]
 			value.Run.Result.ContentToken = entryContentToken(result)
-			copy := result.clone()
+			copy, err := materializeReadEntry(result)
+			if err != nil {
+				return RunOverview{}, err
+			}
 			value.Result = &copy
 		}
 	}
-	return value
+	return value, nil
 }
 
 func (m *SessionManager) ReadRuns(query RunsQuery) (RunsPage, error) {
@@ -266,15 +287,19 @@ func (m *SessionManager) ReadRuns(query RunsQuery) (RunsPage, error) {
 			span := runs[index]
 			cost := 512 + len(store.entries[path[span.start]].id)*6
 			if !query.MetadataOnly {
-				cost += len(store.entries[path[span.start]].raw)
+				cost += entryRawLength(store.entries[path[span.start]])
 				if span.result >= 0 {
-					cost += len(store.entries[path[span.result]].raw)
+					cost += entryRawLength(store.entries[path[span.result]])
 				}
 			}
 			if len(result.Items) > 0 && used+cost > budget {
 				break
 			}
-			result.Items = append(result.Items, store.runOverviewLocked(path, span, query.MetadataOnly))
+			item, err := store.runOverviewLocked(path, span, query.MetadataOnly)
+			if err != nil {
+				return err
+			}
+			result.Items = append(result.Items, item)
 			used += cost
 			if direction == PageOlder {
 				start--

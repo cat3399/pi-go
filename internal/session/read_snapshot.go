@@ -82,11 +82,8 @@ func (m *SessionManager) ReadSnapshot(options SnapshotOptions) (ReadSnapshot, er
 func (s *Session) latestAssistantUsageLocked(index int) *AssistantUsage {
 	for remaining := len(s.entries); remaining > 0 && index >= 0 && index < len(s.entries); remaining-- {
 		entry := s.entries[index]
-		if message, ok := entry.message.(llm.AssistantTerminal); ok && message.FinishReason() != llm.FinishAborted && message.FinishReason() != llm.FinishError {
-			usage := message.Usage()
-			if usage.TotalTokens() > 0 || usage.Input() > 0 || usage.Output() > 0 || usage.CacheRead() > 0 || usage.CacheWrite() > 0 {
-				return &AssistantUsage{EntryID: entry.id, Timestamp: message.Timestamp(), Provenance: message.AssistantProvenance(), Usage: usage}
-			}
+		if usage := entryAssistantUsage(entry); usage != nil {
+			return usage
 		}
 		if !entry.hasParent {
 			break

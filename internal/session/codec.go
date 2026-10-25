@@ -105,6 +105,13 @@ func decodeStructurallyCleanCompatibleSessionFile(path string, data []byte) (Hea
 }
 
 func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Entry, map[string]int, bool, []LoadDiagnostic, error) {
+	return decodeCompatibleSessionReaderProjected(path, source, nil)
+}
+
+// The optional projection belongs only to the rebuildable read index. Decode
+// and validate with the same compatibility rules as the writer, but release
+// each record's body before reading the next one. Offsets include skipped lines.
+func decodeCompatibleSessionReaderProjected(path string, source io.Reader, project func(Entry, int64) Entry) (Header, []Entry, map[string]int, bool, []LoadDiagnostic, error) {
 	var header Header
 	entries := make([]Entry, 0)
 	byID := make(map[string]int)
@@ -119,12 +126,14 @@ func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Ent
 	lineNumber := 0
 	sawBytes := false
 	lastTerminated := false
-	reader := bufio.NewReaderSize(source, sessionReadBufferSize)
+	counted := &sessionCountingReader{Reader: source}
+	reader := bufio.NewReaderSize(counted, sessionReadBufferSize)
 	// Tail validation only needs scratch storage. Reuse it across physical
 	// records instead of allocating 32 KiB for every message in the session.
 	whitespaceBuffer := make([]byte, 32*1024)
 
 	for {
+		offset := counted.bytes - int64(reader.Buffered())
 		line, readErr := nextStreamedJSONLine(reader, whitespaceBuffer)
 		if readErr != nil {
 			return Header{}, nil, nil, false, diagnostics, fmt.Errorf("%w: read %s: %v", ErrStorage, path, readErr)
@@ -174,6 +183,9 @@ func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Ent
 		}
 		byID[entry.id] = len(entries)
 		lineByID[entry.id] = lineNumber
+		if project != nil {
+			entry = project(entry, offset)
+		}
 		entries = append(entries, entry)
 	}
 
@@ -206,6 +218,17 @@ func decodeCompatibleSessionReader(path string, source io.Reader) (Header, []Ent
 	})
 	needsSeparator := sawBytes && !lastTerminated
 	return header, entries, byID, needsSeparator, diagnostics, nil
+}
+
+type sessionCountingReader struct {
+	io.Reader
+	bytes int64
+}
+
+func (r *sessionCountingReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += int64(n)
+	return n, err
 }
 
 const maxLoadDiagnosticSamplesPerCode = 16

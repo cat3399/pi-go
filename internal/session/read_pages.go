@@ -206,14 +206,17 @@ func (m *SessionManager) ReadHistory(query HistoryQuery) (HistoryPage, error) {
 			item := PageEntry{Node: entryReadNode(entry)}
 			item.Node.Position = index
 			metadataBytes := 256 + 6*(len(entry.id)+len(entry.parentID)+len(entry.typeName)+len(entry.messageRole)+len(item.Node.Preview))
-			cost := len(entry.raw) + metadataBytes
+			cost := entryRawLength(entry) + metadataBytes
 			// A page always makes progress and returns a complete entry. Large
 			// text/thinking records occupy a page on their own, without truncation.
 			if len(result.Items) > 0 && used+cost > budget {
 				break
 			}
 			item.Node.ContentToken = entryContentToken(entry)
-			copy := entry.clone()
+			copy, err := materializeReadEntry(entry)
+			if err != nil {
+				return err
+			}
 			item.Entry = &copy
 			result.Items = append(result.Items, item)
 			used += cost
@@ -388,8 +391,14 @@ func (m *SessionManager) ReadNodes(query NodeQuery) (NodePage, error) {
 			if query.ParentID != nil && *query.ParentID != parent || query.Role != "" && query.Role != entry.messageRole || query.Type != "" && query.Type != entry.typeName {
 				continue
 			}
-			if len(needle) != 0 && !bytes.Contains(bytes.ToLower(entry.raw), needle) {
-				continue
+			if len(needle) != 0 {
+				raw, err := readEntryRaw(entry)
+				if err != nil {
+					return err
+				}
+				if !bytes.Contains(bytes.ToLower(raw), needle) {
+					continue
+				}
 			}
 			node := entryReadNode(entry)
 			node.Position = position - 1
@@ -485,16 +494,25 @@ func (m *SessionManager) ReadEntry(id, generation string) (EntrySnapshot, error)
 		if !ok {
 			return ErrEntryNotFound
 		}
-		result = EntrySnapshot{Version: source.Version, SessionID: source.Info.ID, Entry: store.entries[index].clone(), ContentToken: entryContentToken(store.entries[index])}
+		entry, err := materializeReadEntry(store.entries[index])
+		if err != nil {
+			return err
+		}
+		result = EntrySnapshot{Version: source.Version, SessionID: source.Info.ID, Entry: entry, ContentToken: entryContentToken(store.entries[index])}
 		return nil
 	})
 	return result, err
 }
 
-func entryContentToken(entry Entry) string { return fmt.Sprintf("%x", sha256.Sum256(entry.raw)) }
+func entryContentToken(entry Entry) string {
+	if entry.readRecord != nil {
+		return entry.readRecord.token
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(entry.raw))
+}
 
 func entryReadNode(entry Entry) EntryNode {
-	node := EntryNode{ID: entry.id, Type: entry.typeName, Role: entry.messageRole, Timestamp: entry.timestamp, RawBytes: len(entry.raw), Preview: entryPreview(entry)}
+	node := EntryNode{ID: entry.id, Type: entry.typeName, Role: entry.messageRole, Timestamp: entry.timestamp, RawBytes: entryRawLength(entry), Preview: entryPreview(entry)}
 	if entry.hasParent {
 		id := entry.parentID
 		node.ParentID = &id
@@ -503,6 +521,9 @@ func entryReadNode(entry Entry) EntryNode {
 }
 
 func entryPreview(entry Entry) string {
+	if entry.readRecord != nil {
+		return entry.readRecord.preview
+	}
 	var text string
 	switch message := entry.message.(type) {
 	case interface{ Content() []llm.TextBlock }:

@@ -249,9 +249,13 @@ func TestReadIndexOwnsNoWriterAndDetectsSameSizeTimestampReplacement(t *testing.
 	if valid, err := index.ValidateSource(); err != nil || valid {
 		t.Fatalf("same-size/mtime replacement validated old data: %t, %v", valid, err)
 	}
-	old, _ := index.ReadHistory(HistoryQuery{})
-	if !bytes.Equal(old.Items[0].Entry.RawJSON(), before.Items[0].Entry.RawJSON()) {
-		t.Fatal("file replacement mutated an existing immutable index")
+	// An offset-backed index cannot serve bodies from a replaced source.
+	// Already returned entries remain owned and immutable; new reads fail closed.
+	if _, err := index.ReadHistory(HistoryQuery{}); !errors.Is(err, ErrReadSourceChanged) {
+		t.Fatalf("replaced source served old index offsets: %v", err)
+	}
+	if !bytes.Contains(before.Items[0].Entry.RawJSON(), []byte("before")) {
+		t.Fatal("file replacement mutated an already returned entry")
 	}
 	next, err := OpenReadIndex(path)
 	if err != nil {
