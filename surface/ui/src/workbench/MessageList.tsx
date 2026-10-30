@@ -18,6 +18,7 @@ import { messageText, visibleMessage } from "./message";
 import { ElapsedClock, elapsedBetween } from "./elapsed-time";
 import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
+import { TranscriptViewport } from "./TranscriptViewport";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
 import type { SessionImageCache } from "./session-images";
@@ -1074,7 +1075,7 @@ function Turn(props: {
   busy: boolean;
   compacting: boolean;
   active: boolean;
-  onLoadProcess(runId: string, direction: "initial" | "older" | "newer"): Promise<void>;
+  onLoadProcess(runId: string, direction: "initial" | "older" | "newer"): Promise<boolean>;
   onExpand(runId: string): void;
   onOpenTerminal?(id: string): void;
   onFork(entryId: string): Promise<void>;
@@ -1102,7 +1103,8 @@ function Turn(props: {
   const fullFinal = turn.result && turn.tail.find((item) => item.entryId === turn.result?.entryId);
   const finalProcess = fullFinal && splitFinalAssistant(fullFinal.message).process;
   if (finalProcess) processMessages.push({ ...fullFinal, message: finalProcess });
-  if (props.active && props.streamingMessage) processMessages.push({ message: props.streamingMessage });
+  const followsLive = !turn.run || history.data.runFollowsLive(history.sessionId, turn.run.id);
+  if (props.active && props.streamingMessage && followsLive) processMessages.push({ message: props.streamingMessage });
   const processVisible = Boolean(turn.run?.processCount) || processMessages.some(({ message }) => hasDisplayableProcessMessage(message));
   const startTime = messageTimestamp(turn.run ? { timestamp: turn.run.header.timestamp } : turn.anchor.message);
   const endTime = turn.run ? messageTimestamp({ timestamp: turn.run.lastActivity })
@@ -1119,7 +1121,7 @@ function Turn(props: {
     lastDirectionRef.current = direction;
     loadingRef.current = true;
     setLoading(true); setError("");
-    try { await props.onLoadProcess(turn.run.id, direction); }
+    try { if (!await props.onLoadProcess(turn.run.id, direction)) lastDirectionRef.current = "initial"; }
     catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { loadingRef.current = false; setLoading(false); }
   };
@@ -1169,7 +1171,7 @@ function Turn(props: {
               editing={props.editingEntryId === entryId} streaming={message === props.streamingMessage} process />)}
             {loading && !detail && <div className="pi-process-loading" role="status"><LoaderCircle className="pi-loading-spinner" size={14} />正在加载过程…</div>}
             {error && <button className="pi-history-more is-error" type="button" onClick={() => void load(lastDirectionRef.current)}>加载失败，点击重试</button>}
-            {(detail?.newer || detail?.latestAvailable) && <button className="pi-history-more" data-run-page="newer" type="button" disabled={loading} aria-busy={loading} onClick={() => void load("newer")}>{loading && <LoaderCircle className="pi-loading-spinner" size={13} />}{loading ? "正在加载过程…" : "查看后续过程"}</button>}
+            {(detail?.newer || detail?.latestAvailable || running && detail && !detail.following) && <button className="pi-history-more" data-run-page="newer" type="button" disabled={loading} aria-busy={loading} onClick={() => void load("newer")}>{loading && <LoaderCircle className="pi-loading-spinner" size={13} />}{loading ? "正在加载过程…" : "查看后续过程"}</button>}
             {props.compacting && <CompactionStatus />}
           </div>}
         </div>
@@ -1236,12 +1238,12 @@ function MessageListContent({
   const [anchorOpen, setAnchorOpen] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [, updateProcessScroll] = useState(0);
   const loadingHistoryRef = useRef(false);
   const currentWindowRef = useRef(historyWindow);
   currentWindowRef.current = historyWindow;
   const scrollScope = JSON.stringify([sessionId, historyWindow?.version.generation ?? ""]);
-  const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition; scrollTop?: number; ready?: boolean; runRange?: { id: string; start: number; end: number } } | null>(null);
+  const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition } | null>(null);
+  const scrollNavigationRef = useRef<{ entryId: string; destination?: number } | null>(null);
   const historyRequestRef = useRef(0);
   const stablePositionRef = useRef<ScrollPosition | null>(null);
   const previousScrollTopRef = useRef(0);
@@ -1274,22 +1276,28 @@ function MessageListContent({
       if (entryId && covered.has(entryId)) continue;
       const item = { message, entryId, pending: true };
       if (message.role === "user") nextTurns.push({ id: entryId || String(message.id ?? `live-${index}`), anchor: item, tail: [] });
-      else if (nextTurns.length) nextTurns.at(-1)!.tail.push(item);
+      else if (nextTurns.length) {
+        const turn = nextTurns.at(-1)!;
+        if (!turn.run || data.runFollowsLive(sessionId, turn.run.id)) turn.tail.push(item);
+      }
       else nextLeading.push(item);
     }
     return { turns: nextTurns, leading: nextLeading };
   })();
+  const activeTurnIndex = historyWindow && (historyWindow.end < historyWindow.total || historyWindow.preview || historyWindow.latestAvailable) ? -1 : turns.length - 1;
+  const activeRun = turns[activeTurnIndex]?.run;
+  const followsLive = historyWindow?.following !== false
+    && (turns.length === 0 || activeTurnIndex >= 0 && (!activeRun || data.runFollowsLive(sessionId, activeRun.id)));
   const toolResults = new Map<string, AgentMessage>();
   for (const message of [...messages, ...turns.flatMap((turn) => turn.tail.map((item) => item.message))]) {
     if (message.role === "toolResult" && typeof message.toolCallId === "string") toolResults.set(message.toolCallId, message);
   }
-  for (const tool of toolProgress ?? []) {
+  for (const tool of followsLive ? toolProgress ?? [] : []) {
     if (toolResults.has(tool.toolCallId)) continue;
     toolResults.set(tool.toolCallId, { role: "toolResult", toolCallId: tool.toolCallId, toolName: tool.toolName,
       ...tool.partialResult, partial: true,
       content: (tool.partialResult?.content as MessageContentBlock[] | undefined) ?? String(tool.partialResult?.text ?? "") });
   }
-  const activeTurnIndex = historyWindow && (historyWindow.end < historyWindow.total || historyWindow.preview || historyWindow.latestAvailable) ? -1 : turns.length - 1;
   const anchors = data.navigation(sessionId)?.items ?? [];
   const anchorIndices = useMemo(() => new Map(anchors.map((anchor, index) => [anchor.id, index])), [anchors]);
   const anchorIndexRef = useRef(anchorIndices);
@@ -1328,8 +1336,11 @@ function MessageListContent({
   const capturePosition = (): ScrollPosition => {
     const transcript = transcriptRef.current;
     if (!transcript) return { entryId: "", offset: 0, bottom: true };
-    const top = transcript.getBoundingClientRect().top;
-    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id], [data-run-summary]")].find((item) => item.getBoundingClientRect().bottom > top + 8);
+    const { top, bottom } = transcript.getBoundingClientRect();
+    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id], [data-run-summary]")].find((item) => {
+      const box = item.getBoundingClientRect();
+      return box.bottom > top + 8 && box.top < bottom;
+    });
     return { entryId: element?.dataset.entryId ?? element?.dataset.runSummary ?? "", target: element?.dataset.runSummary ? "process" : undefined, offset: (element?.getBoundingClientRect().top ?? top) - top, bottom: atBottomRef.current && currentWindowRef.current?.following !== false };
   };
 
@@ -1337,13 +1348,14 @@ function MessageListContent({
     const transcript = transcriptRef.current;
     if (!transcript) return false;
     if (position.bottom) {
-      transcript.scrollTop = transcript.scrollHeight;
+      if (transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop > 0.5) transcript.scrollTop = transcript.scrollHeight;
       atBottomRef.current = currentWindowRef.current?.following !== false;
       return true;
     }
     const element = [...transcript.querySelectorAll<HTMLElement>(position.target === "process" ? "[data-run-summary]" : "[data-entry-id]")].find((item) => (position.target === "process" ? item.dataset.runSummary : item.dataset.entryId) === position.entryId);
     if (!element) return false;
-    transcript.scrollTop += element.getBoundingClientRect().top - transcript.getBoundingClientRect().top - position.offset;
+    const delta = element.getBoundingClientRect().top - transcript.getBoundingClientRect().top - position.offset;
+    if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
     atBottomRef.current = false;
     return true;
   };
@@ -1353,12 +1365,6 @@ function MessageListContent({
     const pending = pendingScrollRef.current;
     if (!pending) return;
     if (pending.scope !== scrollScope) { pendingScrollRef.current = null; return; }
-    if (pending.ready === false) return;
-    if (pending.runRange) {
-      const run = [...transcriptRef.current?.querySelectorAll<HTMLElement>("[data-run-id]") ?? []].find((element) => element.dataset.runId === pending.runRange!.id);
-      const body = run?.querySelector<HTMLElement>("[data-run-start]");
-      if (Number(body?.dataset.runStart) !== pending.runRange.start || Number(body?.dataset.runEnd) !== pending.runRange.end) return;
-    }
     if (!restorePosition(pending.position)) return;
     pendingScrollRef.current = null;
     const position = capturePosition();
@@ -1368,13 +1374,42 @@ function MessageListContent({
     previousScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
   };
 
+  const restoreNavigation = (): boolean => {
+    const navigation = scrollNavigationRef.current, transcript = transcriptRef.current;
+    if (!navigation || !transcript) return false;
+    const target = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((element) => element.dataset.entryId === navigation.entryId);
+    if (!target) return true;
+    const destination = Math.min(transcript.scrollHeight - transcript.clientHeight,
+      Math.max(0, target.getBoundingClientRect().top - transcript.getBoundingClientRect().top + transcript.scrollTop - 20));
+    if (navigation.destination === undefined || Math.abs(navigation.destination - destination) > 0.5) {
+      navigation.destination = destination;
+      transcript.scrollTo({ top: destination, behavior: "smooth" });
+    }
+    if (Math.abs(transcript.scrollTop - destination) < 1) scrollNavigationRef.current = null;
+    return true;
+  };
+
+  const restoreAfterRender = (position: ScrollPosition | null) => {
+    if (!initializedScrollRef.current) return;
+    if (pendingScrollRef.current) { restorePendingPosition(); return; }
+    if (restoreNavigation()) return;
+    if (!position || !restorePosition(position)) return;
+    const current = capturePosition();
+    stablePositionRef.current = current;
+    data.scroll.set(scrollScope, current);
+    data.lastScroll.set(sessionId, current);
+    previousScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
+  };
+
   const loadHistory = async (direction: "older" | "newer" | "latest", aroundId?: string) => {
     if (loadingHistoryRef.current && direction !== "latest" && !aroundId) return;
     const request = ++historyRequestRef.current;
     loadingHistoryRef.current = true;
     setLoadingHistory(true);
-    const position = direction === "latest" && !aroundId ? { entryId: "", offset: 0, bottom: true } : capturePosition();
-    pendingScrollRef.current = { scope: scrollScope, position: aroundId ? { entryId: aroundId, offset: 24, bottom: false } : position, scrollTop: transcriptRef.current?.scrollTop };
+    scrollNavigationRef.current = null;
+    pendingScrollRef.current = direction === "latest" || aroundId
+      ? { scope: scrollScope, position: aroundId ? { entryId: aroundId, offset: 24, bottom: false } : { entryId: "", offset: 0, bottom: true } }
+      : null;
     atBottomRef.current = false;
     try {
       await onLoadHistory(direction, aroundId);
@@ -1385,35 +1420,11 @@ function MessageListContent({
     }
   };
   const loadProcess = async (runId: string, direction: "initial" | "older" | "newer") => {
-    let pending: typeof pendingScrollRef.current = null;
-    if (direction !== "initial") {
-      const position = capturePosition();
-      position.bottom = false;
-      const transcript = transcriptRef.current;
-      const run = transcript && [...transcript.querySelectorAll<HTMLElement>("[data-run-id]")].find((element) => element.dataset.runId === runId);
-      const entries = [...run?.querySelectorAll<HTMLElement>(".pi-turn-process-body [data-entry-id]") ?? []];
-      const bounds = transcript?.getBoundingClientRect();
-      const anchor = bounds && (entries.find((element) => { const box = element.getBoundingClientRect(); return box.bottom > bounds.top + 8 && box.top < bounds.bottom; })
-        ?? (direction === "newer" ? entries.at(-1) : entries[0]));
-      if (anchor && bounds) { position.entryId = anchor.dataset.entryId!; position.target = undefined; position.offset = anchor.getBoundingClientRect().top - bounds.top; }
-      stablePositionRef.current = position;
-      data.scroll.set(scrollScope, position);
-      pending = { scope: scrollScope, position, scrollTop: transcript?.scrollTop, ready: false };
-      pendingScrollRef.current = pending;
-      atBottomRef.current = false;
-    }
-    try {
-      await data.loadRun(sessionId, runId, direction);
-      if (pending && pendingScrollRef.current === pending) {
-        const detail = data.runDetails(sessionId, runId);
-        pending.ready = true;
-        if (detail) pending.runRange = { id: runId, start: detail.start, end: detail.end };
-        updateProcessScroll((revision) => revision + 1);
-      }
-    } catch (error) {
-      if (pendingScrollRef.current === pending) pendingScrollRef.current = null;
-      throw error;
-    }
+    if (direction !== "initial" && (pendingScrollRef.current || scrollNavigationRef.current)) return false;
+    const request = historyRequestRef.current;
+    if (direction !== "initial") atBottomRef.current = false;
+    await data.loadRun(sessionId, runId, direction);
+    return request === historyRequestRef.current;
   };
   const prepareExpansion = (runId: string) => {
     const transcript = transcriptRef.current;
@@ -1430,7 +1441,7 @@ function MessageListContent({
     // Initial DOM geometry is not a saved browsing position. Restore the
     // viewport before observations are allowed to overwrite its cache.
     if (!transcript || !initializedScrollRef.current || pendingScrollRef.current) return;
-    atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96 && currentWindowRef.current?.following !== false;
+    atBottomRef.current = atBottomRef.current && transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96 && currentWindowRef.current?.following !== false;
     const position = capturePosition();
     stablePositionRef.current = position;
     data.scroll.set(scrollScope, position);
@@ -1458,18 +1469,32 @@ function MessageListContent({
     setActiveAnchorIndex(index);
     if (!target) { void loadHistory("latest", anchor.id); return; }
     historyRequestRef.current++;
-    data.cancelHistoryNavigation(sessionId);
     pendingScrollRef.current = null;
     loadingHistoryRef.current = false; setLoadingHistory(false);
     atBottomRef.current = false;
-    const top = target.getBoundingClientRect().top - transcript.getBoundingClientRect().top + transcript.scrollTop - 20;
-    transcript.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+    scrollNavigationRef.current = { entryId: anchor.id };
+    // Commit the new reading window before starting the animation. Removing a
+    // live tail can otherwise clamp scrollTop and cancel an in-progress scroll.
+    data.browseHistory(sessionId);
+  };
+
+  const interruptNavigation = () => {
+    if (!scrollNavigationRef.current && !pendingScrollRef.current) return;
+    scrollNavigationRef.current = null;
+    pendingScrollRef.current = null;
+    historyRequestRef.current++;
+    data.cancelHistoryNavigation(sessionId);
+    loadingHistoryRef.current = false;
+    setLoadingHistory(false);
+    const transcript = transcriptRef.current;
+    if (transcript) transcript.scrollTo({ top: transcript.scrollTop, behavior: "instant" });
   };
 
   const focused = data.focusedEntry(sessionId);
   useLayoutEffect(() => {
     if (!focused || focused.entryId) return;
     pendingScrollRef.current = null;
+    scrollNavigationRef.current = null;
     atBottomRef.current = true;
     if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
     stablePositionRef.current = { entryId: "", offset: 0, bottom: true };
@@ -1707,24 +1732,24 @@ function MessageListContent({
     const onScroll = () => {
       if (!initializedScrollRef.current) return;
       const pending = pendingScrollRef.current;
-      if (pending) {
-        const selector = pending.position.target === "process" ? "[data-run-summary]" : "[data-entry-id]";
-        const element = [...transcript.querySelectorAll<HTMLElement>(selector)].find((element) => (pending.position.target === "process" ? element.dataset.runSummary : element.dataset.entryId) === pending.position.entryId);
-        // Only account for movement of the viewport while a read is pending.
-        // Sampling the element's new geometry here would mistake DOM eviction
-        // for user scrolling and cancel the compensation in the layout effect.
-        if (element && pending.scrollTop !== undefined) pending.position.offset -= transcript.scrollTop - pending.scrollTop;
-        pending.scrollTop = transcript.scrollTop;
-        return;
-      }
-      if (loadingHistoryRef.current) return;
+      if (pending) return;
       const upwards = transcript.scrollTop < previousScrollTopRef.current;
       const downwards = transcript.scrollTop > previousScrollTopRef.current;
       previousScrollTopRef.current = transcript.scrollTop;
+      if (upwards) atBottomRef.current = false;
+      else if (downwards && !scrollNavigationRef.current) atBottomRef.current = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 96;
       syncActiveAnchor();
+      if (restoreNavigation()) return;
+      if (loadingHistoryRef.current) return;
       const bounds = transcript.getBoundingClientRect();
+      const reading = capturePosition();
+      const readingElement = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((element) => element.dataset.entryId === reading.entryId);
+      const readingProcess = readingElement?.closest(".pi-turn-process-body");
       const processPage = [...transcript.querySelectorAll<HTMLButtonElement>(`[data-run-page="${upwards ? "older" : "newer"}"]:not(:disabled)`)]
-        .find((button) => { const box = button.getBoundingClientRect(); return box.bottom > bounds.top - 100 && box.top < bounds.bottom + 100; });
+        .find((button) => {
+          const box = button.getBoundingClientRect();
+          return button.closest(".pi-turn-process-body") === readingProcess && box.bottom > bounds.top - 100 && box.top < bounds.bottom + 100;
+        });
       if ((upwards || downwards) && processPage) { processPage.click(); return; }
       const window = currentWindowRef.current;
       if (upwards && transcript.scrollTop < 320 && window?.older) void loadHistoryRef.current("older");
@@ -1737,8 +1762,10 @@ function MessageListContent({
         stageRef.current?.style.setProperty("--pi-composer-height", `${composer.getBoundingClientRect().height}px`);
       }
       restorePendingPosition();
+      if (restoreNavigation()) return;
       if (atBottomRef.current) transcript.scrollTop = transcript.scrollHeight;
       else if (!pendingScrollRef.current && stablePositionRef.current) restorePosition(stablePositionRef.current);
+      previousScrollTopRef.current = transcript.scrollTop;
       if (!loadingHistoryRef.current && !pendingScrollRef.current) syncActiveAnchor();
     };
     transcript.addEventListener("scroll", onScroll, { passive: true });
@@ -1757,14 +1784,19 @@ function MessageListContent({
     <div
       ref={stageRef}
       className="pi-message-stage"
-      onPointerDownCapture={onAnchorPointerDown}
+      onPointerDownCapture={(event) => { interruptNavigation(); onAnchorPointerDown(event); }}
+      onWheelCapture={interruptNavigation}
+      onKeyDownCapture={(event) => {
+        if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+          && !(event.target as Element).closest("input, textarea, [contenteditable]")) interruptNavigation();
+      }}
       onPointerMoveCapture={onAnchorPointerMove}
       onPointerUpCapture={(event) => finishAnchorGesture(event, false)}
       onPointerCancelCapture={(event) => finishAnchorGesture(event, true)}
     >
       <div className="pi-transcript-scroll pi-overlay-scroll-host">
-        <div ref={transcriptRef} className="pi-transcript pi-overlay-scroll-viewport" aria-live="polite" data-history-start={historyWindow?.start} data-history-end={historyWindow?.end} data-history-loading={loadingHistory || undefined}>
-          <div className="pi-transcript-inner">
+        <TranscriptViewport viewportRef={transcriptRef} start={historyWindow?.start} end={historyWindow?.end} loading={loadingHistory}
+          capture={() => initializedScrollRef.current ? capturePosition() : null} restore={restoreAfterRender}>
             {historyWindow?.older && <button className="pi-history-more" type="button" disabled={loadingHistory} onClick={() => void loadHistory("older")}>查看更早的对话</button>}
             {leading.map(({ message, entryId }, index) => (
               <Message
@@ -1821,7 +1853,7 @@ function MessageListContent({
               </div>
             )}
             {turns.length === 0 && compacting && <CompactionStatus />}
-            {(toolProgress ?? []).filter((tool) => !toolCalls.has(tool.toolCallId)).map((tool) => <ToolCall key={tool.toolCallId}
+            {(followsLive ? toolProgress ?? [] : []).filter((tool) => !toolCalls.has(tool.toolCallId)).map((tool) => <ToolCall key={tool.toolCallId}
               block={{ type: "toolCall", id: tool.toolCallId, name: tool.toolName, arguments: tool.args }}
               result={toolResults.get(tool.toolCallId)} streaming onOpenTerminal={onOpenTerminal} />)}
             {pendingMessages.map((message, index) => (
@@ -1834,8 +1866,7 @@ function MessageListContent({
               />
             ))}
             {(historyWindow?.newer || historyWindow?.latestAvailable && !historyWindow.preview) && <button className="pi-history-more" type="button" disabled={loadingHistory} onClick={() => void loadHistory("newer")}>查看后续对话</button>}
-          </div>
-        </div>
+        </TranscriptViewport>
         <OverlayScrollbar viewportRef={transcriptRef} />
         {loadingHistory && <div className="pi-history-loading" role="status"><LoaderCircle className="pi-loading-spinner" size={14} />正在加载历史…</div>}
         {showScrollToBottom && (
@@ -1848,7 +1879,7 @@ function MessageListContent({
             onClick={() => {
               const transcript = transcriptRef.current;
               if (!transcript) return;
-              if (currentWindowRef.current?.following === false || currentWindowRef.current?.latestAvailable) {
+              if (currentWindowRef.current?.following === false || currentWindowRef.current?.latestAvailable || !followsLive) {
                 void loadHistory("latest");
                 return;
               }

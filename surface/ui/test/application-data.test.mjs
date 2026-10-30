@@ -675,3 +675,125 @@ test("a collapsed run keeps its cached position without downloading changing pro
   assert.equal(store.runDetails("one", "n1").end, 1002);
   assert.equal(store.runDetails("one", "n1").latestAvailable, false);
 });
+
+test("cached early and late process pages stay separate until adjacent history fills the gap", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(1000);
+  await store.loadSession("one");
+  await store.loadRun("one", "n1", "initial", "n128");
+  await store.loadRun("one", "n1", "newer");
+  await store.loadRun("one", "n1", "newer");
+  const earlyItem = store.runDetails("one", "n1").pages[0].items[1];
+  assert.deepEqual([store.runDetails("one", "n1").start, store.runDetails("one", "n1").end], [0, 384]);
+
+  await store.loadRun("one", "n1", "latest");
+  assert.deepEqual([store.runDetails("one", "n1").start, store.runDetails("one", "n1").end], [872, 1000]);
+  assert.equal(store.messageFor("one", "SourceA", { node: earlyItem.node }), earlyItem.message, "early records remain reusable in the cache");
+  for (let page = 0; page < 7; page++) {
+    await store.loadRun("one", "n1", "older");
+    const detail = store.runDetails("one", "n1");
+    assert.ok(detail.pages.length <= 3);
+    assert.deepEqual(detail.pages.flatMap((page) => page.items.map((item) => item.node.id)),
+      Array.from({ length: detail.end - detail.start }, (_, index) => `n${detail.start + index + 1}`), "the rendered window has no gaps or duplicate records");
+  }
+  assert.equal(store.runDetails("one", "n1").start, 0);
+});
+
+test("a completed process read after a cached-node jump only warms the cache", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 1200; client.setLog(2400);
+  await store.loadSession("one"); await store.loadRun("one", "n1201");
+  const previous = store.runDetails("one", "n1201");
+  const read = client.readResource.bind(client), wait = deferred();
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "history" && args[2].cursor) await wait.promise;
+    return result;
+  };
+  const loading = store.loadRun("one", "n1201", "older"); await tick();
+  store.browseHistory("one"); // A's header is already in the overview.
+  wait.resolve(); await loading;
+  assert.equal(store.session("one").window.following, false);
+  assert.equal(store.runDetails("one", "n1201").pages, previous.pages, "the obsolete read cannot replace the visible process window");
+  assert.equal(store.runFollowsLive("one", "n1201"), false);
+
+  const calls = client.calls.length;
+  await store.loadRun("one", "n1201", "older");
+  assert.equal(client.calls.length, calls, "returning to B reuses the completed request");
+  assert.equal(store.runDetails("one", "n1201").start, previous.start - 128);
+});
+
+test("a baseline refresh cannot resume live following or replace a window after navigation", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(3500);
+  await store.loadSession("one"); await store.loadRun("one", "n2001");
+  const release = store.watchRun("one", "n2001"), previous = store.runDetails("one", "n2001");
+  const read = client.readResource.bind(client), started = deferred(), wait = deferred();
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "history" && args[2].afterId) { started.resolve(); await wait.promise; }
+    return result;
+  };
+  client.setLog(3501);
+  const refreshing = store.loadSession("one", true); await started.promise;
+  store.browseHistory("one");
+  const current = store.session("one").window;
+  wait.resolve(); await refreshing;
+  assert.equal(store.session("one").window.pages, current.pages);
+  assert.equal(store.session("one").window.following, false);
+  assert.equal(store.session("one").window.latestAvailable, true);
+  assert.equal(store.runDetails("one", "n2001").pages, previous.pages);
+  assert.equal(store.session("one").live.history.log, 3501, "live data still advances independently of the reading window");
+  release();
+});
+
+test("opposite-edge trimming waits when the reader moved into the page it would evict", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(1000);
+  await store.loadSession("one"); await store.loadRun("one", "n1");
+  await store.loadRun("one", "n1", "older"); await store.loadRun("one", "n1", "older");
+  const previous = store.runDetails("one", "n1");
+  const read = client.readResource.bind(client), wait = deferred();
+  client.readResource = async (...args) => {
+    const result = await read(...args);
+    if (args[1] === "history" && args[2].cursor) await wait.promise;
+    return result;
+  };
+  const loading = store.loadRun("one", "n1", "older"); await tick();
+  store.scroll.set(JSON.stringify(["one", "SourceA"]), { entryId: "n999", offset: -10, bottom: false });
+  wait.resolve(); await loading;
+  assert.equal(store.runDetails("one", "n1").pages, previous.pages);
+  const calls = client.calls.length;
+  store.scroll.set(JSON.stringify(["one", "SourceA"]), { entryId: "n650", offset: -10, bottom: false });
+  await store.loadRun("one", "n1", "older");
+  assert.equal(client.calls.length, calls);
+  assert.deepEqual([store.runDetails("one", "n1").start, store.runDetails("one", "n1").end], [488, 872]);
+});
+
+test("a disconnected history refresh still replaces the previous branch window", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.setLog(1000);
+  await store.loadSession("one");
+  await store.loadRun("one", "n997");
+  client.setLog(400);
+  await store.loadSession("one", true);
+  assert.equal(store.session("one").window.anchorId, "n400");
+  assert.equal(store.session("one").window.total, 100);
+  assert.equal(store.runDetails("one", "n997"), undefined);
+});
+
+test("live receipts only attach to the latest contiguous process window, and latest restores both windows", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runSize = 2000; client.setLog(1000);
+  await store.loadSession("one");
+  assert.equal(store.runFollowsLive("one", "n1"), false, "a cold process cannot skip directly to streaming output");
+  await store.loadRun("one", "n1");
+  assert.equal(store.runFollowsLive("one", "n1"), true);
+  for (let i = 0; i < 3; i++) await store.loadRun("one", "n1", "older");
+  assert.equal(store.runFollowsLive("one", "n1"), false);
+  store.browseHistory("one");
+  await store.pageHistory("one", "latest");
+  assert.equal(store.session("one").window.following, true);
+  assert.equal(store.runFollowsLive("one", "n1"), true);
+  assert.deepEqual([store.runDetails("one", "n1").start, store.runDetails("one", "n1").end], [872, 1000]);
+});

@@ -111,7 +111,10 @@ export function OverlayScrollbar<T extends HTMLElement>({ viewportRef }: Overlay
   }, [reveal, scheduleMeasure, viewportRef]);
 
   useEffect(() => () => {
-    if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current);
+    if (frameRef.current !== null) {
+      window.cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
     if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
   }, []);
 

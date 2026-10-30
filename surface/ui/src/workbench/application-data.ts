@@ -232,6 +232,12 @@ export class ApplicationDataStore {
     const generation = this.session(id)?.window.version.generation;
     return generation ? this.cache.peek(runWindowKey(id, generation, runId)) : undefined;
   }
+  runFollowsLive(id: string, runId: string): boolean {
+    const view = this.session(id), detail = this.runDetails(id, runId);
+    const run = view?.window.pages.at(-1)?.runs.at(-1);
+    return Boolean(view?.window.following && run?.id === runId && detail?.following
+      && !detail.latestAvailable && detail.end === detail.total && detail.run.lastEntryId === run.lastEntryId);
+  }
   watchRun(id: string, runId: string): () => void {
     const generation = this.session(id)?.window.version.generation ?? "";
     const key = runWindowKey(id, generation, runId), release = this.cache.pin(key);
@@ -317,6 +323,7 @@ export class ApplicationDataStore {
       // global cursor is already at the current event-stream frontier.
       this.invalidateSession(id, false);
     } else this.scopes.delete(owner);
+    if (previous && !this.selectedIDs().includes(previous)) this.cancelHistoryNavigation(previous);
     if (this.running) {
       if (this.recovering) this.recoveryAgain = true;
       else if (this.needsBaseline) void this.recover().catch((error) => this.fail(error));
@@ -606,11 +613,18 @@ export class ApplicationDataStore {
     if (force) this.invalidateSession(id);
     const pending = this.sessionFlights.get(id);
     if (pending) return pending;
-    const current = this.session(id);
-    if (!force && current && !this.dirtySessions.has(id) && this.cache.isFresh(resourceKey(id, "metadata"), revalidateAfter) && this.cache.isFresh(resourceKey(id, "live"), revalidateAfter)) return Promise.resolve(current);
-    const release = this.hold(), lifecycle = this.lifecycle;
+    const previous = this.session(id);
+    if (!force && previous && !this.dirtySessions.has(id) && this.cache.isFresh(resourceKey(id, "metadata"), revalidateAfter) && this.cache.isFresh(resourceKey(id, "live"), revalidateAfter)) return Promise.resolve(previous);
+    const release = this.hold(), lifecycle = this.lifecycle, navigation = this.navigationRequests.get(id) ?? 0;
     const work = this.readSessionBaseline(id).then((view) => {
       if (lifecycle !== this.lifecycle) return view;
+      const current = this.session(id);
+      if (current && current.window !== previous?.window && navigation !== (this.navigationRequests.get(id) ?? 0)
+        && current.window.version.generation === view.window.version.generation) {
+        const head = view.live.active && view.live.history ? view.live.history : { ...view.metadata.version, leafId: view.metadata.leafId };
+        view = { ...view, window: { ...current.window, latestAvailable: current.window.latestAvailable
+          || !sameVersion(current.window.version, head) || current.window.anchorId !== (head.leafId ?? "") } };
+      }
       this.cache.forget(JSON.stringify(["missing", id]));
       for (const page of view.window.pages) for (const item of page.items) {
         const key = this.draftKey(id, view.window.version.generation, item.node.id), draft = this.drafts.get(key);
@@ -658,6 +672,7 @@ export class ApplicationDataStore {
   }
 
   private async readSessionBaseline(id: string): Promise<SessionReadView> {
+    const navigation = this.navigationRequests.get(id) ?? 0;
     for (let attempt = 0; attempt < 3; attempt++) {
       const [metadataResult, liveResult] = await Promise.all([this.read(id, "metadata"), this.read(id, "live")]);
       const metadata = metadataResult.data, live = liveResult.data;
@@ -694,6 +709,7 @@ export class ApplicationDataStore {
       // Refresh visible process windows before replacing pending receipts. The
       // completed tool/assistant must not disappear between these two reads.
       for (const run of window.pages.flatMap((page) => page.runs)) {
+        if (navigation !== (this.navigationRequests.get(id) ?? 0)) break;
         const key = runWindowKey(id, head.generation, run.id);
         let detail = this.cache.peek<RunDetailWindow>(key);
         // A newly accepted user-only group is already complete in the overview.
@@ -711,7 +727,7 @@ export class ApplicationDataStore {
         if (!detail.following || !this.visibleRuns.has(key)) { this.cache.put(key, { ...detail, latestAvailable: true }); continue; }
         const page = await this.history(id, { runId: run.id, at: window.version, leafId: window.anchorId,
           afterId: detail.pages.at(-1)?.items.at(-1)?.node.id });
-        if (this.cache.peek(key) !== detail) continue;
+        if (this.cache.peek(key) !== detail || navigation !== (this.navigationRequests.get(id) ?? 0)) continue;
         this.cache.put(key, makeRunWindow(page.connected && page.start === detail.end ? appendHistoryPages(detail.pages, page) : [page], true));
       }
       return { metadata, live, window, pending: [...(live.pending ?? [])], controls: old?.controls };
@@ -756,15 +772,12 @@ export class ApplicationDataStore {
   }
 
   async pageHistory(id: string, direction: "older" | "newer" | "latest", aroundId?: string): Promise<void> {
-    const serial = (this.navigationRequests.get(id) ?? 0) + 1;
-    this.navigationRequests.set(id, serial);
+    this.cancelHistoryNavigation(id);
+    const serial = this.navigationRequests.get(id)!;
+    if (direction === "older" || aroundId) this.pauseHistoryFollowing(id);
     const value = await this.loadSession(id);
     const previous = value.window;
     if (this.navigationRequests.get(id) !== serial) return;
-    if (direction === "older" && previous.following) {
-      this.cache.put(viewKey(id), { ...value, window: { ...previous, following: false } });
-      this.emit();
-    }
     let page: RunsPage;
     let preview = false;
     if (direction === "latest" || aroundId) {
@@ -816,12 +829,37 @@ export class ApplicationDataStore {
           await this.loadRun(id, target.id, "initial", aroundId);
         }
       }
+    } else if (direction === "latest") {
+      const last = page.runs.at(-1);
+      if (last && this.runDetails(id, last.id)) await this.loadRun(id, last.id, "latest");
     }
     this.emit();
   }
 
   cancelHistoryNavigation(id: string): void {
     this.navigationRequests.set(id, (this.navigationRequests.get(id) ?? 0) + 1);
+    for (const [key, serial] of this.runRequests) {
+      if (JSON.parse(key)[1] !== id) continue;
+      this.runRequests.set(key, serial + 1);
+      this.runFlights.delete(key);
+    }
+  }
+
+  browseHistory(id: string): void {
+    this.cancelHistoryNavigation(id);
+    this.pauseHistoryFollowing(id);
+  }
+
+  private pauseHistoryFollowing(id: string): void {
+    const view = this.session(id);
+    if (!view) return;
+    this.cache.put(viewKey(id), { ...view, window: { ...view.window, following: false } });
+    for (const run of view.window.pages.flatMap((page) => page.runs)) {
+      const key = runWindowKey(id, view.window.version.generation, run.id);
+      const detail = this.cache.peek<RunDetailWindow>(key);
+      if (detail?.following) this.cache.put(key, { ...detail, following: false });
+    }
+    this.emit();
   }
 
   loadRun(id: string, runId: string, direction: "initial" | "older" | "newer" | "latest" = "initial", aroundId?: string): Promise<void> {
@@ -837,6 +875,7 @@ export class ApplicationDataStore {
       if (pending) return pending;
     }
     const serial = (this.runRequests.get(key) ?? 0) + 1, lifecycle = this.lifecycle;
+    const navigation = this.navigationRequests.get(id) ?? 0;
     this.runRequests.set(key, serial);
     if (direction === "older" && previous?.following) {
       this.cache.put(key, { ...previous, following: false });
@@ -851,6 +890,10 @@ export class ApplicationDataStore {
         if (cursor) page = await this.history(id, { runId, cursor });
         else if (direction === "newer" && previous.latestAvailable) {
           page = await this.history(id, { ...query, direction: "newer", afterId: previous.pages.at(-1)?.items.at(-1)?.node.id });
+        } else if (direction === "newer" && previous.end === previous.total) {
+          this.cache.put(key, { ...previous, following: true });
+          this.emit();
+          return;
         } else return;
       } else {
         const active = run.id === window.pages.at(-1)?.runs.at(-1)?.id && window.following
@@ -860,10 +903,19 @@ export class ApplicationDataStore {
       const current = this.session(id)?.window;
       const currentRun = current?.pages.flatMap((page) => page.runs).find((run) => run.id === runId);
       if (lifecycle !== this.lifecycle || this.runRequests.get(key) !== serial || current?.version.generation !== window.version.generation
-        || !currentRun) return;
+        || navigation !== (this.navigationRequests.get(id) ?? 0) || !currentRun) return;
       let pages = [page];
-      if (!aroundId && previous && direction === "older" && page.end === previous.start) pages = [page, ...previous.pages].slice(0, maxWindowPages);
-      if (!aroundId && previous && direction === "newer" && page.start === previous.end) pages = appendHistoryPages(previous.pages, page);
+      if (!aroundId && previous && (direction === "older" || direction === "newer")) {
+        if (this.cache.peek<RunDetailWindow>(key)?.pages !== previous.pages) return;
+        if (direction === "older" && page.end === previous.start) pages = [page, ...previous.pages].slice(0, maxWindowPages);
+        else if (direction === "newer" && page.start === previous.end) pages = appendHistoryPages(previous.pages, page);
+        else return;
+        // A read may finish after the reader has moved to the other edge.
+        // Cache the response, but do not evict the page they are now reading.
+        const reading = this.scroll.get(JSON.stringify([id, window.version.generation]));
+        if (reading?.entryId && previous.pages.some((page) => page.items.some((item) => item.node.id === reading.entryId))
+          && !pages.some((page) => page.items.some((item) => item.node.id === reading.entryId))) return;
+      }
       const detail = makeRunWindow(pages, direction !== "older" && !aroundId && page.end === page.total);
       detail.latestAvailable = page.run?.lastEntryId !== currentRun.lastEntryId;
       if (previous && (direction === "older" || direction === "newer") && page.version.log < previous.version.log) {
