@@ -23,6 +23,7 @@ LLM 调用的 Bash 工具在每次执行时获得以下环境变量：
 
 | 变量 | 内容 |
 |---|---|
+| `PI_EXECUTABLE` | 运行当前 Agent Core 的 pi-go 程序绝对路径 |
 | `PI_SESSION_ID` | 当前会话 ID |
 | `PI_SESSION_FILE` | 当前 JSONL 路径，内存会话不设置 |
 | `PI_PROVIDER` | 当前选中的 Provider |
@@ -34,7 +35,7 @@ printf 'model=%s/%s\nreasoning=%s\nsession=%s\nfile=%s\n' \
   "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL" "$PI_SESSION_ID" "$PI_SESSION_FILE"
 ```
 
-这些信息从 AgentSession / Agent 的真实状态读取。切换模型、推理级别、会话或 reload 后，下一次
+程序路径从当前 pi-go 进程取得，会话信息从 AgentSession / Agent 的真实状态读取。切换模型、推理级别、会话或 reload 后，下一次
 工具调用使用新值。变量描述的是 pi-go 选择的模型；代理服务内部如何路由应向该服务查询。
 用户直接输入的 `!` / `!!` Bash 命令不注入这些会话变量，子进程继承的旧值也会先清除。
 

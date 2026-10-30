@@ -434,8 +434,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         listFiles={listFiles}
         deleteFile={(path) => client.deleteFile(path)}
         onMentionFile={(value) => {
-          composerRef.current?.insertText(value);
-          closeMobileSidebar();
+          composerRef.current?.insertText(value, { focus: false });
         }}
         onPreviewFile={(path) => {
           openFile(path);

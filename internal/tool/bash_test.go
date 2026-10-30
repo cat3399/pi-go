@@ -48,6 +48,7 @@ func TestBashSuccessUsesFixedConfigurationAndMergedRunnerOrder(t *testing.T) {
 	environment := []string{
 		"PATH=/controlled",
 		"KEEP=original",
+		"PI_EXECUTABLE=stale-executable",
 		"PI_SESSION_ID=secret",
 		"PI_SESSION_FILE=secret-file",
 		"PI_PROVIDER=secret-provider",
@@ -138,7 +139,8 @@ func TestBashPerCallExecutionContextInjectsSessionAndOverlaysEnvironment(t *test
 		WorkingDir:  "call",
 		Environment: map[string]string{"KEEP": "call", "EXTRA": "value", "PI_MODEL": "hook-model"},
 		SessionEnvironment: &BashSessionEnvironment{
-			SessionID: "session-id", SessionFile: "session.jsonl", Provider: "provider",
+			Executable: filepath.Join(workingDir, "pi-go"),
+			SessionID:  "session-id", SessionFile: "session.jsonl", Provider: "provider",
 			Model: "session-model", ReasoningLevel: "high",
 		},
 	}
@@ -160,7 +162,8 @@ func TestBashPerCallExecutionContextInjectsSessionAndOverlaysEnvironment(t *test
 		}
 	}
 	want := map[string]string{
-		"KEEP": "call", "EXTRA": "value", "PI_SESSION_ID": "session-id",
+		"PI_EXECUTABLE": filepath.Join(workingDir, "pi-go"),
+		"KEEP":          "call", "EXTRA": "value", "PI_SESSION_ID": "session-id",
 		"PI_SESSION_FILE": "session.jsonl", "PI_PROVIDER": "provider",
 		"PI_MODEL": "hook-model", "PI_REASONING_LEVEL": "high",
 	}

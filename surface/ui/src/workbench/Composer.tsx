@@ -63,7 +63,7 @@ interface ComposerProps {
 }
 
 export interface ComposerHandle {
-  insertText(value: string): void;
+  insertText(value: string, options?: { focus?: boolean }): void;
   setDraft(value: string): void;
   removeWorkspaceFile(path: string): void;
   focus(): void;
@@ -222,7 +222,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
 
-  const insertText = (value: string) => {
+  const insertText = (value: string, options?: { focus?: boolean }) => {
     const element = textareaRef.current;
     const start = element?.selectionStart ?? text.length;
     const end = element?.selectionEnd ?? start;
@@ -236,7 +236,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     requestAnimationFrame(() => {
       const textarea = textareaRef.current;
       if (!textarea) return;
-      textarea.focus();
+      if (options?.focus !== false) textarea.focus();
       textarea.setSelectionRange(cursor, cursor);
     });
   };

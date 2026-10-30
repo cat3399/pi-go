@@ -24,6 +24,7 @@ interface ViewportBounds {
 
 interface AnchoredPopoverProps extends HTMLAttributes<HTMLDivElement> {
   anchorRef: RefObject<HTMLElement | null>;
+  anchorPoint?: { x: number; y: number };
   open: boolean;
   align?: PopoverAlign;
   placement?: PopoverPlacement;
@@ -62,6 +63,7 @@ function assignRef<T>(ref: Ref<T> | undefined, value: T | null): void {
  */
 export const AnchoredPopover = forwardRef<HTMLDivElement, AnchoredPopoverProps>(function AnchoredPopover({
   anchorRef,
+  anchorPoint,
   open,
   align = "end",
   placement = "auto",
@@ -93,7 +95,9 @@ export const AnchoredPopover = forwardRef<HTMLDivElement, AnchoredPopoverProps>(
     if (!anchor || !surface) return;
 
     const viewport = viewportBounds();
-    const anchorRect = anchor.getBoundingClientRect();
+    const anchorRect = anchorPoint
+      ? { top: anchorPoint.y, bottom: anchorPoint.y, left: anchorPoint.x, right: anchorPoint.x, width: 0 }
+      : anchor.getBoundingClientRect();
     const surfaceRect = surface.getBoundingClientRect();
     const viewportWidth = Math.max(0, viewport.right - viewport.left - gutter * 2);
     const measuredWidth = Math.min(surfaceRect.width, viewportWidth);
@@ -134,7 +138,7 @@ export const AnchoredPopover = forwardRef<HTMLDivElement, AnchoredPopoverProps>(
           : undefined,
       visibility: "visible",
     });
-  }, [align, anchorRef, gap, gutter, maxHeight, minWidth, placement]);
+  }, [align, anchorPoint, anchorRef, gap, gutter, maxHeight, minWidth, placement]);
 
   const schedulePositionUpdate = useCallback(() => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);

@@ -169,7 +169,7 @@ function SessionRow({
       }}
     >
       <span>{sessionTitle(session)}</span>
-      {running && <span className="pi-session-running-dot" aria-label="运行中" />}
+      {running && <LoaderCircle className="pi-session-running-spinner pi-loading-spinner" size={12} role="img" aria-label="运行中" />}
       <InlineActions className="pi-sidebar-row-actions pi-session-actions">
         <IconAction label="重命名会话" onClick={startRename}>
           <Pencil size={15} />

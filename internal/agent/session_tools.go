@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os"
 
 	"github.com/cat3399/pi-go/internal/tool"
 )
@@ -56,5 +57,6 @@ func (t *sessionToolExecutor) executionContext(ctx context.Context) context.Cont
 		metadata.Model = state.Model().ID()
 	}
 	s.selectionMu.RUnlock()
+	metadata.Executable, _ = os.Executable()
 	return tool.WithBashSessionEnvironment(ctx, metadata)
 }

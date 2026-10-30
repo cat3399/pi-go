@@ -15,6 +15,7 @@ import (
 )
 
 var strippedSessionEnvironment = map[string]struct{}{
+	"PI_EXECUTABLE":      {},
 	"PI_SESSION_ID":      {},
 	"PI_SESSION_FILE":    {},
 	"PI_PROVIDER":        {},

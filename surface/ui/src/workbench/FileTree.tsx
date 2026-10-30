@@ -5,18 +5,16 @@ import {
   type CSSProperties,
 } from "react";
 import {
-  AtSign,
   ChevronRight,
-  Eye,
   File,
   Folder,
   FolderOpen,
   RefreshCw,
-  Trash2,
 } from "lucide-react";
 import type { FileEntry, FileList } from "../contracts";
-import { IconAction, InlineActions } from "../primitives/InlineActions";
+import { IconAction } from "../primitives/InlineActions";
 import { InlineConfirmation } from "../primitives/InlineConfirmation";
+import { FileContextMenu, useFileContextMenu } from "./FileContextMenu";
 
 interface FileTreeProps {
   cwd: string;
@@ -94,9 +92,14 @@ function TreeNode(props: {
   const [loaded, setLoaded] = useState(false);
   const [children, setChildren] = useState<FileNode[]>([]);
   const [error, setError] = useState("");
-  const [hovered, setHovered] = useState(false);
   const selected = props.selectedPath === props.node.path || props.activePreviewPath === props.node.path;
   const deleteOpen = props.deleteControl.targetPath === props.node.path;
+  const menu = useFileContextMenu((action) => {
+    props.onSelect(props.node.path);
+    if (action === "preview") props.onPreview(props.node.path);
+    if (action === "mention") props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
+    if (action === "delete") props.deleteControl.request(props.node);
+  });
 
   const loadChildren = useCallback(async () => {
     if (!props.node.isDir || loading) return;
@@ -114,6 +117,7 @@ function TreeNode(props: {
   }, [loading, props.listFiles, props.node.isDir, props.node.path]);
 
   const activate = () => {
+    menu.dismiss();
     props.onSelect(props.node.path);
     if (!props.node.isDir) return;
     const next = !open;
@@ -121,7 +125,6 @@ function TreeNode(props: {
     if (next && !loaded) void loadChildren();
   };
 
-  const actionsVisible = hovered || selected;
   const Icon = props.node.isDir ? (open ? FolderOpen : Folder) : File;
 
   return (
@@ -132,14 +135,8 @@ function TreeNode(props: {
       aria-selected={selected}
     >
       <div
-        className={`pi-file-row ${selected ? "is-selected" : ""} ${deleteOpen ? "is-confirming-delete" : ""}`}
+        className={`pi-file-row ${selected ? "is-selected" : ""} ${menu.open ? "is-menu-open" : ""} ${deleteOpen ? "is-confirming-delete" : ""}`}
         style={{ "--pi-file-indent": `${8 + props.depth * 14}px` } as CSSProperties}
-        onPointerEnter={(event) => {
-          if (event.pointerType === "mouse") setHovered(true);
-        }}
-        onPointerLeave={(event) => {
-          if (event.pointerType === "mouse") setHovered(false);
-        }}
       >
         {deleteOpen ? (
           <InlineConfirmation
@@ -152,9 +149,17 @@ function TreeNode(props: {
         ) : (
           <>
             <button
+              ref={menu.anchorRef}
               className="pi-file-row-main"
               type="button"
               title={props.node.path}
+              aria-haspopup="menu"
+              aria-expanded={menu.open}
+              aria-keyshortcuts="Shift+F10"
+              onPointerDown={menu.onPointerDown}
+              onContextMenu={menu.onContextMenu}
+              onKeyDown={menu.onTriggerKeyDown}
+              onClickCapture={menu.onClickCapture}
               onClick={activate}
             >
               {props.node.isDir ? (
@@ -166,44 +171,7 @@ function TreeNode(props: {
               <span>{props.node.name}</span>
               {loading && <RefreshCw className="pi-file-loading" size={11} aria-label="正在读取" />}
             </button>
-            <InlineActions className="pi-file-actions" visible={actionsVisible}>
-              {!props.node.isDir && (
-                <IconAction
-                  label={`预览 ${props.node.name}`}
-                  title={`预览 ${props.node.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    props.onPreview(props.node.path);
-                  }}
-                >
-                  <Eye size={12} />
-                  <span>预览</span>
-                </IconAction>
-              )}
-              <IconAction
-                label={`引用 ${props.node.name}`}
-                title={`在输入框中引用 ${props.node.name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
-                }}
-              >
-                <AtSign size={12} />
-                <span>引用</span>
-              </IconAction>
-              <IconAction
-                className="is-danger"
-                label={`删除 ${props.node.name}`}
-                title={`删除 ${props.node.name}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  props.deleteControl.request(props.node);
-                }}
-              >
-                <Trash2 size={12} />
-                <span>删除</span>
-              </IconAction>
-            </InlineActions>
+            <FileContextMenu name={props.node.name} isDir={props.node.isDir} menu={menu} />
           </>
         )}
       </div>

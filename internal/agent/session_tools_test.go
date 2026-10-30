@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -21,11 +22,15 @@ func (r *sessionEnvironmentRunner) Run(_ context.Context, request tool.RunReques
 func TestSessionToolEnvironmentFollowsLiveSelectionAndToolReload(t *testing.T) {
 	ctx := context.Background()
 	cwd := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := &sessionEnvironmentRunner{}
 	newExecutor := func() *BashExecutor {
 		bash, err := tool.NewBash(tool.BashOptions{
 			WorkingDir: cwd, Runner: runner,
-			Environment: []string{"PI_MODEL=stale", "PI_SESSION_ID=stale", "PI_SESSION_FILE=stale", "KEEP=value"},
+			Environment: []string{"PI_EXECUTABLE=stale", "PI_MODEL=stale", "PI_SESSION_ID=stale", "PI_SESSION_FILE=stale", "KEEP=value"},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -79,7 +84,7 @@ func TestSessionToolEnvironmentFollowsLiveSelectionAndToolReload(t *testing.T) {
 	assertSelection := func(model, thinking string) {
 		t.Helper()
 		invoke(ctx)
-		want := map[string]string{"KEEP": "value", "PI_SESSION_ID": manager.SessionID(), "PI_PROVIDER": "scripted", "PI_MODEL": model, "PI_REASONING_LEVEL": thinking}
+		want := map[string]string{"KEEP": "value", "PI_EXECUTABLE": executable, "PI_SESSION_ID": manager.SessionID(), "PI_PROVIDER": "scripted", "PI_MODEL": model, "PI_REASONING_LEVEL": thinking}
 		if got := readEnvironment(); !reflect.DeepEqual(got, want) {
 			t.Fatalf("environment = %v, want %v", got, want)
 		}

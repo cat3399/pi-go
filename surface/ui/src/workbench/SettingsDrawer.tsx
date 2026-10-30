@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Pencil, Radio, Settings, Trash2 } from "lucide-react";
 import type { ClientKind } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
+import { InlineConfirmation } from "../primitives/InlineConfirmation";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import type { RemoteConnection } from "../remote-connections";
 import type { HostUpdater } from "../host-update";
@@ -30,16 +31,26 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   const [endpoint, setEndpoint] = useState("");
   const [name, setName] = useState("");
   const [editingEndpoint, setEditingEndpoint] = useState<string | undefined>();
+  const [removingEndpoint, setRemovingEndpoint] = useState("");
   const [error, setError] = useState("");
   const [page, setPage] = useState<"connection" | "input" | "about">("connection");
   const dialogRef = useRef<HTMLElement>(null);
   const backRef = useRef<HTMLButtonElement>(null);
+  const removeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useDialogFocus(props.open, dialogRef, backRef);
 
   useEffect(() => {
-    if (!props.open) setError("");
+    if (!props.open) {
+      setError("");
+      setRemovingEndpoint("");
+    }
   }, [props.open]);
+
+  const cancelRemove = () => {
+    setRemovingEndpoint("");
+    removeButtonRef.current?.focus();
+  };
 
   const remoteOnly = props.hostKind !== "desktop";
   const remoteLabel = props.hostKind === "mobile"
@@ -128,11 +139,24 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                 )}
                 {props.hostKind === "desktop" && props.localError && <p className="pi-settings-error">{props.localError}</p>}
                 {props.nodes.map((node) => (
-                  <div className="pi-saved-connection" key={node.endpoint}>
+                  <div
+                    className={`pi-saved-connection ${removingEndpoint === node.endpoint ? "is-removing" : ""}`}
+                    key={node.endpoint}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape" && removingEndpoint === node.endpoint) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        cancelRemove();
+                      }
+                    }}
+                  >
                     <button
                       className={`pi-connection-row ${props.kind === "remote" && node.endpoint === props.endpoint ? "is-selected" : ""}`}
                       type="button"
-                      onClick={() => props.onUseRemote(node.endpoint)}
+                      onClick={() => {
+                        setRemovingEndpoint("");
+                        props.onUseRemote(node.endpoint);
+                      }}
                       aria-label={`连接 ${node.name}`}
                       aria-pressed={props.kind === "remote" && node.endpoint === props.endpoint}
                     >
@@ -146,6 +170,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                       aria-label={`编辑节点 ${node.name}`}
                       title="编辑节点"
                       onClick={() => {
+                        setRemovingEndpoint("");
                         setName(node.name);
                         setEndpoint(node.endpoint);
                         setEditingEndpoint(node.endpoint);
@@ -156,16 +181,30 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
                       className="pi-icon-button"
                       type="button"
                       aria-label={`移除节点 ${node.name}`}
+                      aria-expanded={removingEndpoint === node.endpoint}
                       title="移除保存的节点"
-                      onClick={() => {
-                        props.onRemoveRemote(node.endpoint);
-                        if (editingEndpoint === node.endpoint) {
-                          setEditingEndpoint(undefined);
-                          setName("");
-                          setEndpoint("");
-                        }
+                      onClick={(event) => {
+                        removeButtonRef.current = event.currentTarget;
+                        setRemovingEndpoint(node.endpoint);
                       }}
                     ><Trash2 size={15} /></button>
+                    {removingEndpoint === node.endpoint && (
+                      <InlineConfirmation
+                        className="pi-connection-remove-confirm"
+                        message={`移除节点“${node.name}”？`}
+                        title={`移除 ${node.name}（${node.endpoint}）的本机连接记录`}
+                        onConfirm={() => {
+                          props.onRemoveRemote(node.endpoint);
+                          setRemovingEndpoint("");
+                          if (editingEndpoint === node.endpoint) {
+                            setEditingEndpoint(undefined);
+                            setName("");
+                            setEndpoint("");
+                          }
+                        }}
+                        onCancel={cancelRemove}
+                      />
+                    )}
                   </div>
                 ))}
                 <form className={`pi-remote-form ${remoteOnly ? "is-remote-only" : ""}`} onSubmit={connectRemote}>

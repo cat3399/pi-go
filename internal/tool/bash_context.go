@@ -10,10 +10,11 @@ import (
 	"unicode/utf8"
 )
 
-// BashSessionEnvironment is the per-call session metadata exposed by the
-// original coding-agent Bash tool. AgentSession owns the live values; the tool
+// BashSessionEnvironment is the per-call session metadata and pi-go executable
+// path exposed to the Bash tool. AgentSession supplies the values; the tool
 // package only provides this injection seam.
 type BashSessionEnvironment struct {
+	Executable     string
 	SessionID      string
 	SessionFile    string
 	Provider       string
@@ -97,6 +98,7 @@ func (b *Bash) resolveExecutionContext(execution BashExecutionContext) (string, 
 			name  string
 			value string
 		}{
+			{"PI_EXECUTABLE", session.Executable},
 			{"PI_SESSION_ID", session.SessionID},
 			{"PI_SESSION_FILE", session.SessionFile},
 			{"PI_PROVIDER", session.Provider},
