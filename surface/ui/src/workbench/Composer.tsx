@@ -1,4 +1,4 @@
-import { forwardRef, KeyboardEvent, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, KeyboardEvent, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { FileText, FileUp, Folder, ImagePlus, LoaderCircle, Plus, Square, X } from "lucide-react";
 import type {
   ContextUsage,
@@ -32,8 +32,11 @@ import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import { ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { ModelConfigControl, thinkingLevelLabel } from "./ModelConfigControl";
 import type { SendBehavior } from "./useApplicationController";
+import { draftRevision, type ComposerDraft, type DraftFile } from "./composer-drafts";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 
 interface ComposerProps {
+  draft: ComposerDraft;
   centered: boolean;
   active: boolean;
   mobile: boolean;
@@ -74,11 +77,6 @@ const MAX_ATTACHED_IMAGES = 10;
 
 type UploadPhase = "idle" | "checking" | "uploading";
 
-interface UploadedWorkspaceFile {
-  name: string;
-  path: string;
-}
-
 interface PendingUploadConflict {
   directory: string;
   files: File[];
@@ -107,11 +105,15 @@ function fileMention(name: string): string {
 const rootSlashSources: SlashCommandPaletteSource[] = ["builtin", "extension", "prompt", "skill"];
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
-  const [text, setText] = useState("");
+  const draftState = useSyncExternalStore(props.draft.subscribe, props.draft.getSnapshot);
+  const { text, files: uploadedFiles } = draftState.content;
+  const submitting = draftState.submitting;
+  const setText = (value: string) => props.draft.update({ text: value });
+  const setUploadedFiles = (value: DraftFile[] | ((current: DraftFile[]) => DraftFile[])) => props.draft.update((current) => ({
+    ...current, files: typeof value === "function" ? value(current.files) : value,
+  }));
   const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedWorkspaceFile[]>([]);
   const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadError, setUploadError] = useState("");
@@ -134,6 +136,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const compositionEndedAtRef = useRef(0);
   imagesRef.current = images;
   const uploadBusy = uploadPhase !== "idle";
+
+  useEffect(() => {
+    let cancelled = false;
+    const refs = draftState.content.images;
+    setImages(refs.map((image) => ({ mimeType: image.mimeType, data: "", previewUrl: "" })));
+    void Promise.all(refs.map(async (image) => {
+      try {
+        const value = await props.draft.store.images.get(image.id);
+        return { ...value, previewUrl: `data:${value.mimeType};base64,${value.data}` };
+      } catch {
+        return { mimeType: image.mimeType, data: "", previewUrl: "" };
+      }
+    })).then((values) => { if (!cancelled) setImages(values); });
+    return () => { cancelled = true; };
+  }, [props.draft, draftState.content.images]);
 
   const modelCapabilityKey = props.model
     ? `${props.model.provider}:${props.model.modelId}`
@@ -201,6 +218,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     [argumentCommands, props.slashCommands, query],
   );
   const slashMenuOpen = query !== null && !slashDismissed && (!query.argumentMode || argumentCommand);
+  useBackNavigation(Boolean(slashMenuOpen), () => setSlashDismissed(true), 70);
   const slashSources = query?.argumentMode ? ["argument" as const] : rootSlashSources;
   const slashGroups = useMemo(() => slashSources
     .map((source) => ({
@@ -271,7 +289,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   useEffect(() => {
     uploadGenerationRef.current += 1;
-    setUploadedFiles([]);
     setPendingUploadConflict(null);
     setUploadResult(null);
     setUploadError("");
@@ -291,24 +308,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const send = async () => {
     const value = text.trim();
-    if (!value || submitting || (props.busy && images.length > 0)) return;
-    const mentions = uploadedFiles.map((file) => fileMention(file.name)).join(" ");
-    const prompt = mentions ? `${mentions}\n\n${value}` : value;
-    setSubmitting(true);
-    setText("");
+    if (!value || submitting || (props.busy && draftState.content.images.length > 0)) return;
+    const draft = props.draft;
+    const pending = draft.beginSend();
+    if (!pending) return;
+    const mentions = pending.content.files.map((file) => fileMention(file.name)).join(" ");
+    const prompt = mentions ? `${mentions}\n\n${pending.content.text.trim()}` : pending.content.text.trim();
     try {
-      await props.onSend(prompt, props.busy ? props.streamingInputBehavior : "prompt", images);
+      const attachments = await Promise.all(pending.content.images.map(async (image) => {
+        const data = await draft.store.images.get(image.id);
+        return { ...data, previewUrl: `data:${data.mimeType};base64,${data.data}` };
+      }));
+      await props.onSend(prompt, props.busy ? props.streamingInputBehavior : "prompt", attachments);
+      draft.finishSend(pending.id, true);
       setPreviewImage(null);
-      for (const image of images) {
-        if (image.previewUrl.startsWith("blob:")) URL.revokeObjectURL(image.previewUrl);
-      }
-      setImages([]);
-      setUploadedFiles([]);
       setUploadResult(null);
-    } catch {
-      setText(value);
-    } finally {
-      setSubmitting(false);
+    } catch (error) {
+      draft.finishSend(pending.id, false);
+      setUploadError(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -361,28 +378,36 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const addImages = async (files: File[]) => {
     if (props.busy) return;
+    const draft = props.draft;
     const accepted = files
       .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, Math.max(0, MAX_ATTACHED_IMAGES - imagesRef.current.length));
-    const next = await Promise.all(accepted.map((file) => new Promise<ImageAttachment>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const result = String(reader.result ?? "");
-        const separator = result.indexOf(",");
-        if (separator < 0) {
-          reject(new Error("无法读取图片"));
-          return;
-        }
-        resolve({
-          data: result.slice(separator + 1),
-          mimeType: file.type,
-          previewUrl: URL.createObjectURL(file),
-        });
-      };
-      reader.onerror = () => reject(reader.error ?? new Error("无法读取图片"));
-      reader.readAsDataURL(file);
-    })));
-    setImages((current) => [...current, ...next].slice(0, MAX_ATTACHED_IMAGES));
+      .slice(0, Math.max(0, MAX_ATTACHED_IMAGES - draft.getSnapshot().content.images.length));
+    try {
+      const next = await Promise.all(accepted.map((file) => new Promise<{ data: string; mimeType: string }>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result ?? "");
+          const separator = result.indexOf(",");
+          if (separator < 0) {
+            reject(new Error("无法读取图片"));
+            return;
+          }
+          resolve({
+            data: result.slice(separator + 1),
+            mimeType: file.type,
+          });
+        };
+        reader.onerror = () => reject(reader.error ?? new Error("无法读取图片"));
+        reader.readAsDataURL(file);
+      }).then(async (value) => {
+        const id = draftRevision();
+        const durable = await draft.store.images.put(id, value);
+        return { id, mimeType: value.mimeType, durable };
+      })));
+      draft.update((current) => ({ ...current, images: [...current.images, ...next].slice(0, MAX_ATTACHED_IMAGES) }));
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const removeImage = (index: number) => {
@@ -390,7 +415,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!removed) return;
     if (removed.previewUrl === previewImage?.src) setPreviewImage(null);
     if (removed.previewUrl.startsWith("blob:")) URL.revokeObjectURL(removed.previewUrl);
-    setImages((current) => current.filter((_, currentIndex) => currentIndex !== index));
+    props.draft.update((current) => ({ ...current, images: current.images.filter((_, currentIndex) => currentIndex !== index) }));
   };
 
   const performUpload = async (
@@ -404,8 +429,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setUploadPhase("uploading");
     try {
       const result = await props.onUploadFiles(pending.directory, pending.files, strategy);
-      if (generation !== uploadGenerationRef.current) return;
       if (result.conflicts?.length) {
+        if (generation !== uploadGenerationRef.current) return;
         setPendingUploadConflict({
           ...pending,
           conflicts: result.conflicts,
@@ -413,7 +438,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         });
         return;
       }
-      setUploadResult(result);
       if (result.uploaded.length > 0) {
         const next = result.uploaded.map((name) => ({
           name,
@@ -424,8 +448,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           for (const file of next) byPath.set(file.path, file);
           return [...byPath.values()];
         });
-        props.onFilesUploaded();
+        if (generation === uploadGenerationRef.current) props.onFilesUploaded();
       }
+      if (generation === uploadGenerationRef.current) setUploadResult(result);
     } catch (error) {
       if (generation === uploadGenerationRef.current) {
         setUploadError(error instanceof Error ? error.message : String(error));
@@ -607,9 +632,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                       type="button"
                       aria-label={`预览附件图片 ${index + 1}`}
                       title="预览图片"
+                      disabled={!image.previewUrl}
                       onClick={() => setPreviewImage({ src: image.previewUrl, alt: `附件图片 ${index + 1}` })}
                     >
-                      <img src={image.previewUrl} alt="" />
+                      {image.previewUrl ? <img src={image.previewUrl} alt="" /> : <ImagePlus size={18} aria-label="图片加载中或不可用" />}
                     </button>
                     <button
                       className="pi-composer-image-remove"

@@ -1,6 +1,7 @@
-import { type HTMLAttributes, type MouseEventHandler } from "react";
+import { useRef, type HTMLAttributes, type MouseEventHandler } from "react";
 import { Check, X } from "lucide-react";
 import { IconAction } from "./InlineActions";
+import { useBackNavigation } from "./useBackNavigation";
 
 interface InlineConfirmationProps extends HTMLAttributes<HTMLDivElement> {
   message: string;
@@ -18,6 +19,8 @@ export function InlineConfirmation({
   title,
   ...props
 }: InlineConfirmationProps) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useBackNavigation(true, () => { if (!working) cancelRef.current?.click(); }, 60);
   return (
     <div
       {...props}
@@ -37,6 +40,7 @@ export function InlineConfirmation({
         <Check size={14} />
       </IconAction>
       <IconAction
+        ref={cancelRef}
         label="取消删除"
         disabled={working}
         onClick={(event) => {

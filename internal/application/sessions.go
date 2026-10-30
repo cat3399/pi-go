@@ -14,15 +14,16 @@ import (
 // SessionInfo is the surface-neutral session-list projection. Presentation
 // adapters decide how to format timestamps and which aliases to expose.
 type SessionInfo struct {
-	Path            string
-	ID              string
-	CWD             string
-	Name            string
-	Created         time.Time
-	Modified        time.Time
-	MessageCount    int
-	FirstMessage    string
-	ParentSessionID string
+	Path                   string
+	ID                     string
+	CWD                    string
+	Name                   string
+	Created                time.Time
+	Modified               time.Time
+	MessageCount           int
+	FirstMessage           string
+	ParentSessionID        string
+	LastAssistantMessageID string
 }
 
 // SessionSnapshot contains one consistent SessionManager read and an optional,
@@ -126,7 +127,8 @@ func discoveredSessionInfo(info session.SessionInfo, pathIDs map[string]string) 
 		Path: info.Path, ID: info.ID, CWD: info.Cwd, Name: name,
 		Created: info.Created, Modified: info.Modified,
 		MessageCount: info.MessageCount, FirstMessage: first,
-		ParentSessionID: parentID,
+		ParentSessionID:        parentID,
+		LastAssistantMessageID: info.LastAssistantMessageID,
 	}
 }
 

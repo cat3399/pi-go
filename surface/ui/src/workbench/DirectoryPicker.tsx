@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { ChevronUp, Folder, HardDrive, X } from "lucide-react";
 import type { DirectoryView } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 
 interface DirectoryPickerProps {
   initialPath: string;
@@ -37,6 +38,7 @@ export function DirectoryPicker({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useDialogFocus(true, dialogRef, inputRef);
+  useBackNavigation(true, () => { if (!selecting) onCancel(); }, 40);
 
   const navigate = useCallback(async (path?: string) => {
     setLoading(true);

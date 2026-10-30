@@ -19,7 +19,9 @@ interface SidebarProps {
   hasMoreProjects: boolean;
   loadProjects(): Promise<void>;
   runningSessionIds: string[];
+  unreadSessionIds: string[];
   activeSessionId: string | null;
+  sessionHref?(sessionId: string): string;
   activePreviewPath: string;
   workingDirectory: string;
   fileRefreshKey: number;
@@ -62,6 +64,8 @@ function SessionRow({
   onRename,
   onDelete,
   running,
+  unread,
+  href,
 }: {
   session: SessionInfo;
   active: boolean;
@@ -69,6 +73,8 @@ function SessionRow({
   onRename(name: string): Promise<void>;
   onDelete(): Promise<void>;
   running: boolean;
+  unread: boolean;
+  href?: string;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
@@ -153,23 +159,22 @@ function SessionRow({
     );
   }
 
+  const content = <>
+    <span>{sessionTitle(session)}</span>
+    {running && <LoaderCircle className="pi-session-running-spinner pi-loading-spinner" size={12} role="img" aria-label="运行中" />}
+    {unread && <i className="pi-session-unread" role="img" aria-label="未读" />}
+  </>;
   return (
     <div
       className={`pi-session-item ${active ? "is-active" : ""}`}
-      role="button"
-      tabIndex={0}
-      aria-current={active ? "true" : undefined}
       title={sessionTitle(session)}
-      onClick={onSelect}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelect();
-        }
-      }}
     >
-      <span>{sessionTitle(session)}</span>
-      {running && <LoaderCircle className="pi-session-running-spinner pi-loading-spinner" size={12} role="img" aria-label="运行中" />}
+      {href ? <a className="pi-session-open" href={href} aria-current={active ? "page" : undefined}
+        onClick={(event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault(); onSelect();
+        }}>{content}</a>
+        : <button className="pi-session-open" type="button" aria-current={active ? "true" : undefined} onClick={onSelect}>{content}</button>}
       <InlineActions className="pi-sidebar-row-actions pi-session-actions">
         <IconAction label="重命名会话" onClick={startRename}>
           <Pencil size={15} />
@@ -198,7 +203,9 @@ interface ProjectGroup {
 function ProjectSessions(props: {
   project: ProjectGroup;
   activeSessionId: string | null;
+  sessionHref?(sessionId: string): string;
   runningSessionIds: Set<string>;
+  unreadSessionIds: Set<string>;
   directory(project: string, search?: string): DirectoryWindow | undefined;
   watchDirectory(project: string, search?: string): () => void;
   loadDirectory(project: string, search?: string, more?: boolean, force?: boolean): Promise<DirectoryWindow>;
@@ -321,7 +328,9 @@ function ProjectSessions(props: {
               key={session.id}
               session={session}
               active={session.id === props.activeSessionId}
+              href={props.sessionHref?.(session.id)}
               running={props.runningSessionIds.has(session.id)}
+              unread={props.unreadSessionIds.has(session.id)}
               onSelect={() => props.onSelect(session.id)}
               onRename={(name) => props.onRename(session.id, name)}
               onDelete={() => props.onDelete(session.id)}
@@ -486,7 +495,9 @@ export function Sidebar(props: SidebarProps) {
                     key={project.root}
                     project={project}
                     activeSessionId={props.activeSessionId}
+                    sessionHref={props.sessionHref}
                     runningSessionIds={runningSessionIds}
+                    unreadSessionIds={new Set(props.unreadSessionIds)}
                     directory={props.directory}
                     watchDirectory={props.watchDirectory}
                     loadDirectory={props.loadDirectory}

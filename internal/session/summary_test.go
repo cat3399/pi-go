@@ -39,7 +39,8 @@ func TestManagerSummaryPreservesHistoryAcrossCompactionBranchAndReplacement(t *t
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("summary caused persistence: %v", err)
 	}
-	if _, err := manager.AppendLLMMessage(ctx, managerAssistant(t, "answer", assistantAt)); err != nil {
+	assistant, err := manager.AppendLLMMessage(ctx, managerAssistant(t, "answer", assistantAt))
+	if err != nil {
 		t.Fatal(err)
 	}
 	tool, err := llm.NewToolResultMessage("call", "read", []llm.TextBlock{mustTextBlock(t, "output")}, false, created.Add(time.Hour))
@@ -68,7 +69,7 @@ func TestManagerSummaryPreservesHistoryAcrossCompactionBranchAndReplacement(t *t
 		t.Fatal(err)
 	}
 	want := manager.Summary()
-	if want.MessageCount != 4 || want.FirstMessage != "first question" || want.HasName || want.Name != "" || !want.Modified.Equal(assistantAt) {
+	if want.MessageCount != 4 || want.FirstMessage != "first question" || want.HasName || want.Name != "" || !want.Modified.Equal(assistantAt) || want.LastAssistantMessageID != assistant.ID() {
 		t.Fatalf("branch/compaction/title clear changed summary: %#v", want)
 	}
 	if len(manager.BuildContext().Messages()) >= want.MessageCount {
@@ -84,7 +85,7 @@ func TestManagerSummaryPreservesHistoryAcrossCompactionBranchAndReplacement(t *t
 		t.Fatal(err)
 	}
 	cloned := clone.Summary()
-	if cloned.MessageCount != 1 || cloned.FirstMessage != "first question" || cloned.ParentSessionPath != path || !cloned.HasParentSession {
+	if cloned.MessageCount != 1 || cloned.FirstMessage != "first question" || cloned.ParentSessionPath != path || !cloned.HasParentSession || cloned.LastAssistantMessageID != "" {
 		t.Fatalf("fork summary = %#v", cloned)
 	}
 	if err := clone.Close(); err != nil {

@@ -36,9 +36,9 @@ Android 宿主通过 Web 协议访问远程 Core。
 | Session Store | 文件锁、追加、原子发布和故障恢复 |
 | SessionManager | 会话树、分支、context、fork、恢复、压缩记录与 custom data |
 | AgentSession | 组合 Agent 和 SessionManager，负责有序持久化、重试、压缩、动态配置、reload、standalone bash 和产品事件 |
-| Runtime | 服务装配、AgentSession 生命周期与 new/switch/fork/import 时的 session replacement |
+| Runtime | 服务装配、AgentSession 生命周期、session replacement 与独立 fork 的创建 |
 | ApplicationSession | 单会话 command、snapshot、有序 event stream 和 shutdown |
-| application.Service | 多会话发现、打开去重、项目目录、空闲回收和应用级 revision/event stream |
+| application.Service | 多会话发现、打开去重、项目目录、空闲回收、应用级 revision/event stream 和独立草稿文本存储 |
 | Surface | 输入、渲染、连接和协议编解码，以及选中标签、滚动、草稿等呈现状态 |
 
 运行中的 model、thinking、system prompt、tools 和 messages 由 AgentState 持有。
@@ -53,7 +53,10 @@ JSONL 会话文件是持久对话和会话树的事实源。SessionManager 将 e
 多会话发现使用进程内 catalog 和可从 JSONL 重建的本机缓存。它们只保存列表投影，
 不拥有第二份会话树。
 
-Application Service 管理每个活动会话的独立 Runtime。
+Application Service 管理每个活动会话的独立 Runtime。通过 Service 执行 fork 时，Runtime 复制
+所选历史并创建独立实例，由 Service 注册新会话；源会话的生成、工具与队列继续运行。
+单 Runtime 的 `Fork` 仍保留原版替换语义，`CreateFork` 提供独立分支的装配路径，两者共用
+节点选择、before-fork hook 和历史复制逻辑。
 
 `SessionManager.ReadSnapshot` 在同一读取边界取得摘要、选中 leaf、按需生成的上下文和树，
 并返回数据代次、条目日志版本与分支视图版本。追加和切分支分别推进对应版本；首次 assistant

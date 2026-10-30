@@ -426,6 +426,24 @@ func TestRestoreModelFromSessionExactAvailabilityAndFallback(t *testing.T) {
 	}
 }
 
+func TestDisabledProviderSelectionLeavesSavedAndExplicitModelsAvailable(t *testing.T) {
+	models := []Model{resolverModel("disabled", "model", "Disabled"), resolverModel("enabled", "model", "Enabled")}
+	availability := Availability{HasConfiguredAuth: func(string) bool { return true }, SupportsRoute: func(Model) bool { return true },
+		CanSelect: func(model Model) bool { return model.Provider != "disabled" }}
+	initial := ResolveInitialModel(InitialModelOptions{DefaultProvider: "disabled", DefaultModelID: "model", AllModels: models, Availability: availability})
+	if initial.Model == nil || initial.Model.Provider != "enabled" {
+		t.Fatalf("new selection = %#v", initial)
+	}
+	restored := RestoreModelFromSession(RestoreModelOptions{SavedProvider: "disabled", SavedModelID: "model", AllModels: models, Availability: availability})
+	if restored.Model == nil || restored.Model.Provider != "disabled" || restored.FallbackMessage != "" {
+		t.Fatalf("saved model changed = %#v", restored)
+	}
+	explicit := ResolveInitialModel(InitialModelOptions{CLIProvider: "disabled", CLIModel: "model", AllModels: models, Availability: availability})
+	if explicit.Model == nil || explicit.Model.Provider != "disabled" {
+		t.Fatalf("explicit route changed = %#v", explicit)
+	}
+}
+
 func TestDefaultModelPreferencesMatchPiAndAreDefensivelyCopied(t *testing.T) {
 	for _, preference := range embeddedBuiltinCatalog().defaults {
 		if got, ok := DefaultModelID(preference.Provider); !ok || got != preference.ModelID {

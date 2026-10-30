@@ -2,6 +2,9 @@ package com.wails.app;
 
 import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -14,6 +17,9 @@ import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
 import android.os.PowerManager;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -24,6 +30,9 @@ import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
 import android.view.View;
+import android.view.ContextMenu;
+import android.view.MotionEvent;
+import android.widget.Toast;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.ValueCallback;
@@ -33,6 +42,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import androidx.annotation.Nullable;
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
@@ -76,6 +86,10 @@ public class MainActivity extends AppCompatActivity {
     // network/screen broadcasts don't wake the app.
     private boolean systemReceiversRegistered = false;
     private WebViewAssetLoader assetLoader;
+    private boolean backPending;
+    private float linkTouchX;
+    private float linkTouchY;
+    private String contextLink;
 
     // The Go-side dialog ID of the in-flight file picker (-1 when idle)
     private int pendingFilePickerCallbackID = -1;
@@ -109,6 +123,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Set up WebView
         setupWebView();
+        configureBackNavigation();
 
         // Load the application
         loadApplication();
@@ -175,6 +190,8 @@ public class MainActivity extends AppCompatActivity {
         settings.setAllowContentAccess(false);
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        // target=_blank also goes through the main-frame navigation policy.
+        settings.setSupportMultipleWindows(false);
 
         // Enable debugging in debug builds
         if (DEBUG) {
@@ -189,6 +206,13 @@ public class MainActivity extends AppCompatActivity {
 
         // Set up WebView client to intercept requests
         webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame() || isApplicationURL(request.getUrl())) return false;
+                openExternalLink(request.getUrl().toString());
+                return true;
+            }
+
             @Nullable
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
@@ -276,6 +300,106 @@ public class MainActivity extends AppCompatActivity {
 
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
+        // Public download links use the browser's own download handling. The
+        // application WebView and its JS bridge never navigate to those sites.
+        webView.setDownloadListener((url, userAgent, disposition, mimeType, length) -> openExternalLink(url));
+        configureLinkContextMenu();
+    }
+
+    private boolean isApplicationURL(Uri uri) {
+        return WAILS_SCHEME.equalsIgnoreCase(uri.getScheme()) && WAILS_HOST.equalsIgnoreCase(uri.getHost());
+    }
+
+    private void openExternalLink(String url) {
+        Uri uri = Uri.parse(url);
+        String scheme = uri.getScheme();
+        if (isApplicationURL(uri) || scheme == null || !(scheme.equalsIgnoreCase("http")
+                || scheme.equalsIgnoreCase("https") || scheme.equalsIgnoreCase("mailto")
+                || scheme.equalsIgnoreCase("tel") || scheme.equalsIgnoreCase("geo"))) {
+            Toast.makeText(this, "无法打开这个链接", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+            intent.addCategory(Intent.CATEGORY_BROWSABLE);
+            startActivity(intent);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            Toast.makeText(this, "没有可打开此链接的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void configureBackNavigation() {
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (backPending || webView == null) return;
+                backPending = true;
+                webView.evaluateJavascript(
+                        "!window.dispatchEvent(new Event('pi:navigate-back',{cancelable:true}))",
+                        handled -> {
+                            backPending = false;
+                            if ("true".equals(handled)) return;
+                            if (webView != null && webView.canGoBack()) {
+                                webView.goBack();
+                                return;
+                            }
+                            setEnabled(false);
+                            getOnBackPressedDispatcher().onBackPressed();
+                            setEnabled(true);
+                        });
+            }
+        });
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void configureLinkContextMenu() {
+        registerForContextMenu(webView);
+        webView.setOnTouchListener((view, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                linkTouchX = event.getX();
+                linkTouchY = event.getY();
+            }
+            return false;
+        });
+        webView.setOnLongClickListener(view -> {
+            WebView.HitTestResult hit = webView.getHitTestResult();
+            if (hit == null) return false;
+            if (hit.getType() == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
+                showLinkContextMenu(hit.getExtra());
+                return true;
+            }
+            if (hit.getType() == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+                // HitTestResult.extra is the image URL here, not the link.
+                Handler handler = new Handler(Looper.getMainLooper(), message -> {
+                    showLinkContextMenu(message.getData().getString("url"));
+                    return true;
+                });
+                webView.requestFocusNodeHref(Message.obtain(handler));
+                return true;
+            }
+            return false; // Preserve WebView's ordinary text selection menu.
+        });
+    }
+
+    private void showLinkContextMenu(String url) {
+        if (url == null || url.isEmpty()) return;
+        contextLink = url;
+        webView.showContextMenu(linkTouchX, linkTouchY);
+    }
+
+    @Override
+    public void onCreateContextMenu(ContextMenu menu, View view, ContextMenu.ContextMenuInfo info) {
+        super.onCreateContextMenu(menu, view, info);
+        final String url = contextLink;
+        contextLink = null;
+        if (view != webView || url == null) return;
+        menu.setHeaderTitle(url);
+        menu.add("打开链接").setOnMenuItemClickListener(item -> { openExternalLink(url); return true; });
+        menu.add("复制链接地址").setOnMenuItemClickListener(item -> {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (clipboard != null) clipboard.setPrimaryClip(ClipData.newPlainText("链接", url));
+            return true;
+        });
     }
 
     /**
@@ -1012,12 +1136,4 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    @Override
-    public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
-    }
 }

@@ -6,6 +6,7 @@ import type {
 } from "../contracts";
 import { ResourceCache, retainedBytes } from "./resource-cache.ts";
 import { latestAssistantUsageInfo, type LatestAssistantUsageInfo } from "./message.ts";
+import { ReadMarkers } from "./read-markers.ts";
 
 const pageLimit = 128;
 const pageBytes = 512 * 1024;
@@ -211,6 +212,13 @@ export class ApplicationDataStore {
   private overview: ApplicationOverview | null = null;
   private snapshotValue: ApplicationSnapshot | null = null;
   private error = "";
+  private readMarkers: ReadMarkers | undefined;
+  private readonly completedSessions = new Set<string>();
+  private readonly localActivities = new Map<string, Set<symbol>>();
+  private readonly onStorage = (event: StorageEvent) => {
+    if (!this.readMarkers || event.key !== this.readMarkers.key) return;
+    this.readMarkers.refresh(); this.rebuildSnapshot(); this.emit();
+  };
 
   constructor(client: ApplicationClient, budget?: number) {
     this.client = client; this.cache = new ResourceCache(budget);
@@ -221,6 +229,26 @@ export class ApplicationDataStore {
   get lastAppliedCursor(): string { return this.cursor; }
   get lastError(): string { return this.error; }
   get snapshot(): ApplicationSnapshot | null { return this.snapshotValue; }
+  get unreadSessionIds(): string[] {
+    const running = new Set(this.snapshotValue?.runningSessionIds);
+    return (this.snapshotValue?.sessions ?? []).filter((info) => !running.has(info.id) && this.readMarkers?.unread(info)).map((info) => info.id);
+  }
+
+  markRead(id: string): void {
+    const view = this.session(id);
+    if (view && this.readMarkers?.markRead(view.metadata.info)) { this.rebuildSnapshot(); this.emit(); }
+  }
+
+  beginLocalActivity(id: string): () => void {
+    const token = Symbol(), pending = this.localActivities.get(id) ?? new Set();
+    pending.add(token); this.localActivities.set(id, pending);
+    this.rebuildSnapshot(); this.emit();
+    return () => {
+      pending.delete(token);
+      if (pending.size === 0) this.localActivities.delete(id);
+      this.rebuildSnapshot(); this.emit();
+    };
+  }
   get hasMoreProjects(): boolean { return Boolean(this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.next); }
   observe(listener: Listener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   observeEvents(listener: (event: ApplicationEventEnvelope) => void): () => void { this.eventListeners.add(listener); return () => this.eventListeners.delete(listener); }
@@ -272,6 +300,7 @@ export class ApplicationDataStore {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    if (typeof window !== "undefined") window.addEventListener("storage", this.onStorage);
     const lifecycle = ++this.lifecycle;
     try {
       if (!this.cursor) {
@@ -290,6 +319,7 @@ export class ApplicationDataStore {
 
   stop(): void {
     this.running = false;
+    if (typeof window !== "undefined") window.removeEventListener("storage", this.onStorage);
     this.lifecycle++;
     this.streamSerial++;
     this.subscription?.close();
@@ -489,6 +519,7 @@ export class ApplicationDataStore {
   }
 
   private acceptOverview(value: ApplicationOverview): void {
+    this.readMarkers ??= new ReadMarkers(JSON.stringify([this.client.kind, this.client.endpoint, value.agentDir]));
     this.overview = value;
     if (value.directory) this.installProjectPage(value.directory, false);
   }
@@ -599,8 +630,13 @@ export class ApplicationDataStore {
       const view = this.session(id);
       if (view) sessions.set(id, view.metadata.info);
     }
+    for (const info of sessions.values()) {
+      this.readMarkers?.initialize(info, this.completedSessions.has(info.id));
+      this.completedSessions.delete(info.id);
+    }
     this.snapshotValue = { revision: cursorParts(this.cursor)[1] || 0, cursor: this.cursor, ...this.overview,
-      projects: this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.projects ?? this.overview.projects, sessions: [...sessions.values()] };
+      projects: this.cache.peek<ProjectDirectoryWindow>(projectDirectoryKey)?.projects ?? this.overview.projects, sessions: [...sessions.values()],
+      runningSessionIds: [...new Set([...this.overview.runningSessionIds, ...this.localActivities.keys()])].sort() };
   }
 
   invalidateSession(id: string, history = true): void {
@@ -631,6 +667,7 @@ export class ApplicationDataStore {
         if (draft && !draft.contentToken && item.node.contentToken) this.drafts.set(key, { ...draft, contentToken: item.node.contentToken });
       }
       this.cache.put(viewKey(id), view);
+      if (view.live.state) this.updateRunning(id, view.live.state);
       this.resetSessions.delete(id);
       if (this.selectedIDs().includes(id)) {
         if (view.live.active) void this.ensureNavigation(id).catch((error) => this.fail(error));
@@ -1047,6 +1084,11 @@ export class ApplicationDataStore {
 
   private applyEvent(envelope: ApplicationEventEnvelope): void {
     const { sessionId: id, event } = envelope;
+    if (event.type === "agent_settled") {
+      this.completedSessions.add(id);
+      this.summaryReads.add(id);
+      this.cache.invalidate(resourceKey(id, "metadata"));
+    }
     let view = this.session(id);
     if (event.type === "project_catalog") { this.cache.forget(projectDirectoryKey); this.cache.invalidate(applicationKey("overview")); return; }
     if (event.type === "session_catalog") {

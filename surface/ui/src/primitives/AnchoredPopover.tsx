@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useBackNavigation } from "./useBackNavigation";
 
 type PopoverAlign = "start" | "center" | "end";
 type PopoverPlacement = "auto" | "above" | "below";
@@ -76,6 +77,7 @@ export const AnchoredPopover = forwardRef<HTMLDivElement, AnchoredPopoverProps>(
   children,
   ...surfaceProps
 }, forwardedRef) {
+  useBackNavigation(open && Boolean(onDismiss), () => onDismiss?.(), 70);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const frameRef = useRef<number | null>(null);
   const [position, setPosition] = useState<CSSProperties>({

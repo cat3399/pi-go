@@ -9,11 +9,15 @@ import type {
   CreateSessionRequest,
   CreateSessionResult,
   DirectoryView,
+  DraftText,
+  DraftTextUpdate,
+  DraftTextWriteResult,
   EventObserver,
   EventSubscription,
   FileList,
   FilePreview,
   ModelsView,
+  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery,
   ProjectInfo,
   SessionView,
   SessionResources,
@@ -100,6 +104,23 @@ export class WailsApplicationClient implements ApplicationClient {
 
   models(cwd: string): Promise<ModelsView> {
     return call("Models", cwd);
+  }
+
+  modelProviders(cwd: string): Promise<ModelProviderInfo[]> { return call("ModelProviders", cwd); }
+  providerModels(cwd: string, providerId: string): Promise<ProviderModelInfo[]> { return call("ProviderModels", cwd, providerId); }
+  setBuiltinProviderEnabled(providerId: string, enabled: boolean, only = false): Promise<void> { return call("SetBuiltinProviderEnabled", providerId, enabled, only); }
+  readModelsConfig(): Promise<ModelsConfig> { return call("ReadModelsConfig"); }
+  writeModelProvider(providerId: string, definition: ModelProviderConfig | null): Promise<void> { return call("WriteModelProvider", providerId, definition ? JSON.stringify(definition) : ""); }
+  setProviderAPIKey(providerId: string, key: string): Promise<void> { return call("SetProviderAPIKey", providerId, key); }
+  deleteProviderCredential(providerId: string, credentialType: string): Promise<void> { return call("DeleteProviderCredential", providerId, credentialType); }
+  discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery> { return call("DiscoverModels", providerId, JSON.stringify(definition)); }
+
+  readDraftText(key: string): Promise<DraftText> {
+    return call("ReadDraftText", key);
+  }
+
+  writeDraftText(key: string, update: DraftTextUpdate): Promise<DraftTextWriteResult> {
+    return call("WriteDraftText", key, update);
   }
 
   browseDirectories(path = ""): Promise<DirectoryView> {

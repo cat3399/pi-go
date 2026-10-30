@@ -19,6 +19,9 @@ func (r *Runtime) ParseProviderDraft(providerID string, raw json.RawMessage) (Pr
 }
 
 func parseProviderDraft(providerID string, raw json.RawMessage, builtins *builtinCatalog) (ProviderConfig, []Model, error) {
+	if !validID(providerID) {
+		return ProviderConfig{}, nil, Diagnostic{"models.json", "providers", "provider identifier is invalid"}
+	}
 	configured, err := parseProvider(providerID, raw, builtins)
 	if err != nil {
 		return ProviderConfig{}, nil, err

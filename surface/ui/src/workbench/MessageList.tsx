@@ -1241,6 +1241,29 @@ function MessageListContent({
   const loadingHistoryRef = useRef(false);
   const currentWindowRef = useRef(historyWindow);
   currentWindowRef.current = historyWindow;
+  const lastAssistantMessageId = data.session(sessionId)?.metadata.info.lastAssistantMessageId;
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript || !lastAssistantMessageId) return;
+    let frame = 0;
+    const check = () => {
+      const window = currentWindowRef.current;
+      if (document.visibilityState === "visible" && document.hasFocus() && initializedScrollRef.current
+        && atBottomRef.current && window?.following && !window.latestAvailable && !window.preview
+        && data.containsEntry(sessionId, lastAssistantMessageId)) data.markRead(sessionId);
+    };
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(check); };
+    transcript.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("focus", schedule);
+    document.addEventListener("visibilitychange", schedule);
+    schedule();
+    return () => {
+      cancelAnimationFrame(frame);
+      transcript.removeEventListener("scroll", schedule);
+      window.removeEventListener("focus", schedule);
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [data, sessionId, lastAssistantMessageId, historyWindow]);
   const scrollScope = JSON.stringify([sessionId, historyWindow?.version.generation ?? ""]);
   const pendingScrollRef = useRef<{ scope: string; position: ScrollPosition } | null>(null);
   const scrollNavigationRef = useRef<{ entryId: string; destination?: number } | null>(null);

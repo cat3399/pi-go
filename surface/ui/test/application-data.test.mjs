@@ -60,16 +60,16 @@ function fakeClient() {
   const record = (index) => ({ node: { id: `n${index}`, parentId: index > 1 ? `n${index - 1}` : null, type: "message", role: (index - 1) % (client.runSize ?? 4) === 0 ? "user" : "assistant", timestamp: "2026-01-01T00:00:00Z", preview: `entry ${index}`, hasChildren: false, rawBytes: 100, contentToken: `entry-${index}-${payloadVersion}` }, message: { role: (index - 1) % (client.runSize ?? 4) === 0 ? "user" : "assistant", content: `entry ${index}` } });
   const live = () => ({ sessionId: "one", active: !client.inactive, version: { generation: "AgentA", state, configuration: 1, queue: 1 },
     activityVersion: { generation: "ActivityA", revision: 3 }, bashVersion: { generation: "ActivityA", revision: 1 },
-    state: { cwd: "/project", phase: "provider", isStreaming: true, queuedMessages: { steering: [], followUp: [] } },
+    state: { cwd: "/project", phase: "provider", isStreaming: true, queuedMessages: { steering: [], followUp: [] }, ...client.runtimeState },
     history: { ...version(), leafId: `n${log}` }, latestUsage: client.latestUsage ?? null, streaming, pending: [], toolsRunning: [] });
   const client = {
-    kind: "remote", endpoint: "https://fixture.invalid", calls, subscriptions,
+    kind: "remote", endpoint: "https://fixture.invalid", calls, subscriptions, info,
     delayLive: null,
     snapshot() { throw new Error("whole application snapshot is forbidden in paged reads"); },
     sessionView() { throw new Error("whole session projection is forbidden in paged reads"); },
     async readApplicationResource(kind, query, known) {
       calls.push({ kind, query, known });
-      const data = kind === "overview" ? { agentDir: "/agent", defaultCwd: "/project", projects: [{ path: "/project", modified: info.modified, sessionCount: 1 }], sessionCount: 1, runningSessionIds: ["one"] }
+      const data = kind === "overview" ? { agentDir: "/agent", defaultCwd: "/project", projects: [{ path: "/project", modified: info.modified, sessionCount: 1 }], sessionCount: 1, runningSessionIds: client.runningSessionIds ?? ["one"] }
         : { version: "DirectoryA", sessions: [info], total: 1, start: 0 };
       return { token: JSON.stringify(data), data: structuredClone(data), cursor: `${epoch}:${sequence}` };
     },
@@ -146,6 +146,52 @@ function fakeClient() {
   };
   return client;
 }
+
+test("background completion updates the sidebar summary and leaves the new reply unread", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runningSessionIds = [];
+  client.info.lastAssistantMessageId = "old";
+  client.info.messageCount = 2;
+  await store.start();
+  await store.loadDirectory("/project");
+  assert.deepEqual(store.unreadSessionIds, [], "existing history starts without unread badges");
+  client.emit({ type: "agent_start", activityVersion: { generation: "ActivityA", revision: 4 }, activity: { phase: "provider", isStreaming: true } });
+  assert.deepEqual(store.snapshot.runningSessionIds, ["one"]);
+  client.info.lastAssistantMessageId = "n4";
+  client.info.messageCount = 4;
+  client.setLog(4);
+  client.emit({ type: "agent_settled", activityVersion: { generation: "ActivityA", revision: 5 }, activity: { phase: "idle", isStreaming: false } });
+  await until(() => store.unreadSessionIds.includes("one"));
+  assert.deepEqual(store.snapshot.runningSessionIds, []);
+  assert.equal(client.calls.some((call) => call.kind === "runs" || call.kind === "history"), false, "background badges need no transcript reads");
+  client.runtimeState = { phase: "idle", isStreaming: false };
+  await store.loadSession("one");
+  store.markRead("one");
+  assert.deepEqual(store.unreadSessionIds, []);
+  store.stop();
+});
+
+test("local submission activity survives stale idle reads and clears after rejection or reconciliation", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  client.runningSessionIds = [];
+  client.runtimeState = { phase: "idle", isStreaming: false };
+  await store.start();
+  const finish = store.beginLocalActivity("one");
+  assert.deepEqual(store.snapshot.runningSessionIds, ["one"]);
+  await store.loadSession("one");
+  assert.deepEqual(store.snapshot.runningSessionIds, ["one"]);
+  finish();
+  assert.deepEqual(store.snapshot.runningSessionIds, []);
+  const accepted = store.beginLocalActivity("one");
+  client.runtimeState = { phase: "provider", isStreaming: true };
+  await store.loadSession("one", true);
+  accepted();
+  assert.deepEqual(store.snapshot.runningSessionIds, ["one"]);
+  client.runtimeState = { phase: "idle", isStreaming: false };
+  await store.loadSession("one", true);
+  assert.deepEqual(store.snapshot.runningSessionIds, []);
+  store.stop();
+});
 
 test("latest usage survives receipt handoff, history paging, compaction and reconnect without process reads", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { X } from "lucide-react";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 
 interface SidePanelProps {
   label: string;
@@ -14,6 +15,7 @@ interface SidePanelProps {
 }
 
 export function SidePanel(props: SidePanelProps) {
+  useBackNavigation(true, props.onClose, 20);
   return (
     <aside className="pi-side-panel" aria-label={props.label} aria-busy={props.loading}>
       <header className="pi-side-panel-tabs">

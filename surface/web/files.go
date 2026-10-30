@@ -30,7 +30,7 @@ const (
 )
 
 var fileRequestTypes = map[string]struct{}{
-	"list": {}, "read": {}, "download": {}, "meta": {}, "preview": {}, "watch": {},
+	"list": {}, "read": {}, "download": {}, "meta": {}, "preview": {}, "embedded-preview": {}, "watch": {},
 }
 
 var byteRangePattern = regexp.MustCompile(`^bytes=(\d*)-(\d*)$`)
@@ -53,6 +53,16 @@ func handleFileGet(api application.API) http.HandlerFunc {
 				return
 			}
 			writeJSON(writer, http.StatusOK, map[string]any{"entries": result.Entries, "path": result.Path})
+			return
+		}
+		if requestType == "embedded-preview" {
+			preview, err := surfacewire.PreviewFile(request.Context(), api, filePath)
+			if err != nil {
+				writeFileError(writer, err)
+				return
+			}
+			writer.Header().Set("Cache-Control", "no-store")
+			writeJSON(writer, http.StatusOK, preview)
 			return
 		}
 		resource, err := api.ResolveFile(request.Context(), filePath, request.URL.Query().Get("sessionId"))

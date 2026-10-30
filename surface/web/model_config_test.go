@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
 func modelConfigurationServer(t *testing.T) *Server {
@@ -23,6 +24,49 @@ func modelConfigurationServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func TestModelManagementListsDisabledProvidersAndPreservesCustomUpdates(t *testing.T) {
+	server := modelConfigurationServer(t)
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodPut, "/api/v1/model-providers/custom/config", `{"api":"openai-completions","baseUrl":"http://localhost:1/v1","apiKey":"private-test-key","models":[{"id":"custom-model"}]}`},
+		{http.MethodPatch, "/api/v1/model-providers/deepseek", `{"enabled":true,"only":true}`},
+		{http.MethodPatch, "/api/v1/model-providers/deepseek", `{"enabled":false}`},
+	} {
+		response := serveModelRequest(t, server, request.method, request.path, []byte(request.body))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", request.path, response.Code, response.Body.String())
+		}
+	}
+	response := serveModelRequest(t, server, http.MethodGet, "/api/v1/model-providers", nil)
+	var providers []surfacewire.ModelProviderInfo
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &providers) != nil {
+		t.Fatalf("providers = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "private-test-key") {
+		t.Fatal("provider list exposed a credential")
+	}
+	for _, info := range providers {
+		if info.Builtin && info.Enabled {
+			t.Fatalf("disabled provider = %#v", info)
+		}
+	}
+	models := serveModelRequest(t, server, http.MethodGet, "/api/v1/model-providers/deepseek/models", nil)
+	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), `"contextWindow"`) {
+		t.Fatalf("disabled provider models = %d %s", models.Code, models.Body.String())
+	}
+	available := serveModelRequest(t, server, http.MethodGet, "/api/v1/models", nil)
+	if !strings.Contains(available.Body.String(), `"custom-model"`) || strings.Contains(available.Body.String(), `"provider":"deepseek"`) {
+		t.Fatalf("selector = %s", available.Body.String())
+	}
+	invalid := serveModelRequest(t, server, http.MethodPut, "/api/v1/model-providers/custom/config", []byte(`{"models":[{"id":""}]}`))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid provider = %d %s", invalid.Code, invalid.Body.String())
+	}
+	removed := serveModelRequest(t, server, http.MethodDelete, "/api/v1/model-providers/custom/config", nil)
+	if removed.Code != http.StatusOK {
+		t.Fatalf("remove = %d %s", removed.Code, removed.Body.String())
+	}
 }
 
 func serveModelRequest(t *testing.T, server *Server, method, target string, body []byte) *httptest.ResponseRecorder {

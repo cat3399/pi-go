@@ -87,6 +87,22 @@ type ProviderAuthInfo struct {
 	SupportsOAuth  bool
 	OAuthName      string
 	Builtin        bool
+	Enabled        bool
+}
+
+type BuiltinProviderUpdate struct {
+	Enabled bool
+	Only    bool
+}
+
+type ProviderModelInfo struct {
+	ID            string
+	Name          string
+	API           string
+	ContextWindow uint64
+	MaxTokens     uint64
+	Reasoning     bool
+	ImageInput    bool
 }
 
 type ModelsConfigDocument map[string]json.RawMessage
@@ -224,6 +240,7 @@ func (s *Service) ListModelProviders(ctx context.Context, cwd string) ([]Provide
 			CredentialType: credentialTypes[entry.ID()], ModelCount: len(entry.GetModels()),
 			SupportsAPIKey: !configured.Keyless, SupportsOAuth: supportsOAuth, OAuthName: oauthName,
 			Builtin: modelcatalog.IsBuiltinProvider(entry.ID()),
+			Enabled: runtime.ProviderSelectionEnabled(entry.ID()),
 		}
 		if check != nil {
 			info.Source = check.Source
@@ -231,6 +248,101 @@ func (s *Service) ListModelProviders(ctx context.Context, cwd string) ([]Provide
 		result = append(result, info)
 	}
 	return result, nil
+}
+
+func (s *Service) ListProviderModels(ctx context.Context, cwd, providerID string) ([]ProviderModelInfo, error) {
+	runtime, err := s.openModels(ctx, cwd)
+	if err != nil {
+		return nil, err
+	}
+	entry, ok := runtime.GetProvider(providerID)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownModelProvider, providerID)
+	}
+	result := make([]ProviderModelInfo, 0)
+	for _, candidate := range entry.GetModels() {
+		info := ProviderModelInfo{ID: candidate.ID, Name: candidate.Name, API: candidate.API,
+			ContextWindow: candidate.ContextWindow, MaxTokens: candidate.MaxTokens, Reasoning: candidate.Reasoning}
+		for _, input := range candidate.Input {
+			if input == provider.InputImage {
+				info.ImageInput = true
+			}
+		}
+		result = append(result, info)
+	}
+	return result, nil
+}
+
+func (s *Service) SetBuiltinProviderEnabled(ctx context.Context, providerID string, update BuiltinProviderUpdate) error {
+	if !modelcatalog.IsBuiltinProvider(providerID) {
+		return fmt.Errorf("%w: %s is not builtin", ErrUnknownModelProvider, providerID)
+	}
+	if update.Only && !update.Enabled {
+		return fmt.Errorf("%w: only requires enabled", ErrInvalidModelsConfig)
+	}
+	s.modelMu.Lock()
+	defer s.modelMu.Unlock()
+	document, err := s.ReadModelsConfig(ctx)
+	if err != nil {
+		return err
+	}
+	var providers map[string]json.RawMessage
+	if json.Unmarshal(document["providers"], &providers) != nil || providers == nil {
+		return ErrInvalidModelsConfig
+	}
+	runtime, err := s.openModels(ctx, s.DefaultCWD())
+	if err != nil {
+		return err
+	}
+	for _, candidate := range runtime.GetProviders() {
+		id := candidate.ID()
+		if !modelcatalog.IsBuiltinProvider(id) || id != providerID && !update.Only {
+			continue
+		}
+		config := make(map[string]json.RawMessage)
+		if raw, exists := providers[id]; exists && (json.Unmarshal(raw, &config) != nil || config == nil) {
+			return ErrInvalidModelsConfig
+		}
+		enabled := id == providerID && update.Enabled
+		config["enabled"], _ = json.Marshal(enabled)
+		providers[id], _ = json.Marshal(config)
+	}
+	document["providers"], _ = json.Marshal(providers)
+	return s.writeModelsConfigLocked(ctx, document)
+}
+
+// WriteModelProvider updates one provider while retaining unrelated settings.
+// A nil definition removes a custom provider from models.json.
+func (s *Service) WriteModelProvider(ctx context.Context, providerID string, definition json.RawMessage) error {
+	if definition == nil && modelcatalog.IsBuiltinProvider(providerID) {
+		return fmt.Errorf("%w: cannot remove builtin provider", ErrInvalidModelsConfig)
+	}
+	if definition != nil {
+		runtime, err := s.openModels(ctx, s.DefaultCWD())
+		if err != nil {
+			return err
+		}
+		if _, _, err := runtime.ParseProviderDraft(providerID, definition); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidModelsConfig, err)
+		}
+	}
+	s.modelMu.Lock()
+	defer s.modelMu.Unlock()
+	document, err := s.ReadModelsConfig(ctx)
+	if err != nil {
+		return err
+	}
+	var providers map[string]json.RawMessage
+	if json.Unmarshal(document["providers"], &providers) != nil || providers == nil {
+		return ErrInvalidModelsConfig
+	}
+	if definition == nil {
+		delete(providers, providerID)
+	} else {
+		providers[providerID] = append(json.RawMessage(nil), definition...)
+	}
+	document["providers"], _ = json.Marshal(providers)
+	return s.writeModelsConfigLocked(ctx, document)
 }
 
 func productionOAuthInfo(providerID string) (bool, string) {
@@ -324,6 +436,15 @@ func (s *Service) ReadModelsConfig(ctx context.Context) (ModelsConfigDocument, e
 }
 
 func (s *Service) WriteModelsConfig(ctx context.Context, document ModelsConfigDocument) error {
+	s.modelMu.Lock()
+	defer s.modelMu.Unlock()
+	return s.writeModelsConfigLocked(ctx, document)
+}
+
+func (s *Service) writeModelsConfigLocked(ctx context.Context, document ModelsConfigDocument) error {
+	if cause := context.Cause(normalizeContext(ctx)); cause != nil {
+		return cause
+	}
 	if document == nil {
 		return fmt.Errorf("%w: root must be an object", ErrInvalidModelsConfig)
 	}
@@ -345,13 +466,20 @@ func (s *Service) WriteModelsConfig(ctx context.Context, document ModelsConfigDo
 	if int64(len(encoded)) > maxModelsConfigBytes {
 		return fmt.Errorf("%w: models.json exceeds %d bytes", ErrInvalidModelsConfig, maxModelsConfigBytes)
 	}
-	s.modelMu.Lock()
-	defer s.modelMu.Unlock()
 	if err := os.MkdirAll(s.paths.AgentDir, 0o700); err != nil {
 		return err
 	}
 	err = writeFileAtomic(filepath.Join(s.paths.AgentDir, "models.json"), encoded, 0o600)
 	if err == nil {
+		// Catalog refresh changes future selection only. AgentState keeps the
+		// current model, queues, and running provider call.
+		for _, managed := range s.activeSessions() {
+			if services := managed.session.Runtime().Services(); services != nil && services.ModelRuntime != nil {
+				if reloadErr := services.ModelRuntime.Reload(context.WithoutCancel(normalizeContext(ctx))); reloadErr != nil {
+					return reloadErr
+				}
+			}
+		}
 		s.publishConfiguration("", true, false)
 	}
 	return err

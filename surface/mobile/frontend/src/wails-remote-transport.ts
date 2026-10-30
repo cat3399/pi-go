@@ -35,6 +35,7 @@ function call<T>(method: string, ...args: unknown[]): Promise<T> {
 }
 
 export class WailsRemoteTransport implements RemoteApplicationTransport {
+  readonly mediaMode = "embedded" as const;
   private readonly subscriptions = new Set<() => void>();
   private readonly requests = new Set<string>();
   private readonly requestPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;

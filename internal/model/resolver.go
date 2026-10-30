@@ -49,10 +49,15 @@ type Availability struct {
 	HasConfiguredAuth      func(providerID string) bool
 	HasConfiguredModelAuth func(Model) bool
 	SupportsRoute          func(Model) bool
+	CanSelect              func(Model) bool
 }
 
 func (a Availability) Available(model Model) bool {
 	return a.hasAuth(model) && a.SupportsRoute != nil && a.SupportsRoute(model)
+}
+
+func (a Availability) Selectable(model Model) bool {
+	return (a.CanSelect == nil || a.CanSelect(model)) && a.Available(model)
 }
 
 func (a Availability) hasAuth(model Model) bool {
@@ -65,7 +70,7 @@ func (a Availability) hasAuth(model Model) bool {
 func FilterAvailableModels(models []Model, availability Availability) []Model {
 	result := make([]Model, 0, len(models))
 	for _, candidate := range models {
-		if availability.Available(candidate) {
+		if availability.Selectable(candidate) {
 			result = append(result, cloneModel(candidate))
 		}
 	}
@@ -415,7 +420,7 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 		return InitialModelResult{Model: modelPointer(selected.Model), ThinkingLevel: thinking, Scope: scope}
 	}
 	if options.DefaultProvider != "" && options.DefaultModelID != "" {
-		if saved := exactProviderModel(options.AllModels, options.DefaultProvider, options.DefaultModelID); saved != nil && options.Availability.Available(*saved) {
+		if saved := exactProviderModel(options.AllModels, options.DefaultProvider, options.DefaultModelID); saved != nil && options.Availability.Selectable(*saved) {
 			thinking := resolveInitialThinking(options.CLIThinkingLevel, nil, options.DefaultThinkingLevel)
 			return InitialModelResult{Model: saved, ThinkingLevel: thinking, Scope: scope}
 		}

@@ -24,6 +24,8 @@ type API interface {
 	ListWorktrees(context.Context, string) (WorktreeList, error)
 	AddWorktree(context.Context, string, string) (WorktreeCreated, error)
 	RemoveWorktree(context.Context, string, string, bool) error
+	ReadDraftText(context.Context, string) (DraftText, error)
+	WriteDraftText(context.Context, string, DraftTextUpdate) (DraftTextWriteResult, error)
 
 	NewSession(context.Context, NewSessionOptions) (State, error)
 	Dispatch(context.Context, string, Command) (CommandResult, error)
@@ -61,6 +63,9 @@ type API interface {
 	GetUISettings(context.Context, string) (UISettings, error)
 	SetTheme(context.Context, string, string) (UISettings, error)
 	ListModelProviders(context.Context, string) ([]ProviderAuthInfo, error)
+	ListProviderModels(context.Context, string, string) ([]ProviderModelInfo, error)
+	SetBuiltinProviderEnabled(context.Context, string, BuiltinProviderUpdate) error
+	WriteModelProvider(context.Context, string, json.RawMessage) error
 	SetProviderAPIKey(context.Context, string, string) error
 	DeleteProviderCredential(context.Context, string, string) error
 	StartProviderOAuth(context.Context, string) (*ProviderOAuthLogin, error)

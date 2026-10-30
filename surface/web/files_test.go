@@ -3,6 +3,8 @@ package web
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"mime/multipart"
@@ -16,7 +18,38 @@ import (
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/surfacewire"
 )
+
+func TestEmbeddedMediaPreviewUsesTheExistingFileAccessBoundary(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "photo.png")
+	content := []byte{0, 0xff, 0x89, 'P', 'N', 'G'}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(t, app.ProductionConfig{WorkingDir: root, AgentDir: t.TempDir(), Environment: []string{}}, nil)
+	server, err := New(Options{Application: service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := serveWebAPIRequest(t, server, http.MethodGet, "/api/v1/files/"+encodeTestFilePath(path)+"?type=embedded-preview", nil, "")
+	var preview surfacewire.FilePreview
+	if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || preview.Kind != "image" || preview.SourceURL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(content) {
+		t.Fatalf("preview = %d %#v", response.Code, preview)
+	}
+	directory := serveWebAPIRequest(t, server, http.MethodGet, "/api/v1/files/"+encodeTestFilePath(root)+"?type=embedded-preview", nil, "")
+	if directory.Code != http.StatusBadRequest {
+		t.Fatalf("directory preview = %d %s", directory.Code, directory.Body.String())
+	}
+}
 
 func TestFileGitAndIndexHTTPContracts(t *testing.T) {
 	root := t.TempDir()

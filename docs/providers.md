@@ -1,6 +1,7 @@
 # Provider 与认证
 
-在 TUI 中用 `/login` 选择 Provider，或在 Web / GUI 的模型配置界面管理认证。
+在 TUI 中用 `/login` 选择 Provider 并完成 OAuth 登录；Web / GUI / App 的「设置 → 模型」
+可以管理 API Key，并查看已有认证状态。
 生产 Provider 装配的支持范围由 `internal/app/production_models.go` 及
 `internal/model/builtin_provider_lookup.go` 定义。
 

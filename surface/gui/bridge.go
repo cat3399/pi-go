@@ -198,6 +198,98 @@ func (b *GUIBridge) Models(cwd string) (surfacewire.ModelsView, error) {
 	return surfacewire.Models(b.context(), api, cwd)
 }
 
+func (b *GUIBridge) ModelProviders(cwd string) ([]surfacewire.ModelProviderInfo, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return nil, err
+	}
+	return surfacewire.ModelProviders(b.context(), api, cwd)
+}
+
+func (b *GUIBridge) ProviderModels(cwd, providerID string) ([]surfacewire.ProviderModelInfo, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return nil, err
+	}
+	return surfacewire.ProviderModels(b.context(), api, cwd, providerID)
+}
+
+func (b *GUIBridge) SetBuiltinProviderEnabled(providerID string, enabled, only bool) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	return api.SetBuiltinProviderEnabled(b.context(), providerID, coreapplication.BuiltinProviderUpdate{Enabled: enabled, Only: only})
+}
+
+func (b *GUIBridge) ReadModelsConfig() (coreapplication.ModelsConfigDocument, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return nil, err
+	}
+	return api.ReadModelsConfig(b.context())
+}
+
+func (b *GUIBridge) WriteModelProvider(providerID, definition string) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	var raw json.RawMessage
+	if definition != "" {
+		raw = json.RawMessage(definition)
+	}
+	return api.WriteModelProvider(b.context(), providerID, raw)
+}
+
+func (b *GUIBridge) SetProviderAPIKey(providerID, key string) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	return api.SetProviderAPIKey(b.context(), providerID, key)
+}
+
+func (b *GUIBridge) DeleteProviderCredential(providerID, credentialType string) error {
+	api, err := b.localAPI()
+	if err != nil {
+		return err
+	}
+	return api.DeleteProviderCredential(b.context(), providerID, credentialType)
+}
+
+func (b *GUIBridge) DiscoverModels(providerID, definition string) (map[string]any, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return nil, err
+	}
+	var draft coreapplication.ModelProviderDraft
+	if json.Unmarshal([]byte(definition), &draft) != nil {
+		return nil, coreapplication.ErrInvalidModelsConfig
+	}
+	result, err := api.DiscoverModels(b.context(), providerID, draft)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"models": result.Models, "endpoint": result.Endpoint}, nil
+}
+
+func (b *GUIBridge) ReadDraftText(key string) (surfacewire.DraftText, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.DraftText{}, err
+	}
+	return surfacewire.ReadDraftText(b.context(), api, key)
+}
+
+func (b *GUIBridge) WriteDraftText(key string, input surfacewire.DraftTextUpdate) (surfacewire.DraftTextWriteResult, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return surfacewire.DraftTextWriteResult{}, err
+	}
+	return surfacewire.WriteDraftText(b.context(), api, key, input)
+}
+
 func (b *GUIBridge) BrowseDirectories(path string) (surfacewire.DirectoryView, error) {
 	api, err := b.localAPI()
 	if err != nil {

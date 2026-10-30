@@ -8,11 +8,15 @@ import type {
   CreateSessionRequest,
   CreateSessionResult,
   DirectoryView,
+  DraftText,
+  DraftTextUpdate,
+  DraftTextWriteResult,
   EventObserver,
   EventSubscription,
   FileList,
   FilePreview,
   ModelsView,
+  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery,
   ProjectInfo,
   SessionView,
   SessionResources,
@@ -23,7 +27,7 @@ import type {
   UploadResult,
   UploadTargetInspection,
 } from "./contracts";
-import { validateUploadFiles } from "./upload-files";
+import { validateUploadFiles } from "./upload-files.ts";
 
 type ErrorBody = {
   error?: string;
@@ -42,6 +46,8 @@ export interface RemoteTransportResponse {
 }
 
 export interface RemoteApplicationTransport {
+  /** Native hosts keep credentials out of the WebView and read media via IPC. */
+  readonly mediaMode?: "embedded";
   request(
     endpoint: string,
     path: string,
@@ -65,12 +71,16 @@ export interface RemoteApplicationTransport {
 }
 
 export class ApplicationRequestError extends Error {
+  readonly status: number;
+  readonly retryAfterMs: number;
   constructor(
     message: string,
-    readonly status: number,
-    readonly retryAfterMs = 0,
+    status: number,
+    retryAfterMs = 0,
   ) {
     super(message);
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
     this.name = "ApplicationRequestError";
   }
 }
@@ -135,18 +145,30 @@ export class RemoteApplicationClient implements ApplicationClient {
   readonly endpoint: string;
 
   private token: string;
+  private readonly transport: RemoteApplicationTransport;
 
   constructor(
     endpoint: string,
-    private readonly transport: RemoteApplicationTransport,
+    transport: RemoteApplicationTransport,
     token = "",
   ) {
     this.endpoint = normalizeRemoteEndpoint(endpoint);
+    this.transport = transport;
     this.token = token;
   }
 
   async authStatus(): Promise<AuthState> {
     return this.request<AuthState>("/api/v1/auth/status");
+  }
+
+  readDraftText(key: string): Promise<DraftText> {
+    return this.request(`/api/v1/draft-text?key=${encodeURIComponent(key)}`);
+  }
+
+  writeDraftText(key: string, update: DraftTextUpdate): Promise<DraftTextWriteResult> {
+    return this.request(`/api/v1/draft-text?key=${encodeURIComponent(key)}`, {
+      method: "PUT", body: JSON.stringify(update),
+    });
   }
 
   async login(password: string): Promise<void> {
@@ -180,6 +202,7 @@ export class RemoteApplicationClient implements ApplicationClient {
       if (!Array.isArray(message.content)) continue;
       for (const block of message.content) {
         if (block.type !== "image" || !block.imageRef) continue;
+        if (this.transport.mediaMode === "embedded") { delete block.url; continue; }
         const { entryId, blockIndex } = block.imageRef;
         const url = new URL(`${this.endpoint}/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/image`);
         url.searchParams.set("blockIndex", String(blockIndex));
@@ -198,6 +221,7 @@ export class RemoteApplicationClient implements ApplicationClient {
       if (!Array.isArray(message?.content)) return;
       for (const block of message.content) {
         if (block.type !== "image" || !block.imageRef) continue;
+        if (this.transport.mediaMode === "embedded") { delete block.url; continue; }
         const ref = block.imageRef;
         const url = new URL(`${this.endpoint}/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(ref.entryId)}/image`);
         url.searchParams.set("blockIndex", String(ref.blockIndex));
@@ -224,6 +248,38 @@ export class RemoteApplicationClient implements ApplicationClient {
     return this.request(`/api/v1/models?${query.toString()}`);
   }
 
+  modelProviders(cwd: string): Promise<ModelProviderInfo[]> {
+    return this.request(`/api/v1/model-providers?${new URLSearchParams({ cwd })}`);
+  }
+
+  providerModels(cwd: string, providerId: string): Promise<ProviderModelInfo[]> {
+    return this.request(`/api/v1/model-providers/${encodeURIComponent(providerId)}/models?${new URLSearchParams({ cwd })}`);
+  }
+
+  async setBuiltinProviderEnabled(providerId: string, enabled: boolean, only = false): Promise<void> {
+    await this.request(`/api/v1/model-providers/${encodeURIComponent(providerId)}`, { method: "PATCH", body: JSON.stringify({ enabled, only }) });
+  }
+
+  readModelsConfig(): Promise<ModelsConfig> { return this.request("/api/v1/models-config"); }
+
+  async writeModelProvider(providerId: string, definition: ModelProviderConfig | null): Promise<void> {
+    await this.request(`/api/v1/model-providers/${encodeURIComponent(providerId)}/config`, definition
+      ? { method: "PUT", body: JSON.stringify(definition) } : { method: "DELETE" });
+  }
+
+  async setProviderAPIKey(providerId: string, key: string): Promise<void> {
+    await this.request(`/api/v1/auth/api-key/${encodeURIComponent(providerId)}`, { method: "POST", body: JSON.stringify({ apiKey: key }) });
+  }
+
+  async deleteProviderCredential(providerId: string, credentialType: string): Promise<void> {
+    await this.request(credentialType === "oauth" ? `/api/v1/auth/logout/${encodeURIComponent(providerId)}` : `/api/v1/auth/api-key/${encodeURIComponent(providerId)}`,
+      { method: credentialType === "oauth" ? "POST" : "DELETE" });
+  }
+
+  discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery> {
+    return this.request("/api/v1/models-config/discover", { method: "POST", body: JSON.stringify({ providerName: providerId, provider: definition }) });
+  }
+
   browseDirectories(path = ""): Promise<DirectoryView> {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
     return this.request(`/api/v1/system/cwd/browse${query}`);
@@ -234,6 +290,9 @@ export class RemoteApplicationClient implements ApplicationClient {
   }
 
   async previewFile(path: string): Promise<FilePreview> {
+    if (this.transport.mediaMode === "embedded") {
+      return this.request(this.filePath(path, "embedded-preview"));
+    }
     const metadata = await this.request<{
       size: number;
       language: string;
@@ -374,7 +433,7 @@ export class RemoteApplicationClient implements ApplicationClient {
     this.transport.close();
   }
 
-  private filePath(path: string, type: "read" | "meta" | "preview"): string {
+  private filePath(path: string, type: "read" | "meta" | "preview" | "embedded-preview"): string {
     return `/api/v1/files/${encodeFilePathForAPI(path)}?type=${type}`;
   }
 

@@ -82,6 +82,30 @@ func TestRemoteBridgeRequest(t *testing.T) {
 	}
 }
 
+func TestMediaResourcesUseNativeStoredCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer native-media-token" {
+			t.Error("media request bypassed native credentials")
+		}
+		if r.URL.Query().Has("token") {
+			t.Error("credential leaked into media URL")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"mimeType":"image/png","data":"AAH/"}}`)
+	}))
+	defer server.Close()
+	bridge := NewRemoteBridge()
+	bridge.ctx = context.Background()
+	bridge.credentials = newMemoryCredentialStore()
+	bridge.rememberToken(server.URL, "native-media-token")
+	for _, path := range []string{"/api/v1/sessions/one/resources/image?query=%7B%7D", "/api/v1/files/photo.png?type=embedded-preview"} {
+		response, err := bridge.RequestWithID(path, http.MethodGet, server.URL, path, "", "")
+		if err != nil || response.Status != http.StatusOK || !strings.Contains(response.Body, "AAH/") || strings.Contains(response.Body, "native-media-token") {
+			t.Fatalf("media response = %#v, %v", response, err)
+		}
+	}
+}
+
 func TestRemoteBridgeUploadsMultipartFiles(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

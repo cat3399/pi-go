@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { GitFork, Search, Waypoints, X } from "lucide-react";
 import type { EntryNode, NodesPage, ReadResourceRequest } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 
 interface SessionPointPickerProps {
   mode: "tree" | "fork" | null;
@@ -28,6 +29,7 @@ export function SessionPointPicker(props: SessionPointPickerProps) {
   const dialogRef = useRef<HTMLElement>(null);
   const open = props.mode !== null;
   useDialogFocus(open, dialogRef, inputRef);
+  useBackNavigation(open, props.onClose, 40);
   useEffect(() => {
     const request = ++requestRef.current;
     if (!open || !props.sessionId) return;

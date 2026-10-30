@@ -20,6 +20,9 @@ import type { HostUpdater } from "../host-update";
 import { Sidebar } from "./Sidebar";
 import { useApplicationController, type SendBehavior } from "./useApplicationController";
 import { useMobilePanelGestures } from "./useMobilePanelGestures";
+import { composerDraftKey, composerDraftsFor } from "./composer-drafts";
+import { handleBackNavigation } from "../back-navigation";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -34,6 +37,13 @@ export interface PiWorkbenchProps {
   version: string;
   hostUpdater?: HostUpdater;
   hostKind?: "desktop" | "web" | "mobile";
+  sessionNavigation?: {
+    read(): string | null;
+    endpoint(): string;
+    write(sessionId: string | null, endpoint: string): void;
+    href(sessionId: string, endpoint: string): string;
+    subscribe(listener: () => void): () => void;
+  };
   createRemoteClient?(endpoint: string): ApplicationClient;
   onEdgeGesturesEnabledChange?(enabled: boolean): void;
 }
@@ -51,6 +61,16 @@ const unavailableClient: ApplicationClient = {
   async readApplicationResource() { throw new Error("请先配置远程地址"); },
   async createSession() { throw new Error("请先配置远程地址"); },
   async models() { throw new Error("请先配置远程地址"); },
+  async modelProviders() { throw new Error("请先配置远程地址"); },
+  async providerModels() { throw new Error("请先配置远程地址"); },
+  async setBuiltinProviderEnabled() { throw new Error("请先配置远程地址"); },
+  async readModelsConfig() { throw new Error("请先配置远程地址"); },
+  async writeModelProvider() { throw new Error("请先配置远程地址"); },
+  async setProviderAPIKey() { throw new Error("请先配置远程地址"); },
+  async deleteProviderCredential() { throw new Error("请先配置远程地址"); },
+  async discoverModels() { throw new Error("请先配置远程地址"); },
+  async readDraftText() { throw new Error("请先配置远程地址"); },
+  async writeDraftText() { throw new Error("请先配置远程地址"); },
   async browseDirectories() { throw new Error("请先配置远程地址"); },
   async listFiles() { throw new Error("请先配置远程地址"); },
   async previewFile() { throw new Error("请先配置远程地址"); },
@@ -81,7 +101,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const hostKind = props.hostKind ?? "desktop";
   const mobile = hostKind === "mobile";
   const [remoteConnections, setRemoteConnections] = useState(readRemoteConnections);
-  const initialRemote = remoteConnections.selectedEndpoint || props.defaultRemoteEndpoint?.trim() || "";
+  const initialRemote = props.sessionNavigation?.endpoint() || remoteConnections.selectedEndpoint || props.defaultRemoteEndpoint?.trim() || "";
   const createRemoteClient = props.createRemoteClient ?? ((endpoint: string) => new HTTPApplicationClient(endpoint));
   const [remoteEndpoint, setRemoteEndpoint] = useState(initialRemote);
   const [client, setClient] = useState<ApplicationClient>(() => {
@@ -105,6 +125,40 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const [streamingInputBehavior, setStreamingInputBehavior] = useState(readStreamingInputBehavior);
   const composerRef = useRef<ComposerHandle>(null);
   const controller = useApplicationController(client);
+  const navigationActions = useRef(controller);
+  navigationActions.current = controller;
+  const navigationApplying = useRef(true);
+  const navigationSource = useRef<string | undefined>(undefined);
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  const navigation = props.sessionNavigation;
+  useEffect(() => {
+    if (!navigation || controller.status !== "ready") return;
+    const source = `${client.kind}:${client.endpoint}`;
+    if (navigationSource.current && navigationSource.current !== source) navigation.write(null, client.endpoint);
+    navigationSource.current = source;
+    let generation = 0;
+    const open = async () => {
+      const request = ++generation;
+      navigationApplying.current = true;
+      const id = navigation.read();
+      if (id) await navigationActions.current.selectSession(id);
+      else if (navigationActions.current.activeSessionId) navigationActions.current.beginNewSession();
+      if (request === generation) {
+        navigationApplying.current = false;
+        setNavigationRevision((value) => value + 1);
+      }
+    };
+    const unsubscribe = navigation.subscribe(() => { void open(); });
+    void open();
+    return () => { generation++; navigationApplying.current = true; unsubscribe(); };
+  }, [client, controller.status, navigation]);
+  useEffect(() => {
+    if (navigation && controller.status === "ready" && !navigationApplying.current) navigation.write(controller.activeSessionId, client.endpoint);
+  }, [client, navigation, navigationRevision, controller.activeSessionId, controller.status]);
+  const drafts = useMemo(() => composerDraftsFor(client, controller.snapshot?.agentDir ?? ""), [client, controller.snapshot?.agentDir]);
+  const draftKey = composerDraftKey(controller.activeSessionId, controller.workingDirectory || controller.snapshot?.defaultCwd || "");
+  const draft = useMemo(() => drafts.open(draftKey), [drafts, draftKey]);
+  useBackNavigation(mobile && sidebarOpen, () => setSidebarOpen(false), 10);
   const sidebar = useResizableSidebar();
   const workbenchStyle = {
     "--pi-sidebar-width": `${sidebar.width}px`,
@@ -114,19 +168,14 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   useEffect(() => () => client.close(), [client]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !(event.target instanceof Element && event.target.closest(".pi-terminal-screen"))) {
-        setSettingsOpen(false);
-        setPointPicker(null);
-        setSidePanel(null);
-        setProjectPickerOpen(false);
-        if (mobile || window.innerWidth < 800) {
-          setSidebarOpen(false);
-        }
+      if (event.key === "Escape" && !(event.target instanceof Element && event.target.closest(".pi-terminal-screen")) && handleBackNavigation()) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
       }
     };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [mobile]);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   const sessions = controller.snapshot?.sessions ?? [];
   const title = useMemo(
@@ -226,6 +275,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     text: string,
     behavior?: SendBehavior,
     images: ImageAttachment[] = [],
+    onSessionCreated?: (sessionId: string) => void,
   ) => {
     const match = images.length === 0 ? text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/) : null;
     const command = match?.[1]?.toLocaleLowerCase();
@@ -316,13 +366,15 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         await controller.copyLastAssistant();
         return;
       default:
-        await controller.send(text, behavior, images);
+        await controller.send(text, behavior, images, onSessionCreated);
     }
   }, [controller]);
 
   const settings = (
     <SettingsDrawer
       open={settingsOpen}
+      client={client}
+      cwd={controller.workingDirectory || controller.snapshot?.defaultCwd || ""}
       kind={client.kind}
       endpoint={remoteEndpoint}
       nodes={remoteConnections.nodes}
@@ -422,12 +474,14 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         projects={controller.snapshot?.projects ?? []}
         sessions={sessions}
         runningSessionIds={controller.snapshot?.runningSessionIds ?? []}
+        unreadSessionIds={controller.data.unreadSessionIds}
         directory={controller.directory}
         watchDirectory={controller.watchDirectory}
         loadDirectory={controller.loadDirectory}
         hasMoreProjects={controller.hasMoreProjects}
         loadProjects={controller.loadProjects}
         activeSessionId={controller.activeSessionId}
+        sessionHref={navigation ? (id) => navigation.href(id, client.endpoint) : undefined}
         activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}
         fileRefreshKey={fileRefreshKey}
@@ -522,6 +576,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           ) : null}
           {!controller.sessionLoading && (
             <Composer
+              key={`${client.kind}:${client.endpoint}:${controller.snapshot?.agentDir}:${draftKey}`}
+              draft={draft}
               ref={composerRef}
               centered={empty}
               active={controller.activeSessionId !== null}
@@ -540,7 +596,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               workingDirectory={controller.workingDirectory}
               toolPreset={controller.toolPreset}
               slashCommands={controller.slashCommands}
-              onSend={send}
+              onSend={(text, behavior, images) => send(text, behavior, images, (sessionId) => drafts.move(draftKey, composerDraftKey(sessionId, "")))}
               onAbort={controller.abort}
               onModelChange={controller.setModel}
               onThinkingLevelChange={controller.setThinkingLevel}

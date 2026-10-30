@@ -1,15 +1,19 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Clock3, CornerDownRight, Info, MessageSquareText, Pencil, Radio, Settings, Trash2 } from "lucide-react";
-import type { ClientKind } from "../contracts";
+import { ArrowLeft, Box, Clock3, CornerDownRight, Info, MessageSquareText, Pencil, Radio, Settings, Trash2 } from "lucide-react";
+import type { ApplicationClient, ClientKind } from "../contracts";
 import { useDialogFocus } from "../primitives/useDialogFocus";
 import { InlineConfirmation } from "../primitives/InlineConfirmation";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import type { RemoteConnection } from "../remote-connections";
 import type { HostUpdater } from "../host-update";
 import { HostUpdatePanel } from "./HostUpdatePanel";
+import { useBackNavigation } from "../primitives/useBackNavigation";
+import { ModelManagement } from "./ModelManagement";
 
 interface SettingsDrawerProps {
   open: boolean;
+  client: ApplicationClient;
+  cwd: string;
   kind: ClientKind;
   endpoint: string;
   nodes: RemoteConnection[];
@@ -33,12 +37,13 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
   const [editingEndpoint, setEditingEndpoint] = useState<string | undefined>();
   const [removingEndpoint, setRemovingEndpoint] = useState("");
   const [error, setError] = useState("");
-  const [page, setPage] = useState<"connection" | "input" | "about">("connection");
+  const [page, setPage] = useState<"connection" | "models" | "input" | "about">("connection");
   const dialogRef = useRef<HTMLElement>(null);
   const backRef = useRef<HTMLButtonElement>(null);
   const removeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useDialogFocus(props.open, dialogRef, backRef);
+  useBackNavigation(props.open, props.onClose, 30);
 
   useEffect(() => {
     if (!props.open) {
@@ -90,7 +95,17 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
           <div className="pi-settings-nav-label">pi</div>
           <button
             type="button"
+            className={page === "models" ? "is-active" : ""}
+            aria-label="模型"
+            onClick={() => setPage("models")}
+          >
+            <Box size={17} />
+            <span>模型</span>
+          </button>
+          <button
+            type="button"
             className={page === "connection" ? "is-active" : ""}
+            aria-label="连接"
             onClick={() => setPage("connection")}
           >
             <Radio size={17} />
@@ -99,6 +114,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
           <button
             type="button"
             className={page === "input" ? "is-active" : ""}
+            aria-label="输入"
             onClick={() => setPage("input")}
           >
             <MessageSquareText size={17} />
@@ -107,6 +123,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
           <button
             type="button"
             className={page === "about" ? "is-active" : ""}
+            aria-label="关于"
             onClick={() => setPage("about")}
           >
             <Info size={17} />
@@ -243,7 +260,7 @@ export function SettingsDrawer(props: SettingsDrawerProps) {
               </div>
             </section>
           </>
-        ) : page === "input" ? (
+        ) : page === "models" ? <ModelManagement key={`${props.client.kind}:${props.client.endpoint}:${props.cwd}`} client={props.client} cwd={props.cwd} /> : page === "input" ? (
           <>
             <h1>输入</h1>
             <section className="pi-settings-content-section">

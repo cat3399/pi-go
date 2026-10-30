@@ -365,28 +365,100 @@ func (r *Runtime) Fork(ctx context.Context, entryID string, options ForkOptions)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	ctx = normalizeContext(ctx)
-	current, services, err := r.current()
-	if err != nil {
+	prepared, err := r.prepareFork(ctx, entryID, options.Position)
+	if err != nil || prepared.result.Cancelled {
+		return prepared.result, err
+	}
+	nextManager, services, previous := prepared.manager, prepared.services, prepared.previous
+	owned := true
+	defer func() {
+		if owned {
+			_ = nextManager.Close()
+		}
+	}()
+	if err := r.teardownCurrent(ctx, agent.ShutdownFork, managerFile(nextManager)); err != nil {
 		return ForkResult{}, err
 	}
-	position := options.Position
+	result, err := r.factory(ctx, CreateOptions{
+		CWD: nextManager.Cwd(), AgentDir: services.AgentDir, SessionManager: nextManager,
+		SessionStartEvent: startEvent(agent.SessionFork, previous),
+	})
+	if err != nil {
+		cleanupInvalidCreateResult(result, nextManager)
+		return ForkResult{}, err
+	}
+	if err := validateCreateResult(result, nextManager); err != nil {
+		cleanupInvalidCreateResult(result, nextManager)
+		return ForkResult{}, err
+	}
+	owned = false
+	r.apply(result)
+	if err := r.finishReplacement(ctx, options.WithSession); err != nil {
+		return ForkResult{}, err
+	}
+	return prepared.result, nil
+}
+
+// CreateFork assembles an independently owned Runtime at the selected history
+// position. The source keeps its current AgentSession, queues, and running work.
+// Application owns registration and the lifetime of the returned Runtime.
+func (r *Runtime) CreateFork(ctx context.Context, entryID string, options ForkOptions) (*Runtime, ForkResult, error) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	ctx = normalizeContext(ctx)
+	prepared, err := r.prepareFork(ctx, entryID, options.Position)
+	if err != nil || prepared.result.Cancelled {
+		return nil, prepared.result, err
+	}
+	next, err := Create(ctx, r.factory, InitialOptions{
+		CWD: prepared.manager.Cwd(), AgentDir: prepared.services.AgentDir, SessionManager: prepared.manager,
+		SessionStartEvent: startEvent(agent.SessionFork, prepared.previous),
+	})
+	if err != nil {
+		_ = prepared.manager.Close()
+		return nil, ForkResult{}, err
+	}
+	if options.WithSession != nil {
+		if err := options.WithSession(ctx, next.Session()); err != nil {
+			_ = next.Dispose(context.Background())
+			return nil, ForkResult{}, err
+		}
+	}
+	return next, prepared.result, nil
+}
+
+type preparedFork struct {
+	manager  *session.SessionManager
+	services *Services
+	previous *string
+	result   ForkResult
+}
+
+// Caller holds opMu, keeping lifecycle replacement separate from the history
+// copy while allowing AgentSession's active run to continue appending.
+func (r *Runtime) prepareFork(ctx context.Context, entryID string, requestedPosition agent.ForkPosition) (preparedFork, error) {
+	current, services, err := r.current()
+	if err != nil {
+		return preparedFork{}, err
+	}
+	position := requestedPosition
 	if position == "" {
 		position = agent.ForkBefore
 	}
 	if position != agent.ForkBefore && position != agent.ForkAt {
-		return ForkResult{}, fmt.Errorf("invalid fork position %q", position)
+		return preparedFork{}, fmt.Errorf("invalid fork position %q", position)
 	}
 	before, err := current.PrepareSessionFork(ctx, agent.SessionBeforeForkEvent{EntryID: entryID, Position: position})
 	if err != nil {
-		return ForkResult{}, err
+		return preparedFork{}, err
 	}
 	if before.Cancel.Cancelled() {
-		return ForkResult{Cancelled: true}, nil
+		return preparedFork{result: ForkResult{Cancelled: true}}, nil
 	}
 	manager := current.SessionManager()
 	selected, ok := manager.Entry(entryID)
 	if !ok {
-		return ForkResult{}, errors.New("Invalid entry ID for forking")
+		return preparedFork{}, errors.New("Invalid entry ID for forking")
 	}
 	targetLeafID := ""
 	var selectedText *string
@@ -395,7 +467,7 @@ func (r *Runtime) Fork(ctx context.Context, entryID string, options ForkOptions)
 	} else {
 		message, ok := selected.Message()
 		if !ok || message.Role() != llm.RoleUser {
-			return ForkResult{}, errors.New("Invalid entry ID for forking")
+			return preparedFork{}, errors.New("Invalid entry ID for forking")
 		}
 		text := extractUserMessageText(message)
 		selectedText = &text
@@ -425,47 +497,21 @@ func (r *Runtime) Fork(ctx context.Context, entryID string, options ForkOptions)
 		if manager.IsPersisted() {
 			currentFile, ok := manager.SessionFile()
 			if !ok {
-				return ForkResult{}, errors.New("Persisted session is missing a session file")
+				return preparedFork{}, errors.New("Persisted session is missing a session file")
 			}
 			if _, statErr := os.Stat(currentFile); statErr != nil {
 				if errors.Is(statErr, os.ErrNotExist) {
-					return ForkResult{}, errors.New("This session has not been saved yet. Wait for the first assistant response before cloning or forking it.")
+					return preparedFork{}, errors.New("This session has not been saved yet. Wait for the first assistant response before cloning or forking it.")
 				}
-				return ForkResult{}, statErr
+				return preparedFork{}, statErr
 			}
 		}
 		nextManager, err = manager.CloneBranchedSession(ctx, targetLeafID)
 	}
 	if err != nil {
-		return ForkResult{}, err
+		return preparedFork{}, err
 	}
-	owned := true
-	defer func() {
-		if owned {
-			_ = nextManager.Close()
-		}
-	}()
-	if err := r.teardownCurrent(ctx, agent.ShutdownFork, managerFile(nextManager)); err != nil {
-		return ForkResult{}, err
-	}
-	result, err := r.factory(ctx, CreateOptions{
-		CWD: nextManager.Cwd(), AgentDir: services.AgentDir, SessionManager: nextManager,
-		SessionStartEvent: startEvent(agent.SessionFork, previous),
-	})
-	if err != nil {
-		cleanupInvalidCreateResult(result, nextManager)
-		return ForkResult{}, err
-	}
-	if err := validateCreateResult(result, nextManager); err != nil {
-		cleanupInvalidCreateResult(result, nextManager)
-		return ForkResult{}, err
-	}
-	owned = false
-	r.apply(result)
-	if err := r.finishReplacement(ctx, options.WithSession); err != nil {
-		return ForkResult{}, err
-	}
-	return ForkResult{SelectedText: selectedText}, nil
+	return preparedFork{manager: nextManager, services: services, previous: previous, result: ForkResult{SelectedText: selectedText}}, nil
 }
 
 func (r *Runtime) ImportFromJSONL(ctx context.Context, inputPath, cwdOverride string) (ReplacementResult, error) {

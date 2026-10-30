@@ -9,6 +9,7 @@ import {
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useDialogFocus } from "./useDialogFocus";
+import { useBackNavigation } from "./useBackNavigation";
 
 interface ImagePreviewProps {
   src: string;
@@ -56,6 +57,7 @@ function pointMidpoint(left: Point, right: Point): Point {
 }
 
 export function ImagePreview({ src, alt = "附件图片", onClose }: ImagePreviewProps) {
+  useBackNavigation(true, onClose, 50);
   const [view, setView] = useState<ViewState>({ scale: 1, x: 0, y: 0 });
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);

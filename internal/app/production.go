@@ -386,6 +386,9 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		providersToCheck = []string{explicit.Provider}
 	}
 	for _, providerID := range providersToCheck {
+		if explicit == nil && !catalog.ProviderSelectionEnabled(providerID) {
+			continue
+		}
 		if _, err := catalog.CheckAuth(ctx, providerID); err != nil {
 			return agentruntime.CreateResult{}, productionAuthError(err)
 		}

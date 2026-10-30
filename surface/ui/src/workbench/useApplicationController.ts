@@ -83,7 +83,7 @@ export interface ApplicationController {
   beginNewSession(cwd?: string): void;
   addProject(path: string): Promise<ProjectInfo>;
   removeProject(path: string): Promise<void>;
-  send(text: string, behavior?: SendBehavior, images?: ImageAttachment[]): Promise<void>;
+  send(text: string, behavior?: SendBehavior, images?: ImageAttachment[], onSessionCreated?: (sessionId: string) => void): Promise<void>;
   abort(): Promise<void>;
   clearQueue(): Promise<string[]>;
   setModel(model: SelectedModel): Promise<void>;
@@ -184,6 +184,8 @@ export function useApplicationController(client: ApplicationClient): Application
   const [busy, setBusy] = useState(false);
 
   const activeSessionRef = useRef<string | null>(null);
+  const selectionRef = useRef(0);
+  const selection = selectionRef.current;
   const generationRef = useRef(0);
   const newSessionModelOverriddenRef = useRef(false);
   const newSessionThinkingOverriddenRef = useRef(false);
@@ -473,6 +475,7 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [client, connect]);
 
   const selectSession = useCallback(async (sessionId: string) => {
+    selectionRef.current += 1;
     const refreshing = activeSessionRef.current === sessionId;
     activeSessionRef.current = sessionId;
     data.select(scopeOwner, sessionId);
@@ -519,6 +522,7 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [data, scopeOwner, applyCachedSession, loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
 
   const beginNewSession = useCallback((cwd?: string) => {
+    selectionRef.current += 1;
     const nextCwd = cwd?.trim() || sessionView?.info.cwd || newSessionCwd || snapshot?.defaultCwd || "";
     activeSessionRef.current = null;
     data.select(scopeOwner, null);
@@ -553,8 +557,11 @@ export function useApplicationController(client: ApplicationClient): Application
   }, [data, scopeOwner, loadModels, models, newSessionCwd, sessionView?.info.cwd, snapshot?.defaultCwd]);
 
   const runCompact = useCallback(async (sessionId: string, customInstructions = "") => {
-    setBusy(true);
-    setRuntimeState((current) => ({ ...current, isCompacting: true }));
+    const finishActivity = data.beginLocalActivity(sessionId);
+    if (activeSessionRef.current === sessionId) {
+      setBusy(true);
+      setRuntimeState((current) => ({ ...current, isCompacting: true }));
+    }
     try {
       await client.dispatch(sessionId, {
         type: "compact",
@@ -562,10 +569,13 @@ export function useApplicationController(client: ApplicationClient): Application
       });
       await loadSession(sessionId);
     } finally {
-      setBusy(false);
-      setRuntimeState((current) => ({ ...current, isCompacting: false }));
+      finishActivity();
+      if (activeSessionRef.current === sessionId) {
+        setBusy(false);
+        setRuntimeState((current) => ({ ...current, isCompacting: false }));
+      }
     }
-  }, [client, loadSession]);
+  }, [client, data, loadSession]);
 
   const reloadSessionResources = useCallback(async (sessionId: string) => {
     await client.dispatch(sessionId, { type: "reload" });
@@ -666,15 +676,20 @@ export function useApplicationController(client: ApplicationClient): Application
     rawText: string,
     behavior: SendBehavior = "prompt",
     images: ImageAttachment[] = [],
+    onSessionCreated?: (sessionId: string) => void,
   ) => {
     const text = rawText.trim();
-    if (!text || !snapshot) return;
+    if (!text || !snapshot) throw new Error("连接尚未就绪，消息未发送");
     setError("");
-    let sessionID = activeSessionRef.current;
+    // Bind the request to the composer that submitted it, even if attachment
+    // loading or session creation completes after the user changes selection.
+    let sessionID = activeSessionId;
+    const generation = generationRef.current;
+    const selected = () => generation === generationRef.current && activeSessionRef.current === sessionID;
     let createdSession = false;
     try {
       if (!sessionID) {
-        if (behavior !== "prompt") return;
+        if (behavior !== "prompt") throw new Error("请先打开会话");
         const created = await client.createSession({
           cwd: newSessionCwd || snapshot.defaultCwd,
           ...(newSessionModel ? {
@@ -687,28 +702,45 @@ export function useApplicationController(client: ApplicationClient): Application
           toolNames: getToolNamesForPreset(toolPreset),
         });
         sessionID = created.sessionId;
+        onSessionCreated?.(sessionID);
         createdSession = true;
-        activeSessionRef.current = sessionID;
-        data.select(scopeOwner, sessionID);
-        setActiveSessionId(sessionID);
-        setRuntimeState({
-          sessionId: sessionID,
-          thinkingLevel: created.thinkingLevel,
-          model: created.model ? {
-            id: created.model.modelId,
-            provider: created.model.provider,
-          } : undefined,
-          queuedMessages: emptyQueue,
-        });
+        if (selection === selectionRef.current && generation === generationRef.current) {
+          activeSessionRef.current = sessionID;
+          data.select(scopeOwner, sessionID);
+          setActiveSessionId(sessionID);
+          setRuntimeState({
+            sessionId: sessionID,
+            thinkingLevel: created.thinkingLevel,
+            model: created.model ? {
+              id: created.model.modelId,
+              provider: created.model.provider,
+            } : undefined,
+            queuedMessages: emptyQueue,
+          });
+        }
         await refreshSnapshot();
       }
 
+      const dispatchInput = async (command: Record<string, unknown>) => {
+        const id = sessionID!;
+        const finishActivity = data.beginLocalActivity(id);
+        try {
+          const result = await client.dispatch(id, command);
+          // A failed follow-up read cannot turn an accepted input into a failed
+          // submission. The shared cache/events keep reconciling independently.
+          await data.loadSession(id, true).catch(() => undefined);
+          return result;
+        } finally { finishActivity(); }
+      };
+
       if (behavior === "steer" || behavior === "follow_up") {
-        await client.dispatch(sessionID, {
-          type: behavior, message: text,
+        await dispatchInput({
+          // The server may have finished since the UI observed it running.
+          // Prompt owns the atomic queue-or-start boundary, as in pi's TUI.
+          type: "prompt", message: text,
+          streamingBehavior: behavior === "follow_up" ? "followUp" : "steer",
           ...(images.length ? { images: images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })) } : {}),
         });
-        await loadSession(sessionID);
         return;
       }
 
@@ -726,25 +758,28 @@ export function useApplicationController(client: ApplicationClient): Application
         ? text.slice(bashExcluded ? 2 : 1).trim()
         : "";
       if (!busy && bashCommand) {
-        setBusy(true);
-        setRuntimeState((current) => ({ ...current, isBashRunning: true }));
+        if (selected()) {
+          setBusy(true);
+          setRuntimeState((current) => ({ ...current, isBashRunning: true }));
+        }
         try {
-          await client.dispatch(sessionID, {
+          await dispatchInput({
             type: "bash",
             command: bashCommand,
             excludeFromContext: bashExcluded,
           });
-          await loadSession(sessionID);
         } finally {
-          setBusy(false);
-          setRuntimeState((current) => ({ ...current, isBashRunning: false }));
+          if (selected()) {
+            setBusy(false);
+            setRuntimeState((current) => ({ ...current, isBashRunning: false }));
+          }
         }
         return;
       }
 
       if (busy) {
         if (images.length) throw new Error("Agent 运行期间不能把图片加入队列");
-        await client.dispatch(sessionID, {
+        await dispatchInput({
           type: "prompt",
           message: text,
           streamingBehavior: "steer",
@@ -752,9 +787,11 @@ export function useApplicationController(client: ApplicationClient): Application
         return;
       }
 
-      setBusy(true);
-      setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
-      await client.dispatch(sessionID, {
+      if (selected()) {
+        setBusy(true);
+        setRuntimeState((current) => ({ ...current, isPromptRunning: true }));
+      }
+      await dispatchInput({
         type: "prompt",
         message: text,
         ...(images.length ? {
@@ -771,12 +808,16 @@ export function useApplicationController(client: ApplicationClient): Application
         });
       }
     } catch (sendError) {
-      if (!busy) setBusy(false);
-      setError(errorMessage(sendError));
+      if (selected()) {
+        if (!busy) setBusy(false);
+        setError(errorMessage(sendError));
+      }
       throw sendError;
     }
   }, [
     busy,
+    activeSessionId,
+    selection,
     client,
     newSessionModel,
     newSessionCwd,

@@ -29,6 +29,8 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("GET /api/v1/snapshot", handleApplicationSnapshot(api))
 	mux.HandleFunc("GET /api/v1/resources/{resource}", handleApplicationResource(api))
 	mux.HandleFunc("GET /api/v1/events", handleApplicationEvents(api))
+	mux.HandleFunc("GET /api/v1/draft-text", handleDraftTextRead(api))
+	mux.HandleFunc("PUT /api/v1/draft-text", handleDraftTextWrite(api))
 
 	mux.HandleFunc("GET /api/v1/sessions", handleSessions(api))
 	mux.HandleFunc("POST /api/v1/sessions", handleCreateSession(api))
@@ -49,6 +51,11 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("DELETE /api/v1/projects", handleProjectRemove(api))
 
 	mux.HandleFunc("GET /api/v1/models", handleModels(api))
+	mux.HandleFunc("GET /api/v1/model-providers", handleModelProviders(api))
+	mux.HandleFunc("GET /api/v1/model-providers/{provider}/models", handleProviderModels(api))
+	mux.HandleFunc("PATCH /api/v1/model-providers/{provider}", handleBuiltinProviderUpdate(api))
+	mux.HandleFunc("PUT /api/v1/model-providers/{provider}/config", handleModelProviderWrite(api))
+	mux.HandleFunc("DELETE /api/v1/model-providers/{provider}/config", handleModelProviderWrite(api))
 	mux.HandleFunc("GET /api/v1/models-config", handleModelsConfigRead(api))
 	mux.HandleFunc("PUT /api/v1/models-config", handleModelsConfigWrite(api))
 	mux.HandleFunc("POST /api/v1/models-config/discover", handleModelDiscovery(api))

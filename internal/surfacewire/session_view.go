@@ -20,16 +20,17 @@ type SelectedModel struct {
 }
 
 type SessionInfo struct {
-	Path            string `json:"path"`
-	ID              string `json:"id"`
-	CWD             string `json:"cwd"`
-	Name            string `json:"name,omitempty"`
-	Created         string `json:"created"`
-	Modified        string `json:"modified"`
-	MessageCount    int    `json:"messageCount"`
-	FirstMessage    string `json:"firstMessage"`
-	ParentSessionID string `json:"parentSessionId,omitempty"`
-	ProjectRoot     string `json:"projectRoot"`
+	Path                   string `json:"path"`
+	ID                     string `json:"id"`
+	CWD                    string `json:"cwd"`
+	Name                   string `json:"name,omitempty"`
+	Created                string `json:"created"`
+	Modified               string `json:"modified"`
+	MessageCount           int    `json:"messageCount"`
+	FirstMessage           string `json:"firstMessage"`
+	ParentSessionID        string `json:"parentSessionId,omitempty"`
+	ProjectRoot            string `json:"projectRoot"`
+	LastAssistantMessageID string `json:"lastAssistantMessageId,omitempty"`
 }
 
 type SessionContext struct {
@@ -76,6 +77,7 @@ func SessionInfoFromApplication(info application.SessionInfo) SessionInfo {
 		Created: formatWebTime(info.Created), Modified: formatWebTime(info.Modified),
 		MessageCount: info.MessageCount, FirstMessage: info.FirstMessage,
 		ParentSessionID: info.ParentSessionID, ProjectRoot: info.CWD,
+		LastAssistantMessageID: info.LastAssistantMessageID,
 	}
 }
 

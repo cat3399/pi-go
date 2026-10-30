@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, X } from "lucide-react";
 import type { SessionStatsInfo } from "../contracts";
+import { useBackNavigation } from "../primitives/useBackNavigation";
 
 interface SessionStatsPanelProps {
   open: boolean;
@@ -51,6 +52,7 @@ function CopyableValue(props: { label: string; value: string }) {
 }
 
 export function SessionStatsPanel(props: SessionStatsPanelProps) {
+  useBackNavigation(props.open, props.onClose, 40);
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

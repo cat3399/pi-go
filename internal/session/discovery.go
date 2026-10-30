@@ -24,18 +24,19 @@ const (
 // continue-recent lifecycle. Modified is conversation activity time, not a
 // label/custom-entry append time.
 type SessionInfo struct {
-	Path              string
-	ID                string
-	Cwd               string
-	Name              string
-	HasName           bool
-	ParentSessionPath string
-	HasParentSession  bool
-	Created           time.Time
-	Modified          time.Time
-	MessageCount      int
-	FirstMessage      string
-	AllMessagesText   string
+	Path                   string
+	ID                     string
+	Cwd                    string
+	Name                   string
+	HasName                bool
+	ParentSessionPath      string
+	HasParentSession       bool
+	Created                time.Time
+	Modified               time.Time
+	MessageCount           int
+	FirstMessage           string
+	AllMessagesText        string
+	LastAssistantMessageID string
 }
 
 type SessionListProgress func(loaded, total int)

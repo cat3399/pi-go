@@ -16,6 +16,7 @@ export interface SessionInfo {
   firstMessage: string;
   parentSessionId?: string;
   projectRoot: string;
+  lastAssistantMessageId?: string;
 }
 
 export interface ProjectInfo {
@@ -482,6 +483,16 @@ export interface ApplicationClient {
   readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query?: ReadResourceRequest, known?: string): Promise<ResourceResponse<SessionResources[K]>>;
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult>;
   models(cwd: string): Promise<ModelsView>;
+  modelProviders(cwd: string): Promise<ModelProviderInfo[]>;
+  providerModels(cwd: string, providerId: string): Promise<ProviderModelInfo[]>;
+  setBuiltinProviderEnabled(providerId: string, enabled: boolean, only?: boolean): Promise<void>;
+  readModelsConfig(): Promise<ModelsConfig>;
+  writeModelProvider(providerId: string, definition: ModelProviderConfig | null): Promise<void>;
+  setProviderAPIKey(providerId: string, key: string): Promise<void>;
+  deleteProviderCredential(providerId: string, credentialType: string): Promise<void>;
+  discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery>;
+  readDraftText(key: string): Promise<DraftText>;
+  writeDraftText(key: string, update: DraftTextUpdate): Promise<DraftTextWriteResult>;
   browseDirectories(path?: string): Promise<DirectoryView>;
   listFiles(path: string): Promise<FileList>;
   previewFile(path: string): Promise<FilePreview>;
@@ -495,6 +506,77 @@ export interface ApplicationClient {
   dispatch<T = unknown>(sessionId: string, command: Record<string, unknown>): Promise<T>;
   subscribe(after: number | string, observer: EventObserver, sessionIds?: string[]): EventSubscription;
   close(): void;
+}
+
+export interface ModelProviderInfo {
+  id: string;
+  name: string;
+  configured: boolean;
+  source?: string;
+  credentialType?: string;
+  modelCount: number;
+  supportsApiKey: boolean;
+  supportsOAuth: boolean;
+  oauthName?: string;
+  builtin: boolean;
+  enabled: boolean;
+}
+
+export interface ProviderModelInfo {
+  id: string;
+  name: string;
+  api: string;
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+  imageInput: boolean;
+}
+
+export interface ModelDefinition {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  input?: string[];
+  [key: string]: unknown;
+}
+
+export interface ModelProviderConfig {
+  name?: string;
+  api?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  enabled?: boolean;
+  models?: ModelDefinition[];
+  [key: string]: unknown;
+}
+
+export interface ModelsConfig {
+  providers: Record<string, ModelProviderConfig>;
+  [key: string]: unknown;
+}
+
+export interface ModelDiscovery {
+  models: { id: string; name?: string }[];
+  endpoint: string;
+}
+
+export interface DraftText {
+  revision: string;
+  text: string;
+  updatedAt?: string;
+}
+
+export interface DraftTextUpdate {
+  baseRevision: string;
+  revision: string;
+  text: string;
+}
+
+export interface DraftTextWriteResult {
+  saved: boolean;
+  draft: DraftText;
 }
 
 export type MessageContentBlock = {

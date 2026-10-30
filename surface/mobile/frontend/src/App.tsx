@@ -1,4 +1,4 @@
-import { PiWorkbench, RemoteApplicationClient } from "@cat3399/pi-workbench";
+import { PiWorkbench, RemoteApplicationClient, handleBackNavigation } from "@cat3399/pi-workbench";
 import type { ApplicationClient } from "@cat3399/pi-workbench";
 import { useEffect, useState } from "react";
 import { WailsRemoteTransport } from "./wails-remote-transport";
@@ -19,6 +19,11 @@ function setAndroidEdgeGesturesEnabled(enabled: boolean): void {
 export default function App() {
   const [host, setHost] = useState<MobileHostInfo | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    const onBack = (event: Event) => { if (handleBackNavigation()) event.preventDefault(); };
+    window.addEventListener("pi:navigate-back", onBack);
+    return () => window.removeEventListener("pi:navigate-back", onBack);
+  }, []);
   useEffect(() => {
     void readMobileHostInfo().then(setHost).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   }, []);

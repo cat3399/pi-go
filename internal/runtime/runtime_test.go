@@ -263,8 +263,40 @@ func TestRuntimeCancellationRunsBeforeForkValidationAndAllocation(t *testing.T) 
 	if err != nil || !forkResult.Cancelled {
 		t.Fatalf("cancelled Fork() = (%#v, %v)", forkResult, err)
 	}
+	independent, forkResult, err := runtime.CreateFork(context.Background(), "missing-entry", agentruntime.ForkOptions{})
+	if err != nil || independent != nil || !forkResult.Cancelled {
+		t.Fatalf("cancelled CreateFork() = (%v, %#v, %v)", independent, forkResult, err)
+	}
 	if runtime.Session() != initial || h.createCall != 1 || len(h.shutdowns) != 0 {
 		t.Fatalf("cancelled replacement mutated runtime: calls=%d shutdowns=%#v", h.createCall, h.shutdowns)
+	}
+}
+
+func TestRuntimeCreateForkFactoryFailureLeavesSourceIntact(t *testing.T) {
+	cwd := t.TempDir()
+	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newRuntimeHarness(t, agent.Hooks{})
+	runtime := createRuntime(t, h, manager, cwd)
+	initial := runtime.Session()
+	entry, err := appendUser(context.Background(), manager, "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.factoryErr = func(call int) error {
+		if call > 1 {
+			return errors.New("fork assembly failed")
+		}
+		return nil
+	}
+	next, _, err := runtime.CreateFork(context.Background(), entry.ID(), agentruntime.ForkOptions{Position: agent.ForkAt})
+	if err == nil || next != nil || runtime.Session() != initial || len(h.shutdowns) != 0 {
+		t.Fatalf("failed fork changed source: next=%v err=%v shutdowns=%v", next, err, h.shutdowns)
+	}
+	if _, ok := manager.Entry(entry.ID()); !ok {
+		t.Fatal("source history was closed")
 	}
 }
 

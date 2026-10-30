@@ -10,10 +10,11 @@ import (
 // sessionInfoSummary follows pi's buildSessionInfo projection over the complete
 // append log, independently of the selected branch or compacted context.
 type sessionInfoSummary struct {
-	messageCount int
-	firstMessage string
-	name         string
-	lastActivity time.Time
+	messageCount           int
+	firstMessage           string
+	name                   string
+	lastActivity           time.Time
+	lastAssistantMessageID string
 }
 
 // append returns searchable user/assistant text only when requested. In
@@ -34,6 +35,9 @@ func (s *sessionInfoSummary) append(typeName string, object map[string]json.RawM
 	if role != "user" && role != "assistant" {
 		return ""
 	}
+	if role == "assistant" {
+		_ = json.Unmarshal(object["id"], &s.lastAssistantMessageID)
+	}
 	if hasContent && activity.After(time.UnixMilli(0)) && activity.After(s.lastActivity) {
 		s.lastActivity = activity
 	}
@@ -46,6 +50,7 @@ func (s *sessionInfoSummary) append(typeName string, object map[string]json.RawM
 func (s sessionInfoSummary) apply(info SessionInfo) SessionInfo {
 	info.MessageCount = s.messageCount
 	info.FirstMessage = s.firstMessage
+	info.LastAssistantMessageID = s.lastAssistantMessageID
 	if info.FirstMessage == "" {
 		info.FirstMessage = "(no messages)"
 	}
@@ -100,6 +105,9 @@ func (m *SessionManager) summaryLocked(store *Session) SessionInfo {
 func (s *sessionInfoSummary) appendEntry(entry Entry) {
 	if entry.typeName == "message" {
 		s.messageCount++
+		if entry.messageRole == "assistant" {
+			s.lastAssistantMessageID = entry.id
+		}
 		if entry.messageActivity.After(time.UnixMilli(0)) && entry.messageActivity.After(s.lastActivity) {
 			s.lastActivity = entry.messageActivity
 		}

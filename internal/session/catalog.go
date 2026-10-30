@@ -16,9 +16,8 @@ import (
 )
 
 const (
-	// v3 validates source identity/change time as well as size and mtime, so
-	// replacing a file cannot silently retain a previous session's summary.
-	sessionCatalogSnapshotVersion  = 3
+	// v4 adds the last assistant entry identity to the rebuildable summary.
+	sessionCatalogSnapshotVersion  = 4
 	maxSessionCatalogSnapshotBytes = 64 << 20
 )
 
@@ -77,16 +76,17 @@ type catalogSnapshotEntry struct {
 }
 
 type catalogSnapshotInfo struct {
-	ID                string    `json:"id"`
-	CWD               string    `json:"cwd"`
-	Name              string    `json:"name,omitempty"`
-	HasName           bool      `json:"hasName,omitempty"`
-	ParentSessionPath string    `json:"parentSessionPath,omitempty"`
-	HasParentSession  bool      `json:"hasParentSession,omitempty"`
-	Created           time.Time `json:"created"`
-	Modified          time.Time `json:"modified"`
-	MessageCount      int       `json:"messageCount"`
-	FirstMessage      string    `json:"firstMessage"`
+	ID                     string    `json:"id"`
+	CWD                    string    `json:"cwd"`
+	Name                   string    `json:"name,omitempty"`
+	HasName                bool      `json:"hasName,omitempty"`
+	ParentSessionPath      string    `json:"parentSessionPath,omitempty"`
+	HasParentSession       bool      `json:"hasParentSession,omitempty"`
+	Created                time.Time `json:"created"`
+	Modified               time.Time `json:"modified"`
+	MessageCount           int       `json:"messageCount"`
+	FirstMessage           string    `json:"firstMessage"`
+	LastAssistantMessageID string    `json:"lastAssistantMessageId,omitempty"`
 }
 
 type catalogSnapshotStore interface {
@@ -303,7 +303,7 @@ func (info catalogSnapshotInfo) sessionInfo(path string) SessionInfo {
 		Path: path, ID: info.ID, Cwd: info.CWD, Name: info.Name, HasName: info.HasName,
 		ParentSessionPath: info.ParentSessionPath, HasParentSession: info.HasParentSession,
 		Created: info.Created, Modified: info.Modified, MessageCount: info.MessageCount,
-		FirstMessage: info.FirstMessage,
+		FirstMessage: info.FirstMessage, LastAssistantMessageID: info.LastAssistantMessageID,
 	}
 }
 
@@ -496,7 +496,7 @@ func newCatalogSnapshotInfo(info SessionInfo) *catalogSnapshotInfo {
 		ID: info.ID, CWD: info.Cwd, Name: info.Name, HasName: info.HasName,
 		ParentSessionPath: info.ParentSessionPath, HasParentSession: info.HasParentSession,
 		Created: info.Created, Modified: info.Modified, MessageCount: info.MessageCount,
-		FirstMessage: info.FirstMessage,
+		FirstMessage: info.FirstMessage, LastAssistantMessageID: info.LastAssistantMessageID,
 	}
 }
 

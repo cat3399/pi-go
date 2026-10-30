@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/auth"
+	modelcatalog "github.com/cat3399/pi-go/internal/model"
 )
 
 func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T) {
@@ -44,6 +46,98 @@ func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T)
 		if candidate.ProviderName != "DeepSeek" {
 			t.Fatalf("available model provider name = %q, want DeepSeek", candidate.ProviderName)
 		}
+	}
+}
+
+func TestBuiltinProviderSelectionPreservesCustomConfigCredentialsAndCurrentModel(t *testing.T) {
+	ctx := context.Background()
+	cwd, agentDir := t.TempDir(), t.TempDir()
+	service, err := NewService(ServiceOptions{Production: app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir, Environment: []string{}}, DisableReaper: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(ctx)
+	if err := service.SetProviderAPIKey(ctx, "deepseek", "saved-key"); err != nil {
+		t.Fatal(err)
+	}
+	custom := json.RawMessage(`{"api":"openai-completions","baseUrl":"http://127.0.0.1:1/v1","apiKey":"local-key","models":[{"id":"custom-model","future":{"keep":true}}],"future":"preserve"}`)
+	document := ModelsConfigDocument{"providers": json.RawMessage(`{"deepseek":{"baseUrl":"https://api.deepseek.com","future":true}}`), "future": json.RawMessage(`{"retain":1}`)}
+	if err := service.WriteModelsConfig(ctx, document); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.WriteModelProvider(ctx, "custom", custom); err != nil {
+		t.Fatal(err)
+	}
+	models, err := service.ListProviderModels(ctx, cwd, "deepseek")
+	if err != nil || len(models) == 0 {
+		t.Fatalf("provider models = %v, %v", models, err)
+	}
+	state, err := service.NewSession(ctx, NewSessionOptions{CWD: cwd, Provider: "deepseek", ModelID: models[0].ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetBuiltinProviderEnabled(ctx, "deepseek", BuiltinProviderUpdate{Enabled: true, Only: true}); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := service.ListModelProviders(ctx, cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range providers {
+		if info.Builtin && info.Enabled != (info.ID == "deepseek") {
+			t.Fatalf("exclusive selection = %#v", info)
+		}
+		if info.ID == "custom" && !info.Enabled {
+			t.Fatal("exclusive selection disabled custom provider")
+		}
+	}
+	if err := service.SetBuiltinProviderEnabled(ctx, "deepseek", BuiltinProviderUpdate{Enabled: false}); err != nil {
+		t.Fatal(err)
+	}
+	available, err := service.ListModels(ctx, cwd)
+	if err != nil || len(available.Models) != 1 || available.Models[0].Provider != "custom" {
+		t.Fatalf("disabled builtin fallback = %#v, %v", available, err)
+	}
+	current, active, err := service.LiveState(state.SessionID)
+	if err != nil || !active || !current.Model.Equal(state.Model) {
+		t.Fatalf("configuration switched live model: %#v, %v", current, err)
+	}
+	result, err := service.Dispatch(ctx, state.SessionID, GetAvailableModelsCommand{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range result.(GetAvailableModelsResult).Models {
+		if modelcatalog.IsBuiltinProvider(candidate.Provider()) {
+			t.Fatalf("active selector retained disabled provider: %s", candidate.Provider())
+		}
+	}
+	if err := service.SetBuiltinProviderEnabled(ctx, "deepseek", BuiltinProviderUpdate{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	result, err = service.Dispatch(ctx, state.SessionID, GetAvailableModelsCommand{})
+	if err != nil || len(result.(GetAvailableModelsResult).Models) <= 1 {
+		t.Fatalf("reenabled live selector = %#v, %v", result, err)
+	}
+	stored, err := service.ReadModelsConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedProviders map[string]json.RawMessage
+	if err := json.Unmarshal(stored["providers"], &storedProviders); err != nil {
+		t.Fatal(err)
+	}
+	var before, after any
+	_ = json.Unmarshal(custom, &before)
+	_ = json.Unmarshal(storedProviders["custom"], &after)
+	var future map[string]int
+	_ = json.Unmarshal(stored["future"], &future)
+	if !reflect.DeepEqual(before, after) || future["retain"] != 1 {
+		t.Fatalf("unrelated configuration changed: %s", stored["providers"])
+	}
+	store, _ := auth.NewStore(auth.Options{Path: filepath.Join(agentDir, "auth.json")})
+	credential, exists, err := store.Read(ctx, "deepseek")
+	if err != nil || !exists || credential.Type != "api_key" {
+		t.Fatalf("credential changed: %#v, %v", credential, err)
 	}
 }
 

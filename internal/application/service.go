@@ -517,6 +517,9 @@ func (s *Service) Dispatch(ctx context.Context, id string, command Command) (Com
 		return nil, err
 	}
 	managed.touch()
+	if fork, ok := command.(ForkCommand); ok {
+		return s.forkSession(ctx, managed, fork)
+	}
 	result, dispatchErr := managed.session.Dispatch(ctx, command)
 	identityErr := s.reconcileIdentity(managed)
 	if dispatchErr != nil {
@@ -527,6 +530,27 @@ func (s *Service) Dispatch(ctx context.Context, id string, command Command) (Com
 	}
 	s.publishCommandEffect(managed, command, result)
 	return result, nil
+}
+
+func (s *Service) forkSession(ctx context.Context, source *managedSession, command ForkCommand) (CommandResult, error) {
+	runtime, result, err := source.session.Runtime().CreateFork(ctx, command.EntryID, agentruntime.ForkOptions{Position: command.Position})
+	if err != nil {
+		return nil, err
+	}
+	if result.Cancelled {
+		return ForkResult{Cancelled: true}, nil
+	}
+	managed, err := s.adoptRuntime(runtime)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.register(managed); err != nil {
+		_ = managed.dispose(context.Background())
+		return nil, err
+	}
+	id, _, _ := managed.identity()
+	s.events.publish(Event{SessionID: id, Value: SessionCatalogEvent{Change: SessionCreated}})
+	return ForkResult{SessionID: &id, SelectedText: cloneOptionalString(result.SelectedText)}, nil
 }
 
 func (s *Service) publishCommandEffect(managed *managedSession, command Command, result CommandResult) {

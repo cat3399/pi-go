@@ -248,6 +248,16 @@ func (s *ApplicationSession) dispatchPromptOperation(
 			return nil, context.Cause(ctx)
 		}
 	case promptErr := <-outcome:
+		// A handled/queued prompt can finish before this goroutine is scheduled.
+		// Both channels are then ready; completion must not discard the already
+		// published acceptance and make the caller restore an accepted input.
+		select {
+		case accepted := <-preflight:
+			if accepted {
+				return startedResult(operationID), nil
+			}
+		default:
+		}
 		if promptErr == nil {
 			return nil, fmt.Errorf("%w: %s completed without preflight acknowledgement", ErrInvalidCommand, commandType)
 		}

@@ -251,6 +251,9 @@ func (r *Runtime) GetAvailable(ctx context.Context, providerID ...string) ([]Mod
 		if len(providerID) == 1 && entry.ID() != providerID[0] {
 			continue
 		}
+		if !r.ProviderSelectionEnabled(entry.ID()) {
+			continue
+		}
 		check, err := entry.CheckAuth(ctx)
 		if err != nil {
 			return nil, err
@@ -299,6 +302,7 @@ func (r *Runtime) GetAvailable(ctx context.Context, providerID ...string) ([]Mod
 // selection helpers. It samples live auth and route state on every call.
 func (r *Runtime) Availability() Availability {
 	return Availability{
+		CanSelect: func(candidate Model) bool { return r.ProviderSelectionEnabled(candidate.Provider) },
 		HasConfiguredAuth: func(providerID string) bool {
 			check, err := r.CheckAuth(context.Background(), providerID)
 			return err == nil && check != nil
@@ -353,6 +357,13 @@ func (r *Runtime) Availability() Availability {
 		},
 		SupportsRoute: func(candidate Model) bool { return r.ValidateRoute(candidate) == nil },
 	}
+}
+
+func (r *Runtime) ProviderSelectionEnabled(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	config, exists := r.providers[id]
+	return exists && (config.Enabled == nil || *config.Enabled)
 }
 
 func (r *Runtime) SetRuntimeAPIKey(providerID, apiKey string) error {

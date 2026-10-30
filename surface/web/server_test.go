@@ -661,7 +661,8 @@ func TestNativeWebAgentSessionAndSSEFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = sourceResponse.Body.Close()
-	if sourceResponse.StatusCode != http.StatusOK || sourceState["running"] != false {
+	sourceAgent, _ := sourceState["state"].(map[string]any)
+	if sourceResponse.StatusCode != http.StatusOK || sourceState["running"] != true || sourceAgent["sessionId"] != sessionID || sourceAgent["messageCount"] != float64(2) {
 		t.Fatalf("source agent state = status %d, %#v", sourceResponse.StatusCode, sourceState)
 	}
 

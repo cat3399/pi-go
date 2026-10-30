@@ -183,7 +183,7 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 			catalogModels = options.Services.ModelRuntime.Snapshot().Models
 		}
 		catalog := exactCatalogModel(catalogModels, candidate.Provider(), candidate.ID())
-		return catalog != nil && options.Availability.Available(*catalog), nil
+		return catalog != nil && options.Availability.Selectable(*catalog), nil
 	}
 	if options.Services.ModelRuntime != nil && config.ResolveAvailableModels == nil {
 		config.ResolveAvailableModels = func(_ context.Context) ([]provider.Model, error) {

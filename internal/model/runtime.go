@@ -88,9 +88,12 @@ func (m Model) Ref() (provider.Model, error) {
 
 type ProviderConfig struct {
 	ID, Name, API, BaseURL string
-	Headers                map[string]string
-	Compat                 provider.ModelCompat
-	AuthHeader             *bool
+	// Enabled controls model selection. Existing session models and explicit
+	// provider calls keep their normal auth and route semantics.
+	Enabled    *bool
+	Headers    map[string]string
+	Compat     provider.ModelCompat
+	AuthHeader *bool
 	// ConfiguredAPIKey is returned only to the in-process assembly that passes it
 	// to auth. It is never put in diagnostics or persisted by this package.
 	ConfiguredAPIKey *string
@@ -690,8 +693,8 @@ func validateConfiguredProvider(config ProviderConfig, baseline []Model) error {
 		return Diagnostic{"models.json", path + ".baseUrl", "is required when oauth is set"}
 	}
 	if config.BaseURL == "" && config.Headers == nil && !config.compatPresent && len(config.overrides) == 0 &&
-		len(config.Models) == 0 && config.ConfiguredAPIKey == nil && !config.oauthRadius && config.AuthHeader == nil {
-		return Diagnostic{"models.json", path, "must configure baseUrl, headers, compat, modelOverrides, models, apiKey, oauth, or authHeader"}
+		len(config.Models) == 0 && config.ConfiguredAPIKey == nil && !config.oauthRadius && config.AuthHeader == nil && config.Enabled == nil {
+		return Diagnostic{"models.json", path, "must configure baseUrl, headers, compat, modelOverrides, models, apiKey, oauth, authHeader, or enabled"}
 	}
 	byID := make(map[string]Model, len(baseline))
 	for _, candidate := range baseline {
@@ -1352,6 +1355,11 @@ func parseProvider(id string, raw json.RawMessage, builtins *builtinCatalog) (Pr
 	}
 	p := ProviderConfig{ID: id}
 	var err error
+	if value, present, parseErr := optionalBool(o, "enabled", id); parseErr != nil {
+		return p, parseErr
+	} else if present {
+		p.Enabled = &value
+	}
 	if p.Name, err = optionalString(o, "name", id); err != nil {
 		return p, err
 	}
@@ -1439,7 +1447,7 @@ func parseProvider(id string, raw json.RawMessage, builtins *builtinCatalog) (Pr
 	}
 	for key := range o {
 		switch key {
-		case "name", "baseUrl", "apiKey", "api", "headers", "models", "modelOverrides", "compat", "oauth", "authHeader":
+		case "name", "baseUrl", "apiKey", "api", "headers", "models", "modelOverrides", "compat", "oauth", "authHeader", "enabled":
 		default:
 			p.UnknownFields = append(p.UnknownFields, key)
 		}
@@ -2959,6 +2967,10 @@ func cloneModel(m Model) Model {
 	return m
 }
 func cloneProvider(p ProviderConfig) ProviderConfig {
+	if p.Enabled != nil {
+		value := *p.Enabled
+		p.Enabled = &value
+	}
 	p.Headers = cloneHeaders(p.Headers)
 	p.Compat = cloneCompat(p.Compat)
 	p.AuthHeader = cloneBoolPointer(p.AuthHeader)
