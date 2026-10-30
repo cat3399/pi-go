@@ -729,8 +729,14 @@ func TestEmbeddedCatalogProjectsEveryModel(t *testing.T) {
 	expected := map[string]bool{}
 	for _, p := range doc.Providers {
 		for _, entries := range p.Models {
-			for id := range entries {
-				expected[p.ID+"/"+id] = true
+			for _, raw := range entries {
+				var identity struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(raw, &identity); err != nil {
+					t.Fatal(err)
+				}
+				expected[p.ID+"/"+identity.ID] = true
 			}
 		}
 	}
@@ -1120,6 +1126,16 @@ func TestRuntimePreservesModelsJSONValuesWithoutGoOnlyPolicyClamps(t *testing.T)
 }
 
 func TestRuntimeCustomFallbackUsesOriginalProviderDefaultBaseline(t *testing.T) {
+	var baseline Model
+	for _, candidate := range builtinModels() {
+		if candidate.Provider == OpenAIProviderID && candidate.ID == testDefaultModelID(t, OpenAIProviderID) {
+			baseline = candidate
+			break
+		}
+	}
+	if baseline.ID == "" {
+		t.Fatal("built-in OpenAI default is missing")
+	}
 	models := `{"providers":{"openai":{"api":"provider-api","baseUrl":"https://provider.invalid/v1","models":[{"id":"aaa","name":"poison","api":"poison-api","baseUrl":"https://aaa.invalid/v1","headers":{"Authorization":"aaa-secret"},"compat":{"token":"aaa-secret"},"futureOption":"aaa-secret"}]}}}`
 	r, _, _ := newTestRuntime(t, models, "", false)
 	resolved, err := r.Resolve(Selection{Provider: "OPENAI", Model: "custom"})
@@ -1127,11 +1143,14 @@ func TestRuntimeCustomFallbackUsesOriginalProviderDefaultBaseline(t *testing.T) 
 		t.Fatal(err)
 	}
 	model := resolved.Model
-	if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != OpenAIResponsesAPI || model.BaseURL != "https://provider.invalid/v1" {
+	if model.Provider != OpenAIProviderID || model.ID != "custom" || model.Name != "custom" || model.API != baseline.API || model.BaseURL != "https://provider.invalid/v1" {
 		t.Fatalf("custom baseline = %#v", model)
 	}
-	if len(model.Headers) != 0 || len(model.UnsupportedFields) != 0 || len(model.UnknownFields) != 0 || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") ||
-		!model.Reasoning || len(model.Input) != 2 || model.ContextWindow != 272_000 || model.MaxTokens != 128_000 {
+	if !reflect.DeepEqual(model.Headers, baseline.Headers) || !reflect.DeepEqual(model.UnsupportedFields, baseline.UnsupportedFields) ||
+		!reflect.DeepEqual(model.UnknownFields, baseline.UnknownFields) || strings.Contains(fmt.Sprintf("%#v", model), "aaa-secret") ||
+		model.Reasoning != baseline.Reasoning || !reflect.DeepEqual(model.Input, baseline.Input) ||
+		model.ContextWindow != baseline.ContextWindow || model.MaxTokens != baseline.MaxTokens ||
+		!reflect.DeepEqual(model.Cost, baseline.Cost) || !reflect.DeepEqual(model.ThinkingLevelMap, baseline.ThinkingLevelMap) {
 		t.Fatalf("custom inherited non-default per-model metadata: %#v", model)
 	}
 	if err := r.ValidateRoute(model); err != nil {

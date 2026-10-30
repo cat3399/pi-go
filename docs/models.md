@@ -59,8 +59,14 @@ make sync-models ARGS='-version <上游发行版本>'
 参数变更、默认模型变更及 Provider 元数据变更。
 
 仓库数据统一保存在 `internal/model/catalogdata/catalog.json`，包含模型原始 JSON、有序的
-Provider 默认模型、默认 API / 地址和上游包版本、commit、完整性信息。同步读取同一发行版本的
+Provider 默认模型、默认 API / 地址和上游包版本、可用的 commit、完整性信息。同步读取同一发行版本的
 `pi-ai` 模型数据和 `pi-coding-agent` 默认选择，保留原始模型的未知字段。
+
+同步按上游的聊天模型目录规则读取 `type: "chat"`，同时兼容尚未提供 `type` 的旧发行包；
+分类和图像生成模型不会进入 Agent 的聊天模型列表。上游改名后的 `azure` 目录会映射到
+pi-go 已注册的 `azure-openai-responses`，模型与默认选择使用同一个映射，现有认证、配置和
+会话引用无需改名。该 Provider 仅同步已实现的 Azure Responses 分组；上游新增的 Foundry
+Chat Completions 需要独立的 Azure 请求适配，不随目录更新启用。
 
 已安装的程序也可以独立更新数据，无需重新编译：
 

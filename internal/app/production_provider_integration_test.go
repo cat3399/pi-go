@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/app"
+	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
 	coderwebsocket "github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -296,6 +297,10 @@ func TestRunProductionRoutesIndependentOpenAICodexOAuthOverWebSocket(t *testing.
 	provider.ResetOpenAICodexWebSocketDebugStats("")
 	defer provider.CloseOpenAICodexWebSocketSessions("")
 	workingDir, agentDir := t.TempDir(), t.TempDir()
+	modelID, ok := modelcatalog.DefaultModelID(modelcatalog.OpenAICodexProviderID)
+	if !ok {
+		t.Fatal("built-in OpenAI Codex default is missing")
+	}
 	token := productionOAuthJWT("codex-production-account")
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/codex/responses" || !strings.EqualFold(request.Header.Get("Upgrade"), "websocket") {
@@ -317,7 +322,7 @@ func TestRunProductionRoutesIndependentOpenAICodexOAuthOverWebSocket(t *testing.
 			t.Errorf("read response.create: %v", err)
 			return
 		}
-		if frame["type"] != "response.create" || frame["model"] != "gpt-5.5" {
+		if frame["type"] != "response.create" || frame["model"] != modelID {
 			t.Errorf("response.create = %#v", frame)
 		}
 		item := map[string]any{
@@ -347,7 +352,7 @@ func TestRunProductionRoutesIndependentOpenAICodexOAuthOverWebSocket(t *testing.
 	config.OpenAIOAuthHTTPClient = server.Client()
 	var stdout, stderr bytes.Buffer
 	code := app.RunProduction(context.Background(), config, []string{
-		"--model", "openai-codex/gpt-5.5", "--session", filepath.Join(workingDir, "codex.jsonl"), "-p", "hello",
+		"--model", "openai-codex/" + modelID, "--session", filepath.Join(workingDir, "codex.jsonl"), "-p", "hello",
 	}, &stdout, &stderr)
 	if code != app.ExitSuccess || stdout.String() != "codex answer\n" || stderr.Len() != 0 {
 		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())

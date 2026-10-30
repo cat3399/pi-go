@@ -32,23 +32,26 @@ type packageMetadata struct {
 // reproducing pi-ai's model-generation rules. Provider scope comes from the
 // shipped document; adding a provider still requires its Go implementation.
 func Sync(ctx context.Context, baseline Document, version string) (Document, error) {
+	return syncCatalog(ctx, &http.Client{Timeout: 90 * time.Second}, baseline, version)
+}
+
+func syncCatalog(ctx context.Context, client *http.Client, baseline Document, version string) (Document, error) {
 	if err := baseline.Validate(); err != nil {
 		return Document{}, err
 	}
 	if version == "" {
 		version = "latest"
 	}
-	client := &http.Client{Timeout: 90 * time.Second}
-	paths := make([]string, 0, len(baseline.Providers))
+	paths := make([][]string, 0, len(baseline.Providers))
 	for _, p := range baseline.Providers {
-		paths = append(paths, "package/dist/providers/data/"+p.ID+".json")
+		paths = append(paths, providerPaths(p.ID))
 	}
 	modelsSource, files, err := downloadPackage(ctx, client, baseline.Sources.Models.Package, version, paths)
 	if err != nil {
 		return Document{}, err
 	}
 	const resolverPath = "package/dist/core/model-resolver.js"
-	defaultsSource, resolverFiles, err := downloadPackage(ctx, client, baseline.Sources.Defaults.Package, modelsSource.Version, []string{resolverPath})
+	defaultsSource, resolverFiles, err := downloadPackage(ctx, client, baseline.Sources.Defaults.Package, modelsSource.Version, [][]string{{resolverPath}})
 	if err != nil {
 		return Document{}, err
 	}
@@ -62,8 +65,21 @@ func Sync(ctx context.Context, baseline Document, version string) (Document, err
 	result := Document{SchemaVersion: SchemaVersion, Sources: Sources{Models: modelsSource, Defaults: defaultsSource}, Defaults: defaults}
 	for _, previous := range baseline.Providers {
 		p := Provider{ID: previous.ID, API: previous.API, BaseURL: previous.BaseURL}
-		if err := json.Unmarshal(files["package/dist/providers/data/"+p.ID+".json"], &p.Models); err != nil {
+		path := providerPaths(p.ID)[0]
+		if _, exists := files[path]; !exists && p.ID == legacyAzureProvider {
+			path = providerPaths(p.ID)[1]
+		}
+		renamedAzure := p.ID == legacyAzureProvider && path == providerPath("azure")
+		p.Models, err = decodeProviderModels(files[path], p.ID, renamedAzure)
+		if err != nil {
 			return Document{}, fmt.Errorf("decode upstream provider %s: %w", p.ID, err)
+		}
+		if renamedAzure {
+			for i := range result.Defaults {
+				if result.Defaults[i].Provider == "azure" {
+					result.Defaults[i].Provider = p.ID
+				}
+			}
 		}
 		// A sole API is unambiguous (for example a provider moving from Chat
 		// Completions to Responses). Multiple dialects retain the existing
@@ -101,7 +117,87 @@ func Sync(ctx context.Context, baseline Document, version string) (Document, err
 	return result, result.Validate()
 }
 
-func downloadPackage(ctx context.Context, client *http.Client, name, version string, paths []string) (Source, map[string][]byte, error) {
+const legacyAzureProvider = "azure-openai-responses"
+
+func providerPath(id string) string { return "package/dist/providers/data/" + id + ".json" }
+
+func providerPaths(id string) []string {
+	paths := []string{providerPath(id)}
+	if id == legacyAzureProvider {
+		paths = append(paths, providerPath("azure"))
+	}
+	return paths
+}
+
+// The registered Azure provider implements Responses, whereas upstream's
+// renamed Azure provider also wraps Foundry Chat Completions. Updating data
+// keeps the registered identity and API scope, so existing credentials and
+// sessions still work and Foundry requests cannot fall through to OpenAI.
+// Other providers follow upstream's chat-model projection; older releases
+// predate the type discriminator and contain only chat models.
+func decodeProviderModels(raw []byte, providerID string, renamedAzure bool) (map[string]map[string]json.RawMessage, error) {
+	var groups map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return nil, err
+	}
+	if groups == nil {
+		return nil, fmt.Errorf("provider catalog must be an object")
+	}
+	result := make(map[string]map[string]json.RawMessage)
+	for api, entries := range groups {
+		if renamedAzure && api != legacyAzureProvider {
+			continue
+		}
+		if entries == nil {
+			return nil, fmt.Errorf("API group %q must be an object", api)
+		}
+		// An explicitly empty group can remove a provider's last models. Keep
+		// it distinct from a group containing only non-chat models.
+		if len(entries) == 0 {
+			result[api] = make(map[string]json.RawMessage)
+		}
+		for key, entry := range entries {
+			var identity struct {
+				ID       string `json:"id"`
+				Provider string `json:"provider"`
+				API      string `json:"api"`
+				Type     string `json:"type"`
+			}
+			if err := json.Unmarshal(entry, &identity); err != nil {
+				return nil, err
+			}
+			if identity.Type != "" && identity.Type != "chat" {
+				continue
+			}
+			sourceProvider := providerID
+			if renamedAzure {
+				sourceProvider = "azure"
+			}
+			if identity.ID == "" || identity.Provider != sourceProvider || identity.API != api {
+				return nil, fmt.Errorf("invalid model identity for %s/%s", sourceProvider, key)
+			}
+			if renamedAzure {
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(entry, &fields); err != nil {
+					return nil, err
+				}
+				fields["provider"], _ = json.Marshal(providerID)
+				var err error
+				entry, err = json.Marshal(fields)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if result[api] == nil {
+				result[api] = make(map[string]json.RawMessage)
+			}
+			result[api][key] = entry
+		}
+	}
+	return result, nil
+}
+
+func downloadPackage(ctx context.Context, client *http.Client, name, version string, paths [][]string) (Source, map[string][]byte, error) {
 	metadataURL := "https://registry.npmjs.org/" + url.PathEscape(name) + "/" + url.PathEscape(version)
 	raw, err := download(ctx, client, metadataURL, 2<<20)
 	if err != nil {
@@ -160,7 +256,9 @@ func download(ctx context.Context, client *http.Client, address string, limit in
 	return raw, nil
 }
 
-func readPackageFiles(archive []byte, paths []string) (map[string][]byte, error) {
+// Each path group is one required file, with ordered alternatives for known
+// upstream renames. Missing unrelated provider files remain an error.
+func readPackageFiles(archive []byte, paths [][]string) (map[string][]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
 		return nil, err
@@ -168,8 +266,10 @@ func readPackageFiles(archive []byte, paths []string) (map[string][]byte, error)
 	defer gz.Close()
 	reader := tar.NewReader(io.LimitReader(gz, 256<<20))
 	wanted := map[string]bool{}
-	for _, path := range paths {
-		wanted[path] = true
+	for _, alternatives := range paths {
+		for _, path := range alternatives {
+			wanted[path] = true
+		}
 	}
 	files := map[string][]byte{}
 	for {
@@ -195,9 +295,16 @@ func readPackageFiles(archive []byte, paths []string) (map[string][]byte, error)
 		}
 		files[header.Name] = raw
 	}
-	for _, path := range paths {
-		if _, ok := files[path]; !ok {
-			return nil, fmt.Errorf("upstream package is missing %s", path)
+	for _, alternatives := range paths {
+		found := false
+		for _, path := range alternatives {
+			if _, ok := files[path]; ok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("upstream package is missing %s", strings.Join(alternatives, " or "))
 		}
 	}
 	return files, nil
