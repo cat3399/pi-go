@@ -19,6 +19,7 @@ import { ElapsedClock, elapsedBetween } from "./elapsed-time";
 import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { TranscriptViewport } from "./TranscriptViewport";
+import { captureTranscriptPosition, restoreTranscriptPosition, transcriptPositionTarget } from "./transcript-position";
 import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
 
 import type { SessionImageCache } from "./session-images";
@@ -805,6 +806,7 @@ function Message({
     <>
       <article
         data-entry-id={entryId}
+        data-message-part={process ? "process" : "message"}
         className={`pi-message pi-message-${role} ${streaming ? "is-streaming" : ""} ${process ? "is-process" : ""} ${userActionsVisible ? "is-actions-visible" : ""} ${editing ? "is-editing" : ""}`}
         onPointerEnter={(event) => {
           if (userActionsAvailable && event.pointerType === "mouse") showUserActions();
@@ -1359,27 +1361,13 @@ function MessageListContent({
   const capturePosition = (): ScrollPosition => {
     const transcript = transcriptRef.current;
     if (!transcript) return { entryId: "", offset: 0, bottom: true };
-    const { top, bottom } = transcript.getBoundingClientRect();
-    const element = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id], [data-run-summary]")].find((item) => {
-      const box = item.getBoundingClientRect();
-      return box.bottom > top + 8 && box.top < bottom;
-    });
-    return { entryId: element?.dataset.entryId ?? element?.dataset.runSummary ?? "", target: element?.dataset.runSummary ? "process" : undefined, offset: (element?.getBoundingClientRect().top ?? top) - top, bottom: atBottomRef.current && currentWindowRef.current?.following !== false };
+    return captureTranscriptPosition(transcript, atBottomRef.current && currentWindowRef.current?.following !== false);
   };
 
   const restorePosition = (position: ScrollPosition): boolean => {
     const transcript = transcriptRef.current;
-    if (!transcript) return false;
-    if (position.bottom) {
-      if (transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop > 0.5) transcript.scrollTop = transcript.scrollHeight;
-      atBottomRef.current = currentWindowRef.current?.following !== false;
-      return true;
-    }
-    const element = [...transcript.querySelectorAll<HTMLElement>(position.target === "process" ? "[data-run-summary]" : "[data-entry-id]")].find((item) => (position.target === "process" ? item.dataset.runSummary : item.dataset.entryId) === position.entryId);
-    if (!element) return false;
-    const delta = element.getBoundingClientRect().top - transcript.getBoundingClientRect().top - position.offset;
-    if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
-    atBottomRef.current = false;
+    if (!transcript || !restoreTranscriptPosition(transcript, position)) return false;
+    atBottomRef.current = position.bottom && currentWindowRef.current?.following !== false;
     return true;
   };
 
@@ -1766,7 +1754,7 @@ function MessageListContent({
       if (loadingHistoryRef.current) return;
       const bounds = transcript.getBoundingClientRect();
       const reading = capturePosition();
-      const readingElement = [...transcript.querySelectorAll<HTMLElement>("[data-entry-id]")].find((element) => element.dataset.entryId === reading.entryId);
+      const readingElement = transcriptPositionTarget(transcript, reading);
       const readingProcess = readingElement?.closest(".pi-turn-process-body");
       const processPage = [...transcript.querySelectorAll<HTMLButtonElement>(`[data-run-page="${upwards ? "older" : "newer"}"]:not(:disabled)`)]
         .find((button) => {

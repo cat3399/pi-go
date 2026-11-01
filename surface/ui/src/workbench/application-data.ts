@@ -78,7 +78,13 @@ interface ProjectDirectoryWindow {
 
 const projectDirectoryKey = '["project-directory"]';
 
-export interface ScrollPosition { entryId: string; offset: number; bottom: boolean; target?: "process" }
+export interface ScrollPosition {
+  entryId: string;
+  offset: number;
+  bottom: boolean;
+  target?: "process";
+  messagePart?: "process" | "message";
+}
 export interface EditDraft { text: string; original: string; contentToken?: string }
 
 type BufferedEvent = { envelope: ApplicationEventEnvelope } | { connected: string };
