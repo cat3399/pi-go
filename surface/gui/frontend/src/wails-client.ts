@@ -27,7 +27,7 @@ import type {
   UploadResult,
   UploadTargetInspection,
 } from "@cat3399/pi-workbench";
-import { encodeUploadFiles } from "@cat3399/pi-workbench";
+import { BrowserRemoteTransport, RemoteApplicationClient, encodeUploadFiles } from "@cat3399/pi-workbench";
 
 const bridge = "main.GUIBridge";
 const applicationEventName = "pi:application-event";
@@ -66,6 +66,38 @@ function call<T>(method: string, ...args: unknown[]): Promise<T> {
 
 export function readGUIHostInfo(): Promise<GUIHostInfo> {
   return call("HostInfo");
+}
+
+class GUIRemoteTransport extends BrowserRemoteTransport {
+  protected override async saveDownload(response: Response, name: string): Promise<void> {
+    const id = await call<string>("BeginDownload", name);
+    if (!id) { await response.body?.cancel(); return; }
+    const reader = response.body?.getReader();
+    try {
+      if (reader) {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Bound each IPC payload while retaining browser cookies and keeping
+          // the complete download out of both JavaScript and Go memory.
+          for (let offset = 0; offset < value.length; offset += 64 * 1024) {
+            const chunk = value.subarray(offset, offset + 64 * 1024);
+            let binary = "";
+            for (const byte of chunk) binary += String.fromCharCode(byte);
+            await call("WriteDownload", id, btoa(binary));
+          }
+        }
+      }
+      await call("CompleteDownload", id);
+    } finally {
+      await reader?.cancel().catch(() => undefined);
+      await call("DiscardDownload", id);
+    }
+  }
+}
+
+export function createGUIRemoteClient(endpoint: string): ApplicationClient {
+  return new RemoteApplicationClient(endpoint, new GUIRemoteTransport());
 }
 
 export class WailsApplicationClient implements ApplicationClient {
@@ -133,6 +165,10 @@ export class WailsApplicationClient implements ApplicationClient {
 
   previewFile(path: string): Promise<FilePreview> {
     return call("PreviewFile", path);
+  }
+
+  downloadFile(path: string): Promise<void> {
+    return call("DownloadFile", path);
   }
 
   deleteFile(path: string): Promise<void> {

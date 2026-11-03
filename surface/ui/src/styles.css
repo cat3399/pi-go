@@ -822,6 +822,9 @@ input:-webkit-autofill:focus {
 }
 
 .pi-file-preview-mode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 0 0 auto;
   margin-bottom: 4px;
   height: 30px;
@@ -832,6 +835,11 @@ input:-webkit-autofill:focus {
   color: var(--pi-text);
   font-size: 12px;
   cursor: pointer;
+}
+
+.pi-file-preview-mode:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .pi-file-preview-mode:hover {

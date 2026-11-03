@@ -73,6 +73,8 @@ type GUIBridge struct {
 	localError error
 	nextStream uint64
 	streams    map[uint64]*guiEventStream
+	downloadMu sync.Mutex
+	downloads  map[string]*pendingDownload
 }
 
 type guiEventStream struct {
@@ -108,6 +110,7 @@ func (b *GUIBridge) ServiceStartup(ctx context.Context, _ wails.ServiceOptions) 
 }
 
 func (b *GUIBridge) ServiceShutdown() error {
+	b.discardDownloads()
 	b.mu.Lock()
 	streams := make([]*guiEventStream, 0, len(b.streams))
 	for _, stream := range b.streams {

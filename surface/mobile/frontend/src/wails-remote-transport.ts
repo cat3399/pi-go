@@ -41,6 +41,32 @@ export class WailsRemoteTransport implements RemoteApplicationTransport {
   private readonly requestPrefix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   private requestSequence = 0;
 
+  async download(endpoint: string, path: string, token: string, name: string): Promise<void> {
+    const host = (window as Window & { wails?: { saveDownloadedFile(id: string, path: string, name: string, mime: string): void } }).wails;
+    if (!host?.saveDownloadedFile) throw new Error("当前宿主不支持保存文件");
+    const requestId = `${this.requestPrefix}-${++this.requestSequence}`;
+    this.requests.add(requestId);
+    let staged: { id: string; path: string; name: string; mimeType: string } | undefined;
+    try {
+      staged = await call("DownloadFileWithID", requestId, endpoint, path, token, name);
+      const file = staged!;
+      await new Promise<void>((resolve, reject) => {
+        const off = Events.On("pi:mobile-download-saved", (event) => {
+          const result = event.data as { id: string; error?: string };
+          if (result.id !== file.id) return;
+          off();
+          if (result.error) reject(new Error(result.error));
+          else resolve();
+        });
+        try { host.saveDownloadedFile(file.id, file.path, file.name, file.mimeType); }
+        catch (error) { off(); reject(error); }
+      });
+    } finally {
+      this.requests.delete(requestId);
+      if (staged) await call("DiscardDownload", staged.id);
+    }
+  }
+
   async request(
     endpoint: string,
     path: string,

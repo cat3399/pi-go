@@ -73,6 +73,9 @@ type RemoteBridge struct {
 	requestMu     sync.Mutex
 	requests      map[string]context.CancelFunc
 	cancelled     map[string]struct{}
+	downloadMu    sync.Mutex
+	downloads     map[string]string
+	downloadRoot  string
 
 	mu         sync.RWMutex
 	ctx        context.Context
@@ -123,6 +126,7 @@ func (b *RemoteBridge) ServiceStartup(ctx context.Context, _ wails.ServiceOption
 
 func (b *RemoteBridge) ServiceShutdown() error {
 	b.cancelRequests()
+	b.discardDownloads()
 	b.mu.Lock()
 	streams := make([]*remoteEventStream, 0, len(b.streams))
 	for _, stream := range b.streams {
@@ -262,7 +266,13 @@ func (b *RemoteBridge) UploadFilesWithID(requestID, endpoint, requestPath, token
 }
 
 func (b *RemoteBridge) beginRequest(requestID string, timeout time.Duration) (context.Context, func(), error) {
-	requestContext, cancel := context.WithTimeout(b.context(), timeout)
+	var requestContext context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		requestContext, cancel = context.WithTimeout(b.context(), timeout)
+	} else {
+		requestContext, cancel = context.WithCancel(b.context())
+	}
 	if requestID == "" {
 		return requestContext, cancel, nil
 	}

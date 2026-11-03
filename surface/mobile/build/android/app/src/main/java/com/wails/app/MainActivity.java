@@ -74,6 +74,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String WAILS_HOST = "wails.localhost";
     private static final int FILE_PICKER_REQUEST = 7001;
     private static final int WEB_FILE_CHOOSER_REQUEST = 7004;
+    private static final int DOWNLOAD_SAVE_REQUEST = 7005;
     private static final int CONTENT_INSET_TYPES =
             WindowInsetsCompat.Type.systemBars()
                     | WindowInsetsCompat.Type.displayCutout()
@@ -90,6 +91,8 @@ public class MainActivity extends AppCompatActivity {
     private float linkTouchX;
     private float linkTouchY;
     private String contextLink;
+    private String pendingDownloadId;
+    private File pendingDownloadFile;
 
     // The Go-side dialog ID of the in-flight file picker (-1 when idle)
     private int pendingFilePickerCallbackID = -1;
@@ -746,9 +749,75 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // Export only files staged by the Go download bridge. Authentication and
+    // network bytes stay in Go; Android owns the user-selected document URI.
+    public void saveDownloadedFile(String id, String path, String name, String mimeType) {
+        if (pendingDownloadId != null) {
+            finishDownloadSave(id, "请先完成当前文件的保存");
+            return;
+        }
+        try {
+            File directory = new File(getFilesDir(), "downloads").getCanonicalFile();
+            File source = new File(path).getCanonicalFile();
+            if (!directory.equals(source.getParentFile()) || !source.isFile()
+                    || !source.getName().equals(id) || !id.startsWith("pi-download-")) {
+                throw new java.io.IOException("下载文件不可用");
+            }
+            pendingDownloadId = id;
+            pendingDownloadFile = source;
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType(mimeType == null || mimeType.isEmpty() ? "application/octet-stream" : mimeType.split(";", 2)[0]);
+            intent.putExtra(Intent.EXTRA_TITLE, name);
+            startActivityForResult(intent, DOWNLOAD_SAVE_REQUEST);
+        } catch (Exception error) {
+            pendingDownloadId = null;
+            pendingDownloadFile = null;
+            finishDownloadSave(id, error.getMessage());
+        }
+    }
+
+    private void finishDownloadSave(String id, String error) {
+        try {
+            JSONObject result = new JSONObject();
+            result.put("id", id);
+            if (error != null) result.put("error", error);
+            bridge.emitEvent("pi:mobile-download-saved", result.toString());
+        } catch (Exception errorReporting) {
+            Log.e(TAG, "Unable to report download result", errorReporting);
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == DOWNLOAD_SAVE_REQUEST) {
+            final String id = pendingDownloadId;
+            final File source = pendingDownloadFile;
+            pendingDownloadId = null;
+            pendingDownloadFile = null;
+            if (id == null) return;
+            if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+                finishDownloadSave(id, null);
+                return;
+            }
+            final Uri destination = data.getData();
+            new Thread(() -> {
+                String failure = null;
+                try (InputStream input = new java.io.FileInputStream(source);
+                        OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
+                    if (output == null) throw new java.io.IOException("无法打开保存位置");
+                    byte[] buffer = new byte[64 * 1024];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                    output.flush();
+                } catch (Exception error) {
+                    failure = error.getMessage() == null ? "文件保存失败" : error.getMessage();
+                }
+                finishDownloadSave(id, failure);
+            }, "pi-download-save").start();
+            return;
+        }
         if (requestCode == PHOTO_CAPTURE_REQUEST || requestCode == VIDEO_CAPTURE_REQUEST) {
             handleCaptureResult(resultCode, data);
             return;

@@ -463,6 +463,14 @@ public class WailsBridge {
         });
     }
 
+    public void saveDownloadedFile(String id, String path, String name, String mimeType) {
+        mainHandler.post(() -> {
+            if (activity instanceof MainActivity) {
+                ((MainActivity) activity).saveDownloadedFile(id, path, name, mimeType);
+            }
+        });
+    }
+
     /**
      * Keep the screen on (1) or release the hold (0) via FLAG_KEEP_SCREEN_ON.
      */

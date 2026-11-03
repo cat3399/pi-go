@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FileText, LoaderCircle } from "lucide-react";
+import { Download, FileText, LoaderCircle } from "lucide-react";
 import type { FilePreview } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { SidePanel } from "./SidePanel";
@@ -7,6 +7,7 @@ import { SidePanel } from "./SidePanel";
 interface FilePreviewPanelProps {
   path: string;
   previewFile(path: string): Promise<FilePreview>;
+  downloadFile(path: string): Promise<void>;
   onClose(): void;
 }
 
@@ -16,10 +17,12 @@ function normalizedPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
-export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPanelProps) {
+export function FilePreviewPanel({ path, previewFile, downloadFile, onClose }: FilePreviewPanelProps) {
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
   const [textMode, setTextMode] = useState<TextDisplayMode>("source");
 
   useEffect(() => {
@@ -49,6 +52,14 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
 
   const name = preview?.name || normalizedPath(path).split("/").pop() || path;
   const markdown = preview?.kind === "text" && preview.language === "markdown";
+  const download = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError("");
+    try { await downloadFile(path); }
+    catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
+    finally { setDownloading(false); }
+  };
 
   return (
     <SidePanel
@@ -59,7 +70,8 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
       loading={loading}
       closeLabel="关闭文件预览"
       onClose={onClose}
-      actions={markdown && (
+      actions={<>
+        {markdown && (
           <button
             className="pi-file-preview-mode"
             type="button"
@@ -67,9 +79,15 @@ export function FilePreviewPanel({ path, previewFile, onClose }: FilePreviewPane
           >
             {textMode === "preview" ? "查看源代码" : "查看预览"}
           </button>
-      )}
+        )}
+        <button className="pi-file-preview-mode" type="button" disabled={downloading} onClick={() => void download()}
+          aria-label={downloading ? "正在下载文件" : "下载文件"} title={downloading ? "正在下载…" : "下载文件"}>
+          {downloading ? <LoaderCircle className="pi-spin" size={15} /> : <Download size={15} />}
+        </button>
+      </>}
     >
       <div className="pi-file-preview-content">
+        {downloadError && <div className="pi-inline-error" role="alert">下载失败：{downloadError}</div>}
         {loading ? (
           <div className="pi-file-preview-status" role="status">
             <LoaderCircle size={17} />

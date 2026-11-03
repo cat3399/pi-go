@@ -48,6 +48,7 @@ export interface RemoteTransportResponse {
 export interface RemoteApplicationTransport {
   /** Native hosts keep credentials out of the WebView and read media via IPC. */
   readonly mediaMode?: "embedded";
+  download(endpoint: string, path: string, token: string, name: string): Promise<void>;
   request(
     endpoint: string,
     path: string,
@@ -342,6 +343,10 @@ export class RemoteApplicationClient implements ApplicationClient {
     });
   }
 
+  downloadFile(path: string): Promise<void> {
+    return this.transport.download(this.endpoint, this.filePath(path, "download"), this.token, fileName(path));
+  }
+
   inspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection> {
     return this.request(`/api/v1/files/${encodeFilePathForAPI(directory)}?type=upload-check`, {
       method: "POST",
@@ -433,7 +438,7 @@ export class RemoteApplicationClient implements ApplicationClient {
     this.transport.close();
   }
 
-  private filePath(path: string, type: "read" | "meta" | "preview" | "embedded-preview"): string {
+  private filePath(path: string, type: "read" | "meta" | "preview" | "embedded-preview" | "download"): string {
     return `/api/v1/files/${encodeFilePathForAPI(path)}?type=${type}`;
   }
 
@@ -490,9 +495,40 @@ export class RemoteApplicationClient implements ApplicationClient {
   }
 }
 
-class BrowserRemoteTransport implements RemoteApplicationTransport {
+export class BrowserRemoteTransport implements RemoteApplicationTransport {
   private readonly sources = new Set<EventSource>();
   private readonly requests = new Set<AbortController>();
+
+  async download(endpoint: string, path: string, token: string, name: string): Promise<void> {
+    const controller = new AbortController();
+    this.requests.add(controller);
+    try {
+      const headers = new Headers();
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+      const response = await fetch(`${endpoint}${path}`, {
+        headers, credentials: "include", cache: "no-store", signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as ErrorBody | null;
+        throw new ApplicationRequestError(body?.error || `HTTP ${response.status}`, response.status);
+      }
+      await this.saveDownload(response, name);
+    } finally {
+      this.requests.delete(controller);
+    }
+  }
+
+  protected async saveDownload(response: Response, name: string): Promise<void> {
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    // Leave time for the browser's download process to acquire the blob.
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
 
   async request(
     endpoint: string,

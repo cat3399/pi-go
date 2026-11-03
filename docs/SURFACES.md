@@ -96,6 +96,12 @@ Go 服务直接提供 HTTP，HTTPS 可由前置代理终止。桌面和移动端
 文件接口的 `type=embedded-preview` 返回与桌面 `PreviewFile` 相同的 JSON 投影，供需要通过
 原生鉴权桥读取媒体的宿主使用；媒体正文包含在 `sourceUrl` 的 data URL 中，不额外携带凭据。
 
+文件菜单和预览面板均提供单文件下载，下载不受预览大小或格式限制。
+`ApplicationClient.downloadFile` 由宿主完成保存：Web 使用现有 `GET /api/v1/files/{path}?type=download`
+及浏览器保存；桌面本地模式直接读取 Application 授权的文件，远程模式保留浏览器鉴权、分块经 IPC
+写入系统保存窗口选择的位置，完整传输后才替换目标文件。Android 由 Go 网络桥携带原生凭据流式
+下载到私有暂存文件，再通过系统文档保存器导出；取消或失败会清理暂存文件，凭据不进入下载 URL。
+
 ## 输入草稿
 
 共享 Workbench 按连接数据源和会话 ID 保存输入；尚未创建的会话按工作目录保存。

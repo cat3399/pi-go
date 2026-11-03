@@ -138,6 +138,11 @@ public class WailsJSBridge {
         });
     }
 
+    @JavascriptInterface
+    public void saveDownloadedFile(String id, String path, String name, String mimeType) {
+        bridge.saveDownloadedFile(id, path, name, mimeType);
+    }
+
     private void updateSystemGestureExclusion() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
         if (!edgeGesturesEnabled) {

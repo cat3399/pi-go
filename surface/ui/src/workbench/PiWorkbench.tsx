@@ -74,6 +74,7 @@ const unavailableClient: ApplicationClient = {
   async browseDirectories() { throw new Error("请先配置远程地址"); },
   async listFiles() { throw new Error("请先配置远程地址"); },
   async previewFile() { throw new Error("请先配置远程地址"); },
+  async downloadFile() { throw new Error("请先配置远程地址"); },
   async deleteFile() { throw new Error("请先配置远程地址"); },
   async inspectUploadTargets() { throw new Error("请先配置远程地址"); },
   async uploadFiles() { throw new Error("请先配置远程地址"); },
@@ -199,6 +200,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const anchorGesturesEnabled = mobileGesturesEnabled && !sidebarOpen;
   const listFiles = useCallback((path: string) => client.listFiles(path), [client]);
   const previewFile = useCallback((path: string) => client.previewFile(path), [client]);
+  const downloadFile = useCallback((path: string) => client.downloadFile(path), [client]);
   const gestures = useMobilePanelGestures({
     enabled: mobileGesturesEnabled,
     sidebarOpen,
@@ -486,6 +488,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         workingDirectory={controller.workingDirectory}
         fileRefreshKey={fileRefreshKey}
         listFiles={listFiles}
+        downloadFile={downloadFile}
         deleteFile={(path) => client.deleteFile(path)}
         onMentionFile={(value) => {
           composerRef.current?.insertText(value, { focus: false });
@@ -615,6 +618,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           key={`${previewPath}:${fileRefreshKey}`}
           path={previewPath}
           previewFile={previewFile}
+          downloadFile={downloadFile}
           onClose={() => setSidePanel(null)}
         />
       )}

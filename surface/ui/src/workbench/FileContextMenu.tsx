@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
-import { AtSign, Eye, Trash2 } from "lucide-react";
+import { AtSign, Download, Eye, Trash2 } from "lucide-react";
 import { AnchoredPopover } from "../primitives/AnchoredPopover";
 
-type FileAction = "preview" | "mention" | "delete";
+type FileAction = "preview" | "mention" | "download" | "delete";
 
 export function useFileContextMenu(onAction: (action: FileAction) => void) {
   const anchorRef = useRef<HTMLButtonElement>(null);
@@ -28,7 +28,7 @@ export function useFileContextMenu(onAction: (action: FileAction) => void) {
   useEffect(() => () => cancelGestureRef.current?.(), []);
 
   useEffect(() => {
-    if (mode === "pointer") menuRef.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus({ preventScroll: true });
+    if (mode === "pointer") menuRef.current?.querySelector<HTMLButtonElement>("[role=menuitem]:not(:disabled)")?.focus({ preventScroll: true });
   }, [mode]);
 
   const onPointerDown = (event: PointerEvent<HTMLButtonElement>) => {
@@ -44,7 +44,7 @@ export function useFileContextMenu(onAction: (action: FileAction) => void) {
       const item = document.elementFromPoint(x, y)?.closest<HTMLButtonElement>("[data-file-action]");
       if (!item || !menuRef.current?.contains(item) || item.disabled) return null;
       const action = item.dataset.fileAction;
-      return action === "preview" || action === "mention" || action === "delete" ? action : null;
+      return action === "preview" || action === "mention" || action === "download" || action === "delete" ? action : null;
     };
 
     const cleanup = () => {
@@ -140,7 +140,7 @@ export function useFileContextMenu(onAction: (action: FileAction) => void) {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     event.stopPropagation();
-    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role=menuitem]") ?? []);
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("[role=menuitem]:not(:disabled)") ?? []);
     const current = items.findIndex((item) => item === document.activeElement);
     const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
       : (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
@@ -150,9 +150,10 @@ export function useFileContextMenu(onAction: (action: FileAction) => void) {
   return { anchorRef, menuRef, point, open: mode !== null, activeAction, choose, dismiss, onPointerDown, onContextMenu, onTriggerKeyDown, onClickCapture, onMenuKeyDown };
 }
 
-export function FileContextMenu({ name, isDir, menu }: {
+export function FileContextMenu({ name, isDir, downloading, menu }: {
   name: string;
   isDir: boolean;
+  downloading: boolean;
   menu: ReturnType<typeof useFileContextMenu>;
 }) {
   return (
@@ -179,6 +180,11 @@ export function FileContextMenu({ name, isDir, menu }: {
       <button type="button" role="menuitem" data-file-action="mention" className={menu.activeAction === "mention" ? "is-active" : ""} onClick={() => menu.choose("mention")}>
         <AtSign size={15} /><span>引用</span>
       </button>
+      {!isDir && (
+        <button type="button" role="menuitem" data-file-action="download" disabled={downloading} className={menu.activeAction === "download" ? "is-active" : ""} onClick={() => menu.choose("download")}>
+          <Download size={15} /><span>{downloading ? "正在下载…" : "下载"}</span>
+        </button>
+      )}
       <button type="button" role="menuitem" data-file-action="delete" className={`is-danger ${menu.activeAction === "delete" ? "is-active" : ""}`} onClick={() => menu.choose("delete")}>
         <Trash2 size={15} /><span>删除</span>
       </button>

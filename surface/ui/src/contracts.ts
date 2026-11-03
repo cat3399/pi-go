@@ -496,6 +496,7 @@ export interface ApplicationClient {
   browseDirectories(path?: string): Promise<DirectoryView>;
   listFiles(path: string): Promise<FileList>;
   previewFile(path: string): Promise<FilePreview>;
+  downloadFile(path: string): Promise<void>;
   deleteFile(path: string): Promise<void>;
   inspectUploadTargets(directory: string, fileNames: string[]): Promise<UploadTargetInspection>;
   uploadFiles(directory: string, files: File[], strategy: UploadConflictStrategy): Promise<UploadResult>;

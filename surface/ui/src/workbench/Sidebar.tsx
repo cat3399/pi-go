@@ -26,6 +26,7 @@ interface SidebarProps {
   workingDirectory: string;
   fileRefreshKey: number;
   listFiles(path: string): Promise<FileList>;
+  downloadFile(path: string): Promise<void>;
   deleteFile(path: string): Promise<void>;
   onMentionFile(value: string): void;
   onPreviewFile(path: string): void;
@@ -523,6 +524,7 @@ export function Sidebar(props: SidebarProps) {
               refreshKey={props.fileRefreshKey}
               activePreviewPath={props.activePreviewPath}
               listFiles={props.listFiles}
+              downloadFile={props.downloadFile}
               deleteFile={props.deleteFile}
               onMention={props.onMentionFile}
               onPreview={props.onPreviewFile}

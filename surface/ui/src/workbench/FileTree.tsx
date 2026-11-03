@@ -21,6 +21,7 @@ interface FileTreeProps {
   refreshKey?: number;
   activePreviewPath: string;
   listFiles(path: string): Promise<FileList>;
+  downloadFile(path: string): Promise<void>;
   deleteFile(path: string): Promise<void>;
   onMention(value: string): void;
   onPreview(path: string): void;
@@ -83,6 +84,7 @@ function TreeNode(props: {
   selectedPath: string;
   onSelect(path: string): void;
   listFiles(path: string): Promise<FileList>;
+  downloadFile(path: string): Promise<void>;
   deleteControl: FileDeleteControl;
   onMention(value: string): void;
   onPreview(path: string): void;
@@ -92,11 +94,22 @@ function TreeNode(props: {
   const [loaded, setLoaded] = useState(false);
   const [children, setChildren] = useState<FileNode[]>([]);
   const [error, setError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const download = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError("");
+    try { await props.downloadFile(props.node.path); }
+    catch (error) { setDownloadError(error instanceof Error ? error.message : String(error)); }
+    finally { setDownloading(false); }
+  };
   const selected = props.selectedPath === props.node.path || props.activePreviewPath === props.node.path;
   const deleteOpen = props.deleteControl.targetPath === props.node.path;
   const menu = useFileContextMenu((action) => {
     props.onSelect(props.node.path);
     if (action === "preview") props.onPreview(props.node.path);
+    if (action === "download") void download();
     if (action === "mention") props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
     if (action === "delete") props.deleteControl.request(props.node);
   });
@@ -169,9 +182,9 @@ function TreeNode(props: {
               )}
               <Icon size={14} strokeWidth={1.7} />
               <span>{props.node.name}</span>
-              {loading && <RefreshCw className="pi-file-loading" size={11} aria-label="正在读取" />}
+              {(loading || downloading) && <RefreshCw className="pi-file-loading" size={11} aria-label={downloading ? "正在下载" : "正在读取"} />}
             </button>
-            <FileContextMenu name={props.node.name} isDir={props.node.isDir} menu={menu} />
+            <FileContextMenu name={props.node.name} isDir={props.node.isDir} downloading={downloading} menu={menu} />
           </>
         )}
       </div>
@@ -180,6 +193,7 @@ function TreeNode(props: {
           读取失败，点此重试
         </button>
       )}
+      {downloadError && <div className="pi-file-inline-error" role="alert">下载失败：{downloadError}</div>}
       {props.node.isDir && open && (
         <div role="group">
           {loaded && children.length === 0 && <div className="pi-file-empty" style={{ paddingLeft: 34 + props.depth * 14 }}>空文件夹</div>}
@@ -202,6 +216,7 @@ export function FileTree({
   refreshKey: externalRefreshKey = 0,
   activePreviewPath,
   listFiles,
+  downloadFile,
   deleteFile,
   onMention,
   onPreview,
@@ -320,6 +335,7 @@ export function FileTree({
               selectedPath={selectedPath}
               onSelect={setSelectedPath}
               listFiles={listFiles}
+              downloadFile={downloadFile}
               deleteControl={deleteControl}
               onMention={onMention}
               onPreview={onPreview}
