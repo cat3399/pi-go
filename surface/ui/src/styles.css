@@ -478,8 +478,6 @@ input:-webkit-autofill:focus {
   transition: opacity 100ms ease, visibility 0s linear 100ms;
 }
 
-.pi-project-row:hover .pi-sidebar-row-actions,
-.pi-project-row:focus-within .pi-sidebar-row-actions,
 .pi-session-item:hover .pi-session-actions,
 .pi-session-item:focus-within .pi-session-actions {
   opacity: 1;
@@ -503,6 +501,7 @@ input:-webkit-autofill:focus {
 }
 
 .pi-sidebar-row-actions .pi-icon-action,
+.pi-project-actions .pi-icon-action,
 .pi-inline-confirmation .pi-icon-action {
   flex: 0 0 auto;
   width: 26px;
@@ -2979,6 +2978,9 @@ input:-webkit-autofill:focus {
 
 .pi-project-row {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   width: 100%;
   min-height: 34px;
   padding: 0 4px 0 8px;
@@ -2995,11 +2997,11 @@ input:-webkit-autofill:focus {
 
 .pi-project-toggle {
   display: grid;
+  flex: 1;
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: 7px;
   min-width: 0;
-  width: 100%;
   min-height: 34px;
   padding: 0;
   border: 0;
@@ -3008,6 +3010,13 @@ input:-webkit-autofill:focus {
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.pi-project-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
 }
 
 .pi-project-toggle:focus-visible {
@@ -5139,6 +5148,11 @@ input:-webkit-autofill:focus {
 }
 
 .pi-workbench.is-mobile .pi-sidebar-row-actions .pi-icon-action {
+  width: 36px;
+  height: 36px;
+}
+
+.pi-workbench.is-mobile .pi-project-actions .pi-icon-action {
   width: 36px;
   height: 36px;
 }

@@ -275,7 +275,7 @@ function ProjectSessions(props: {
           {open ? <FolderOpen size={16} /> : <Folder size={16} />}
           <span>{props.project.name}</span>
         </button>
-        <InlineActions className="pi-sidebar-row-actions pi-project-actions" visible={menuOpen}>
+        <div className="pi-project-actions">
           <IconAction
             className="pi-project-new-session"
             label={`在 ${props.project.name} 中新建对话`}
@@ -319,7 +319,7 @@ function ProjectSessions(props: {
               <span>{removing ? "正在删除…" : "删除项目"}</span>
             </button>
           </AnchoredPopover>
-        </InlineActions>
+        </div>
       </div>
       {open && (
         <div ref={listRef} className="pi-project-sessions" aria-busy={loading || undefined}>
