@@ -97,6 +97,8 @@ HTTP 同时支持 `ETag`/`If-None-Match` 和 304。token 覆盖实际资源表�
 Go 服务直接提供 HTTP，HTTPS 可由前置代理终止。桌面和移动端的远程连接支持 HTTP 与 HTTPS。
 文件接口的 `type=embedded-preview` 返回与桌面 `PreviewFile` 相同的 JSON 投影，供需要通过
 原生鉴权桥读取媒体的宿主使用；媒体正文包含在 `sourceUrl` 的 data URL 中，不额外携带凭据。
+Markdown、代码、日志和普通文本统一支持最大 5 MiB 的完整预览，Web 与原生端使用同一读取上限；
+超过上限返回大小错误，仍可通过下载入口获取完整文件。
 
 文件菜单和预览面板均提供单文件下载，下载不受预览大小或格式限制。
 `ApplicationClient.downloadFile` 由宿主完成保存：Web 使用现有 `GET /api/v1/files/{path}?type=download`

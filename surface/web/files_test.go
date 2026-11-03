@@ -51,6 +51,49 @@ func TestEmbeddedMediaPreviewUsesTheExistingFileAccessBoundary(t *testing.T) {
 	}
 }
 
+func TestTextPreviewLimitMatchesNativeAndDownloadRemainsAvailable(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "large.md")
+	content := []byte("# 文档\n" + strings.Repeat("x", int(surfacewire.TextPreviewMaxBytes)-len("# 文档\n")))
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := testService(t, app.ProductionConfig{WorkingDir: root, AgentDir: t.TempDir(), Environment: []string{}}, nil)
+	server, err := New(Options{Application: service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "/api/v1/files/" + encodeTestFilePath(path)
+	for _, kind := range []string{"read", "embedded-preview"} {
+		response := serveWebAPIRequest(t, server, http.MethodGet, target+"?type="+kind, nil, "")
+		var preview surfacewire.FilePreview
+		if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != http.StatusOK || preview.Content != string(content) || preview.Size != int64(len(content)) {
+			t.Fatalf("%s preview did not preserve 5 MiB text: status=%d size=%d", kind, response.Code, preview.Size)
+		}
+	}
+	content = append(content, 'x')
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"read", "embedded-preview"} {
+		response := serveWebAPIRequest(t, server, http.MethodGet, target+"?type="+kind, nil, "")
+		if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "5 MiB") {
+			t.Fatalf("%s oversized preview = %d %s", kind, response.Code, response.Body.String())
+		}
+	}
+	download := serveWebAPIRequest(t, server, http.MethodGet, target+"?type=download", nil, "")
+	if download.Code != http.StatusOK || !bytes.Equal(download.Body.Bytes(), content) {
+		t.Fatalf("oversized file download = %d, bytes=%d", download.Code, download.Body.Len())
+	}
+}
+
 func TestFileGitAndIndexHTTPContracts(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("hello\n"), 0o600); err != nil {

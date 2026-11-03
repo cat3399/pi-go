@@ -21,7 +21,6 @@ import (
 )
 
 const (
-	textPreviewMaxBytes   = surfacewire.TextPreviewMaxBytes
 	imagePreviewMaxBytes  = surfacewire.ImagePreviewMaxBytes
 	docxPreviewMaxBytes   = surfacewire.DOCXPreviewMaxBytes
 	maxUploadFileBytes    = application.MaxUploadFileBytes
@@ -127,17 +126,13 @@ func handleFileRead(writer http.ResponseWriter, request *http.Request, resource 
 		streamFileResponse(writer, request, resource, mimeType, false)
 		return
 	}
-	if resource.Size > textPreviewMaxBytes {
-		writeAPIError(writer, http.StatusRequestEntityTooLarge, errors.New("File too large for preview (>256KB)"))
-		return
-	}
-	content, err := os.ReadFile(resource.Path)
+	content, err := surfacewire.ReadTextPreview(resource.Path)
 	if err != nil {
-		writeAPIError(writer, http.StatusInternalServerError, err)
+		writeFileError(writer, err)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"content": string(content), "language": fileLanguage(resource.Path), "size": resource.Size,
+		"content": string(content), "language": fileLanguage(resource.Path), "size": len(content),
 	})
 }
 
@@ -470,6 +465,8 @@ func writeFileDeleteError(writer http.ResponseWriter, err error) {
 
 func writeFileError(writer http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, surfacewire.ErrPreviewTooLarge):
+		writeAPIError(writer, http.StatusRequestEntityTooLarge, err)
 	case errors.Is(err, application.ErrResourceAccessDenied):
 		writeAPIError(writer, http.StatusForbidden, errors.New("Access denied"))
 	case errors.Is(err, os.ErrNotExist):

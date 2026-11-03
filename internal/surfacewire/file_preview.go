@@ -14,11 +14,13 @@ import (
 )
 
 const (
-	TextPreviewMaxBytes     int64 = 256 * 1024
+	TextPreviewMaxBytes     int64 = 5 * 1024 * 1024
 	ImagePreviewMaxBytes    int64 = 10 * 1024 * 1024
 	DOCXPreviewMaxBytes     int64 = 10 * 1024 * 1024
 	EmbeddedPreviewMaxBytes int64 = 32 * 1024 * 1024
 )
+
+var ErrPreviewTooLarge = errors.New("file too large for preview")
 
 type FilePreview struct {
 	Path      string `json:"path"`
@@ -141,13 +143,20 @@ func PreviewFile(ctx context.Context, api application.API, requested string) (Fi
 	default:
 		preview.Kind = "text"
 		preview.MIMEType = "text/plain"
-		data, readErr := readPreviewBytes(resource.Path, TextPreviewMaxBytes)
+		data, readErr := ReadTextPreview(resource.Path)
 		if readErr != nil {
 			return FilePreview{}, readErr
 		}
 		preview.Content = string(data)
+		preview.Size = int64(len(data))
 		return preview, nil
 	}
+}
+
+// ReadTextPreview applies the same byte limit to HTTP and native previews,
+// including files that grow between metadata lookup and the actual read.
+func ReadTextPreview(path string) ([]byte, error) {
+	return readPreviewBytes(path, TextPreviewMaxBytes)
 }
 
 func previewDataURL(path, mimeType string, limit int64) (string, error) {
@@ -169,14 +178,14 @@ func readPreviewBytes(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("file too large for embedded preview (>%s)", formatPreviewLimit(limit))
+		return nil, fmt.Errorf("%w (>%s)", ErrPreviewTooLarge, formatPreviewLimit(limit))
 	}
 	return data, nil
 }
 
 func formatPreviewLimit(limit int64) string {
 	if limit < 1024*1024 {
-		return fmt.Sprintf("%dKB", limit/1024)
+		return fmt.Sprintf("%d KiB", limit/1024)
 	}
-	return fmt.Sprintf("%dMB", limit/(1024*1024))
+	return fmt.Sprintf("%d MiB", limit/(1024*1024))
 }

@@ -70,8 +70,24 @@ func TestPreviewFileEnforcesTextLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := PreviewFile(context.Background(), previewAPIForPath(t, path), path)
-	if err == nil || !strings.Contains(err.Error(), ">256KB") {
-		t.Fatalf("error = %v, want 256KB preview limit", err)
+	if !errors.Is(err, ErrPreviewTooLarge) || !strings.Contains(err.Error(), ">5 MiB") {
+		t.Fatalf("error = %v, want 5 MiB preview limit", err)
+	}
+}
+
+func TestPreviewFileAcceptsTextAtFiveMiBBoundary(t *testing.T) {
+	content := "# 文档\n" + strings.Repeat("x", int(TextPreviewMaxBytes)-len("# 文档\n"))
+	for _, name := range []string{"large.md", "large.mdx", "large.go", "large.log"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			preview, err := PreviewFile(context.Background(), previewAPIForPath(t, path), path)
+			if err != nil || preview.Content != content || preview.Size != TextPreviewMaxBytes {
+				t.Fatalf("preview did not preserve full text: size=%d, error=%v", preview.Size, err)
+			}
+		})
 	}
 }
 
