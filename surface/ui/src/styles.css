@@ -819,10 +819,32 @@ input:-webkit-autofill:focus {
 }
 
 .pi-file-preview-content {
+  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+}
+
+.pi-file-preview-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pi-markdown-preview-stage {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pi-markdown-preview-stage .pi-file-preview-markdown {
+  padding-right: 42px;
 }
 
 .pi-file-preview-status {

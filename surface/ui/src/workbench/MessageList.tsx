@@ -7,7 +7,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
@@ -21,7 +20,7 @@ import { ComposerCancelButton, ComposerInput, ComposerSendButton } from "./Compo
 import { MessageAnchors, type MessageAnchorsHandle } from "./MessageAnchors";
 import { TranscriptViewport } from "./TranscriptViewport";
 import { captureTranscriptPosition, restoreTranscriptPosition, transcriptPositionTarget } from "./transcript-position";
-import { blocksEdgeGestureStart, isTextSelectionInteraction } from "./edge-gesture-target";
+import { useAnchorGestures } from "./useAnchorGestures";
 
 import type { SessionImageCache } from "./session-images";
 import type { ApplicationDataStore, HistoryWindow, ScrollPosition } from "./application-data";
@@ -62,30 +61,6 @@ interface MessageListProps {
   onFork(entryId: string): Promise<void>;
   onEdit(entryId: string, text: string): Promise<void>;
 }
-
-interface AnchorTrackMetrics {
-  innerTop: number;
-  innerHeight: number;
-  slotHeight: number;
-}
-
-interface AnchorGesture {
-  pointerId: number;
-  startX: number;
-  startY: number;
-  lastY: number;
-  engaged: boolean;
-  hasSelection: boolean;
-  insideHitRegion: boolean;
-  index: number;
-  trackMetrics: AnchorTrackMetrics | null;
-  stageTop: number;
-  stageBottom: number;
-}
-
-const MOBILE_EDGE_SIZE = 44;
-const TOUCH_SLOP = 8;
-const ANCHOR_PREVIEW_DWELL_MS = 160;
 
 function contentBlocks(message: AgentMessage): MessageContentBlock[] {
   return Array.isArray(message.content) ? message.content : [];
@@ -1213,11 +1188,7 @@ function MessageListContent({
   const atBottomRef = useRef(true);
   const initializedScrollRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const anchorGestureRef = useRef<AnchorGesture | null>(null);
-  const anchorPreviewTimerRef = useRef<number | null>(null);
-  const anchorPreviewVisibleRef = useRef(false);
   const [activeAnchorIndex, setActiveAnchorIndex] = useState(0);
-  const [anchorOpen, setAnchorOpen] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const loadingHistoryRef = useRef(false);
@@ -1494,157 +1465,10 @@ function MessageListContent({
 
   useLayoutEffect(() => { syncActiveAnchor(); }, [anchors.length]);
 
-  const anchorTrackMetrics = () => {
-    const track = document.querySelector<HTMLElement>("#pi-message-anchors .pi-anchor-track");
-    if (!track || anchors.length === 0) return null;
-    const bounds = track.getBoundingClientRect();
-    const innerTop = bounds.top + 8;
-    const innerHeight = Math.max(0, bounds.height - 16);
-    if (bounds.width <= 0 || innerHeight <= 0) return null;
-    return {
-      innerTop,
-      innerHeight,
-      slotHeight: innerHeight / anchors.length,
-    };
-  };
-
-  const anchorIndexAtY = (clientY: number, gesture: AnchorGesture): number | null => {
-    const metrics = gesture.trackMetrics ?? anchorTrackMetrics();
-    if (!metrics) return null;
-    gesture.trackMetrics = metrics;
-    if (clientY < metrics.innerTop || clientY > metrics.innerTop + metrics.innerHeight) return null;
-    const estimated = Math.round((clientY - metrics.innerTop) / metrics.slotHeight - 0.5);
-    return Math.max(0, Math.min(anchors.length - 1, estimated));
-  };
-
-  const clearAnchorPreviewTimer = () => {
-    if (anchorPreviewTimerRef.current === null) return;
-    window.clearTimeout(anchorPreviewTimerRef.current);
-    anchorPreviewTimerRef.current = null;
-  };
-
-  const hideAnchorPreview = () => {
-    clearAnchorPreviewTimer();
-    anchorPreviewVisibleRef.current = false;
-    messageAnchorsRef.current?.setPreviewPosition(null);
-    messageAnchorsRef.current?.setPreviewIndex(null);
-  };
-
-  const positionAnchorPreview = (gesture: AnchorGesture, clientY: number) => {
-    messageAnchorsRef.current?.setPreviewPosition({
-      clientY,
-      stageTop: gesture.stageTop,
-      stageBottom: gesture.stageBottom,
-    });
-  };
-
-  const scheduleAnchorPreview = (index: number) => {
-    clearAnchorPreviewTimer();
-    anchorPreviewTimerRef.current = window.setTimeout(() => {
-      anchorPreviewTimerRef.current = null;
-      const gesture = anchorGestureRef.current;
-      if (
-        !gesture?.engaged
-        || !gesture.hasSelection
-        || !gesture.insideHitRegion
-        || gesture.index !== index
-      ) return;
-      positionAnchorPreview(gesture, gesture.lastY);
-      anchorPreviewVisibleRef.current = true;
-      messageAnchorsRef.current?.setPreviewIndex(index);
-    }, ANCHOR_PREVIEW_DWELL_MS);
-  };
-
-  const onAnchorPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!mobile || !anchorsEnabled || anchors.length === 0 || event.pointerType !== "touch" || !event.isPrimary) return;
-    const target = event.target instanceof Element ? event.target : null;
-    if (
-      (
-        blocksEdgeGestureStart(target)
-        || isTextSelectionInteraction(target, event.clientX, event.clientY)
-      )
-      && !target?.closest("#pi-message-anchors")
-    ) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
-    if (bounds.right - event.clientX > MOBILE_EDGE_SIZE) return;
-    anchorGestureRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      lastY: event.clientY,
-      engaged: false,
-      hasSelection: false,
-      insideHitRegion: false,
-      index: activeAnchorIndex,
-      trackMetrics: null,
-      stageTop: bounds.top,
-      stageBottom: bounds.bottom,
-    };
-  };
-
-  const onAnchorPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const gesture = anchorGestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    const dx = event.clientX - gesture.startX;
-    const dy = event.clientY - gesture.startY;
-    gesture.lastY = event.clientY;
-    if (!gesture.engaged) {
-      if (isTextSelectionInteraction(event.target, event.clientX, event.clientY)) {
-        anchorGestureRef.current = null;
-        return;
-      }
-      if (Math.abs(dy) > TOUCH_SLOP && Math.abs(dy) > Math.abs(dx)) {
-        anchorGestureRef.current = null;
-        return;
-      }
-      if (dx > -TOUCH_SLOP || Math.abs(dx) < Math.abs(dy) * 1.1) return;
-      gesture.engaged = true;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      setAnchorOpen(true);
-    }
-    event.preventDefault();
-    const index = anchorIndexAtY(event.clientY, gesture);
-    if (index === null) {
-      gesture.insideHitRegion = false;
-      clearAnchorPreviewTimer();
-      return;
-    }
-    const changed = !gesture.hasSelection || gesture.index !== index;
-    const entered = !gesture.insideHitRegion;
-    gesture.hasSelection = true;
-    gesture.insideHitRegion = true;
-    gesture.index = index;
-    if (changed) {
-      messageAnchorsRef.current?.setGestureIndex(index);
-    }
-    if (anchorPreviewVisibleRef.current) {
-      positionAnchorPreview(gesture, event.clientY);
-      if (changed || entered) messageAnchorsRef.current?.setPreviewIndex(index);
-    } else if (changed || entered) {
-      scheduleAnchorPreview(index);
-    }
-  };
-
-  const finishAnchorGesture = (event: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) => {
-    const gesture = anchorGestureRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    const releasedIndex = anchorIndexAtY(event.clientY, gesture);
-    if (releasedIndex !== null) {
-      gesture.hasSelection = true;
-      gesture.index = releasedIndex;
-    }
-    const selected = gesture.hasSelection ? gesture.index : null;
-    anchorGestureRef.current = null;
-    messageAnchorsRef.current?.setGestureIndex(null);
-    hideAnchorPreview();
-    if (!gesture.engaged) return;
-    setAnchorOpen(false);
-    if (cancelled || selected === null) return;
-    scrollToAnchor(selected);
-  };
+  const anchorGestures = useAnchorGestures({
+    navigatorRef: messageAnchorsRef, mobile, enabled: anchorsEnabled,
+    itemCount: anchors.length, activeIndex: activeAnchorIndex, scope: scrollScope, onSelect: scrollToAnchor,
+  });
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
@@ -1659,13 +1483,6 @@ function MessageListContent({
       }
     }
     setShowScrollToBottom(false);
-    anchorGestureRef.current = null;
-    messageAnchorsRef.current?.setGestureIndex(null);
-    clearAnchorPreviewTimer();
-    anchorPreviewVisibleRef.current = false;
-    messageAnchorsRef.current?.setPreviewIndex(null);
-    messageAnchorsRef.current?.setPreviewPosition(null);
-    setAnchorOpen(false);
     setActiveAnchorIndex(Math.max(0, anchors.length - 1));
     initializedScrollRef.current = true;
     previousScrollTopRef.current = transcript.scrollTop;
@@ -1686,33 +1503,6 @@ function MessageListContent({
     if (!transcript || !atBottomRef.current) return;
     transcript.scrollTop = transcript.scrollHeight;
   }, [messages.length, pendingMessages.length, streamingMessage, busy, compacting]);
-
-  useEffect(() => {
-    if (!mobile || anchorsEnabled) return;
-    anchorGestureRef.current = null;
-    messageAnchorsRef.current?.setGestureIndex(null);
-    setAnchorOpen(false);
-    hideAnchorPreview();
-  }, [anchorsEnabled, mobile]);
-
-  useEffect(() => {
-    if (!mobile || !anchorOpen) return;
-    const dismiss = (event: PointerEvent) => {
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest("#pi-message-anchors")) return;
-      setAnchorOpen(false);
-      messageAnchorsRef.current?.setGestureIndex(null);
-      hideAnchorPreview();
-    };
-    document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
-  }, [anchorOpen, mobile]);
-
-  useEffect(() => () => {
-    if (anchorPreviewTimerRef.current !== null) {
-      window.clearTimeout(anchorPreviewTimerRef.current);
-    }
-  }, []);
 
   // The history owner can change while this conversation is already visible.
   // Measure its composer and restore the viewport before the remounted list paints.
@@ -1775,15 +1565,15 @@ function MessageListContent({
     <div
       ref={stageRef}
       className="pi-message-stage"
-      onPointerDownCapture={(event) => { interruptNavigation(); onAnchorPointerDown(event); }}
+      onPointerDownCapture={(event) => { interruptNavigation(); anchorGestures.onPointerDownCapture(event); }}
       onWheelCapture={interruptNavigation}
       onKeyDownCapture={(event) => {
         if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
           && !(event.target as Element).closest("input, textarea, [contenteditable]")) interruptNavigation();
       }}
-      onPointerMoveCapture={onAnchorPointerMove}
-      onPointerUpCapture={(event) => finishAnchorGesture(event, false)}
-      onPointerCancelCapture={(event) => finishAnchorGesture(event, true)}
+      onPointerMoveCapture={anchorGestures.onPointerMoveCapture}
+      onPointerUpCapture={anchorGestures.onPointerUpCapture}
+      onPointerCancelCapture={anchorGestures.onPointerCancelCapture}
     >
       <div className="pi-transcript-scroll pi-overlay-scroll-host">
         <TranscriptViewport viewportRef={transcriptRef} start={historyWindow?.start} end={historyWindow?.end} loading={loadingHistory}
@@ -1889,14 +1679,8 @@ function MessageListContent({
         items={anchors}
         activeIndex={activeAnchorIndex}
         mobile={mobile}
-        open={!mobile || (anchorsEnabled && anchorOpen)}
-        onSelect={(index) => {
-          scrollToAnchor(index);
-          if (!mobile) return;
-          setAnchorOpen(false);
-          messageAnchorsRef.current?.setGestureIndex(null);
-          hideAnchorPreview();
-        }}
+        open={anchorGestures.open}
+        onSelect={anchorGestures.select}
       />
     </div>
   );

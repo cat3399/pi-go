@@ -11,6 +11,7 @@ import {
 export interface MessageAnchorItem {
   id: string;
   label: string;
+  level?: number;
 }
 
 interface MessageAnchorsProps {
@@ -19,9 +20,12 @@ interface MessageAnchorsProps {
   mobile: boolean;
   open: boolean;
   onSelect(index: number): void;
+  kind?: "messages" | "chapters";
 }
 
 export interface MessageAnchorsHandle {
+  getTrackElement(): HTMLDivElement | null;
+  contains(target: Node): boolean;
   setGestureIndex(index: number | null): void;
   setPreviewIndex(index: number | null): void;
   setPreviewPosition(position: AnchorPreviewPosition | null): void;
@@ -56,6 +60,8 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
   const previewPositionRef = useRef<AnchorPreviewPosition | null>(null);
 
   useImperativeHandle(ref, () => ({
+    getTrackElement: () => trackRef.current,
+    contains: (target) => Boolean(trackRef.current?.parentElement?.contains(target)),
     setGestureIndex,
     setPreviewIndex,
     setPreviewPosition(position) {
@@ -88,13 +94,15 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
   const desktopHeight = Math.min(320, 16 + props.items.length * 18);
   const mobileHeight = Math.max(40, 16 + props.items.length * 24);
   const mobileDotSize = props.items.length > 120 ? 3 : props.items.length > 80 ? 4 : props.items.length > 60 ? 5 : 6;
+  const chapters = props.kind === "chapters";
+  const emptyLabel = chapters ? "（无标题章节）" : "（无文字消息）";
 
   return (
     <>
       <aside
-        id="pi-message-anchors"
+        id={chapters ? "pi-chapter-anchors" : "pi-message-anchors"}
         className={`pi-message-anchors ${props.mobile ? "is-mobile" : "is-desktop"} ${props.open ? "is-open" : ""} ${gestureIndex !== null ? "is-scrubbing" : ""} ${expandedIndex !== null ? "is-expanded" : ""}`}
-        aria-label="消息锚点"
+        aria-label={chapters ? "章节导航" : "消息锚点"}
         onPointerEnter={(event) => {
           if (props.mobile || props.items.length <= 30 || expandedIndex !== null) return;
           const bounds = event.currentTarget.getBoundingClientRect();
@@ -110,7 +118,7 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
             } as CSSProperties
           : { height: `min(${desktopHeight}px, calc(100% - 112px))` }}
       >
-        <div ref={trackRef} className="pi-anchor-track" aria-label="快速定位到对话">
+        <div ref={trackRef} className="pi-anchor-track" aria-label={chapters ? "快速定位到章节" : "快速定位到对话"}>
           {props.items.length > 1 && <span className="pi-anchor-line" />}
           {props.items.map((item, index) => (
             <button
@@ -121,7 +129,8 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
               // normal desktop spacing stays intact; the track cannot overflow.
               style={!props.mobile && props.items.length > 30 && expandedIndex === null ? { minHeight: 0, flexBasis: 0 } : undefined}
               tabIndex={props.mobile ? -1 : 0}
-              aria-label={`第 ${index + 1} 轮：${item.label}`}
+              aria-label={`第 ${index + 1} ${chapters ? "节" : "轮"}：${item.label || emptyLabel}`}
+              aria-current={index === displayedActiveIndex ? "location" : undefined}
               onPointerEnter={() => setHoveredIndex(index)}
               onFocus={() => setHoveredIndex(index)}
               onBlur={() => setHoveredIndex(null)}
@@ -131,7 +140,7 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
               {!props.mobile && (expandedIndex !== null || hoveredIndex === index) && (
                 <span className="pi-anchor-preview">
                   <small>{String(index + 1).padStart(2, "0")}</small>
-                  <span>{item.label || "（无文字消息）"}</span>
+                  <span style={expandedIndex !== null && item.level ? { paddingLeft: (item.level - 1) * 8 } : undefined}>{item.label || emptyLabel}</span>
                 </span>
               )}
             </button>
@@ -145,7 +154,7 @@ export const MessageAnchors = forwardRef<MessageAnchorsHandle, MessageAnchorsPro
           aria-hidden="true"
         >
           <small>{preview && displayedPreviewIndex !== null ? String(displayedPreviewIndex + 1).padStart(2, "0") : ""}</small>
-          <span>{preview?.label || (preview ? "（无文字消息）" : "")}</span>
+          <span>{preview?.label || (preview ? emptyLabel : "")}</span>
         </div>
       )}
     </>

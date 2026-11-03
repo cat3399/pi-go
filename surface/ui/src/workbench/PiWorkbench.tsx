@@ -117,6 +117,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     { kind: "file"; path: string } | { kind: "terminal"; id: string | null } | null
   >(null);
   const previewPath = sidePanel?.kind === "file" ? sidePanel.path : "";
+  const [previewAnchorsAvailable, setPreviewAnchorsAvailable] = useState(false);
   const openFile = useCallback((path: string) => setSidePanel(path ? { kind: "file", path } : null), []);
   const openTerminal = useCallback((id: string | null) => setSidePanel({ kind: "terminal", id }), []);
   const [fileRefreshKey, setFileRefreshKey] = useState(0);
@@ -190,14 +191,16 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     ? controller.latestGenerationSpeed.tokensPerSecond
     : null;
   const empty = controller.messages.length === 0 && !controller.streamingMessage;
-  const mobileGesturesEnabled = mobile
+  const mobileGesturesAvailable = mobile
     && controller.status === "ready"
     && !settingsOpen
-    && !sidePanel
     && !projectPickerOpen
     && pointPicker === null
     && !controller.sessionStatsOpen;
+  const mobileGesturesEnabled = mobileGesturesAvailable && !sidePanel;
   const anchorGesturesEnabled = mobileGesturesEnabled && !sidebarOpen;
+  const previewAnchorGesturesEnabled = mobileGesturesAvailable && Boolean(previewPath) && !sidebarOpen;
+  const nativeEdgeGesturesEnabled = mobileGesturesEnabled || (previewAnchorGesturesEnabled && previewAnchorsAvailable);
   const listFiles = useCallback((path: string) => client.listFiles(path), [client]);
   const previewFile = useCallback((path: string) => client.previewFile(path), [client]);
   const downloadFile = useCallback((path: string) => client.downloadFile(path), [client]);
@@ -208,8 +211,8 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   });
 
   useEffect(() => {
-    props.onEdgeGesturesEnabledChange?.(mobileGesturesEnabled);
-  }, [mobileGesturesEnabled, props.onEdgeGesturesEnabledChange]);
+    props.onEdgeGesturesEnabledChange?.(nativeEdgeGesturesEnabled);
+  }, [nativeEdgeGesturesEnabled, props.onEdgeGesturesEnabledChange]);
 
   useEffect(() => () => {
     props.onEdgeGesturesEnabledChange?.(false);
@@ -619,6 +622,9 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           path={previewPath}
           previewFile={previewFile}
           downloadFile={downloadFile}
+          mobile={mobile}
+          anchorsEnabled={!mobile || previewAnchorGesturesEnabled}
+          onAnchorsAvailableChange={setPreviewAnchorsAvailable}
           onClose={() => setSidePanel(null)}
         />
       )}

@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
 import { Download, FileText, LoaderCircle } from "lucide-react";
 import type { FilePreview } from "../contracts";
-import { MarkdownBody } from "../content/MarkdownBody";
+import { MarkdownFilePreview } from "./MarkdownFilePreview";
 import { SidePanel } from "./SidePanel";
 
 interface FilePreviewPanelProps {
   path: string;
   previewFile(path: string): Promise<FilePreview>;
   downloadFile(path: string): Promise<void>;
+  mobile: boolean;
+  anchorsEnabled: boolean;
+  onAnchorsAvailableChange(available: boolean): void;
   onClose(): void;
 }
 
@@ -17,7 +20,7 @@ function normalizedPath(value: string): string {
   return value.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
-export function FilePreviewPanel({ path, previewFile, downloadFile, onClose }: FilePreviewPanelProps) {
+export function FilePreviewPanel({ path, previewFile, downloadFile, mobile, anchorsEnabled, onAnchorsAvailableChange, onClose }: FilePreviewPanelProps) {
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -86,44 +89,45 @@ export function FilePreviewPanel({ path, previewFile, downloadFile, onClose }: F
         </button>
       </>}
     >
-      <div className="pi-file-preview-content">
+      <div className="pi-file-preview-body">
         {downloadError && <div className="pi-inline-error" role="alert">下载失败：{downloadError}</div>}
-        {loading ? (
-          <div className="pi-file-preview-status" role="status">
-            <LoaderCircle size={17} />
-            <span>正在读取文件…</span>
-          </div>
-        ) : error ? (
-          <div className="pi-file-preview-status is-error" role="alert">{error}</div>
-        ) : preview?.kind === "text" ? (
-          markdown && textMode === "preview" ? (
-            <div className="pi-file-preview-markdown">
-              <MarkdownBody>{preview.content ?? ""}</MarkdownBody>
-            </div>
-          ) : (
-            <pre className="pi-file-preview-source"><code>{preview.content ?? ""}</code></pre>
-          )
-        ) : preview?.kind === "image" && preview.sourceUrl ? (
-          <div className="pi-file-preview-media is-image">
-            <img src={preview.sourceUrl} alt={preview.name} />
-          </div>
-        ) : preview?.kind === "audio" && preview.sourceUrl ? (
-          <div className="pi-file-preview-media is-audio">
-            <audio controls preload="metadata" src={preview.sourceUrl}>
-              当前环境无法播放这个音频文件。
-            </audio>
-          </div>
-        ) : preview?.kind === "pdf" && preview.sourceUrl ? (
-          <iframe className="pi-file-preview-frame" src={preview.sourceUrl} title={`预览 ${preview.name}`} />
-        ) : preview?.kind === "docx" && preview.content ? (
-          <iframe
-            className="pi-file-preview-frame"
-            srcDoc={preview.content}
-            sandbox=""
-            title={`预览 ${preview.name}`}
-          />
+        {!loading && !error && markdown && textMode === "preview" ? (
+          <MarkdownFilePreview content={preview.content ?? ""} mobile={mobile} anchorsEnabled={anchorsEnabled}
+            onAnchorsAvailableChange={onAnchorsAvailableChange} />
         ) : (
-          <div className="pi-file-preview-status is-error" role="alert">无法预览这个文件</div>
+          <div className="pi-file-preview-content">
+            {loading ? (
+              <div className="pi-file-preview-status" role="status">
+                <LoaderCircle size={17} />
+                <span>正在读取文件…</span>
+              </div>
+            ) : error ? (
+              <div className="pi-file-preview-status is-error" role="alert">{error}</div>
+            ) : preview?.kind === "text" ? (
+              <pre className="pi-file-preview-source"><code>{preview.content ?? ""}</code></pre>
+            ) : preview?.kind === "image" && preview.sourceUrl ? (
+              <div className="pi-file-preview-media is-image">
+                <img src={preview.sourceUrl} alt={preview.name} />
+              </div>
+            ) : preview?.kind === "audio" && preview.sourceUrl ? (
+              <div className="pi-file-preview-media is-audio">
+                <audio controls preload="metadata" src={preview.sourceUrl}>
+                  当前环境无法播放这个音频文件。
+                </audio>
+              </div>
+            ) : preview?.kind === "pdf" && preview.sourceUrl ? (
+              <iframe className="pi-file-preview-frame" src={preview.sourceUrl} title={`预览 ${preview.name}`} />
+            ) : preview?.kind === "docx" && preview.content ? (
+              <iframe
+                className="pi-file-preview-frame"
+                srcDoc={preview.content}
+                sandbox=""
+                title={`预览 ${preview.name}`}
+              />
+            ) : (
+              <div className="pi-file-preview-status is-error" role="alert">无法预览这个文件</div>
+            )}
+          </div>
         )}
       </div>
     </SidePanel>
