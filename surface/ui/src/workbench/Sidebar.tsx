@@ -1,8 +1,10 @@
 import { KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Ellipsis, FileText, Folder, FolderOpen, LoaderCircle, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
+import { Check, Copy, Ellipsis, FileText, Folder, FolderOpen, LoaderCircle, MessageSquare, Pencil, Plus, Settings, SquarePen, Trash2, X } from "lucide-react";
 import type { FileList, ProjectInfo, SessionInfo } from "../contracts";
 import { AnchoredPopover } from "../primitives/AnchoredPopover";
-import { IconAction, InlineActions } from "../primitives/InlineActions";
+import { IconAction } from "../primitives/InlineActions";
+import { ContextMenu, useContextMenu } from "../primitives/ContextMenu";
+import { writeClipboardText } from "../clipboard";
 import { InlineConfirmation } from "../primitives/InlineConfirmation";
 import { OverlayScrollbar } from "../primitives/OverlayScrollbar";
 import { FileTree } from "./FileTree";
@@ -82,14 +84,47 @@ function SessionRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const startRename = (event: MouseEvent) => {
-    event.stopPropagation();
+  const startRename = () => {
     setError("");
     setRenameValue(session.name?.trim() || session.firstMessage?.trim() || "");
     setRenaming(true);
     requestAnimationFrame(() => inputRef.current?.select());
+  };
+
+  const copyID = async () => {
+    setError("");
+    setCopied(false);
+    try {
+      await writeClipboardText(session.id);
+      setCopied(true);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const menu = useContextMenu<"rename" | "copy-id" | "delete", HTMLAnchorElement | HTMLButtonElement>((action) => {
+    if (action === "rename") startRename();
+    if (action === "copy-id") void copyID();
+    if (action === "delete") { setError(""); setConfirmDelete(true); }
+  });
+  const triggerProps = {
+    ref: (element: HTMLAnchorElement | HTMLButtonElement | null) => { menu.anchorRef.current = element; },
+    "aria-haspopup": "menu" as const,
+    "aria-expanded": menu.open,
+    "aria-keyshortcuts": "Shift+F10",
+    onPointerDown: menu.onPointerDown,
+    onContextMenu: menu.onContextMenu,
+    onKeyDown: menu.onTriggerKeyDown,
+    onClickCapture: menu.onClickCapture,
   };
 
   const commitRename = async () => {
@@ -162,35 +197,30 @@ function SessionRow({
 
   const content = <>
     <span>{sessionTitle(session)}</span>
+    {copied && <Check size={12} role="status" aria-label="已复制对话 ID" />}
     {running && <LoaderCircle className="pi-session-running-spinner pi-loading-spinner" size={12} role="img" aria-label="运行中" />}
     {unread && <i className="pi-session-unread" role="img" aria-label="未读" />}
   </>;
   return (
+    <>
     <div
-      className={`pi-session-item ${active ? "is-active" : ""}`}
+      className={`pi-session-item ${active ? "is-active" : ""} ${menu.open ? "is-menu-open" : ""}`}
       title={sessionTitle(session)}
     >
-      {href ? <a className="pi-session-open" href={href} aria-current={active ? "page" : undefined}
+      {href ? <a {...triggerProps} className="pi-session-open" href={href} aria-current={active ? "page" : undefined}
         onClick={(event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-          event.preventDefault(); onSelect();
+          event.preventDefault(); menu.dismiss(); onSelect();
         }}>{content}</a>
-        : <button className="pi-session-open" type="button" aria-current={active ? "true" : undefined} onClick={onSelect}>{content}</button>}
-      <InlineActions className="pi-sidebar-row-actions pi-session-actions">
-        <IconAction label="重命名会话" onClick={startRename}>
-          <Pencil size={15} />
-        </IconAction>
-        <IconAction
-          label="删除会话"
-          onClick={(event) => {
-            event.stopPropagation();
-            setConfirmDelete(true);
-          }}
-        >
-          <Trash2 size={15} />
-        </IconAction>
-      </InlineActions>
+        : <button {...triggerProps} className="pi-session-open" type="button" aria-current={active ? "true" : undefined} onClick={() => { menu.dismiss(); onSelect(); }}>{content}</button>}
+      <ContextMenu name={sessionTitle(session)} menu={menu} items={[
+        { id: "rename", label: "重命名", icon: <Pencil size={15} /> },
+        { id: "copy-id", label: "复制对话 ID", icon: <Copy size={15} /> },
+        { id: "delete", label: "删除", icon: <Trash2 size={15} />, danger: true },
+      ]} />
     </div>
+    {error && <div className="pi-sidebar-row-error" role="alert">{error}</div>}
+    </>
   );
 }
 

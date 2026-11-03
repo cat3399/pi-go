@@ -435,6 +435,19 @@ input:-webkit-autofill:focus {
   text-align: left;
   text-decoration: none;
   cursor: pointer;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.pi-session-item.is-menu-open {
+  background: var(--pi-hover);
+}
+
+.pi-sidebar-row-error {
+  padding: 4px 9px 4px 32px;
+  color: var(--pi-error);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .pi-session-open > span:first-child {
@@ -460,47 +473,6 @@ input:-webkit-autofill:focus {
   box-shadow: inset 0 0 0 0.5px var(--pi-border-strong);
 }
 
-.pi-sidebar-row-actions {
-  position: absolute;
-  z-index: 2;
-  top: 50%;
-  right: 4px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding-left: 12px;
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--pi-text) 5.5%, var(--pi-panel)) 12px
-  );
-  transform: translateY(-50%);
-  transition: opacity 100ms ease, visibility 0s linear 100ms;
-}
-
-.pi-session-item:hover .pi-session-actions,
-.pi-session-item:focus-within .pi-session-actions {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transition-delay: 0s;
-}
-
-.pi-session-item:hover .pi-session-running-spinner,
-.pi-session-item:focus-within .pi-session-running-spinner {
-  opacity: 0;
-}
-
-.pi-session-item.is-active .pi-session-actions {
-  background: linear-gradient(to right, transparent, #ececec 10px);
-  background: linear-gradient(
-    to right,
-    transparent,
-    color-mix(in srgb, var(--pi-text) 8%, var(--pi-panel)) 10px
-  );
-}
-
-.pi-sidebar-row-actions .pi-icon-action,
 .pi-project-actions .pi-icon-action,
 .pi-inline-confirmation .pi-icon-action {
   flex: 0 0 auto;
@@ -5155,11 +5127,6 @@ input:-webkit-autofill:focus {
   height: 40px;
 }
 
-.pi-workbench.is-mobile .pi-sidebar-row-actions .pi-icon-action {
-  width: 36px;
-  height: 36px;
-}
-
 .pi-workbench.is-mobile .pi-project-actions .pi-icon-action {
   width: 36px;
   height: 36px;
@@ -5168,17 +5135,6 @@ input:-webkit-autofill:focus {
 .pi-workbench.is-mobile .pi-inline-confirmation .pi-icon-action {
   width: 34px;
   height: 34px;
-}
-
-.pi-workbench.is-mobile .pi-session-item.is-active .pi-session-actions {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
-  transition-delay: 0s;
-}
-
-.pi-workbench.is-mobile .pi-session-item.is-active .pi-session-running-spinner {
-  opacity: 0;
 }
 
 .pi-workbench.is-mobile .pi-sidebar-tabs button {
@@ -5510,9 +5466,10 @@ input:-webkit-autofill:focus {
   transform: rotate(90deg);
 }
 
-.pi-file-context-menu {
+.pi-context-menu {
   z-index: 90;
-  width: 120px;
+  width: max-content;
+  min-width: 120px;
   padding: 4px;
   overflow-y: auto;
   border: 1px solid var(--pi-border);
@@ -5526,7 +5483,7 @@ input:-webkit-autofill:focus {
   -webkit-touch-callout: none;
 }
 
-.pi-file-context-menu button {
+.pi-context-menu button {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -5541,21 +5498,27 @@ input:-webkit-autofill:focus {
   font-size: 12px;
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.pi-file-context-menu button:hover,
-.pi-file-context-menu button:focus-visible,
-.pi-file-context-menu button.is-active {
+.pi-context-menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pi-context-menu button:hover,
+.pi-context-menu button:focus-visible,
+.pi-context-menu button.is-active {
   background: var(--pi-hover);
   color: var(--pi-text);
 }
 
-.pi-file-context-menu button.is-danger {
+.pi-context-menu button.is-danger {
   color: var(--pi-error);
 }
 
 @media (pointer: coarse) {
-  .pi-file-context-menu button { min-height: 44px; }
+  .pi-context-menu button { min-height: 44px; }
 }
 
 .pi-file-tree-status,
