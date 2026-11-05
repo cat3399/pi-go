@@ -109,7 +109,10 @@ func displayValue(value string) string {
 // String is intentionally a short terminal summary, not a generated report.
 func (d Diff) String() string {
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s: %s -> %s\n", d.After.Models.Package, d.Before.Models.Version, d.After.Models.Version)
+	fmt.Fprintf(&text, "%s: %s -> %s\n", d.After.Models.Name, sourceRevision(d.Before.Models), sourceRevision(d.After.Models))
+	if d.Before.Policy != d.After.Policy {
+		fmt.Fprintf(&text, "Local policy: %s -> %s\n", sourceRevision(d.Before.Policy), sourceRevision(d.After.Policy))
+	}
 	fmt.Fprintf(&text, "Models: +%d / -%d / ~%d; defaults: %d; provider metadata: %d\n", len(d.Added), len(d.Removed), len(d.Changed), len(d.Defaults), len(d.Providers))
 	for _, group := range []struct {
 		label  string
@@ -127,4 +130,14 @@ func (d Diff) String() string {
 		text.WriteString("Already up to date.\n")
 	}
 	return text.String()
+}
+
+func sourceRevision(source Source) string {
+	if source.Revision != "" {
+		return source.Revision
+	}
+	if len(source.Integrity) > 23 {
+		return source.Integrity[:23]
+	}
+	return source.Integrity
 }

@@ -15,7 +15,7 @@ import (
 // RunModels is the command-line adapter for installed built-in data updates.
 func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "Usage: pi-go models update [--version <release>] [--agent-dir <path>]")
+		fmt.Fprintln(stdout, "Usage: pi-go models update [--source <models.dev JSON file>] [--agent-dir <path>]")
 		return 0
 	}
 	if args[0] != "update" {
@@ -24,7 +24,7 @@ func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 	flags := flag.NewFlagSet("pi-go models update", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	version := flags.String("version", "latest", "upstream release version or latest")
+	source := flags.String("source", "", "replay a saved models.dev JSON file instead of downloading it")
 	agentDir := flags.String("agent-dir", "", "agent data directory")
 	if err := flags.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -42,8 +42,8 @@ func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 1
 	}
 	target := filepath.Join(paths.AgentDir, catalog.Filename)
-	fmt.Fprintln(stdout, "Syncing built-in models from upstream...")
-	diff, err := model.SyncBuiltinCatalog(ctx, target, *version)
+	fmt.Fprintln(stdout, "Syncing built-in models from models.dev...")
+	diff, err := model.SyncBuiltinCatalog(ctx, target, *source)
 	if err != nil {
 		fmt.Fprintln(stderr, "pi-go models update:", err)
 		return 1

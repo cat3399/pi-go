@@ -14,20 +14,20 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 const Filename = "builtin-models.json"
 const maxDocumentBytes = 32 << 20
 
 type Source struct {
-	Package   string `json:"package"`
-	Version   string `json:"version"`
-	Commit    string `json:"commit,omitempty"`
+	Name      string `json:"name"`
+	URL       string `json:"url,omitempty"`
+	Revision  string `json:"revision,omitempty"`
 	Integrity string `json:"integrity"`
 }
 
 type Sources struct {
-	Models   Source `json:"models"`
-	Defaults Source `json:"defaults"`
+	Models Source `json:"models"`
+	Policy Source `json:"policy"`
 }
 
 // Preference is ordered: the first available provider default wins.
@@ -40,8 +40,9 @@ type Provider struct {
 	ID      string `json:"id"`
 	API     string `json:"api"`
 	BaseURL string `json:"baseUrl"`
-	// Keep upstream objects intact, including fields unknown to this binary.
-	// Entry keys are upstream indexes; model identity comes from each object's id.
+	// Entries use the runtime model shape. The modelsDev member retains the
+	// original source object, including fields this binary cannot yet project.
+	// Model identity comes from each object's id, not its index key.
 	Models map[string]map[string]json.RawMessage `json:"models"`
 }
 
@@ -62,7 +63,35 @@ func Decode(raw []byte) (Document, error) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return doc, fmt.Errorf("decode built-in model catalog: %w", err)
 	}
+	if doc.SchemaVersion == 1 {
+		// Installed snapshots from older binaries remain readable. This is
+		// a local format migration, not an updater for the former data source.
+		var legacy struct {
+			Sources struct {
+				Models   legacySource `json:"models"`
+				Defaults legacySource `json:"defaults"`
+			} `json:"sources"`
+		}
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			return doc, err
+		}
+		doc.Sources = Sources{Models: legacy.Sources.Models.source(), Policy: legacy.Sources.Defaults.source()}
+		doc.SchemaVersion = SchemaVersion
+	}
 	return doc, doc.Validate()
+}
+
+type legacySource struct {
+	Package   string `json:"package"`
+	Version   string `json:"version"`
+	Integrity string `json:"integrity"`
+}
+
+func (s legacySource) source() Source {
+	if s.Version == "" {
+		return Source{}
+	}
+	return Source{Name: s.Package, Revision: s.Version, Integrity: s.Integrity}
 }
 
 func Read(path string) (Document, error) {
@@ -82,8 +111,8 @@ func (d Document) Validate() error {
 	if d.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported built-in catalog schema %d", d.SchemaVersion)
 	}
-	for _, source := range []Source{d.Sources.Models, d.Sources.Defaults} {
-		if source.Package == "" || source.Version == "" || source.Integrity == "" {
+	for _, source := range []Source{d.Sources.Models, d.Sources.Policy} {
+		if source.Name == "" || source.Integrity == "" {
 			return fmt.Errorf("built-in catalog source metadata is incomplete")
 		}
 	}

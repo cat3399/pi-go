@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
@@ -192,7 +193,7 @@ func NewService(options ServiceOptions) (*Service, error) {
 	}
 	modelCatalogURL := strings.TrimRight(strings.TrimSpace(options.ModelCatalogURL), "/")
 	if modelCatalogURL == "" {
-		modelCatalogURL = "https://models.dev/api.json"
+		modelCatalogURL = catalog.ModelsDevURL
 	}
 	skillsAPI := strings.TrimRight(strings.TrimSpace(options.SkillsAPIURL), "/")
 	if skillsAPI == "" {

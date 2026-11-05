@@ -25,7 +25,7 @@ Actions:
   devices  List connected Android devices
   e2e-core Run deterministic production/Application/transport E2E tests
   sync-models
-           Sync built-in model data from upstream and show a short diff
+           Sync built-in model data from models.dev and show a short diff
   e2e-deepseek
            Run opt-in live DeepSeek E2E tests (requires DEEPSEEK_API_KEY)
 
@@ -47,7 +47,7 @@ Examples:
   make dev SURFACE=web ARGS='--cwd /path/to/project'
   make e2e-core
   make sync-models
-  make sync-models ARGS='-version <release>'
+  make sync-models ARGS='-source /path/to/models.dev.json'
   DEEPSEEK_API_KEY='...' make e2e-deepseek
 EOF
 }

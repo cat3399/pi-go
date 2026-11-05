@@ -63,33 +63,40 @@ pi-go run --model local/local-model -p "hello"
 
 ```sh
 make sync-models
-make sync-models ARGS='-version <上游发行版本>'
+make sync-models ARGS='-source /path/to/models.dev.json'
 ```
 
-默认同步最新正式发行包，也可以指定版本来重现或回退数据。完成后终端会显示新增、移除、
-参数变更、默认模型变更及 Provider 元数据变更。
+默认直接读取 [models.dev 的公开 JSON 接口](https://models.dev/api.json)，不下载 pi 的 npm
+包，也不解析 JavaScript。`-source` 可以回放保存的同一接口响应，以重现或回退模型资料；
+原来的 `-version` 参数已移除。完成后终端会显示新增、移除、参数变更等差异。
 
-仓库数据统一保存在 `internal/model/catalogdata/catalog.json`，包含模型原始 JSON、有序的
-Provider 默认模型、默认 API / 地址和上游包版本、可用的 commit、完整性信息。同步读取同一发行版本的
-`pi-ai` 模型数据和 `pi-coding-agent` 默认选择，保留原始模型的未知字段。
+`internal/model/catalogdata/policy.json` 是随 Go 程序发布的本地适配规则，维护有序的默认模型、
+已实现的 Provider 身份、协议、地址、特殊模型列表和兼容性修正。同步不会改写该文件。
+已有模型的显式兼容参数、推理等级映射及上下文策略保留在这里；新增模型依据 models.dev 的
+能力信息和已有 Go 协议适配规则生成。新增协议或修改本地适配规则仍需发布新版程序。
 
-同步按上游的聊天模型目录规则读取 `type: "chat"`，同时兼容尚未提供 `type` 的旧发行包；
-分类和图像生成模型不会进入 Agent 的聊天模型列表。上游改名后的 `azure` 目录会映射到
-pi-go 已注册的 `azure-openai-responses`，模型与默认选择使用同一个映射，现有认证、配置和
-会话引用无需改名。该 Provider 仅同步已实现的 Azure Responses 分组；上游新增的 Foundry
-Chat Completions 需要独立的 Azure 请求适配，不随目录更新启用。
+生成结果保存在 `internal/model/catalogdata/catalog.json`，记录数据源地址、源响应与本地规则的
+SHA-256。每个在线模型的 `modelsDev` 字段保留原始模型对象，包括尚未投影的字段。价格按每百万
+token 映射，并保留可表示的长上下文价格档位；本地兼容规则优先于通用模型资料。
+
+只有支持工具调用的聊天模型进入目录；分类和图像生成模型不会进入 Agent 的聊天模型列表。
+`azure` 映射到已注册的 `azure-openai-responses`，仅接受该适配器支持的 OpenAI 模型，不启用
+Foundry 的其他协议。`togetherai` 映射到 `together`，并排除已标记退役的模型。现有认证、配置和
+会话引用无需改名。models.dev 没有独立的 Codex OAuth 目录，因此 `openai-codex` 使用本地规则中
+明确列出的模型，不从普通 OpenAI API 的模型列表推断订阅可用性。
 
 已安装的程序也可以独立更新数据，无需重新编译：
 
 ```sh
 pi-go models update
-pi-go models update --version <上游发行版本>
+pi-go models update --source /path/to/models.dev.json
 pi-go models update --agent-dir /path/to/agent-data
 ```
 
 该命令将完整目录原子写入用户数据目录的 `builtin-models.json`。下次启动或 `/reload` 时，
 Runtime 使用这份目录作为内置基线；文件不存在时使用二进制嵌入的数据。数据无效时保留进程内
 上一份有效基线，首次启动则使用嵌入数据，并给出诊断。不会在启动时联网。
+旧版已安装目录可直接读取，下次更新时写入新格式，不再访问旧数据源。
 
 合并顺序仍为：内置基线 → 已注册 Provider 的动态目录缓存 → 用户 Provider / 模型定义与
 `modelOverrides`。默认模型选择仍先考虑显式选择、会话、scope 和用户 `settings.json`，

@@ -18,6 +18,9 @@ import (
 //go:embed catalogdata/catalog.json
 var embeddedCatalogJSON []byte
 
+//go:embed catalogdata/policy.json
+var embeddedCatalogPolicyJSON []byte
+
 // builtinCatalog is an immutable input to Runtime's existing composition.
 // Neither installed data nor this projection owns user settings or state.
 type builtinCatalog struct {
@@ -77,7 +80,7 @@ func projectBuiltinCatalog(document catalog.Document) (*builtinCatalog, error) {
 	return result, nil
 }
 
-// Built-in metadata uses pi-ai's Model shape. In particular, an empty baseUrl
+// Built-in metadata uses the runtime Model shape. In particular, an empty baseUrl
 // is valid for Azure; models.json's nonempty user-property schema is different.
 type catalogModel struct {
 	Provider         string                             `json:"provider"`
@@ -117,7 +120,7 @@ func projectBuiltinModel(providerID string, raw json.RawMessage) (Model, error) 
 	}
 	for key := range object {
 		switch key {
-		case "provider", "id", "name", "api", "baseUrl", "headers", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "compat":
+		case "provider", "id", "name", "api", "baseUrl", "headers", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "compat", "modelsDev":
 		default:
 			model.UnknownFields = append(model.UnknownFields, key)
 		}
@@ -175,7 +178,7 @@ func builtinProviderConfigs() []ProviderConfig {
 // SyncBuiltinCatalog updates only the target built-in data file. It does not
 // modify adjacent settings, user models, authentication, or provider caches.
 // The same operation backs development sync and the installed-data command.
-func SyncBuiltinCatalog(ctx context.Context, target, version string) (catalog.Diff, error) {
+func SyncBuiltinCatalog(ctx context.Context, target, sourceFile string) (catalog.Diff, error) {
 	baseline, err := catalog.Decode(embeddedCatalogJSON)
 	if err != nil {
 		return catalog.Diff{}, err
@@ -189,7 +192,11 @@ func SyncBuiltinCatalog(ctx context.Context, target, version string) (catalog.Di
 	if _, err := projectBuiltinCatalog(previous); err != nil {
 		return catalog.Diff{}, err
 	}
-	updated, err := catalog.Sync(ctx, baseline, version)
+	policy, err := catalog.DecodePolicy(embeddedCatalogPolicyJSON)
+	if err != nil {
+		return catalog.Diff{}, err
+	}
+	updated, err := catalog.Sync(ctx, policy, sourceFile)
 	if err != nil {
 		return catalog.Diff{}, err
 	}
