@@ -52,6 +52,19 @@ func WithBashSessionEnvironment(ctx context.Context, session BashSessionEnvironm
 	return WithBashExecutionContext(ctx, execution)
 }
 
+// WithAdditionalBashEnvironment merges host-owned, per-session access values
+// without mutating the base process environment or a caller's context.
+func WithAdditionalBashEnvironment(ctx context.Context, values map[string]string) context.Context {
+	execution := bashExecutionContextFromContext(ctx)
+	if execution.Environment == nil {
+		execution.Environment = make(map[string]string)
+	}
+	for key, value := range values {
+		execution.Environment[key] = value
+	}
+	return WithBashExecutionContext(ctx, execution)
+}
+
 func bashExecutionContextFromContext(ctx context.Context) BashExecutionContext {
 	if ctx == nil {
 		return BashExecutionContext{}

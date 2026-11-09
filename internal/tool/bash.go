@@ -15,12 +15,15 @@ import (
 )
 
 var strippedSessionEnvironment = map[string]struct{}{
-	"PI_EXECUTABLE":      {},
-	"PI_SESSION_ID":      {},
-	"PI_SESSION_FILE":    {},
-	"PI_PROVIDER":        {},
-	"PI_MODEL":           {},
-	"PI_REASONING_LEVEL": {},
+	"PI_EXECUTABLE":        {},
+	"PI_SESSION_ID":        {},
+	"PI_SESSION_FILE":      {},
+	"PI_SESSION_ENDPOINT":  {},
+	"PI_SESSION_TOKEN":     {},
+	"PI_SESSION_AGENT_DIR": {},
+	"PI_PROVIDER":          {},
+	"PI_MODEL":             {},
+	"PI_REASONING_LEVEL":   {},
 }
 
 const BashToolName = "bash"

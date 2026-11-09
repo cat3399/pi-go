@@ -48,6 +48,9 @@ func parseLaunchOptions(args []string) (launchOptions, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "session" {
+		os.Exit(cli.RunSession(context.Background(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Println(product.Version)
 		return
@@ -61,6 +64,7 @@ func main() {
 	}
 
 	bridge := NewGUIBridge(coreapp.ProductionConfig{
+		AttachSession: cli.AttachSession,
 		WorkingDir:    options.cwd,
 		AgentDir:      options.agentDir,
 		DocsDir:       options.docsDir,

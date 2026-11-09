@@ -18,6 +18,12 @@ func (s *ApplicationSession) Dispatch(ctx context.Context, command Command) (Com
 		return nil, fmt.Errorf("%w: nil command", ErrInvalidCommand)
 	}
 	switch command := command.(type) {
+	case ContextChangeCommand, ContextStatusCommand:
+		current, _, err := s.currentSession()
+		if err != nil {
+			return nil, err
+		}
+		return BorrowSessionContext(current).Dispatch(ctx, command)
 	case TerminalCommand:
 		session, _, err := s.currentSession()
 		if err != nil {

@@ -7,6 +7,7 @@ pi-go 通过同一套 Go Agent 核心提供命令行、TUI、Web 和桌面入口
 - [Provider 与认证](providers.md)
 - [模型配置](models.md)
 - [工具、技能与提示模板](tools.md)
+- [上下文管理与历史读取](context-management.md)
 - [版本、运行状态与本地源码](self-knowledge.md)
 - [核心架构](ARCHITECTURE.md)
 - [Surface 架构](SURFACES.md)

@@ -398,6 +398,9 @@ func contextProjectionIndexes(path []int, entries []Entry) []int {
 		if compaction := entries[entryIndex].compaction; compaction != nil {
 			latest = position
 			firstKept = compaction.FirstKeptEntryID
+		} else if _, ok := entries[entryIndex].ContextHandoff(); ok {
+			latest = position
+			firstKept = ""
 		}
 	}
 	if latest < 0 {
@@ -420,6 +423,13 @@ func contextProjectionIndexes(path []int, entries []Entry) []int {
 }
 
 func appendEntryToContext(context *Context, entry Entry) {
+	if handoff, ok := entry.ContextHandoff(); ok {
+		message := handoffMessage(entry, handoff)
+		context.agentMessages = append(context.agentMessages, message)
+		converted, _ := agentmsg.ConvertToLLM([]agentmsg.Message{message})
+		context.messages = append(context.messages, converted...)
+		return
+	}
 	if message, ok := entry.AgentMessage(); ok {
 		context.agentMessages = append(context.agentMessages, message)
 		converted, err := agentmsg.ConvertToLLM([]agentmsg.Message{message})

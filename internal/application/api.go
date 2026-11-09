@@ -32,6 +32,7 @@ type API interface {
 	LiveState(string) (State, bool, error)
 	ReadLiveSession(string) (LiveSnapshot, bool, error)
 	ReadHistory(string, session.HistoryQuery) (HistorySnapshot, error)
+	ReadHistoryView(string, session.HistoryViewQuery) (session.HistoryView, error)
 	ReadRuns(string, session.RunsQuery) (RunsSnapshot, error)
 	ReadNodes(string, session.NodeQuery) (NodesSnapshot, error)
 	ReadSessionMetadata(string) (SessionSnapshot, error)

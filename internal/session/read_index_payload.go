@@ -41,7 +41,8 @@ func (r *ReadIndex) projectEntry(entry Entry, offset int64) Entry {
 	if entry.compaction != nil {
 		entry.compaction = &CompactionRecord{FirstKeptEntryID: entry.compaction.FirstKeptEntryID}
 	}
-	if _, label := entry.payload.(LabelPayload); !label {
+	_, handoff := entry.ContextHandoff()
+	if _, label := entry.payload.(LabelPayload); !label && !handoff {
 		entry.payload = nil
 	}
 	entry.raw, entry.message, entry.diagnostics = nil, nil, nil
@@ -156,6 +157,9 @@ func readIndexBytes(header Header, entries []Entry, summary sessionInfoSummary, 
 		}
 		if entry.compaction != nil {
 			total += int64(256 + len(entry.compaction.FirstKeptEntryID))
+		}
+		if payload, ok := entry.payload.(CustomPayload); ok {
+			total += int64(64 + len(payload.CustomType) + cap(payload.Data))
 		}
 		if label, ok := entry.payload.(LabelPayload); ok {
 			total += int64(64 + len(label.TargetID))

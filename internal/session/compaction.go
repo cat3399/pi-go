@@ -551,6 +551,12 @@ func prepareCompaction(path []Entry, settings CompactionSettings) (compactionPre
 	previousSummary := ""
 	boundaryStart := 0
 	for index := len(path) - 1; index >= 0; index-- {
+		if handoff, ok := path[index].ContextHandoff(); ok {
+			previousIndex = index
+			previousSummary = handoff.Text
+			boundaryStart = index + 1
+			break
+		}
 		if record, ok := path[index].Compaction(); ok {
 			previousIndex = index
 			previousSummary = record.Summary

@@ -58,5 +58,7 @@ func (t *sessionToolExecutor) executionContext(ctx context.Context) context.Cont
 	}
 	s.selectionMu.RUnlock()
 	metadata.Executable, _ = os.Executable()
-	return tool.WithBashSessionEnvironment(ctx, metadata)
+	_, environment := s.contextAccessSnapshot()
+	ctx = tool.WithBashSessionEnvironment(ctx, metadata)
+	return tool.WithAdditionalBashEnvironment(ctx, environment)
 }

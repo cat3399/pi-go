@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"sync"
@@ -462,11 +463,22 @@ type AgentSession struct {
 	// agent_settled callback joins the same generation, so callers that began
 	// waiting on the preceding run do not return until the replacement run also
 	// settles. run.done remains the completion signal for one sessionRun only.
-	idleWait                chan struct{}
-	settlingCallbacks       uint32
-	closing                 bool
-	closed                  bool
-	shutdown                *sessionShutdownAttempt
+	idleWait          chan struct{}
+	settlingCallbacks uint32
+	closing           bool
+	closed            bool
+	shutdown          *sessionShutdownAttempt
+
+	// Context requests use the existing run admission and turn boundaries.
+	// These fields and the borrowed host adapter lifetime use lifecycleMu.
+	contextRequest            *pendingContextChange
+	lastContextChange         *ContextChangeResult
+	contextAccessInstructions string
+	contextAccessEnvironment  map[string]string
+	contextAccessCloser       io.Closer
+	contextReminderKey        string
+	contextRebuildPending     bool
+
 	retryPolicy             RetryPolicy
 	retryEnabled            bool
 	resolveRuntimeSettings  func() RuntimeControlSettings
@@ -670,8 +682,9 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		ConvertToLLM: config.ConvertToLLM, GetAPIKey: config.GetAPIKey,
 		MessageEnd:   s.messageEndTransform,
 		SteeringMode: config.SteeringMode, FollowUpMode: config.FollowUpMode,
-		Now:         config.Now,
-		PrepareTurn: s.prepareTurn,
+		Now:             config.Now,
+		PrepareTurn:     s.prepareTurn,
+		PrepareNextTurn: s.prepareContextChange,
 	})
 	if err != nil {
 		return nil, err
@@ -1214,6 +1227,13 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 	if err := s.rejectIfClosed(); err != nil {
 		return TurnSnapshot{}, err
 	}
+	s.lifecycleMu.Lock()
+	rebuilt := s.contextRebuildPending
+	s.contextRebuildPending = false
+	s.unlockLifecycle()
+	if rebuilt {
+		turn.Messages = s.loop.State().Messages()
+	}
 	compacted := turn.Turn > 1 && s.compactBeforeNextAssistantResponse(ctx, turn)
 	s.selectionMu.RLock()
 	state, executor := s.loop.runtimeSnapshot()
@@ -1229,7 +1249,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 	resolver := s.resolveStream
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
-	if compacted {
+	if compacted || rebuilt {
 		snapshot.Messages = state.Messages()
 	}
 	s.lifecycleMu.Lock()
@@ -1253,6 +1273,9 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 		OnHeaders:  s.hooks.BeforeProviderHeaders,
 		OnResponse: s.hooks.AfterProviderResponse,
 	})
+	if err := s.prepareContextReminder(&snapshot, turn.Messages); err != nil {
+		return TurnSnapshot{}, err
+	}
 	return snapshot, nil
 }
 
@@ -2339,11 +2362,14 @@ func (s *AgentSession) latestCompactionBoundary() (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
-	entry, ok := session.LatestCompactionEntry(branch)
-	if !ok {
-		return time.Time{}, false
+	for i := len(branch) - 1; i >= 0; i-- {
+		_, handoff := branch[i].ContextHandoff()
+		_, compacted := branch[i].Compaction()
+		if handoff || compacted {
+			return branch[i].Timestamp(), true
+		}
 	}
-	return entry.Timestamp(), true
+	return time.Time{}, false
 }
 
 func compactionThresholdExceeded(tokens, contextWindow, reserveTokens uint64) bool {
@@ -3007,6 +3033,10 @@ func (s *AgentSession) admitSessionRun(ctx context.Context, agentPipeline bool) 
 	if s.run != nil || s.standaloneMutation {
 		return nil, ErrBusy
 	}
+	return s.admitSessionRunLocked(ctx, agentPipeline), nil
+}
+
+func (s *AgentSession) admitSessionRunLocked(ctx context.Context, agentPipeline bool) *sessionRun {
 	runCtx, cancel := context.WithCancelCause(ctx)
 	run := &sessionRun{
 		ctx: runCtx, cancel: cancel, done: make(chan struct{}), phase: PhaseProvider, acceptingQueues: true,
@@ -3016,7 +3046,7 @@ func (s *AgentSession) admitSessionRun(ctx context.Context, agentPipeline bool) 
 		s.idleWait = make(chan struct{})
 	}
 	s.run = run
-	return run, nil
+	return run
 }
 
 func (s *AgentSession) setSessionPhase(run *sessionRun, phase Phase) {
@@ -3036,6 +3066,7 @@ func (s *AgentSession) finishSessionRun(run *sessionRun) {
 		s.unlockLifecycle()
 		return
 	}
+	s.cancelContextChangeLocked(run)
 	s.run = nil
 	s.unlockLifecycle()
 	s.completeSessionRun(run)
@@ -3104,6 +3135,7 @@ func (s *AgentSession) settleSessionRun(run *sessionRun) error {
 		return flushErr
 	}
 	run.agentRunActive = false
+	s.cancelContextChangeLocked(run)
 	s.run = nil
 	s.settlingCallbacks++
 	s.unlockLifecycle()
@@ -3632,7 +3664,11 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	s.lifecycleMu.Lock()
 	s.closed = true
 	s.closing = false
+	contextCloser := s.contextAccessCloser
+	s.contextAccessCloser = nil
+	s.contextAccessEnvironment = nil
 	s.unlockLifecycle()
+	accessCloseErr := closeContextAccess(contextCloser)
 	s.mu.Lock()
 	unsubscribe := s.loopUnsubscribe
 	s.loopUnsubscribe = nil
@@ -3642,7 +3678,7 @@ func (s *AgentSession) Shutdown(ctx context.Context, options SessionShutdownOpti
 	if unsubscribe != nil {
 		unsubscribe()
 	}
-	return nil
+	return accessCloseErr
 }
 
 // Close is the process-level compatibility path and therefore emits quit.
@@ -3685,6 +3721,10 @@ func (s *AgentSession) Compact(ctx context.Context, instructions string) (sessio
 		return session.CompactResult{}, err
 	}
 	defer s.finishSessionRun(run)
+	return s.manualCompaction(run, instructions)
+}
+
+func (s *AgentSession) manualCompaction(run *sessionRun, instructions string) (session.CompactResult, error) {
 	domain, ok := s.beginCompaction(run)
 	if !ok {
 		return session.CompactResult{}, ErrBusy

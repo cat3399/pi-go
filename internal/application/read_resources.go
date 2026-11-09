@@ -18,6 +18,7 @@ const (
 type sessionResourceReader interface {
 	ReadSnapshot(session.SnapshotOptions) (session.ReadSnapshot, error)
 	ReadHistory(session.HistoryQuery) (session.HistoryPage, error)
+	ReadHistoryView(session.HistoryViewQuery) (session.HistoryView, error)
 	ReadRuns(session.RunsQuery) (session.RunsPage, error)
 	ReadNodes(session.NodeQuery) (session.NodePage, error)
 	ReadEntry(string, string) (session.EntrySnapshot, error)

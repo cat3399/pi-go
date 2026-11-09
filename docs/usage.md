@@ -42,6 +42,19 @@ TUI 常用命令：
 通过 `/help` 查看当前界面的完整命令和快捷键。会话以 JSONL 保存，包含消息、工具结果、模型
 切换、分支和压缩等记录。队列、重试、压缩和持久化由核心统一执行。
 
+## 上下文与历史
+
+```sh
+pi-go session list
+pi-go session --id <session-id> history read --view dialogue
+pi-go session --file /path/to/session.jsonl history search '关键词'
+```
+
+模型也可从 bash 使用 `"$PI_EXECUTABLE" session` 查询当前会话、提交短交接后换窗，或请求
+原有摘要压缩。新窗口只带交接，原始历史仍可按 entry ID 读取。运行中的请求先返回 accepted，
+在工具批次落盘后生效；通过 `context status` 检查结果。完整命令与语义见
+[上下文管理与历史读取](context-management.md)。
+
 ## 更新程序
 
 各个 surface 只更新自身的发布产物。Terminal/Web 使用 `pi-go update`，GUI 使用

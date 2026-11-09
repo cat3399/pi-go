@@ -35,13 +35,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "update":
 		return cli.RunUpdate(ctx, args[1:], stdout, stderr)
 	case "run":
-		return app.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdout, stderr)
+		return app.RunProduction(ctx, app.ProductionConfig{AttachSession: cli.AttachSession}, args[1:], stdout, stderr)
 	case "models":
 		return cli.RunModels(ctx, args[1:], stdout, stderr)
+	case "session":
+		return cli.RunSession(ctx, args[1:], stdin, stdout, stderr)
 	case "tui":
 		return runTUI(ctx, args[1:], stdin, stdout, stderr)
 	case "rpc":
-		return rpc.RunProduction(ctx, app.ProductionConfig{}, args[1:], stdin, stdout, stderr)
+		return rpc.RunProduction(ctx, app.ProductionConfig{AttachSession: cli.AttachSession}, args[1:], stdin, stdout, stderr)
 	case "web":
 		return runWeb(ctx, args[1:], stderr)
 	default:
@@ -59,6 +61,7 @@ Commands:
   tui      Run the interactive terminal surface
   web      Serve the WebUI and application API
   rpc      Run the JSONL automation adapter
+  session  Read history and manage the current context
   models   Update installed built-in model data
   update   Update this installation's surface
   version  Print the version

@@ -17,6 +17,7 @@ import (
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/product"
+	"github.com/cat3399/pi-go/surface/cli"
 	websurface "github.com/cat3399/pi-go/surface/web"
 )
 
@@ -62,9 +63,10 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 	service, err := application.NewService(application.ServiceOptions{
 		Context: ctx,
 		Production: app.ProductionConfig{
-			WorkingDir: *cwd,
-			AgentDir:   *agentDir,
-			DocsDir:    *docsDir,
+			AttachSession: cli.AttachSession,
+			WorkingDir:    *cwd,
+			AgentDir:      *agentDir,
+			DocsDir:       *docsDir,
 		},
 	})
 	if err != nil {

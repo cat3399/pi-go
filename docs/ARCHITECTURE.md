@@ -49,6 +49,11 @@ AgentSession 发布配置变更，AgentLoop 在每一轮开始时取得不可变
 
 JSONL 会话文件是持久对话和会话树的事实源。SessionManager 将 entry 解释为当前分支上下文，
 保留 model/thinking change、compaction、branch summary、name、label 和 custom entry/message。
+短交接是带版本的 custom 检查点，SessionManager 在同一投影中识别其窗口边界；原始历史不变。
+AgentSession 在现有工具回合结束边界提交交接，并复用请求前准备更新 Agent 上下文和交付队列。
+`surface/cli` 只提供参数、帮助、输出和本地控制连接，通过 typed Application API 调用核心。
+历史 dialogue/raw 视图与搜索属于 SessionManager，可复用 ReadIndex。具体契约见
+[上下文管理](context-management.md)。
 
 多会话发现使用进程内 catalog 和可从 JSONL 重建的本机缓存。它们只保存列表投影，
 不拥有第二份会话树。

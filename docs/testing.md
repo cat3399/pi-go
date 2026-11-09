@@ -15,6 +15,12 @@ make e2e-core
 provider 或本机测试服务器，验证请求、工具循环、事件、JSONL 持久化与恢复。涉及并发与生命周期
 的修改同时执行 `go test -race`，并运行相关包的 `go vet` 和构建。
 
+上下文换窗的完整场景运行 `go test ./cmd/pi-go -run TestSessionHandoffBinaryEndToEnd`，
+构建正式二进制并验证 provider → bash → CLI → 原会话控制 → 检查点 → 历史读取 → read 续读，
+随后从新进程恢复。仅模型响应使用本机测试服务器；命令、文件和工具均走生产路径。
+`internal/agent` 与 `internal/session` 补充并行工具回执、排队输入、取消、落盘失败、重复请求、
+多窗口、分支、重启和完整对话视图检查。短交接属于 pi-go 扩展；原摘要路径仍使用原版 fixture 验证。
+
 自更新使用本地 HTTPS 发布服务器及真实 Go 可执行 fixture，覆盖不同 surface 的资产选择、
 分页与版本排序、下载校验、terminal/web/gui 运行中程序替换、重装、降级、取消和失败恢复，
 以及 Android APK 选择、下载链接和宿主计划过期。相关检查为

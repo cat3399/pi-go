@@ -43,6 +43,9 @@ type ProductionConfig struct {
 	DocsDir       string
 	Environment   []string
 	SourceBundles []installation.SourceBundle
+	// AttachSession mounts optional host adapters after core construction.
+	// Adapters register their cleanup with the session they borrow.
+	AttachSession func(*agent.AgentSession, string) error
 
 	OpenAIHTTPClient provider.HTTPDoer
 	OpenAIClock      provider.Clock
@@ -522,6 +525,11 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 		},
 		SessionStartEvent: options.SessionStartEvent, Diagnostics: diagnostics, DocsDir: p.docsDir,
 	})
+	if err == nil && p.config.AttachSession != nil {
+		if err = p.config.AttachSession(created.Session, p.agentDir); err != nil {
+			_ = created.Session.Close(context.Background())
+		}
+	}
 	return created, err
 }
 
