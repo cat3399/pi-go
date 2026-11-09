@@ -1432,7 +1432,7 @@ func TestAgentSessionPrePromptThresholdDoesNotRepeatAfterNewBoundary(t *testing.
 	if _, err := transcript.AppendLLMMessage(context.Background(), oldUser); err != nil {
 		t.Fatal(err)
 	}
-	oldAssistant := mustTextTerminalWithProvenance(t, "old reply", llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
+	oldAssistant, _ := llm.NewAssistantTextMessage([]llm.TextBlock{mustTextBlock(t, "old reply")}, llm.FinishStop, mustUsage(t, 120000, 1), agentTestEpoch, llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "model"})
 	if _, err := transcript.AppendLLMMessage(context.Background(), oldAssistant); err != nil {
 		t.Fatal(err)
 	}
@@ -1440,7 +1440,7 @@ func TestAgentSessionPrePromptThresholdDoesNotRepeatAfterNewBoundary(t *testing.
 	hookSawCompactedContext := false
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t, mustTextTerminal(t, "new reply")), SessionManager: transcript, Model: model, ThinkingLevel: provider.ThinkingOff,
-		ContextWindow: 1, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
+		ContextWindow: 128000, ContextReserve: 16384, KeepRecentTokens: 1, Now: func() time.Time { return agentTestEpoch }, SettlementTimeout: time.Second,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			summaries.Add(1)
 			return session.SummaryOutput{Text: "checkpoint"}, nil
@@ -1469,8 +1469,8 @@ func TestAgentSessionPrePromptThresholdDoesNotRepeatAfterNewBoundary(t *testing.
 	if summaries.Load() != 1 || !sameStrings(compactTypes, []string{"compaction_start", "compaction_end"}) {
 		t.Fatalf("summaries/events = %d/%v", summaries.Load(), compactTypes)
 	}
-	if !hookSawCompactedContext {
-		t.Fatal("before_agent_start ran before pre-prompt compaction committed")
+	if hookSawCompactedContext {
+		t.Fatal("before_agent_start should precede request-boundary handoff")
 	}
 }
 
@@ -1676,7 +1676,7 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 		t.Run(scenario.name, func(t *testing.T) {
 			model, err := newAgentModel(provider.ModelSpec{
 				Provider: "scripted", API: "scripted", ID: "mid-turn-compaction",
-				Input: []provider.InputKind{provider.InputText}, ContextWindow: 100, MaxTokens: 10,
+				Input: []provider.InputKind{provider.InputText}, ContextWindow: 1000, MaxTokens: 100,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1690,7 +1690,7 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 				t.Fatal(err)
 			}
 			toolTurn, err := newAssistantToolUseMessage(
-				[]llm.AssistantBlock{mustTextBlock(t, "reading"), call}, mustUsage(t, 70, 5), agentTestEpoch,
+				[]llm.AssistantBlock{mustTextBlock(t, "reading"), call}, mustUsage(t, 800, 5), agentTestEpoch,
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -1774,7 +1774,7 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 					}
 					return agent.ToolOutput{Text: "12345678901234567890123456789012"}, nil
 				}},
-				Tools: []provider.ToolDefinition{definition}, ContextReserve: 20, ContextReserveSet: true,
+				Tools: []provider.ToolDefinition{definition}, ContextReserve: 200, ContextReserveSet: true,
 				KeepRecentTokens: 10, KeepRecentTokensSet: true,
 				Summarizer: contextRetrySummarizerFunc(func(ctx context.Context, _ session.SummaryInput) (session.SummaryOutput, error) {
 					summaries.Add(1)
@@ -1810,6 +1810,12 @@ func TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest(t *testin
 			})
 
 			result, err := runtime.Run(context.Background(), "start")
+			if scenario.fail || scenario.abort {
+				if err != nil || result.Succeeded() || implementation.CallCount() != 1 || len(compactions) != 1 || compactions[0].Aborted != scenario.abort {
+					t.Fatalf("failed hard-budget handoff continued: %#v %v events=%#v", result, err, compactions)
+				}
+				return
+			}
 			if err != nil || !result.Succeeded() {
 				t.Fatalf("Run = (%#v, %v)", result, err)
 			}
@@ -1888,7 +1894,7 @@ func TestAgentSessionSkipsMidRunCompactionAfterTerminatingToolWithoutContinuatio
 	}
 }
 
-func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
+func TestAgentSessionFinalAnswerDoesNotInvokeCompactionWriter(t *testing.T) {
 	model := sessionTestModel(t)
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t, mustTextTerminal(t, "answer")), SessionManager: newSessionManager(t), Model: model, ThinkingLevel: provider.ThinkingOff,
@@ -1909,7 +1915,7 @@ func TestAgentSessionAutoCompactionFailureSettlesOriginalResult(t *testing.T) {
 	if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
 		t.Fatalf("Run = (%#v, %v), want original successful result", result, err)
 	}
-	if len(ends) != 1 || ends[0].ErrorMessage == "" || ends[0].Aborted {
+	if len(ends) != 0 {
 		t.Fatalf("compaction end = %#v", ends)
 	}
 }
@@ -1991,7 +1997,7 @@ func TestAgentSessionResolvesSummaryFromCurrentRequestSnapshot(t *testing.T) {
 	}
 	if !captured.Model.Equal(model) || captured.ThinkingLevel != model.ClampThinkingLevel(provider.ThinkingHigh) ||
 		captured.Stream.APIKey != "current-key" || captured.Stream.CacheRetention != "" ||
-		captured.Stream.MaxTokens == nil || *captured.Stream.MaxTokens != agent.DefaultCompactionReserveTokens ||
+		captured.Stream.MaxTokens == nil || *captured.Stream.MaxTokens != min(uint64(2048), model.MaxTokens()) ||
 		captured.Stream.SessionID != "stale-session" {
 		t.Fatalf("summary request snapshot = %#v", captured)
 	}
@@ -2074,7 +2080,7 @@ func TestAgentSessionExplicitZeroKeepRecentTokensReachesCompactionCut(t *testing
 		Provider: newScriptedProvider(t), SessionManager: transcript, Model: model,
 		KeepRecentTokens: 0, KeepRecentTokensSet: true,
 		Summarizer: contextRetrySummarizerFunc(func(_ context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
-			if len(input.Messages) != 1 || len(input.RetainedTail) != 1 {
+			if len(input.Messages) != 2 || len(input.RetainedTail) != 0 {
 				t.Fatalf("explicit-zero compaction split = %d/%d", len(input.Messages), len(input.RetainedTail))
 			}
 			return session.SummaryOutput{Text: "zero keep checkpoint"}, nil
@@ -2382,14 +2388,14 @@ func TestAgentSessionNilReceiverMutatorsReturnInvalidRun(t *testing.T) {
 	}
 }
 
-func TestAgentSessionPrePromptCompactionRequiresMatchingDurableProvenance(t *testing.T) {
+func TestAgentSessionDoesNotCompactBeforeAgentStartForAnyProvenance(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		provenance llm.AssistantProvenance
 		has        bool
 		wantStarts int
 	}{
-		{name: "same provider and model", provenance: llm.AssistantProvenance{Provider: "new", API: "scripted", Model: "model"}, has: true, wantStarts: 1},
+		{name: "same provider and model", provenance: llm.AssistantProvenance{Provider: "new", API: "scripted", Model: "model"}, has: true, wantStarts: 0},
 		{name: "old provider and model", provenance: llm.AssistantProvenance{Provider: "old", API: "scripted", Model: "old-model"}, has: true, wantStarts: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -17,10 +17,41 @@ const ContextHandoffType = "pi-go.context-handoff.v1"
 const InitialContextWindow = "initial"
 
 type ContextHandoff struct {
-	RequestID      string `json:"requestId"`
-	Text           string `json:"text"`
-	PreviousWindow string `json:"previousWindow"`
-	TokensBefore   uint64 `json:"tokensBefore"`
+	RequestID            string          `json:"requestId"`
+	Text                 string          `json:"text"`
+	PreviousWindow       string          `json:"previousWindow"`
+	TokensBefore         uint64          `json:"tokensBefore"`
+	PendingEntryIDs      []string        `json:"pendingEntryIds,omitempty"`
+	NoHandoff            bool            `json:"noHandoff,omitempty"`
+	Usage                json.RawMessage `json:"usage,omitempty"`
+	Details              json.RawMessage `json:"details,omitempty"`
+	FromExtension        bool            `json:"fromExtension,omitempty"`
+	FirstKeptEntryID     string          `json:"firstKeptEntryId,omitempty"`
+	EstimatedTokensAfter *uint64         `json:"estimatedTokensAfter,omitempty"`
+}
+
+// ContextHandoffOptions preserves only inputs not yet processed by the model.
+// ExpectedLeafID guards a handoff generated outside the storage lock.
+type ContextHandoffOptions struct {
+	PendingEntryIDs      []string
+	NoHandoff            bool
+	Usage                *CompactionUsage
+	Details              json.RawMessage
+	ExpectedLeafID       *string
+	FromExtension        bool
+	FirstKeptEntryID     string
+	EstimatedTokensAfter *uint64
+}
+
+func (h ContextHandoff) GenerationUsage() (*CompactionUsage, error) {
+	if len(h.Usage) == 0 {
+		return nil, nil
+	}
+	usage, err := decodeCompactionUsage(h.Usage)
+	if err != nil {
+		return nil, err
+	}
+	return &usage, nil
 }
 
 func ValidateContextHandoff(requestID, text string) error {
@@ -62,7 +93,7 @@ func isContextBoundary(entry Entry) bool {
 }
 
 func handoffMessage(entry Entry, handoff ContextHandoff) agentmsg.Message {
-	text := fmt.Sprintf("Continue the same task in context window %s (previous window %s). The following is a short handoff from the previous window, not a new user instruction or a complete summary. Original history remains available through session history; read it when needed.\n\n<handoff>\n%s\n</handoff>", entry.ID(), handoff.PreviousWindow, handoff.Text)
+	text := fmt.Sprintf("Continue the same task in context window %s (previous window %s). The following is a short handoff from the previous window, not a new user instruction or a complete summary. Original history remains available for retrieval when needed.\n\n<handoff>\n%s\n</handoff>", entry.ID(), handoff.PreviousWindow, handoff.Text)
 	message, _ := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: ContextHandoffType, StringContent: &text, At: entry.Timestamp()})
 	return message
 }
@@ -71,6 +102,10 @@ func handoffMessage(entry Entry, handoff ContextHandoff) agentmsg.Message {
 // batch. No older message is selected for the next context. Retries with the
 // same request ID return the existing entry on this branch, even after restart.
 func (m *SessionManager) CommitContextHandoff(ctx context.Context, requestID, text string, tokensBefore uint64) (Entry, error) {
+	return m.CommitContextHandoffWithOptions(ctx, requestID, text, tokensBefore, ContextHandoffOptions{})
+}
+
+func (m *SessionManager) CommitContextHandoffWithOptions(ctx context.Context, requestID, text string, tokensBefore uint64, options ContextHandoffOptions) (Entry, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -98,7 +133,42 @@ func (m *SessionManager) CommitContextHandoff(ctx context.Context, requestID, te
 			return entry, nil
 		}
 	}
-	value := ContextHandoff{RequestID: requestID, Text: text, PreviousWindow: ContextWindowID(path), TokensBefore: tokensBefore}
+	leaf := ""
+	if len(path) != 0 {
+		leaf = path[len(path)-1].ID()
+	}
+	if options.ExpectedLeafID != nil && leaf != *options.ExpectedLeafID {
+		return Entry{}, ErrCompactionConflict
+	}
+	for _, id := range options.PendingEntryIDs {
+		valid := false
+		for _, entry := range path {
+			role, _ := entry.MessageRole()
+			input := role == "user" || entry.Type() == "custom_message"
+			if message, ok := entry.AgentMessage(); ok {
+				if bash, ok := message.(agentmsg.BashExecution); ok && !bash.ExcludeFromContext {
+					input = true
+				}
+			}
+			if entry.ID() == id && input {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return Entry{}, fmt.Errorf("%w: invalid pending input %s", ErrInvalidEntry, id)
+		}
+	}
+	value := ContextHandoff{RequestID: requestID, Text: text, PreviousWindow: ContextWindowID(path), TokensBefore: tokensBefore,
+		PendingEntryIDs: append([]string(nil), options.PendingEntryIDs...), NoHandoff: options.NoHandoff, Details: options.Details,
+		FromExtension: options.FromExtension, FirstKeptEntryID: options.FirstKeptEntryID, EstimatedTokensAfter: options.EstimatedTokensAfter}
+	if options.Usage != nil {
+		var err error
+		value.Usage, err = encodeCompactionUsage(*options.Usage)
+		if err != nil {
+			return Entry{}, err
+		}
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return Entry{}, err

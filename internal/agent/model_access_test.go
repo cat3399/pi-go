@@ -11,6 +11,7 @@ import (
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/agentmsg"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 func TestAgentSessionModelAccessFailsBeforePromptSideEffects(t *testing.T) {
@@ -119,7 +120,7 @@ func TestAgentSessionManualCompactValidatesAccessAfterStartBeforeHooks(t *testin
 	}
 }
 
-func TestAgentSessionManualCompactUnavailableUsesOriginalFailurePrefix(t *testing.T) {
+func TestAgentSessionManualCompactEmptyContextUsesOriginalFailurePrefix(t *testing.T) {
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 		ThinkingLevel: provider.ThinkingOff,
@@ -134,10 +135,10 @@ func TestAgentSessionManualCompactUnavailableUsesOriginalFailurePrefix(t *testin
 			errorMessage = compact.ErrorMessage
 		}
 	})
-	if _, err := runtime.Compact(context.Background(), "manual"); !errors.Is(err, agent.ErrCompactionUnavailable) {
+	if _, err := runtime.Compact(context.Background(), "manual"); !errors.Is(err, session.ErrNothingToCompact) {
 		t.Fatalf("Compact error = %v", err)
 	}
-	if want := "Compaction failed: " + agent.ErrCompactionUnavailable.Error(); errorMessage != want {
+	if want := "Compaction failed: Nothing to compact (session too small)"; errorMessage != want {
 		t.Fatalf("compaction_end error = %q, want %q", errorMessage, want)
 	}
 }

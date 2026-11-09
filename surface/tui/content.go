@@ -96,6 +96,11 @@ func contentItemFromEntry(entry session.Entry) (contentItem, bool) {
 		ID: entry.ID(), Revision: 1, Role: contentRoleSystem,
 		Timestamp: entry.Timestamp(),
 	}
+	if handoff, ok := entry.ContextHandoff(); ok {
+		item.Title = "Compaction"
+		item.Blocks = []contentBlock{{Kind: contentBlockMarkdown, Text: handoff.Text}}
+		return item, true
+	}
 	switch payload := entry.Payload().(type) {
 	case session.CompactionPayload:
 		item.Title = "Compaction"

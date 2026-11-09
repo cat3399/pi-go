@@ -20,7 +20,10 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-const contextCLIInstructions = `Session history and context management are available through bash: "$PI_EXECUTABLE" session --help. Use session history read --view dialogue for original user and assistant visible text (including commentary, excluding thinking and tools); raw records and search are also available. Use session context --help for status, summary compaction, or a new window with a short handoff. A handoff needs only progress, relevant files and next direction; recover details from original history when needed.`
+var contextCLIInstructions = agent.ContextAccessInstructions{
+	Handoff: `Use bash to run "${PI_EXECUTABLE}" session context new --handoff-stdin and supply the handoff on stdin (for example, with a quoted heredoc). Include current progress, relevant files and the next direction. This saves the handoff and switches windows after the current tool batch; continue the same task afterward.`,
+	History: `Original history is available through bash. Search with "${PI_EXECUTABLE}" session history search 'query'; read a matching record with "${PI_EXECUTABLE}" session history read --entry ID. Use --view raw to include tool calls and results, or session history --help for window/range options. Read only what you need to continue.`,
+}
 
 type sessionControlRequest struct {
 	SessionID string                     `json:"sessionId"`

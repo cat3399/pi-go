@@ -282,7 +282,7 @@ func TestAbortDuringRetryDrainsFollowUpBeforeReturning(t *testing.T) {
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, SessionManager: transcript, Model: model,
-		ContextWindow: 2, ContextReserve: 1, KeepRecentTokens: 1,
+		ContextWindow: 128000, ContextReserve: 16384, KeepRecentTokens: 1,
 		Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 			return session.SummaryOutput{Text: "summary after retry cancellation"}, nil
 		}),
@@ -378,7 +378,7 @@ func TestAbortDuringRetryDrainsFollowUpBeforeReturning(t *testing.T) {
 	gotSequence := append([]string(nil), sequence...)
 	gotRetryEnd := retryEnd
 	eventsMu.Unlock()
-	want := []string{"auto_retry_end", "compaction_start", "compaction_end", "agent_start", "turn_start", "queue_update", "message_start", "agent_end", "agent_settled"}
+	want := []string{"auto_retry_end", "agent_start", "turn_start", "queue_update", "message_start", "agent_end", "agent_settled"}
 	if !reflect.DeepEqual(gotSequence, want) {
 		t.Fatalf("post-retry cancellation sequence = %v, want %v", gotSequence, want)
 	}

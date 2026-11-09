@@ -189,6 +189,10 @@ func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, pro
 	if err != nil {
 		return session.SummaryOutput{}, fmt.Errorf("build summary request: %w", err)
 	}
+	return s.completeRequest(ctx, request, observer, allowEmpty)
+}
+
+func (s *ContextSummarizer) completeRequest(ctx context.Context, request Request, observer RetryObserver, allowEmpty bool) (session.SummaryOutput, error) {
 	retryPending := false
 	for attempt := uint32(1); ; attempt++ {
 		if retryPending {
@@ -247,6 +251,11 @@ func (s *ContextSummarizer) summarizeCall(ctx context.Context, systemPrompt, pro
 		if streamErr != nil {
 			finishRetry(kind, status, false, failureReason, errorMessage)
 			return session.SummaryOutput{}, fmt.Errorf("summary stream: %w", streamErr)
+		}
+		if choice, ok := request.ToolChoice(); ok && choice.Mode == "none" && terminal != nil &&
+			(terminal.FinishReason() == llm.FinishToolUse || terminal.FinishReason() == llm.FinishLength) {
+			finishRetry(FailureInvalidResponse, 0, false, RetryFinishFailed, "incomplete handoff response")
+			return session.SummaryOutput{}, errors.New("handoff response did not finish with complete text")
 		}
 		text, usage, err := summaryTerminal(terminal, allowEmpty)
 		if err != nil {

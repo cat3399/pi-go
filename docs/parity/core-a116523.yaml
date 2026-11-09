@@ -33,6 +33,7 @@ scope:
       upstreamPath: packages/agent/src/harness
 
 statusDefinitions:
+  intentional_difference: An explicitly chosen pi-go product policy replaces the upstream behavior and has its own executable scenarios.
   oracle_verified: A frozen scenario generated through the pinned upstream production implementation is asserted by Go.
   source_aligned: The production behavior is implemented and tested from the pinned source contract but lacks a frozen end-to-end upstream oracle.
   remaining: A real product-integration difference remains at the named Go boundary.
@@ -279,7 +280,7 @@ capabilities:
 
   - id: agent_session.manual_compaction
     category: agent_session
-    status: oracle_verified
+    status: intentional_difference
     upstream:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: async compact
@@ -288,13 +289,16 @@ capabilities:
       symbol: func (s *AgentSession) Compact
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
-      - {kind: upstream_oracle, path: internal/agent/upstream_manual_compaction_oracle_test.go, symbol: TestUpstreamAgentSessionManualCompactionOracle}
-    intentionalGoDifference: Compaction preparation and commit are explicit SessionManager transactions.
+      - {kind: go_test, path: internal/agent/upstream_manual_compaction_oracle_test.go, symbol: TestManualHandoffReusesUpstreamWorkflowScenario}
+    intentionalGoDifference: >-
+      Manual compaction requests a brief handoff from the current model using the working
+      message prefix and cache attribution. It commits a custom window checkpoint instead
+      of an isolated full-history summary and retained tail. Original history stays readable.
     remainingDifference: none
 
   - id: agent_session.threshold_and_overflow_compaction
     category: agent_session
-    status: oracle_verified
+    status: intentional_difference
     upstream:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: _checkCompaction
@@ -303,16 +307,16 @@ capabilities:
       symbol: func (s *AgentSession) checkCompaction
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
-      - {kind: upstream_oracle, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestUpstreamAgentSessionOverflowCompactionOracle}
+      - {kind: go_test, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestOverflowHandoffReusesUpstreamWorkflowScenario}
       - {kind: go_test, path: internal/agent/context_retry_test.go, symbol: TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTranscript}
       - {kind: go_test, path: internal/agent/session_runtime_test.go, symbol: TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest}
     intentionalGoDifference: >-
-      Compaction cancellation is an owned child context rather than AbortController state.
-      Go additionally checks the complete context before continuing provider turns and
-      compacts within the same Agent run. The pinned upstream checks before prompts
-      and after agent_end; the public PrepareNextTurn callback retains its upstream
-      after-turn ordering, including final turns and before ShouldStopAfterTurn.
-    remainingDifference: Threshold compaction does not yet have its own frozen upstream workflow.
+      Budget reminders let the model finish or submit a handoff. Hard limits are checked
+      only before actual provider requests, and use the same current-model handoff path.
+      Overflow starts an explicit no-handoff recovery window with unprocessed inputs and
+      history access. A final answer without queued input never triggers compaction.
+      AgentLoop callbacks retain their upstream after-turn ordering.
+    remainingDifference: none
 
   - id: agent_session.model_set_and_scoped_cycle
     category: agent_session

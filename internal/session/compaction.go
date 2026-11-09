@@ -907,6 +907,12 @@ func turnPrefixPrompt(messages []agentmsg.Message) (string, error) {
 	return "<conversation>\n" + SerializeConversation(converted) + "\n</conversation>\n\n" + turnPrefixSummarizationPrompt, nil
 }
 
+// MessageFileOperations exposes tool file references from the supplied active
+// context for handoff hooks, without searching earlier windows or adding text.
+func MessageFileOperations(messages []agentmsg.Message) FileOperations {
+	return extractFileOperations(messages, nil, -1)
+}
+
 func extractFileOperations(messages []agentmsg.Message, entries []Entry, previousCompactionIndex int) FileOperations {
 	operations := FileOperations{}
 	if previousCompactionIndex >= 0 {

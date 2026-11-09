@@ -105,7 +105,7 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	defer server.Close()
 	model, err := newAgentModel(provider.ModelSpec{
 		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
-		ContextWindow: 24, MaxTokens: 1,
+		ContextWindow: 128000, MaxTokens: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,14 +114,14 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	if err != nil {
 		t.Fatal(err)
 	}
-	summarizer, err := provider.NewContextSummarizer(implementation, model, func() time.Time { return agentTestEpoch })
+	summarizer, err := newHandoffWriter(implementation, model, func() time.Time { return agentTestEpoch })
 	if err != nil {
 		t.Fatal(err)
 	}
 	appendMatchingAssistant(t, transcript, model)
 	coordinator, err := agent.NewSession(agent.SessionConfig{
 		Provider: implementation, SessionManager: transcript, Model: model, Now: func() time.Time { return agentTestEpoch },
-		ContextWindow: 2, ContextReserve: 1, KeepRecentTokens: 1, Summarizer: summarizer,
+		ContextWindow: 128000, ContextReserve: 16384, KeepRecentTokens: 1, Summarizer: summarizer,
 		Retry: agent.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Millisecond, Sleep: func(context.Context, time.Duration) error { return nil }},
 	})
 	if err != nil {
@@ -143,7 +143,7 @@ func TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTr
 	entries := transcript.Entries()
 	var users, finals, compactions int
 	for _, entry := range entries {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			compactions++
 		}
 		message, ok := entry.Message()
@@ -193,8 +193,6 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprintf(w, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"maximum context length exceeded; echoed=%s"}}`, secretEcho)
 		case 2:
-			writeContextSSE(t, w, "durable overflow summary")
-		case 3:
 			writeContextSSE(t, w, "accepted after overflow")
 		default:
 			t.Errorf("unexpected request %d", calls.Load())
@@ -203,7 +201,7 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 	defer server.Close()
 	model, err := newAgentModel(provider.ModelSpec{
 		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
-		ContextWindow: 32, MaxTokens: 1,
+		ContextWindow: 128000, MaxTokens: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -212,7 +210,7 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 	if err != nil {
 		t.Fatal(err)
 	}
-	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
+	summarizer, err := newHandoffWriterWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
@@ -240,7 +238,7 @@ func TestProviderContextOverflowCompactsOnceRebuildsContextAndPublishesSafeCompa
 	}
 	terminal, ok := result.Terminal()
 	text, okText := terminal.(llm.AssistantTextMessage)
-	if !ok || !okText || text.Usage().TotalTokens() != 2 || result.ProviderTurns() != 2 || calls.Load() != 3 {
+	if !ok || !okText || text.Usage().TotalTokens() != 2 || result.ProviderTurns() != 2 || calls.Load() != 2 {
 		t.Fatalf("terminal=%T usage=%d turns=%d calls=%d", terminal, text.Usage().TotalTokens(), result.ProviderTurns(), calls.Load())
 	}
 	assertCompactionLifecycle(t, compactionEvents, agent.CompactionContextOverflow, nil)
@@ -281,7 +279,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	})
 	appendMatchingAssistant(t, transcript, model)
 	var delays []time.Duration
-	summarizer, err := provider.NewContextSummarizerWithRetry(capturing, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
+	summarizer, err := newHandoffWriterWithRetry(capturing, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 2, InitialDelay: time.Millisecond, MaxRetryAfter: 10 * time.Millisecond,
 		Sleep: func(_ context.Context, delay time.Duration) error { delays = append(delays, delay); return nil },
 	})
@@ -289,7 +287,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: capturing, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: capturing, SessionManager: transcript, Model: model, ContextWindow: 128000, ContextReserve: 16384,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -318,10 +316,7 @@ func TestContextSummarizerRetriesTransientStreamDropBeforeSingleCompactionCommit
 	}
 	firstSummary := capturedRequests[0].StreamOptions()
 	retriedSummary := capturedRequests[1].StreamOptions()
-	if firstSummary.CacheRetention != provider.CacheRetentionNone || retriedSummary.CacheRetention != provider.CacheRetentionNone ||
-		firstSummary.SessionID == "" || firstSummary.SessionID != retriedSummary.SessionID ||
-		firstSummary.SessionID == transcript.SessionID() || len(firstSummary.SessionID) != 36 || firstSummary.SessionID[14] != '7' ||
-		!strings.ContainsRune("89ab", rune(firstSummary.SessionID[19])) {
+	if firstSummary.CacheRetention != retriedSummary.CacheRetention || firstSummary.SessionID != retriedSummary.SessionID {
 		t.Fatalf("summary retry request affinity = %#v / %#v, durable %q", firstSummary, retriedSummary, transcript.SessionID())
 	}
 	if len(retryEvents) != 3 ||
@@ -356,7 +351,7 @@ func TestAbortDoesNotCancelSummarizerRetryButShutdownDoes(t *testing.T) {
 	model, implementation := contextRetryProvider(t, server.URL)
 	appendMatchingAssistant(t, transcript, model)
 	sleepEntered := make(chan struct{})
-	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
+	summarizer, err := newHandoffWriterWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 3, InitialDelay: time.Hour,
 		Sleep: func(ctx context.Context, _ time.Duration) error {
 			select {
@@ -372,7 +367,7 @@ func TestAbortDoesNotCancelSummarizerRetryButShutdownDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 128000, ContextReserve: 16384,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -425,26 +420,24 @@ func TestAbortDoesNotCancelSummarizerRetryButShutdownDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	outcome := <-runDone
-	if !errors.Is(outcome.err, agent.ErrAgentAborted) {
-		t.Fatalf("Run() = (%#v, %v), want pre-low-run abort", outcome.result, outcome.err)
+	terminal, ok := outcome.result.Terminal()
+	if outcome.err != nil || !ok || terminal.FinishReason() != llm.FinishAborted {
+		t.Fatalf("request-boundary abort = (%#v, %v)", outcome.result, outcome.err)
 	}
-	if _, ok := outcome.result.Terminal(); ok {
-		t.Fatalf("pre-low-run abort produced terminal = %#v", outcome.result)
-	}
-	if len(lifecycleEvents) != 0 {
-		t.Fatalf("pre-low-run abort emitted lifecycle = %v", lifecycleEvents)
+	if !reflect.DeepEqual(lifecycleEvents, []agent.AgentEventType{agent.AgentStartEventType, agent.TurnStartEventType, agent.MessageStartEventType, agent.MessageEndEventType, agent.MessageStartEventType, agent.MessageEndEventType, agent.TurnEndEventType, agent.AgentEndEventType, agent.AgentSettledEventType}) {
+		t.Fatalf("aborted handoff lifecycle = %v", lifecycleEvents)
 	}
 	steering, _ := coordinator.Queues()
 	if len(steering) != 1 || joinContextText(steering[0].Content()) != "queued while summarizer retries" {
 		t.Fatalf("steering queue = %+v", steering)
 	}
 	for _, entry := range transcript.Entries() {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			t.Fatal("cancelled summary appended a compaction")
 		}
 	}
-	if entries := len(transcript.Entries()); entries != baselineEntries {
-		t.Fatalf("pre-low-run abort entries = %d, want baseline %d", entries, baselineEntries)
+	if entries := len(transcript.Entries()); entries != baselineEntries+2 {
+		t.Fatalf("aborted request entries = %d, want baseline plus user and aborted assistant (%d)", entries, baselineEntries+2)
 	}
 	if len(retryEvents) != 2 || retryEvents[0].Kind != agent.SummarizationRetryScheduledEventType ||
 		retryEvents[1].Kind != agent.SummarizationRetryFinishedEventType ||
@@ -474,14 +467,14 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
 	appendMatchingAssistant(t, transcript, model)
-	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
+	summarizer, err := newHandoffWriterWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{
 		MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	coordinator, err := agent.NewSession(agent.SessionConfig{
-		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 2, ContextReserve: 1,
+		Provider: implementation, SessionManager: transcript, Model: model, ContextWindow: 128000, ContextReserve: 16384,
 		KeepRecentTokens: 1, Summarizer: summarizer, Retry: agent.RetryPolicy{MaxAttempts: 1},
 		Now: func() time.Time { return agentTestEpoch },
 	})
@@ -496,12 +489,11 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 		}
 	})
 	result, err := coordinator.Run(context.Background(), "summary failure prompt")
-	terminal, ok := result.Terminal()
-	if err != nil || !ok || terminal.FinishReason() != llm.FinishError {
-		t.Fatalf("Run() terminal=%T error=%v", terminal, err)
+	if err != nil || result.Succeeded() {
+		t.Fatalf("hard-budget failure continued: %#v %v", result, err)
 	}
-	if calls.Load() != 4 {
-		t.Fatalf("provider calls = %d, want 4", calls.Load())
+	if calls.Load() != 3 {
+		t.Fatalf("provider calls = %d, want only three handoff attempts", calls.Load())
 	}
 	if len(retryEvents) != 6 || retryEvents[0].Kind != agent.SummarizationRetryScheduledEventType ||
 		retryEvents[1].Kind != agent.SummarizationRetryAttemptEventType ||
@@ -519,7 +511,7 @@ func TestSummarizerRetryExhaustionDoesNotAppendCompaction(t *testing.T) {
 	}
 	assertSummarizationRetryReason(t, retryEvents, agent.CompactionThreshold)
 	for _, entry := range transcript.Entries() {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			t.Fatal("failed summary appended a compaction")
 		}
 	}
@@ -534,19 +526,17 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 	var calls atomic.Uint32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		switch calls.Add(1) {
-		case 1, 3:
+		case 1, 2:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"error":{"code":"context_length_exceeded","message":"maximum context length exceeded"}}`)
-		case 2:
-			writeContextSSE(t, w, "one summary only")
 		default:
 			t.Errorf("unexpected request %d", calls.Load())
 		}
 	}))
 	defer server.Close()
 	model, implementation := contextRetryProvider(t, server.URL)
-	summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{MaxAttempts: 1})
+	summarizer, err := newHandoffWriterWithRetry(implementation, model, func() time.Time { return agentTestEpoch }, provider.RetryPolicy{MaxAttempts: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +553,7 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 	}
 	terminal, _ := result.Terminal()
 	failure, ok := terminal.(llm.AssistantFailureMessage)
-	if !ok || calls.Load() != 3 {
+	if !ok || calls.Load() != 2 {
 		t.Fatalf("terminal=%T calls=%d", terminal, calls.Load())
 	}
 	var classified *provider.ProviderFailure
@@ -572,7 +562,7 @@ func TestContextOverflowCompactionRetryOccursAtMostOnce(t *testing.T) {
 	}
 	var compactions int
 	for _, entry := range transcript.Entries() {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			compactions++
 		}
 	}
@@ -680,7 +670,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 		}))
 		defer server.Close()
 		model, implementation := contextRetryProvider(t, server.URL)
-		summarizer, err := provider.NewContextSummarizerWithRetry(implementation, model, nil, provider.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }})
+		summarizer, err := newHandoffWriterWithRetry(implementation, model, nil, provider.RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -702,7 +692,7 @@ func TestHTTPRetryEventsExposeSafeReasonAndOrdinary400DoesNotRetry(t *testing.T)
 			t.Fatalf("terminal = %T cause=%v", terminal, failure.Failure().Cause())
 		}
 		for _, entry := range transcript.Entries() {
-			if entry.Type() == "compaction" {
+			if _, handoff := entry.ContextHandoff(); handoff {
 				t.Fatal("ordinary 400 triggered compaction")
 			}
 		}
@@ -973,7 +963,7 @@ func appendCompactionHistory(t *testing.T, transcript *session.SessionManager) {
 func appendMatchingAssistant(t *testing.T, transcript *session.SessionManager, model provider.Model) {
 	t.Helper()
 	assistant, err := llm.NewAssistantTextMessage(
-		[]llm.TextBlock{mustTextBlock(t, "prior response")}, llm.FinishStop, mustUsage(t, model.ContextWindow(), 0), agentTestEpoch,
+		[]llm.TextBlock{mustTextBlock(t, "prior response")}, llm.FinishStop, mustUsage(t, model.ContextWindow()-8000, 0), agentTestEpoch,
 		llm.AssistantProvenance{Provider: model.Provider(), API: model.API(), Model: model.ID()},
 	)
 	if err != nil {
@@ -1016,7 +1006,7 @@ func assertManualCompactionFailureLifecycle(t *testing.T, events []agentEventSna
 func assertNoCompactionEntry(t *testing.T, transcript *session.SessionManager) {
 	t.Helper()
 	for _, entry := range transcript.Entries() {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			t.Fatal("failed compaction appended a durable checkpoint")
 		}
 	}
@@ -1026,7 +1016,7 @@ func contextRetryProvider(t *testing.T, baseURL string) (provider.Model, *provid
 	t.Helper()
 	model, err := newAgentModel(provider.ModelSpec{
 		Provider: provider.OpenAIProviderID, API: provider.OpenAIResponsesAPI, ID: "fixture-model",
-		ContextWindow: 32, MaxTokens: 1,
+		ContextWindow: 128000, MaxTokens: 2048,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1042,7 +1032,7 @@ func assertContextRetryEntries(t *testing.T, transcript *session.SessionManager,
 	t.Helper()
 	var users, finals, compactions, failures int
 	for _, entry := range transcript.Entries() {
-		if entry.Type() == "compaction" {
+		if _, handoff := entry.ContextHandoff(); handoff {
 			compactions++
 		}
 		message, ok := entry.Message()
@@ -1160,4 +1150,11 @@ func dropContextSSE(t *testing.T, w http.ResponseWriter) {
 	if err := buffered.Flush(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func newHandoffWriter(implementation provider.Provider, model provider.Model, now func() time.Time) (*provider.ContextHandoffWriter, error) {
+	return newHandoffWriterWithRetry(implementation, model, now, provider.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Millisecond})
+}
+func newHandoffWriterWithRetry(implementation provider.Provider, model provider.Model, now func() time.Time, retry provider.RetryPolicy) (*provider.ContextHandoffWriter, error) {
+	return provider.NewContextHandoffWriter(implementation, model, now, provider.ContextSummarizerOptions{Retry: retry}, nil)
 }

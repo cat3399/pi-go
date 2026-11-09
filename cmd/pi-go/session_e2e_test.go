@@ -74,6 +74,13 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 		}
 		if calls == 1 {
 			systemPrefix = string(payload.Messages[0].Content)
+			if strings.Contains(systemPrefix, "session context new") || strings.Contains(systemPrefix, "session history search") {
+				t.Error("context instructions polluted system prompt")
+			}
+			encoded, _ := json.Marshal(payload.Messages)
+			if strings.Contains(string(encoded), "Original history is available through bash") {
+				t.Error("history instructions appeared before a window switch")
+			}
 		} else if string(payload.Messages[0].Content) != systemPrefix {
 			t.Error("system/tool capability prefix changed across handoff")
 		}
@@ -88,6 +95,9 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 			encoded, _ := json.Marshal(payload.Messages)
 			if strings.Contains(string(encoded), original) || strings.Contains(string(encoded), "original history filler") || !strings.Contains(string(encoded), "Continue the same task in context window") {
 				t.Error("new window did not contain only the handoff")
+			}
+			if !strings.Contains(string(encoded), "session history search") {
+				t.Error("new window omitted history access instructions")
 			}
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session history read --view dialogue --window initial`}

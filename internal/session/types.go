@@ -165,6 +165,8 @@ type CompactionDetails struct {
 // provider cannot mistake either summarization call for a continuation request;
 // the typed message snapshots are retained for extensions and parity checks.
 type SummaryInput struct {
+	// ContextWindow is populated for current-context handoff generation.
+	ContextWindow       uint64
 	SystemPrompt        string
 	Prompt              string
 	TurnPrefixPrompt    string

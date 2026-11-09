@@ -866,10 +866,10 @@ func TestManualAndAutomaticCompactionHooksRunAtCommitBoundaries(t *testing.T) {
 					t.Fatalf("manual reason = %q", event.Reason)
 				}
 				phases = append(phases, "before")
-				if event.CustomInstructions == nil || *event.CustomInstructions != "caller instructions" || event.Preparation.FirstKeptEntryID == "" ||
-					event.Preparation.Settings.Enabled || event.Preparation.Settings.ReserveTokens != agent.DefaultCompactionReserveTokens ||
-					event.Preparation.Settings.KeepRecentTokens != 1 || len(event.Preparation.MessagesToSummarize) != 2 ||
-					len(event.Preparation.TurnPrefixMessages) != 0 || event.Preparation.IsSplitTurn || len(event.Preparation.RetainedTail) != 1 {
+				if event.CustomInstructions == nil || *event.CustomInstructions != "caller instructions" || event.Preparation.FirstKeptEntryID != "" ||
+					event.Preparation.Settings.Enabled || event.Preparation.Settings.ReserveTokens != 25 ||
+					event.Preparation.Settings.KeepRecentTokens != 1 || len(event.Preparation.MessagesToSummarize) != 3 ||
+					len(event.Preparation.TurnPrefixMessages) != 0 || event.Preparation.IsSplitTurn || len(event.Preparation.RetainedTail) != 0 {
 					t.Fatalf("manual preparation = %#v", event)
 				}
 				return agent.SessionBeforeCompactResult{}, nil
@@ -985,8 +985,8 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 		if summarizerCalls != 0 || !result.Output.FromExtension || after.CompactionEntry.ID() != result.Entry.ID() || !after.FromExtension || after.Result.EstimatedTokensAfter == nil {
 			t.Fatalf("extension result = calls=%d result=%#v after=%#v", summarizerCalls, result, after)
 		}
-		payload, ok := result.Entry.Payload().(session.CompactionPayload)
-		if !ok || !payload.HasFromHook || !payload.FromHook || string(payload.Details) != `{"owner":"extension"}` || payload.Record.Summary != "extension summary" {
+		payload, ok := result.Entry.ContextHandoff()
+		if !ok || !payload.FromExtension || string(payload.Details) != `{"owner":"extension"}` || payload.Text != "extension summary" {
 			t.Fatalf("durable compaction payload = %#v", result.Entry.Payload())
 		}
 	})
@@ -1088,7 +1088,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 		var settled bool
 		runtime, err := agent.NewSession(agent.SessionConfig{
 			Provider: newScriptedProvider(t, mustTextTerminal(t, "done")), SessionManager: newSessionManager(t), Model: model,
-			ContextWindow: 1, KeepRecentTokens: 1,
+			ContextWindow: 128000, ContextReserve: 127999, KeepRecentTokens: 1,
 			Summarizer: contextRetrySummarizerFunc(func(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
 				t.Fatal("automatic summarizer ran after cancellation")
 				return session.SummaryOutput{}, nil
@@ -1110,7 +1110,7 @@ func TestCompactionExtensionOverrideAndSettlementOrdering(t *testing.T) {
 				settlement, settled = event.(agent.CompactionEndEvent)
 			}
 		})
-		if result, err := runtime.Run(context.Background(), "go"); err != nil || !result.Succeeded() {
+		if result, err := runtime.Run(context.Background(), "start work"); err != nil || result.Succeeded() {
 			t.Fatalf("Run = (%#v, %v)", result, err)
 		}
 		if !reflect.DeepEqual(sequence, []string{"observer-start", "hook-before", "observer-end"}) || !settled || !settlement.Aborted {

@@ -77,6 +77,9 @@ func visibleRunEntry(entry Entry) bool {
 	if entry.typeName == "compaction" || entry.typeName == "branch_summary" {
 		return true
 	}
+	if _, ok := entry.ContextHandoff(); ok {
+		return true
+	}
 	if entry.typeName == "custom_message" {
 		if value, ok := entry.payload.(CustomMessagePayload); ok {
 			return value.Message.Display()

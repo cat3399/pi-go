@@ -169,7 +169,7 @@ func TestCoreIntegrationRetriesChatCompletionsDropAfterToolResult(t *testing.T) 
 
 	model, err := newAgentModel(provider.ModelSpec{
 		Provider: "compatible", API: provider.OpenAICompletionsAPI, ID: "fixture-chat",
-		BaseURL: server.URL + "/v1", ContextWindow: 4096, MaxTokens: 512,
+		BaseURL: server.URL + "/v1", ContextWindow: 128000, MaxTokens: 512,
 	})
 	if err != nil {
 		t.Fatal(err)

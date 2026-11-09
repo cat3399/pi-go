@@ -93,6 +93,17 @@ func (s *AgentSession) GetSessionStats() (SessionStats, error) {
 
 	var totals usageTotals
 	for _, entry := range s.sessionManager.Entries() {
+		if handoff, ok := entry.ContextHandoff(); ok {
+			usage, err := handoff.GenerationUsage()
+			if err != nil {
+				return SessionStats{}, err
+			}
+			if usage != nil {
+				if err := totals.addCompaction(*usage); err != nil {
+					return SessionStats{}, err
+				}
+			}
+		}
 		switch payload := entry.Payload().(type) {
 		case session.BranchSummaryPayload:
 			if payload.Usage != nil {
@@ -195,7 +206,17 @@ func (s *AgentSession) GetContextUsage() (ContextUsage, bool, error) {
 	if err != nil {
 		return ContextUsage{}, false, err
 	}
-	if latest, ok := session.LatestCompactionEntry(branch); ok {
+	latest, hasBoundary := session.LatestCompactionEntry(branch)
+	for i := len(branch) - 1; i >= 0; i-- {
+		if _, ok := branch[i].ContextHandoff(); ok {
+			latest, hasBoundary = branch[i], true
+			break
+		}
+		if _, ok := branch[i].Compaction(); ok {
+			break
+		}
+	}
+	if hasBoundary {
 		compactionIndex := -1
 		for index := len(branch) - 1; index >= 0; index-- {
 			if branch[index].ID() == latest.ID() {

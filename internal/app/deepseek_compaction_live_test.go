@@ -25,7 +25,7 @@ const (
 
 // TestLiveProductionDeepSeekCompaction is deliberately opt-in. It exercises
 // the same production assembly, runtime auth resolution, Agent runs, remote
-// summarization, durable compaction, and resume path used by the application.
+// handoff generation, durable checkpoints, and resume used by the application.
 func TestLiveProductionDeepSeekCompaction(t *testing.T) {
 	apiKey := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
 	if apiKey == "" {
@@ -104,10 +104,10 @@ func TestLiveProductionDeepSeekCompaction(t *testing.T) {
 			if compactErr != nil {
 				t.Fatalf("remote manual compaction failed (%T)", compactErr)
 			}
-			if !compactResult.Committed || !compactResult.Input.IsSplitTurn ||
-				len(compactResult.Input.MessagesToSummarize) == 0 || len(compactResult.Input.TurnPrefixMessages) == 0 ||
-				!strings.Contains(compactResult.Output.Text, "**Turn Context (split turn):**") || compactResult.Output.Usage == nil {
-				t.Fatalf("remote manual compaction did not execute the real ordered dual-summary path")
+			if !compactResult.Committed || compactResult.Input.IsSplitTurn ||
+				len(compactResult.Input.Messages) == 0 || len(compactResult.Input.RetainedTail) != 0 ||
+				!strings.Contains(compactResult.Output.Text, "FIRST_OK") || !strings.Contains(compactResult.Output.Text, "PRECOMPACT_OK") || compactResult.Output.Usage == nil {
+				t.Fatalf("remote manual handoff did not preserve completed work")
 			}
 
 			second := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),
@@ -361,7 +361,7 @@ func (l *deepSeekCompactionLifecycle) assertManualSuccess(t *testing.T) {
 func countCompactionEntries(entries []session.Entry) int {
 	count := 0
 	for _, entry := range entries {
-		if entry.Type() == "compaction" {
+		if _, ok := entry.ContextHandoff(); ok {
 			count++
 		}
 	}

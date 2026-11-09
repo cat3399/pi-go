@@ -2,11 +2,57 @@ package surfacewire
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cat3399/pi-go/internal/llm"
+	"github.com/cat3399/pi-go/internal/session"
 )
+
+func TestHandoffRemainsVisibleInHistoryAndUsesCompactionPresentation(t *testing.T) {
+	manager, err := session.CreateSessionManager(t.TempDir(), t.TempDir(), session.NewSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	user, _ := llm.NewUserTextMessage("original request", time.Now())
+	_, _ = manager.AppendLLMMessage(context.Background(), user)
+	entry, err := manager.CommitContextHandoff(context.Background(), "visible-checkpoint", "Continue with module B", 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := manager.ReadRuns(session.RunsQuery{})
+	if err != nil || len(runs.Items) != 1 || runs.Items[0].Run.ProcessCount != 1 {
+		t.Fatalf("handoff hidden from history run: %#v %v", runs, err)
+	}
+	path, _ := manager.SessionFile()
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	index, err := session.OpenReadIndex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := index.ReadRuns(session.RunsQuery{})
+	if err != nil || len(indexed.Items) != 1 || indexed.Items[0].Run.ProcessCount != 1 {
+		t.Fatal("restart hid handoff marker", err)
+	}
+	encoded, visible, err := ProjectEntry(entry, false, false)
+	if err != nil || !visible {
+		t.Fatal("handoff is not visible", err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(encoded, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["customType"] != "compaction" || message["display"] != true || message["content"] != "Continue with module B" {
+		t.Fatalf("handoff does not use existing expandable compaction marker: %s", encoded)
+	}
+}
 
 func TestHistoryProjectionCombinesToolsThinkingAndMedia(t *testing.T) {
 	raw := json.RawMessage(`{"role":"assistant","extra":{"n":9007199254740993},"content":[{"type":"text","text":"kept"},{"type":"thinking","thinking":"private","signature":"opaque"},{"type":"toolCall","id":"call-1","name":"read","arguments":{"offset":9007199254740993}},{"type":"image","data":"YWJjZA==","mimeType":"image/png"}]}`)

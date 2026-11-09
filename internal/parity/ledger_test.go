@@ -78,7 +78,7 @@ func TestCoreParityLedgerIsConcreteAndCurrent(t *testing.T) {
 	}
 	assertCorpusCommit(t, root, document.Upstream.Commit)
 
-	allowedStatus := map[string]bool{"oracle_verified": true, "source_aligned": true, "remaining": true}
+	allowedStatus := map[string]bool{"oracle_verified": true, "source_aligned": true, "remaining": true, "intentional_difference": true}
 	allowedExposure := map[string]bool{"full": true, "partial": true, "deferred": true, "not_applicable": true}
 	allowedEvidenceKind := map[string]bool{"go_source": true, "go_test": true, "upstream_oracle": true, "upstream_source": true}
 	seen := make(map[string]struct{}, len(document.Capabilities))

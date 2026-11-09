@@ -492,11 +492,11 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 				if accessErr := requirePromptAccess(resolveCtx, request.Model); accessErr != nil {
 					return nil, accessErr
 				}
-				return provider.NewContextSummarizerWithOptions(catalog, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
+				return provider.NewContextHandoffWriter(catalog, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
 					ThinkingLevel: request.ThinkingLevel,
 					Stream:        request.Stream,
 					Retry:         request.Retry,
-				})
+				}, request.Tools)
 			},
 			ResolveBranchSummarizer: func(resolveCtx context.Context, request agent.SummarizerResolveRequest) (session.BranchSummarizer, error) {
 				if accessErr := requirePromptAccess(resolveCtx, request.Model); accessErr != nil {

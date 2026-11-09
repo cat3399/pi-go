@@ -4,19 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sync"
-	"sync/atomic"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
 	"github.com/cat3399/pi-go/internal/llm"
-	catalogmodel "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
-	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
@@ -40,370 +34,107 @@ type upstreamOverflowCompactionScenario struct {
 	RecoveryResponse upstreamOverflowCompactionResponse `json:"recoveryResponse"`
 }
 
-// TestUpstreamAgentSessionOverflowCompactionOracle fixes the complete overflow
-// recovery pipeline: durable failure, live-state removal, automatic summary,
-// context rebuild, Agent continue, one final settlement, and reopen history.
-func TestUpstreamAgentSessionOverflowCompactionOracle(t *testing.T) {
+// The upstream overflow scenario still exercises durable failure, continuation
+// and reopen; pi-go now recovers without making an isolated summary request.
+func TestOverflowHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 	var corpus upstreamWorkflowCorpus
 	if err := json.Unmarshal(upstreamWorkflowCorpusJSON, &corpus); err != nil {
-		t.Fatalf("decode workflow corpus: %v", err)
-	}
-	expectedRoot, err := decodeWorkflowJSON(upstreamWorkflowOracleJSON)
-	if err != nil {
-		t.Fatalf("decode workflow oracle: %v", err)
-	}
-	expectedObject, ok := expectedRoot.(map[string]any)
-	if !ok {
-		t.Fatal("workflow oracle root is not an object")
-	}
-	expectedScenario, ok := expectedObject["overflowCompactionScenario"].(map[string]any)
-	if !ok {
-		t.Fatal("workflow oracle overflowCompactionScenario is not an object")
+		t.Fatal(err)
 	}
 	scenario := corpus.OverflowCompaction
-	if scenario.ErrorMessage == "" || scenario.ReserveTokens == 0 || scenario.KeepRecentTokens == 0 {
-		t.Fatal("overflow compaction corpus no longer covers typed overflow recovery")
-	}
-
-	root := t.TempDir()
-	cwd := filepath.Join(root, "project")
-	agentDir := filepath.Join(root, "agent")
-	sessionDir := filepath.Join(root, "sessions")
-	for _, directory := range []string{cwd, agentDir, sessionDir} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatalf("create overflow compaction workflow directory: %v", err)
+	response := func(value upstreamOverflowCompactionResponse) llm.AssistantTerminal {
+		message, err := newAssistantTextMessage([]llm.TextBlock{mustTextBlock(t, value.Text)}, llm.FinishStop, mustUsage(t, value.InputTokens, value.OutputTokens), agentTestEpoch.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
 		}
+		return message
 	}
-
-	var clockTick atomic.Int64
-	var entrySequence atomic.Uint64
-	manager, err := session.CreateSessionManagerWithOptions(cwd, sessionDir, session.ManagerOptions{
-		NewSession: session.NewSessionOptions{ID: scenario.SessionID},
-		Now: func() time.Time {
-			return agentTestEpoch.Add(time.Duration(clockTick.Add(1)) * time.Millisecond)
-		},
-		NewEntryID: func() (string, error) {
-			return fmt.Sprintf("go-overflow-compaction-entry-%d", entrySequence.Add(1)), nil
-		},
+	typed, _ := provider.NewProviderFailure(provider.ProviderFailureSpec{Kind: provider.FailureContextOverflow, Message: scenario.ErrorMessage, Cause: errors.New("overflow fixture")})
+	cause, _ := llm.NewFailure(scenario.ErrorMessage, typed)
+	failed, _ := newAssistantFailureMessageWithFailure(nil, llm.FinishError, cause, llm.Usage{}, agentTestEpoch.Add(time.Hour))
+	implementation := newScriptedProvider(t, response(scenario.SeedResponse), failed, response(scenario.RecoveryResponse))
+	manager := newSessionManager(t)
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: manager, Model: handoffModel(t), SystemPrompt: scenario.SystemPrompt,
+		Stream: provider.StreamOptions{SessionID: scenario.SessionID}, ContextReserve: scenario.ReserveTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close(context.Background())
+	_ = runtime.ConfigureContextAccess(handoffInstructions(), nil, nil)
+	starts, ends, settlements := 0, 0, 0
+	runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		switch event := event.(type) {
+		case agent.CompactionStartEvent:
+			starts++
+			if event.Reason != agent.CompactionContextOverflow || !event.WillRetry {
+				t.Error("overflow start metadata")
+			}
+		case agent.CompactionEndEvent:
+			ends++
+			if event.Result == nil || !event.WillRetry || event.Aborted || event.ErrorMessage != "" {
+				t.Error("overflow settlement metadata")
+			}
+		case agent.AgentSettledEvent:
+			settlements++
+		}
 	})
-	if err != nil {
-		t.Fatalf("create overflow compaction session manager: %v", err)
+	if result, err := runtime.Prompt(context.Background(), scenario.FirstPrompt); err != nil || !result.Succeeded() {
+		t.Fatalf("seed: %#v %v", result, err)
 	}
-	managerOwned := true
-	defer func() {
-		if managerOwned {
-			_ = manager.Close()
-		}
-	}()
-
-	selected := catalogmodel.Model{
-		Provider: "faux", API: "anthropic-messages", ID: "faux-1", Name: "Faux Model",
-		BaseURL: "http://localhost:0", Input: []provider.InputKind{provider.InputText, provider.InputImage},
-		Cost: provider.CostRates{}, ContextWindow: 128_000, MaxTokens: 16_384,
-	}
-	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{
-		ChunkRunes: 3,
-		Clock:      func() time.Time { return agentTestEpoch },
-	})
-	if err != nil {
-		t.Fatalf("construct overflow compaction provider: %v", err)
-	}
-	responseStep := func(label string, response upstreamOverflowCompactionResponse) provider.ScriptStep {
-		terminal, terminalErr := newAssistantTextMessage(
-			[]llm.TextBlock{mustTextBlock(t, response.Text)},
-			llm.FinishStop,
-			mustUsage(t, response.InputTokens, response.OutputTokens),
-			agentTestEpoch,
-		)
-		if terminalErr != nil {
-			t.Fatalf("construct %s response: %v", label, terminalErr)
-		}
-		step, stepErr := provider.FixedResponseStep(terminal)
-		if stepErr != nil {
-			t.Fatalf("construct %s response step: %v", label, stepErr)
-		}
-		return step
-	}
-	providerFailure, err := provider.NewProviderFailure(provider.ProviderFailureSpec{
-		Kind: provider.FailureContextOverflow, Message: scenario.ErrorMessage,
-		Cause: errors.New("fixture context overflow"),
-	})
-	if err != nil {
-		t.Fatalf("construct overflow provider failure: %v", err)
-	}
-	failure, err := llm.NewFailure(scenario.ErrorMessage, providerFailure)
-	if err != nil {
-		t.Fatalf("construct overflow LLM failure: %v", err)
-	}
-	overflow, err := newAssistantFailureMessageWithFailure(
-		[]llm.TextBlock{mustTextBlock(t, "")},
-		llm.FinishError,
-		failure,
-		llm.Usage{},
-		agentTestEpoch,
-	)
-	if err != nil {
-		t.Fatalf("construct overflow response: %v", err)
-	}
-	overflowStep, err := provider.FixedResponseStep(overflow)
-	if err != nil {
-		t.Fatalf("construct overflow response step: %v", err)
-	}
-	steps := []provider.ScriptStep{
-		responseStep("seed", scenario.SeedResponse),
-		overflowStep,
-		responseStep("summary", scenario.SummaryResponse),
-		responseStep("recovery", scenario.RecoveryResponse),
-	}
-	if err := implementation.SetResponses(steps); err != nil {
-		t.Fatalf("set overflow compaction responses: %v", err)
-	}
-
-	enabled := true
-	disabled := false
-	reserveTokens := scenario.ReserveTokens
-	keepRecentTokens := scenario.KeepRecentTokens
-	providerMaxRetries := uint64(0)
-	off := provider.ThinkingOff
-	created, err := agentruntime.CreateAgentSession(context.Background(), agentruntime.SessionFactoryOptions{
-		Services: &agentruntime.Services{
-			CWD: cwd, AgentDir: agentDir, Provider: implementation,
-		},
-		Provider:       implementation,
-		SessionManager: manager,
-		AllModels:      []catalogmodel.Model{selected},
-		Availability: catalogmodel.Availability{
-			HasConfiguredAuth: func(string) bool { return true },
-			SupportsRoute:     func(catalogmodel.Model) bool { return true },
-		},
-		ExplicitModel:         &selected,
-		ExplicitThinkingLevel: &off,
-		Settings: catalogmodel.Settings{
-			Transport: provider.TransportSSE,
-			Compaction: catalogmodel.CompactionSettings{
-				Enabled: &enabled, ReserveTokens: &reserveTokens, KeepRecentTokens: &keepRecentTokens,
-			},
-			Retry: catalogmodel.RetrySettings{
-				Enabled:  &disabled,
-				Provider: catalogmodel.ProviderRetrySettings{MaxRetries: &providerMaxRetries},
-			},
-		},
-		BaseConfig: agent.SessionConfig{
-			SystemPrompt: scenario.SystemPrompt + "\nCurrent working directory: " + cwd,
-			Stream: provider.StreamOptions{
-				SessionID: scenario.SessionID,
-				Transport: provider.TransportSSE,
-			},
-			ResolveSummarizer: func(_ context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
-				return provider.NewContextSummarizerWithOptions(
-					implementation,
-					request.Model,
-					func() time.Time { return agentTestEpoch },
-					provider.ContextSummarizerOptions{
-						ThinkingLevel: request.ThinkingLevel,
-						Stream:        request.Stream,
-						Retry:         request.Retry,
-					},
-				)
-			},
-			Retry: agent.RetryPolicy{
-				Sleep: func(context.Context, time.Duration) error { return nil },
-			},
-			Now:               func() time.Time { return agentTestEpoch },
-			SettlementTimeout: time.Second,
-		},
-	})
-	if err != nil {
-		t.Fatalf("create Go overflow compaction AgentSession: %v", err)
-	}
-	runtime := created.Session
-	runtimeOwned := true
-	defer func() {
-		if runtimeOwned {
-			_ = runtime.Close(context.Background())
-		}
-	}()
-
-	var eventMu sync.Mutex
-	var observed []agent.SessionEvent
-	var settledSnapshots []any
-	unsubscribe := runtime.Subscribe(func(_ context.Context, event agent.SessionEvent) {
-		eventMu.Lock()
-		observed = append(observed, event)
-		if _, settled := event.(agent.AgentSettledEvent); settled {
-			activity := runtime.Activity()
-			queue := runtime.PendingQueue()
-			settledSnapshots = append(settledSnapshots, map[string]any{
-				"isStreaming":         activity.IsStreaming,
-				"isIdle":              activity.Phase == agent.PhaseIdle,
-				"isCompacting":        activity.IsCompacting,
-				"steering":            append([]string{}, queue.Steering...),
-				"followUp":            append([]string{}, queue.FollowUp...),
-				"pendingMessageCount": len(queue.SteeringMessages) + len(queue.FollowUpMessages),
-			})
-		}
-		eventMu.Unlock()
-	})
-
-	seed, err := runtime.Prompt(context.Background(), scenario.FirstPrompt)
-	if err != nil || !seed.Succeeded() {
-		t.Fatalf("seed overflow compaction prompt = (%#v, %v)", seed, err)
-	}
-	eventMu.Lock()
-	seedSettledCount := len(settledSnapshots)
-	eventMu.Unlock()
-	seedReturn := upstreamOverflowReturnSnapshot(runtime, seedSettledCount)
 	recovered, err := runtime.Prompt(context.Background(), scenario.OverflowPrompt)
-	if err != nil || !recovered.Succeeded() {
-		t.Fatalf("overflow recovery prompt = (%#v, %v)", recovered, err)
+	if err != nil || !recovered.Succeeded() || recovered.ProviderTurns() != 2 {
+		t.Fatalf("recovery: %#v %v", recovered, err)
 	}
-	eventMu.Lock()
-	overflowSettledCount := len(settledSnapshots)
-	events := append([]agent.SessionEvent(nil), observed...)
-	settled := append([]any(nil), settledSnapshots...)
-	eventMu.Unlock()
-	overflowReturn := upstreamOverflowReturnSnapshot(runtime, overflowSettledCount)
-	if implementation.CallCount() != 4 || implementation.PendingResponses() != 0 {
-		t.Fatalf("overflow compaction provider calls/pending = %d/%d, want 4/0", implementation.CallCount(), implementation.PendingResponses())
+	if implementation.CallCount() != 3 || starts != 1 || ends != 1 || settlements != 2 {
+		t.Fatalf("calls/events: %d %d %d %d", implementation.CallCount(), starts, ends, settlements)
 	}
-	if len(settled) != 2 {
-		t.Fatalf("overflow compaction settled events = %d, want 2", len(settled))
+	request := implementation.Requests()[2]
+	text := contextRequestText(t, request)
+	if !strings.Contains(text, scenario.OverflowPrompt) || !strings.Contains(text, "No handoff was generated") || !strings.Contains(text, "search-original-history") || strings.Contains(text, scenario.SeedResponse.Text) {
+		t.Fatal("invalid recovery context: ", text)
 	}
-	unsubscribe()
-
-	entries := manager.Entries()
-	entryIDs := workflowEntryIDs(entries)
-	header := manager.Header()
-	sessionFile, ok := manager.SessionFile()
-	if !ok {
-		t.Fatal("overflow compaction manager has no persistent session file")
+	if request.SystemPrompt() != scenario.SystemPrompt || request.StreamOptions().SessionID != scenario.SessionID {
+		t.Fatal("recovery changed runtime configuration")
 	}
-	stats, err := runtime.GetSessionStats()
-	if err != nil {
-		t.Fatalf("overflow compaction stats: %v", err)
+	var checkpoint session.Entry
+	failures, users := 0, 0
+	for _, entry := range manager.Entries() {
+		if handoff, ok := entry.ContextHandoff(); ok {
+			if !handoff.NoHandoff || len(handoff.PendingEntryIDs) != 1 {
+				t.Fatal("overflow input not referenced")
+			}
+			checkpoint = entry
+		}
+		if role, _ := entry.MessageRole(); role == "user" {
+			users++
+		}
+		if message, ok := entry.Message(); ok {
+			if _, failed := message.(llm.AssistantFailureMessage); failed {
+				failures++
+			}
+		}
 	}
-	providerInputs, err := normalizeWorkflowProviderInputs(implementation.Requests(), root, cwd, scenario.SessionID)
-	if err != nil {
-		t.Fatalf("normalize overflow compaction provider inputs: %v", err)
+	if checkpoint.ID() == "" || users != 2 || failures != 1 {
+		t.Fatalf("durable recovery checkpoint/users/failures: %s %d %d", checkpoint.ID(), users, failures)
 	}
-	normalizedEvents, err := normalizeWorkflowEvents(events, entryIDs)
-	if err != nil {
-		t.Fatalf("normalize overflow compaction events: %v", err)
-	}
-	state := runtime.State()
-	selectedRef, selectedOK := runtime.SelectedModel()
-	if !selectedOK {
-		t.Fatal("overflow compaction session lost its selected model")
-	}
-	finalMessages, err := normalizeWorkflowAgentMessages(state.Active.Messages())
-	if err != nil {
-		t.Fatalf("normalize final overflow compaction messages: %v", err)
-	}
-	normalizedEntries, err := normalizeWorkflowEntries(entries, entryIDs)
-	if err != nil {
-		t.Fatalf("normalize overflow compaction entries: %v", err)
-	}
-	finalActivity := runtime.Activity()
-	finalThinkingLevel := runtime.ThinkingLevel()
-	finalActiveTools := append([]string{}, runtime.ActiveToolNames()...)
-	finalSystemPrompt := runtime.SystemPrompt()
-	finalPendingMessageCount := runtime.PendingMessageCount()
+	path, _ := manager.SessionFile()
 	if err := runtime.Close(context.Background()); err != nil {
-		t.Fatalf("close overflow compaction runtime: %v", err)
+		t.Fatal(err)
 	}
-	runtimeOwned = false
-	managerOwned = false
-
-	fileHeader, fileEntries, err := normalizeWorkflowJSONL(sessionFile, entryIDs, root, cwd)
+	reopened, err := session.OpenSessionManager(path, "", "")
 	if err != nil {
-		t.Fatalf("normalize overflow compaction JSONL: %v", err)
+		t.Fatal(err)
 	}
-	reopened, err := session.OpenSessionManagerWithOptions(sessionFile, sessionDir, "", session.ManagerOptions{
-		Now: func() time.Time { return agentTestEpoch },
-		NewEntryID: func() (string, error) {
-			return fmt.Sprintf("reopened-overflow-compaction-entry-%d", entrySequence.Add(1)), nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("reopen overflow compaction session: %v", err)
+	defer reopened.Close()
+	if window, _ := reopened.CurrentContextWindow(); window != checkpoint.ID() {
+		t.Fatal("restart lost overflow boundary")
 	}
-	defer func() { _ = reopened.Close() }()
-	reopenedEntries, err := normalizeWorkflowEntries(reopened.Entries(), entryIDs)
-	if err != nil {
-		t.Fatalf("normalize reopened overflow compaction entries: %v", err)
+	if got := len(reopened.BuildContext().Messages()); got != 3 {
+		t.Fatalf("reopened recovery messages: %d", got)
 	}
-	reopenedContext := reopened.BuildContext()
-	reopenedMessages, err := normalizeWorkflowAgentMessages(reopenedContext.AgentMessages())
-	if err != nil {
-		t.Fatalf("normalize reopened overflow compaction messages: %v", err)
-	}
-	reopenedModel, hasReopenedModel := reopenedContext.Model()
-	reopenedThinking, hasReopenedThinking := reopenedContext.ThinkingLevel()
-	if !hasReopenedModel || !hasReopenedThinking {
-		t.Fatalf("reopened overflow compaction selection = model:%t thinking:%t", hasReopenedModel, hasReopenedThinking)
-	}
-
-	actualScenario := map[string]any{
-		"name":  scenario.Name,
-		"input": scenario,
-		"actions": map[string]any{
-			"seedReturn":       seedReturn,
-			"overflowReturn":   overflowReturn,
-			"settledSnapshots": settled,
-		},
-		"providerInputs": providerInputs,
-		"events":         normalizedEvents,
-		"finalState": map[string]any{
-			"isStreaming":         finalActivity.IsStreaming,
-			"pendingMessageCount": finalPendingMessageCount,
-			"model": map[string]any{
-				"provider": selectedRef.Provider(), "api": selectedRef.API(), "id": selectedRef.ID(),
-			},
-			"thinkingLevel": string(finalThinkingLevel),
-			"activeTools":   finalActiveTools,
-			"systemPrompt":  normalizeWorkflowPath(finalSystemPrompt, root, cwd),
-			"messages":      finalMessages,
-			"stats":         normalizeWorkflowStats(stats),
-		},
-		"session": map[string]any{
-			"header":      normalizeWorkflowHeader(header, root, cwd),
-			"entries":     normalizedEntries,
-			"fileEntries": fileEntries,
-			"reopened": map[string]any{
-				"header":  normalizeWorkflowHeader(reopened.Header(), root, cwd),
-				"entries": reopenedEntries,
-				"context": map[string]any{
-					"messages": reopenedMessages,
-					"model": map[string]any{
-						"provider": reopenedModel.Provider, "modelId": reopenedModel.ModelID,
-					},
-					"thinkingLevel": reopenedThinking,
-				},
-			},
-		},
-	}
-	if difference := workflowJSONDifference("overflowCompactionScenario", expectedScenario, canonicalWorkflowJSON(t, actualScenario)); difference != "" {
-		t.Fatalf("Go overflow compaction workflow differs from pinned TypeScript oracle: %s", difference)
-	}
-	if difference := workflowJSONDifference(
-		"overflowCompactionScenario.session.header",
-		expectedScenario["session"].(map[string]any)["header"],
-		fileHeader,
-	); difference != "" {
-		t.Fatalf("physical overflow compaction header differs from pinned TypeScript oracle: %s", difference)
-	}
-}
-
-func upstreamOverflowReturnSnapshot(runtime *agent.AgentSession, settledEventCount int) map[string]any {
-	activity := runtime.Activity()
-	queue := runtime.PendingQueue()
-	return map[string]any{
-		"isStreaming":         activity.IsStreaming,
-		"isIdle":              activity.Phase == agent.PhaseIdle,
-		"isCompacting":        activity.IsCompacting,
-		"settledEventCount":   settledEventCount,
-		"steering":            append([]string{}, queue.Steering...),
-		"followUp":            append([]string{}, queue.FollowUp...),
-		"pendingMessageCount": len(queue.SteeringMessages) + len(queue.FollowUpMessages),
+	for _, message := range reopened.BuildContext().Messages() {
+		if _, failed := message.(llm.AssistantFailureMessage); failed {
+			t.Fatal("failed response returned to active context")
+		}
 	}
 }

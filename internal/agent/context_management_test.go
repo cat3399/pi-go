@@ -168,7 +168,7 @@ func TestHandoffCancelledRunDoesNotSwitchNextPrompt(t *testing.T) {
 
 func TestContextReminderKeepsStablePrefixAndDoesNotRepeat(t *testing.T) {
 	manager := newSessionManager(t)
-	old, err := llm.NewUserTextMessage(strings.Repeat("old text ", 500), agentTestEpoch)
+	old, err := llm.NewUserTextMessage(strings.Repeat("old text ", 440), agentTestEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestContextReminderKeepsStablePrefixAndDoesNotRepeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close(context.Background())
-	if err := runtime.ConfigureContextAccess("session CLI entry", nil, nil); err != nil {
+	if err := runtime.ConfigureContextAccess(agent.ContextAccessInstructions{Handoff: "session CLI entry", History: "history entry"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runtime.Run(context.Background(), "continue"); err != nil {
@@ -196,14 +196,14 @@ func TestContextReminderKeepsStablePrefixAndDoesNotRepeat(t *testing.T) {
 	}
 	for _, request := range scripted.Requests() {
 		text := contextRequestText(t, request)
-		if strings.Count(text, "Context usage is approximately") != 1 {
+		if strings.Count(text, "tokens remaining for work") != 1 {
 			t.Fatalf("notice duplicated or missing: %s", text)
 		}
-		if request.SystemPrompt() != "stable system\n\nsession CLI entry" {
+		if request.SystemPrompt() != "stable system" {
 			t.Fatal("system prefix changed")
 		}
 	}
-	view, err := manager.ReadHistoryView(session.HistoryViewQuery{Search: "Context usage"})
+	view, err := manager.ReadHistoryView(session.HistoryViewQuery{Search: "tokens remaining for work"})
 	if err != nil || len(view.Records) != 0 {
 		t.Fatal("notice became user dialogue", err)
 	}

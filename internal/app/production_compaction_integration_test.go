@@ -175,7 +175,7 @@ func newPersistentProductionRuntime(t *testing.T, cwd, agentDir, path, modelID s
 	return runtime, manager
 }
 
-func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T) {
+func TestProductionHandoffUsesCurrentHTTPPrefixAndReloads(t *testing.T) {
 	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
 		t.Run(api, func(t *testing.T) {
 			cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
@@ -185,7 +185,7 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 			writeCompactionProductionConfig(t, agentDir, server.URL+"/v1", api, "summary-key", "summary-model")
 			path := filepath.Join(t.TempDir(), "session.jsonl")
 			config := fixedProductionConfig(cwd, agentDir, docsDir)
-			productRuntime, _ := newPersistentProductionRuntime(t, cwd, agentDir, path, "summary-model", config)
+			productRuntime, manager := newPersistentProductionRuntime(t, cwd, agentDir, path, "summary-model", config)
 			result, err := productRuntime.Session().Compact(context.Background(), "preserve implementation details")
 			if err != nil || !result.Committed || result.Output.Text != "production summary" {
 				t.Fatalf("Compact() = %#v, %v", result, err)
@@ -197,10 +197,10 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 			if len(requests) != 1 || requests[0].authorization != "Bearer summary-key" || requests[0].payload["model"] != "summary-model" {
 				t.Fatalf("summary requests = %#v", requests)
 			}
-			if _, exists := requests[0].payload["tools"]; exists {
+			if _, exists := requests[0].payload["tools"]; !exists || requests[0].payload["tool_choice"] != "none" {
 				t.Fatalf("summary request advertised tools: %#v", requests[0].payload["tools"])
 			}
-			if requests[0].sessionID != "" {
+			if requests[0].sessionID != manager.SessionID() {
 				t.Fatalf("summary transmitted session affinity = %q", requests[0].sessionID)
 			}
 			wantPath := "/v1/responses"
@@ -212,8 +212,8 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 			if requests[0].path != wantPath {
 				t.Fatalf("summary path = %q, want %q", requests[0].path, wantPath)
 			}
-			if requests[0].payload[maxField] != float64(8_000) {
-				t.Fatalf("summary %s = %#v, want model cap 8000", maxField, requests[0].payload[maxField])
+			if requests[0].payload[maxField] != float64(2048) {
+				t.Fatalf("summary %s = %#v, want brief handoff cap 2048", maxField, requests[0].payload[maxField])
 			}
 			reloaded, err := session.OpenSessionManager(path, "", "")
 			if err != nil {
@@ -222,7 +222,7 @@ func TestProductionCompactionUsesRealToolFreeHTTPProviderAndReloads(t *testing.T
 			defer reloaded.Close()
 			compactions := 0
 			for _, entry := range reloaded.Entries() {
-				if entry.Type() == "compaction" {
+				if _, ok := entry.ContextHandoff(); ok {
 					compactions++
 				}
 			}
@@ -342,7 +342,7 @@ func TestProductionBranchSummaryUsesRealToolFreeHTTPProviderAndReloads(t *testin
 	}
 }
 
-func TestProductionSplitCompactionRunsOrderedDualSummaryAndReloads(t *testing.T) {
+func TestProductionHandoffKeepsWholeWorkingPrefixWithoutSplitSummary(t *testing.T) {
 	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
 	var capture productionSummaryServer
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -420,17 +420,17 @@ func TestProductionSplitCompactionRunsOrderedDualSummaryAndReloads(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSummary := "history summary\n\n---\n\n**Turn Context (split turn):**\n\nprefix summary"
-	if !result.Committed || !result.Input.IsSplitTurn || result.Output.Text != wantSummary || result.Output.Usage == nil ||
-		result.Output.Usage.Usage.Input() != 6 || result.Output.Usage.Usage.Output() != 4 || result.Output.Usage.Usage.TotalTokens() != 10 {
+	wantSummary := "history summary"
+	if !result.Committed || result.Input.IsSplitTurn || result.Output.Text != wantSummary || result.Output.Usage == nil ||
+		result.Output.Usage.Usage.Input() != 3 || result.Output.Usage.Usage.Output() != 2 || result.Output.Usage.Usage.TotalTokens() != 5 {
 		t.Fatalf("split compaction result = %#v", result)
 	}
 	requests := capture.snapshot()
-	if len(requests) != 2 {
+	if len(requests) != 1 {
 		t.Fatalf("split summary requests = %#v", requests)
 	}
-	for index, wantBudget := range []float64{80, 50} {
-		if _, tools := requests[index].payload["tools"]; tools || requests[index].payload["max_output_tokens"] != wantBudget || requests[index].sessionID != "" {
+	for index, wantBudget := range []float64{100} {
+		if _, tools := requests[index].payload["tools"]; !tools || requests[index].payload["tool_choice"] != "none" || requests[index].payload["max_output_tokens"] != wantBudget || requests[index].sessionID != manager.SessionID() {
 			t.Fatalf("split request %d = %#v", index, requests[index])
 		}
 	}
@@ -444,11 +444,11 @@ func TestProductionSplitCompactionRunsOrderedDualSummaryAndReloads(t *testing.T)
 	defer reloaded.Close()
 	var compactions int
 	for _, entry := range reloaded.Entries() {
-		if entry.Type() == "compaction" {
+		if record, ok := entry.ContextHandoff(); ok {
 			compactions++
-			record, ok := entry.Compaction()
-			if !ok || record.Summary != wantSummary || record.Usage == nil || record.Usage.Usage.TotalTokens() != 10 {
-				t.Fatalf("reloaded split compaction = %#v", entry)
+			usage, err := record.GenerationUsage()
+			if record.Text != wantSummary || err != nil || usage == nil || usage.Usage.TotalTokens() != 5 {
+				t.Fatalf("reloaded handoff: %#v %v", record, err)
 			}
 		}
 	}
@@ -489,6 +489,9 @@ func TestProductionCompactionRefreshesKeyModelAndThinkingPerSummary(t *testing.T
 		t.Fatal(err)
 	}
 	appendProductionCompactionHistory(t, manager, "second")
+	if err := productRuntime.Session().ReloadMessagesFromSession(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := productRuntime.Session().Compact(context.Background(), "second"); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +500,7 @@ func TestProductionCompactionRefreshesKeyModelAndThinkingPerSummary(t *testing.T
 		requests[0].payload["model"] != "first-model" || requests[1].payload["model"] != "second-model" {
 		t.Fatalf("dynamic summary requests = %#v", requests)
 	}
-	if requests[0].sessionID != "" || requests[1].sessionID != "" {
+	if requests[0].sessionID != manager.SessionID() || requests[1].sessionID != manager.SessionID() {
 		t.Fatalf("summary operations transmitted session affinity: %q / %q", requests[0].sessionID, requests[1].sessionID)
 	}
 	firstReasoning, firstOK := requests[0].payload["reasoning"].(map[string]any)
@@ -507,7 +510,7 @@ func TestProductionCompactionRefreshesKeyModelAndThinkingPerSummary(t *testing.T
 	}
 }
 
-func TestProductionThresholdCompactionRunsRealSummaryChain(t *testing.T) {
+func TestProductionThresholdHandoffPrecedesNextRequest(t *testing.T) {
 	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
 	capture := &productionSummaryServer{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { capture.serve(t, w, r) }))
@@ -540,24 +543,24 @@ func TestProductionThresholdCompactionRunsRealSummaryChain(t *testing.T) {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
 	requests := capture.snapshot()
-	if len(requests) != 3 {
-		t.Fatalf("provider/summary request count = %d, want 3", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("provider/summary request count = %d, want 2", len(requests))
 	}
-	if _, agentTools := requests[0].payload["tools"]; !agentTools {
-		t.Fatalf("agent request did not advertise production tools: %#v", requests[0].payload)
+	if requests[0].payload["tool_choice"] != "none" {
+		t.Fatal("first request did not write a handoff")
 	}
-	if _, summaryTools := requests[1].payload["tools"]; summaryTools {
-		t.Fatalf("summary request advertised production tools: %#v", requests[1].payload)
+	if requests[1].payload["tool_choice"] == "none" {
+		t.Fatal("second request did not resume task execution")
 	}
-	if _, summaryTools := requests[2].payload["tools"]; summaryTools {
-		t.Fatalf("turn-prefix summary request advertised production tools: %#v", requests[2].payload)
+	if requests[0].sessionID != manager.SessionID() || requests[1].sessionID != manager.SessionID() {
+		t.Fatal("handoff changed session affinity")
 	}
 	if strings.Join(lifecycle, ",") != "start:threshold,end:threshold" {
 		t.Fatalf("threshold compaction lifecycle = %#v", lifecycle)
 	}
 	compactions := 0
 	for _, entry := range manager.Entries() {
-		if entry.Type() == "compaction" {
+		if _, ok := entry.ContextHandoff(); ok {
 			compactions++
 		}
 	}
@@ -608,12 +611,16 @@ func TestProductionCompactionPreservesExplicitZeroReserveAndKeep(t *testing.T) {
 			if _, err := productRuntime.Session().Compact(context.Background(), "explicit zeros"); err != nil {
 				t.Fatal(err)
 			}
+			status, err := productRuntime.Session().ContextStatus()
+			if err != nil || status.ReserveTokens != 0 || status.RequestBudget != status.ContextWindow {
+				t.Fatalf("zero reserve lost: %#v %v", status, err)
+			}
 			requests := capture.snapshot()
 			if len(requests) != 1 {
 				t.Fatalf("explicit-zero summary request = %#v", requests)
 			}
-			if _, exists := requests[0].payload[test.maxField]; exists {
-				t.Fatalf("explicit-zero summary request sent %s: %#v", test.maxField, requests[0].payload)
+			if requests[0].payload[test.maxField] != float64(2048) {
+				t.Fatalf("brief handoff cap %s: %#v", test.maxField, requests[0].payload)
 			}
 			if result, err := productRuntime.Session().Run(context.Background(), "below full context window"); err != nil || !result.Succeeded() {
 				t.Fatalf("Run() = %#v, %v", result, err)
@@ -666,7 +673,7 @@ func TestProductionManualCompactionWithoutAuthFailsBeforeHTTPOrDurableMutation(t
 	}
 }
 
-func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
+func TestProductionContextOverflowRecoversWithoutSummaryCall(t *testing.T) {
 	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
 	capture := &productionSummaryServer{}
 	var calls atomic.Uint32
@@ -685,10 +692,6 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 			writer.WriteHeader(http.StatusBadRequest)
 			_, _ = fmt.Fprint(writer, `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"maximum context length exceeded"}}`)
 		case 2:
-			writeProductionResponsesSSE(writer, "overflow checkpoint")
-		case 3:
-			writeProductionResponsesSSE(writer, "overflow turn prefix")
-		case 4:
 			writeProductionResponsesSSE(writer, "recovered answer")
 		default:
 			t.Errorf("unexpected overflow request %d", calls.Load())
@@ -711,23 +714,21 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 		t.Fatalf("Run() = %#v, %v", result, err)
 	}
 	requests := capture.snapshot()
-	if len(requests) != 4 || calls.Load() != 4 {
+	if len(requests) != 2 || calls.Load() != 2 {
 		t.Fatalf("overflow request count = %d/%d", len(requests), calls.Load())
 	}
 	if _, hasTools := requests[0].payload["tools"]; !hasTools {
 		t.Fatalf("initial agent request omitted tools: %#v", requests[0].payload)
 	}
-	if _, hasTools := requests[1].payload["tools"]; hasTools {
-		t.Fatalf("overflow summary advertised tools: %#v", requests[1].payload)
+	if _, hasTools := requests[1].payload["tools"]; !hasTools {
+		t.Fatal("recovery omitted task tools")
 	}
-	if _, hasTools := requests[2].payload["tools"]; hasTools {
-		t.Fatalf("overflow turn-prefix summary advertised tools: %#v", requests[2].payload)
+	if requests[0].sessionID != durableSessionID || requests[1].sessionID != durableSessionID {
+		t.Fatal("recovery changed session affinity")
 	}
-	if _, hasTools := requests[3].payload["tools"]; !hasTools {
-		t.Fatalf("continued agent request omitted tools: %#v", requests[3].payload)
-	}
-	if requests[0].sessionID != durableSessionID || requests[3].sessionID != durableSessionID || requests[1].sessionID != "" || requests[2].sessionID != "" {
-		t.Fatalf("overflow session affinity = %q / %q / %q / %q, durable %q", requests[0].sessionID, requests[1].sessionID, requests[2].sessionID, requests[3].sessionID, durableSessionID)
+	payload, _ := json.Marshal(requests[1].payload)
+	if !bytes.Contains(payload, []byte("No handoff was generated")) || !bytes.Contains(payload, []byte("overflow now")) {
+		t.Fatal("recovery lost pending user input or missing-handoff marker")
 	}
 	if len(lifecycle) != 2 {
 		t.Fatalf("overflow compaction lifecycle = %#v", lifecycle)
@@ -740,7 +741,10 @@ func TestProductionContextOverflowRunsSummaryThenContinues(t *testing.T) {
 	}
 	compactions := 0
 	for _, entry := range manager.Entries() {
-		if entry.Type() == "compaction" {
+		if handoff, ok := entry.ContextHandoff(); ok {
+			if !handoff.NoHandoff {
+				t.Fatal("overflow invented a handoff")
+			}
 			compactions++
 		}
 	}

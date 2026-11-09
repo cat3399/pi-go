@@ -21,7 +21,7 @@ const sessionHelp = `Usage: pi-go session [--id ID] [--agent-dir DIR] [--file JS
 Commands:
   list             List saved sessions and the current live session
   history --help   Read original dialogue, raw entries, or search history
-  context --help   Inspect usage, submit a short handoff, or compact
+  context --help   Inspect usage, submit a short handoff, or request one
 
 An explicit --id selects a session; otherwise PI_SESSION_ID selects the current
 session. Agent bash calls connect to the running owner automatically. Outside
@@ -57,7 +57,8 @@ new uses an already-written short handoff, without another model call or any
 automatically retained old conversation. The original history stays readable.
 Submit progress, relevant files/modules and next direction; no fixed template
 is required. A stable request ID makes handoff retries idempotent on this branch.
-compact retains the existing summary and recent-message policy. During a run,
+compact asks the current model for a brief handoff using the active context,
+then starts a new window with original history available on demand. During a run,
 both commands return accepted before changing context at a settled turn boundary.
 status reports estimated tokens (not exact provider tokenization) and the latest
 change state. --file is only for history reads; live control uses PI_SESSION_*.

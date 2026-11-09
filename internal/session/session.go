@@ -408,6 +408,18 @@ func contextProjectionIndexes(path []int, entries []Entry) []int {
 	}
 	result := make([]int, 0, len(path)-latest+1)
 	result = append(result, path[latest])
+	if handoff, ok := entries[path[latest]].ContextHandoff(); ok {
+		pending := make(map[string]bool, len(handoff.PendingEntryIDs))
+		for _, id := range handoff.PendingEntryIDs {
+			pending[id] = true
+		}
+		for _, index := range path[:latest] {
+			if pending[entries[index].ID()] {
+				result = append(result, index)
+			}
+		}
+		return append(result, path[latest+1:]...)
+	}
 	foundFirstKept := false
 	for position := 0; position < latest; position++ {
 		entryIndex := path[position]

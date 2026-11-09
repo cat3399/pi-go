@@ -567,6 +567,17 @@ func (a *Agent) RunAgentMessages(ctx context.Context, messages []agentmsg.Messag
 }
 
 func (a *Agent) Continue(ctx context.Context) (Result, error) {
+	return a.continueRun(ctx, false)
+}
+
+// continueQueued starts the next queued input after a settled session attempt.
+// In particular, cancelling a retry must not replay the failed prompt before
+// delivering a follow-up merely because its failed assistant was removed.
+func (a *Agent) continueQueued(ctx context.Context) (Result, error) {
+	return a.continueRun(ctx, true)
+}
+
+func (a *Agent) continueRun(ctx context.Context, queuedOnly bool) (Result, error) {
 	if a == nil {
 		return Result{}, fmt.Errorf("%w: nil agent", ErrInvalidRun)
 	}
@@ -591,7 +602,7 @@ func (a *Agent) Continue(ctx context.Context) (Result, error) {
 	queuedSteering := false
 	skipInitialSteering := false
 	mode := agentRunContinuation
-	if lastRole == agentmsg.RoleAssistant {
+	if lastRole == agentmsg.RoleAssistant || queuedOnly {
 		mode = agentRunPrompt
 		prompts = a.drainQueueLocked(true)
 		if len(prompts) != 0 {

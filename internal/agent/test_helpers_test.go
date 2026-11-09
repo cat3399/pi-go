@@ -25,7 +25,7 @@ func newTestModel(providerID, api, id string) (provider.Model, error) {
 		BaseURL:       "",
 		Input:         []provider.InputKind{provider.InputText},
 		Cost:          provider.CostRates{},
-		ContextWindow: 2,
+		ContextWindow: 128000,
 		MaxTokens:     1,
 	})
 }
@@ -38,7 +38,7 @@ func newAgentModel(spec provider.ModelSpec) (provider.Model, error) {
 		spec.Input = []provider.InputKind{provider.InputText}
 	}
 	if spec.ContextWindow == 0 {
-		spec.ContextWindow = 2
+		spec.ContextWindow = 128000
 	}
 	if spec.MaxTokens == 0 {
 		spec.MaxTokens = 1

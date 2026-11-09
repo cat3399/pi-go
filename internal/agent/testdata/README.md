@@ -19,6 +19,11 @@ normalized JSONL entries/tree structure and physical malformed-line placement,
 and contexts obtained by reopening persisted sessions. Only timestamps,
 generated entry/session IDs, and temporary absolute paths are normalized.
 
+The manual and overflow compaction inputs are also reused by pi-go handoff
+scenarios. Their assertions cover the explicitly chosen handoff policy rather
+than comparing those two complete workflows to the old summary oracle. The
+frozen upstream outputs remain unchanged for reference and storage compatibility.
+
 Run from the pinned upstream repository root so `tsx` applies its workspace
 path mappings. A fresh upstream checkout must first materialize its ignored
 model-data build input with `npm run hydrate:model-data`:

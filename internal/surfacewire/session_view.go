@@ -150,6 +150,13 @@ func BuildSessionContext(snapshot application.SessionSnapshot, deferThinking, de
 }
 
 func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.RawMessage, bool, error) {
+	if handoff, ok := entry.ContextHandoff(); ok {
+		return marshalRaw(map[string]any{
+			"role": "custom", "customType": "compaction", "content": handoff.Text, "display": true,
+			"details":   map[string]any{"tokensBefore": handoff.TokensBefore, "strategy": "handoff", "noHandoff": handoff.NoHandoff},
+			"timestamp": entry.Timestamp().UnixMilli(),
+		})
+	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(entry.RawJSON(), &object); err != nil {
 		return nil, false, fmt.Errorf("decode session entry %s: %w", entry.ID(), err)
