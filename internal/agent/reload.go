@@ -38,6 +38,9 @@ func (s *AgentSession) syncReloadedRuntimeSettings(settings RuntimeControlSettin
 	if _, err := provider.NewRetryController(settings.Retry); err != nil {
 		return fmt.Errorf("%w: reload retry policy: %w", ErrInvalidConfig, err)
 	}
+	if err := validateContextThresholds(settings.CompactionReminderAtTokens, settings.CompactionHandoffAtTokens); err != nil {
+		return err
+	}
 	// The two settings are one SettingsManager snapshot. Publish them under one
 	// Agent lock so an active run cannot drain one queue under mixed generations.
 	if err := s.loop.setQueueModes(settings.SteeringMode, settings.FollowUpMode); err != nil {
@@ -47,6 +50,8 @@ func (s *AgentSession) syncReloadedRuntimeSettings(settings RuntimeControlSettin
 	s.compactionEnabled = settings.AutoCompactionEnabled
 	s.retryEnabled = settings.AutoRetryEnabled
 	s.retryPolicy = settings.Retry
+	s.reminderAtTokens = cloneUint64(settings.CompactionReminderAtTokens)
+	s.handoffAtTokens = cloneUint64(settings.CompactionHandoffAtTokens)
 	s.notifyReadChange("controls")
 	if settings.CompactionReserveSet {
 		s.contextReserve = settings.CompactionReserveTokens

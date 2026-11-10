@@ -80,7 +80,7 @@ func TestAgentSessionModelAccessFailsBeforePromptSideEffects(t *testing.T) {
 	}
 }
 
-func TestAgentSessionManualCompactValidatesAccessAfterStartBeforeHooks(t *testing.T) {
+func TestAgentSessionManualCompactValidatesAccessBeforeAdmission(t *testing.T) {
 	manager := newSessionManager(t)
 	model := sessionTestModel(t)
 	var beforeCompactCalls atomic.Uint32
@@ -109,7 +109,7 @@ func TestAgentSessionManualCompactValidatesAccessAfterStartBeforeHooks(t *testin
 	if _, err := runtime.Compact(context.Background(), "manual"); !errors.Is(err, agent.ErrModelAccess) || err.Error() != accessErr.Error() {
 		t.Fatalf("Compact error = %v", err)
 	}
-	if startEvents.Load() != 1 {
+	if startEvents.Load() != 0 {
 		t.Fatalf("compaction_start events = %d", startEvents.Load())
 	}
 	if beforeCompactCalls.Load() != 0 {
@@ -120,7 +120,7 @@ func TestAgentSessionManualCompactValidatesAccessAfterStartBeforeHooks(t *testin
 	}
 }
 
-func TestAgentSessionManualCompactEmptyContextUsesOriginalFailurePrefix(t *testing.T) {
+func TestAgentSessionManualCompactEmptyContextFailsBeforeAdmission(t *testing.T) {
 	runtime, err := agent.NewSession(agent.SessionConfig{
 		Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: sessionTestModel(t),
 		ThinkingLevel: provider.ThinkingOff,
@@ -138,7 +138,7 @@ func TestAgentSessionManualCompactEmptyContextUsesOriginalFailurePrefix(t *testi
 	if _, err := runtime.Compact(context.Background(), "manual"); !errors.Is(err, session.ErrNothingToCompact) {
 		t.Fatalf("Compact error = %v", err)
 	}
-	if want := "Compaction failed: Nothing to compact (session too small)"; errorMessage != want {
+	if want := ""; errorMessage != want {
 		t.Fatalf("compaction_end error = %q, want %q", errorMessage, want)
 	}
 }

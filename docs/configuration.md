@@ -29,7 +29,7 @@ README 和源码位置由随二进制携带的资料决定。
   "defaultThinkingLevel": "medium",
   "steeringMode": "one-at-a-time",
   "followUpMode": "one-at-a-time",
-  "compaction": { "enabled": true },
+  "compaction": { "enabled": true, "reminderAtTokens": 40000, "handoffAtTokens": 50000 },
   "retry": { "enabled": true },
   "images": { "autoResize": true }
 }
@@ -39,6 +39,10 @@ README 和源码位置由随二进制携带的资料决定。
 `APPEND_SYSTEM.md` 追加指令，同类文件优先选择项目版本。项目根目录和祖先目录的
 `AGENTS.md` / `CLAUDE.md` 仍作为共享项目指令加载。共享 `.agents/skills` 的发现规则保持独立。
 修改后可使用 `/reload`。
+
+上下文交接的两个阈值使用 tokens，示例表示 40k 提前提醒、50k 升级为立即交接提醒。
+`handoffAtTokens` 优先于旧 `reserveTokens`；未配置新字段时自动兼容旧算法，不改写配置文件。
+`keepRecentTokens` 保持兼容读取。参数、默认回退和 CLI 提交边界见[上下文管理](context-management.md#提醒与用量)。
 
 ## 模型失败与重试
 
@@ -51,7 +55,7 @@ README 和源码位置由随二进制携带的资料决定。
 ```
 
 网络异常、单次模型请求超时、服务端过载、流提前结束和无法解析的响应都允许有限重试。
-用户取消、认证或明确的请求配置错误、额度耗尽不重试；上下文超限由压缩恢复流程处理。
+用户取消、认证或明确的请求配置错误、额度耗尽不重试；上下文超限保留错误和当前窗口，等待显式交接或调整模型。
 会话重试保留已完成的工具结果，只重新请求失败的模型回复。标题生成使用会话的重试设置，
 模型连通性测试使用全局重试设置。`retry.provider.maxRetries` 是独立的 provider 内部重试次数，
 默认 0；通常保持默认即可。

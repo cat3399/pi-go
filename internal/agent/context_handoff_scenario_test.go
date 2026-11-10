@@ -70,8 +70,8 @@ func TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput(t *testing.T)
 	var runtime *agent.AgentSession
 	write, _ := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
 		choice, present := request.ToolChoice()
-		if !present || choice.Mode != "none" || request.SystemPrompt() != "minimal system" || len(request.Tools()) != 1 {
-			t.Error("handoff changed system/tools or allowed task execution")
+		if present && choice.Mode == "none" || request.SystemPrompt() != "minimal system" || len(request.Tools()) != 1 {
+			t.Error("handoff changed system/tools or disabled tools")
 		}
 		if request.StreamOptions().SessionID != "same-session" {
 			t.Error("handoff changed cache attribution")
@@ -83,7 +83,7 @@ func TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput(t *testing.T)
 		if err := runtime.Steer("correction arriving during handoff"); err != nil {
 			t.Fatal(err)
 		}
-		return mustTextTerminal(t, "Module A is done. Verify module B next."), nil
+		return mustToolUseTerminal(t, "submit", "work", []byte(`{}`)), nil
 	})
 	last, _ := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
 		text := contextRequestText(t, request)
@@ -96,7 +96,11 @@ func TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput(t *testing.T)
 	_ = implementation.SetResponses([]provider.ScriptStep{first, write, last})
 	var err error
 	runtime, err = agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: manager, Model: handoffModel(t), SystemPrompt: "minimal system",
-		Tools: []provider.ToolDefinition{definition}, Tool: &fakeTool{name: "work", execute: func(context.Context, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+		Tools: []provider.ToolDefinition{definition}, Tool: &fakeTool{name: "work", executeWithID: func(ctx context.Context, id string, _ []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+			if id == "submit" {
+				_, err := runtime.RequestContextChange(ctx, agent.ContextChangeRequest{Mode: "handoff", Handoff: "Module A is done. Verify module B next."})
+				return agent.ToolOutput{Text: "accepted"}, err
+			}
 			return agent.ToolOutput{Text: "tool receipt"}, nil
 		}},
 		Stream: provider.StreamOptions{SessionID: "same-session"}})
@@ -135,13 +139,13 @@ func TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput(t *testing.T)
 	}
 }
 
-func TestOverflowStartsWindowWithoutInventingHandoffAndPreservesUserInput(t *testing.T) {
+func TestOverflowPreservesOriginalWindowWithoutAutomaticCheckpoint(t *testing.T) {
 	manager := newSessionManager(t)
 	_, _ = manager.AppendLLMMessage(context.Background(), mustTextTerminal(t, "earlier work"))
 	failure, _ := provider.NewProviderFailure(provider.ProviderFailureSpec{Kind: provider.FailureContextOverflow, Message: "overflow", Cause: errors.New("overflow")})
 	llmFailure, _ := llm.NewFailure("overflow", failure)
 	failed, _ := newAssistantFailureMessageWithFailure(nil, llm.FinishError, llmFailure, mustUsage(t, 0, 0), agentTestEpoch.Add(time.Hour))
-	implementation := newScriptedProvider(t, failed, mustTextTerminal(t, "recovered"))
+	implementation := newScriptedProvider(t, failed)
 	runtime, err := agent.NewSession(agent.SessionConfig{Provider: implementation, SessionManager: manager, Model: handoffModel(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -149,21 +153,16 @@ func TestOverflowStartsWindowWithoutInventingHandoffAndPreservesUserInput(t *tes
 	defer runtime.Close(context.Background())
 	_ = runtime.ConfigureContextAccess(handoffInstructions(), nil, nil)
 	result, err := runtime.Run(context.Background(), "unprocessed user correction")
-	if err != nil || !result.Succeeded() || implementation.CallCount() != 2 {
+	if err != nil || result.Succeeded() || implementation.CallCount() != 1 {
 		t.Fatalf("run: %#v %v calls=%d", result, err, implementation.CallCount())
 	}
-	text := contextRequestText(t, implementation.Requests()[1])
-	if !strings.Contains(text, "No handoff was generated") || !strings.Contains(text, "unprocessed user correction") || !strings.Contains(text, "search-original-history") {
-		t.Fatal(text)
+	window, _ := manager.CurrentContextWindow()
+	if window != session.InitialContextWindow {
+		t.Fatal("overflow switched context without a CLI handoff")
 	}
-	missing := false
-	for _, entry := range manager.Entries() {
-		if handoff, ok := entry.ContextHandoff(); ok {
-			missing = handoff.NoHandoff
-		}
-	}
-	if !missing {
-		t.Fatal("missing-handoff recovery was not recorded")
+	view, err := manager.ReadHistoryView(session.HistoryViewQuery{View: "raw", Search: "unprocessed user correction"})
+	if err != nil || len(view.Records) != 1 {
+		t.Fatal("original input lost", err)
 	}
 }
 
@@ -177,8 +176,8 @@ func TestRepeatedHandoffsPreserveUnprocessedInputAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close(context.Background())
-	for range 2 {
-		if _, err := runtime.Compact(context.Background(), ""); err != nil {
+	for _, handoff := range []string{"first handoff", "second handoff"} {
+		if _, err := runtime.RequestContextChange(context.Background(), agent.ContextChangeRequest{Mode: "handoff", Handoff: handoff}); err != nil {
 			t.Fatal(err)
 		}
 	}

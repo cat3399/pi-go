@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -31,121 +31,78 @@ func TestLiveProductionDeepSeekCompaction(t *testing.T) {
 	if apiKey == "" {
 		t.Skip("DEEPSEEK_API_KEY is not set")
 	}
-
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "pi-go")
+	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/pi-go")
+	build.Dir = root
+	if err := build.Run(); err != nil {
+		t.Fatalf("build live CLI failed (%T)", err)
+	}
 	for _, api := range []string{provider.OpenAIResponsesAPI, provider.OpenAICompletionsAPI} {
 		t.Run(api, func(t *testing.T) {
-			cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+			cwd, agentDir := t.TempDir(), t.TempDir()
 			writeDeepSeekCompactionLiveConfig(t, agentDir, api)
-			sessionPath := filepath.Join(t.TempDir(), "deepseek-compaction.jsonl")
-			manager, err := session.OpenSessionManager(sessionPath, "", cwd)
-			if err != nil {
-				t.Fatalf("open live session failed (%T)", err)
+			path := filepath.Join(agentDir, "models.json")
+			data, _ := os.ReadFile(path)
+			var catalog map[string]any
+			if err := json.Unmarshal(data, &catalog); err != nil {
+				t.Fatal(err)
 			}
-
-			assemblyContext, assemblyCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			dependencies, err := assembleProductionRuntime(assemblyContext, fixedProductionConfig(cwd, agentDir, docsDir), options{
-				modelID: "openai/" + deepSeekCompactionLiveModelID,
-			})
-			assemblyCancel()
-			if err != nil {
-				_ = manager.Close()
-				t.Fatalf("assemble production runtime failed (%T)", err)
+			configured := catalog["providers"].(map[string]any)["openai"].(map[string]any)
+			configured["apiKey"] = "DEEPSEEK_API_KEY"
+			configured["models"].([]any)[0].(map[string]any)["maxTokens"] = 8192
+			data, _ = json.Marshal(catalog)
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
 			}
-
-			createContext, createCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			productRuntime, err := agentruntime.Create(createContext, dependencies.factory, agentruntime.InitialOptions{
-				CWD: cwd, AgentDir: agentDir, SessionManager: manager,
-			})
-			createCancel()
-			if err != nil {
-				_ = manager.Close()
-				t.Fatalf("create production runtime without auth failed (%T)", err)
-			}
-			disposed := false
-			defer func() {
-				if disposed {
-					return
+			file := filepath.Join(agentDir, "sessions", "live", "handoff.jsonl")
+			run := func(args ...string) string {
+				t.Helper()
+				command := exec.CommandContext(ctx, binary, args...)
+				command.Dir = cwd
+				command.Env = append(os.Environ(), "PI_GO_AGENT_DIR="+agentDir)
+				output, err := command.Output()
+				if err != nil {
+					t.Fatalf("live CLI failed (%T)", err)
 				}
-				closeContext, closeCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer closeCancel()
-				_ = productRuntime.Dispose(closeContext)
-			}()
-
-			selected, selectedOK := productRuntime.Session().SelectedModel()
-			if !selectedOK || selected.Provider() != "openai" || selected.ID() != deepSeekCompactionLiveModelID || selected.API() != api {
-				t.Fatalf("session-first model selection = %s/%s api=%s present=%t", selected.Provider(), selected.ID(), selected.API(), selectedOK)
+				return string(output)
 			}
-			if _, exists, readErr := productRuntime.Services().AuthRuntime.Read(context.Background(), "openai"); readErr != nil || exists {
-				t.Fatalf("unexpected pre-injection credential state: exists=%t error=%T", exists, readErr)
+			for _, marker := range []string{"FIRST_OK", "PRECOMPACT_OK"} {
+				output := run("run", "--model", "openai/"+deepSeekCompactionLiveModelID, "--session", file, "-p", "Reply with exactly "+marker+". Do not call any tool.")
+				if !strings.Contains(output, marker) {
+					t.Fatal("live task marker missing")
+				}
 			}
-			if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", apiKey); err != nil {
-				t.Fatalf("inject runtime credential failed (%T)", err)
-			}
-
-			lifecycle := &deepSeekCompactionLifecycle{}
-			unsubscribe := productRuntime.Session().Subscribe(lifecycle.observe)
-			defer unsubscribe()
-
-			first := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),
-				"Reply with exactly FIRST_OK. Do not call any tool.", "FIRST_OK")
-			if first.ProviderTurns() != 1 || first.ToolExecutions() != 0 {
-				t.Fatalf("first live run counts = turns %d tools %d, want 1/0", first.ProviderTurns(), first.ToolExecutions())
-			}
-			preCompact := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),
-				"Reply with exactly PRECOMPACT_OK. Do not call any tool.", "PRECOMPACT_OK")
-			if preCompact.ProviderTurns() != 1 || preCompact.ToolExecutions() != 0 {
-				t.Fatalf("second pre-compaction live run counts = turns %d tools %d, want 1/0", preCompact.ProviderTurns(), preCompact.ToolExecutions())
-			}
-
-			compactContext, compactCancel := context.WithTimeout(context.Background(), 120*time.Second)
-			compactResult, compactErr := productRuntime.Session().Compact(compactContext,
-				"Preserve the exact FIRST_OK and PRECOMPACT_OK results and that both requests completed.")
-			compactCancel()
-			if compactErr != nil {
-				t.Fatalf("remote manual compaction failed (%T)", compactErr)
-			}
-			if !compactResult.Committed || compactResult.Input.IsSplitTurn ||
-				len(compactResult.Input.Messages) == 0 || len(compactResult.Input.RetainedTail) != 0 ||
-				!strings.Contains(compactResult.Output.Text, "FIRST_OK") || !strings.Contains(compactResult.Output.Text, "PRECOMPACT_OK") || compactResult.Output.Usage == nil {
-				t.Fatalf("remote manual handoff did not preserve completed work")
-			}
-
-			second := runDeepSeekCompactionLivePrompt(t, productRuntime.Session(),
-				"The prior exchange was compacted. Reply with exactly SECOND_OK. Do not call any tool.", "SECOND_OK")
-			if second.ProviderTurns() != 1 || second.ToolExecutions() != 0 {
-				t.Fatalf("post-compaction live run counts = turns %d tools %d, want 1/0", second.ProviderTurns(), second.ToolExecutions())
-			}
-			lifecycle.assertManualSuccess(t)
-			if countCompactionEntries(manager.Entries()) != 1 {
-				t.Fatalf("live session durable compaction count is not exactly one")
-			}
-
-			disposeContext, disposeCancel := context.WithTimeout(context.Background(), 15*time.Second)
-			disposeErr := productRuntime.Dispose(disposeContext)
-			disposeCancel()
-			if disposeErr != nil {
-				t.Fatalf("dispose production runtime failed (%T)", disposeErr)
-			}
-			disposed = true
-
-			assertDeepSeekCredentialNotPersisted(t, apiKey,
-				filepath.Join(agentDir, "models.json"), filepath.Join(agentDir, "settings.json"), sessionPath)
-			reopened, err := session.OpenSessionManager(sessionPath, "", "")
+			index, err := session.OpenReadIndex(file)
 			if err != nil {
-				t.Fatalf("reopen compacted JSONL failed (%T)", err)
+				t.Fatal(err)
 			}
-			defer reopened.Close()
-			if countCompactionEntries(reopened.Entries()) != 1 {
-				t.Fatalf("reopened live session compaction count is not exactly one")
+			view, err := index.ReadHistoryView(session.HistoryViewQuery{})
+			if err != nil {
+				t.Fatal(err)
 			}
-			messages := reopened.BuildContext().Messages()
-			if len(messages) == 0 {
-				t.Fatal("reopened context is empty")
+			output := run("session", "--id", view.SessionID, "--agent-dir", agentDir, "--json", "context", "compact", "--instructions", "Preserve FIRST_OK and PRECOMPACT_OK as completed results.")
+			var change agent.ContextChangeResult
+			if err := json.Unmarshal([]byte(output), &change); err != nil || change.State != "completed" {
+				t.Fatal("live CLI handoff did not commit")
 			}
-			last, ok := messages[len(messages)-1].(llm.AssistantTerminal)
-			if !ok || last.FinishReason() != llm.FinishStop || !strings.Contains(deepSeekCompactionLiveAssistantText(last), "SECOND_OK") {
-				t.Fatalf("reopened final assistant did not preserve the successful post-compaction response")
+			index, err = session.OpenReadIndex(file)
+			if err != nil {
+				t.Fatal(err)
 			}
+			view, err = index.ReadHistoryView(session.HistoryViewQuery{})
+			if err != nil || len(view.Windows) != 2 || !strings.Contains(view.Windows[1].Handoff, "FIRST_OK") || !strings.Contains(view.Windows[1].Handoff, "PRECOMPACT_OK") {
+				t.Fatal("live handoff lost completed work")
+			}
+			if output := run("run", "--model", "openai/"+deepSeekCompactionLiveModelID, "--session", file, "-p", "Reply with exactly SECOND_OK. Do not call any tool."); !strings.Contains(output, "SECOND_OK") {
+				t.Fatal("resume after handoff failed")
+			}
+			assertDeepSeekCredentialNotPersisted(t, apiKey, path, filepath.Join(agentDir, "settings.json"), file)
 		})
 	}
 }
@@ -312,62 +269,6 @@ func writeDeepSeekCompactionLiveConfig(t *testing.T, agentDir, api string) {
 	}
 }
 
-func runDeepSeekCompactionLivePrompt(t *testing.T, runtime *agent.AgentSession, prompt, marker string) agent.Result {
-	t.Helper()
-	runContext, runCancel := context.WithTimeout(context.Background(), 120*time.Second)
-	result, err := runtime.Run(runContext, prompt)
-	runCancel()
-	if err != nil {
-		t.Fatalf("live Agent run failed (%T)", err)
-	}
-	terminal, ok := result.Terminal()
-	if !result.Succeeded() || !ok || terminal.FinishReason() != llm.FinishStop {
-		t.Fatalf("live Agent run did not finish successfully: turns=%d tools=%d terminal=%T", result.ProviderTurns(), result.ToolExecutions(), terminal)
-	}
-	if !strings.Contains(deepSeekCompactionLiveAssistantText(terminal), marker) {
-		t.Fatalf("live Agent response did not contain the required marker")
-	}
-	return result
-}
-
-type deepSeekCompactionLifecycle struct {
-	mu     sync.Mutex
-	starts []agent.CompactionStartEvent
-	ends   []agent.CompactionEndEvent
-}
-
-func (l *deepSeekCompactionLifecycle) observe(_ context.Context, event agent.SessionEvent) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	switch value := event.(type) {
-	case agent.CompactionStartEvent:
-		l.starts = append(l.starts, value)
-	case agent.CompactionEndEvent:
-		l.ends = append(l.ends, value)
-	}
-}
-
-func (l *deepSeekCompactionLifecycle) assertManualSuccess(t *testing.T) {
-	t.Helper()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.starts) != 1 || len(l.ends) != 1 || l.starts[0].Reason != agent.CompactionManual ||
-		l.ends[0].Reason != agent.CompactionManual || l.ends[0].Aborted || l.ends[0].WillRetry ||
-		l.ends[0].ErrorMessage != "" || l.ends[0].Result == nil || !l.ends[0].Result.Committed {
-		t.Fatalf("manual compaction lifecycle did not close successfully: starts=%d ends=%d", len(l.starts), len(l.ends))
-	}
-}
-
-func countCompactionEntries(entries []session.Entry) int {
-	count := 0
-	for _, entry := range entries {
-		if _, ok := entry.ContextHandoff(); ok {
-			count++
-		}
-	}
-	return count
-}
-
 func assertDeepSeekCredentialNotPersisted(t *testing.T, apiKey string, paths ...string) {
 	t.Helper()
 	for _, path := range paths {
@@ -379,25 +280,4 @@ func assertDeepSeekCredentialNotPersisted(t *testing.T, apiKey string, paths ...
 			t.Fatalf("runtime credential was persisted in %s", filepath.Base(path))
 		}
 	}
-}
-
-func deepSeekCompactionLiveAssistantText(message llm.AssistantTerminal) string {
-	var blocks []llm.AssistantBlock
-	switch value := message.(type) {
-	case llm.AssistantTextMessage:
-		blocks = value.Blocks()
-	case llm.AssistantRichMessage:
-		blocks = value.Blocks()
-	case llm.AssistantToolUseMessage:
-		blocks = value.Blocks()
-	case llm.AssistantFailureMessage:
-		blocks = value.Blocks()
-	}
-	var text strings.Builder
-	for _, block := range blocks {
-		if value, ok := block.(llm.TextBlock); ok {
-			text.WriteString(value.Text())
-		}
-	}
-	return text.String()
 }

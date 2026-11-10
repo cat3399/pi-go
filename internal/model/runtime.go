@@ -251,6 +251,8 @@ func (s BranchSummarySettings) ReserveTokensOrDefault() uint64 {
 // individual global fields and an explicit enabled:false is not lost.
 type CompactionSettings struct {
 	Enabled          *bool   `json:"enabled,omitempty"`
+	ReminderAtTokens *uint64 `json:"reminderAtTokens,omitempty"`
+	HandoffAtTokens  *uint64 `json:"handoffAtTokens,omitempty"`
 	ReserveTokens    *uint64 `json:"reserveTokens,omitempty"`
 	KeepRecentTokens *uint64 `json:"keepRecentTokens,omitempty"`
 }
@@ -814,6 +816,7 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	}
 	putOptionalSettingsObject(root, "compaction", map[string]json.RawMessage{
 		"enabled": optionalBoolJSON(current.Compaction.Enabled), "reserveTokens": optionalUint64JSON(current.Compaction.ReserveTokens),
+		"reminderAtTokens": optionalUint64JSON(current.Compaction.ReminderAtTokens), "handoffAtTokens": optionalUint64JSON(current.Compaction.HandoffAtTokens),
 		"keepRecentTokens": optionalUint64JSON(current.Compaction.KeepRecentTokens),
 	})
 	putOptionalSettingsObject(root, "branchSummary", map[string]json.RawMessage{
@@ -1744,7 +1747,16 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 	}
 	if raw, ok := root["compaction"]; ok {
 		if err := json.Unmarshal(raw, &s.Compaction); err != nil {
-			return s, Diagnostic{label, "compaction", "must be an object with enabled, reserveTokens, and keepRecentTokens"}
+			return s, Diagnostic{label, "compaction", "must contain boolean enabled and non-negative integer token settings"}
+		}
+		if s.Compaction.ReminderAtTokens != nil && *s.Compaction.ReminderAtTokens == 0 {
+			return s, Diagnostic{label, "compaction.reminderAtTokens", "must be greater than zero"}
+		}
+		if s.Compaction.HandoffAtTokens != nil && *s.Compaction.HandoffAtTokens == 0 {
+			return s, Diagnostic{label, "compaction.handoffAtTokens", "must be greater than zero"}
+		}
+		if s.Compaction.ReminderAtTokens != nil && s.Compaction.HandoffAtTokens != nil && *s.Compaction.ReminderAtTokens > *s.Compaction.HandoffAtTokens {
+			return s, Diagnostic{label, "compaction.reminderAtTokens", "must not exceed handoffAtTokens"}
 		}
 	}
 	if raw, ok := root["branchSummary"]; ok {
@@ -2050,6 +2062,12 @@ func mergeSettings(base, override Settings) Settings {
 	}
 	if override.Compaction.Enabled != nil {
 		out.Compaction.Enabled = cloneBoolPointer(override.Compaction.Enabled)
+	}
+	if override.Compaction.ReminderAtTokens != nil {
+		out.Compaction.ReminderAtTokens = cloneUint64Pointer(override.Compaction.ReminderAtTokens)
+	}
+	if override.Compaction.HandoffAtTokens != nil {
+		out.Compaction.HandoffAtTokens = cloneUint64Pointer(override.Compaction.HandoffAtTokens)
 	}
 	if override.Compaction.ReserveTokens != nil {
 		out.Compaction.ReserveTokens = cloneUint64Pointer(override.Compaction.ReserveTokens)
@@ -3051,6 +3069,8 @@ func cloneSettings(s Settings) Settings {
 	s.Prompts = cloneStringSlice(s.Prompts)
 	s.EnabledModels = append([]string(nil), s.EnabledModels...)
 	s.Compaction.Enabled = cloneBoolPointer(s.Compaction.Enabled)
+	s.Compaction.ReminderAtTokens = cloneUint64Pointer(s.Compaction.ReminderAtTokens)
+	s.Compaction.HandoffAtTokens = cloneUint64Pointer(s.Compaction.HandoffAtTokens)
 	s.Compaction.ReserveTokens = cloneUint64Pointer(s.Compaction.ReserveTokens)
 	s.Compaction.KeepRecentTokens = cloneUint64Pointer(s.Compaction.KeepRecentTokens)
 	s.BranchSummary.ReserveTokens = cloneUint64Pointer(s.BranchSummary.ReserveTokens)

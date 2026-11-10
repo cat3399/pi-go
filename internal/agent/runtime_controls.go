@@ -32,6 +32,8 @@ func (s *AgentSession) resolvedRuntimeSettings() RuntimeControlSettings {
 	settings.CompactionReserveSet = true
 	settings.CompactionKeepRecentTokens = s.keepRecentTokens
 	settings.CompactionKeepRecentSet = s.keepRecentSet
+	settings.CompactionReminderAtTokens = cloneUint64(s.reminderAtTokens)
+	settings.CompactionHandoffAtTokens = cloneUint64(s.handoffAtTokens)
 	settings.BranchSummaryReserveTokens = s.branchSummaryReserve
 	settings.BranchSummaryReserveSet = true
 	resolve := s.resolveRuntimeSettings

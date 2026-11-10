@@ -28,10 +28,21 @@ type sessionHarness struct {
 	session        *application.ApplicationSession
 }
 
-type sessionToolExecutor struct{}
+type sessionToolExecutor struct {
+	name    string
+	execute func(context.Context) (agent.ToolOutput, error)
+}
 
-func (sessionToolExecutor) Name() string { return "application-tools" }
-func (sessionToolExecutor) Execute(context.Context, string, []byte, func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+func (e sessionToolExecutor) Name() string {
+	if e.name != "" {
+		return e.name
+	}
+	return "application-tools"
+}
+func (e sessionToolExecutor) Execute(ctx context.Context, _ string, _ []byte, _ func(agent.ToolUpdate)) (agent.ToolOutput, error) {
+	if e.execute != nil {
+		return e.execute(ctx)
+	}
 	return agent.ToolOutput{Text: "ok"}, nil
 }
 
@@ -705,14 +716,24 @@ func TestApplicationSessionCompactionCommandsExposeManualActivityAndAbort(t *tes
 		}
 	}
 	t.Run("success", func(t *testing.T) {
-		harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{
+		call, _ := llm.NewToolCallBlock("submit", "handoff", []byte(`{}`))
+		terminal, err := llm.NewAssistantToolUseMessage([]llm.AssistantBlock{call}, llm.Usage{}, sessionTestEpoch, llm.AssistantProvenance{Provider: "scripted", API: "scripted", Model: "application-model"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		definition, _ := provider.NewToolDefinition("handoff", "CLI handoff submission", false, []byte(`{"type":"object"}`))
+		var harness *sessionHarness
+		harness = newSessionHarnessWithOptions(t, sessionHarnessOptions{
 			SetupManager: setup(t),
 			Configure: func(config *agent.SessionConfig) {
-				config.KeepRecentTokens = 1
-				config.KeepRecentTokensSet = true
-				config.Summarizer = sessionSummarizer{}
+				config.Tools = []provider.ToolDefinition{definition}
+				config.Tool = sessionToolExecutor{name: "handoff", execute: func(ctx context.Context) (agent.ToolOutput, error) {
+					_, err := harness.runtime.Session().RequestContextChange(ctx, agent.ContextChangeRequest{Mode: "handoff", Handoff: "application checkpoint"})
+					return agent.ToolOutput{Text: "accepted"}, err
+				}}
 			},
-		})
+		}, mustFixedStep(t, terminal))
+		_ = harness.runtime.Session().ConfigureContextAccess(agent.ContextAccessInstructions{Handoff: "Submit through the session CLI."}, nil, nil)
 		result, err := harness.session.Dispatch(context.Background(), application.CompactCommand{CustomInstructions: "focus"})
 		if err != nil {
 			t.Fatal(err)
@@ -725,27 +746,26 @@ func TestApplicationSessionCompactionCommandsExposeManualActivityAndAbort(t *tes
 
 	t.Run("abort", func(t *testing.T) {
 		started := make(chan struct{})
-		harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{
-			SetupManager: setup(t),
-			Configure: func(config *agent.SessionConfig) {
-				config.KeepRecentTokens = 1
-				config.KeepRecentTokensSet = true
-				config.Summarizer = sessionSummarizer{started: started, wait: true}
-			},
+		step, _ := provider.FactoryResponseStep(func(ctx context.Context, _ provider.Request, _ uint64) (llm.AssistantTerminal, error) {
+			close(started)
+			<-ctx.Done()
+			return nil, context.Cause(ctx)
 		})
+		harness := newSessionHarnessWithOptions(t, sessionHarnessOptions{SetupManager: setup(t)}, step)
+		_ = harness.runtime.Session().ConfigureContextAccess(agent.ContextAccessInstructions{Handoff: "Submit through the session CLI."}, nil, nil)
 		done := make(chan error, 1)
 		go func() {
-			_, compactErr := harness.session.Dispatch(context.Background(), application.CompactCommand{})
-			done <- compactErr
+			_, err := harness.session.Dispatch(context.Background(), application.CompactCommand{})
+			done <- err
 		}()
 		select {
 		case <-started:
 		case <-time.After(time.Second):
-			t.Fatal("compaction did not reach summarizer")
+			t.Fatal("handoff did not reach the normal Agent request")
 		}
 		state, err := harness.session.State()
-		if err != nil || !state.IsCompacting || state.IsStreaming || state.Phase != agent.PhaseCompacting {
-			t.Fatalf("manual compaction state = (%#v, %v)", state, err)
+		if err != nil || !state.IsCompacting || !state.IsStreaming || state.Phase != agent.PhaseCompacting {
+			t.Fatalf("manual handoff state = (%#v, %v)", state, err)
 		}
 		if _, err := harness.session.Dispatch(context.Background(), application.AbortCompactionCommand{}); err != nil {
 			t.Fatal(err)
@@ -753,12 +773,13 @@ func TestApplicationSessionCompactionCommandsExposeManualActivityAndAbort(t *tes
 		select {
 		case err := <-done:
 			if err == nil {
-				t.Fatal("aborted compaction unexpectedly succeeded")
+				t.Fatal("aborted handoff unexpectedly succeeded")
 			}
 		case <-time.After(time.Second):
-			t.Fatal("aborted compaction did not settle")
+			t.Fatal("aborted handoff did not settle")
 		}
 	})
+
 }
 
 func TestApplicationSessionExposesBranchSummaryAbortCommand(t *testing.T) {

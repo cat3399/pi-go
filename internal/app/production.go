@@ -469,6 +469,8 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 			},
 			CompactionEnabled: &compactionEnabled,
 			ContextReserve:    snapshot.Settings.Compaction.ReserveTokensOrDefault(),
+			ReminderAtTokens:  snapshot.Settings.Compaction.ReminderAtTokens,
+			HandoffAtTokens:   snapshot.Settings.Compaction.HandoffAtTokens,
 			KeepRecentTokens:  snapshot.Settings.Compaction.KeepRecentTokensOrDefault(),
 			ContextReserveSet: true, KeepRecentTokensSet: true,
 			BranchSummaryReserveTokens: snapshot.Settings.BranchSummary.ReserveTokensOrDefault(), BranchSummaryReserveSet: true,
@@ -487,16 +489,6 @@ func (p productionRuntimePlan) create(ctx context.Context, options agentruntime.
 					return provider.StreamOptions{}, streamErr
 				}
 				return turnStream, nil
-			},
-			ResolveSummarizer: func(resolveCtx context.Context, request agent.SummarizerResolveRequest) (session.Summarizer, error) {
-				if accessErr := requirePromptAccess(resolveCtx, request.Model); accessErr != nil {
-					return nil, accessErr
-				}
-				return provider.NewContextHandoffWriter(catalog, request.Model, p.config.AgentNow, provider.ContextSummarizerOptions{
-					ThinkingLevel: request.ThinkingLevel,
-					Stream:        request.Stream,
-					Retry:         request.Retry,
-				}, request.Tools)
 			},
 			ResolveBranchSummarizer: func(resolveCtx context.Context, request agent.SummarizerResolveRequest) (session.BranchSummarizer, error) {
 				if accessErr := requirePromptAccess(resolveCtx, request.Model); accessErr != nil {

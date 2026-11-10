@@ -44,8 +44,14 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
+	for _, mode := range []string{"proactive", "budget", "manual"} {
+		t.Run(mode, func(t *testing.T) { testSessionHandoffBinaryScenario(t, ctx, binary, mode) })
+	}
+}
+
+func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary, mode string) {
 	cwd, agentDir := t.TempDir(), t.TempDir()
-	file := filepath.Join(cwd, "session.jsonl")
+	file := filepath.Join(agentDir, "sessions", "e2e", "session.jsonl")
 	const original = "ORIGINAL_TASK_KEEP_THIS_CORRECTION"
 	prompt := original + "\n" + strings.Repeat("original history filler line\n", 3000) + "END_ORIGINAL_TASK"
 	var mu sync.Mutex
@@ -54,7 +60,10 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 	fullOutput := ""
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			Messages []struct {
+			ToolChoice any               `json:"tool_choice"`
+			MaxTokens  uint64            `json:"max_tokens"`
+			Tools      []json.RawMessage `json:"tools"`
+			Messages   []struct {
 				Role    string          `json:"role"`
 				Content json.RawMessage `json:"content"`
 			} `json:"messages"`
@@ -84,10 +93,34 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 		} else if string(payload.Messages[0].Content) != systemPrefix {
 			t.Error("system/tool capability prefix changed across handoff")
 		}
+		if payload.ToolChoice == "none" || payload.MaxTokens == 2048 || len(payload.Tools) == 0 {
+			t.Error("handoff restricted the normal tool/output request")
+		}
 		text := ""
 		toolName := ""
 		var arguments any
-		switch calls {
+		phase := calls
+		if mode != "proactive" {
+			phase -= 2
+		}
+		switch phase {
+		case -1:
+			toolName = "bash"
+			command := "printf ordinary-work"
+			if mode == "manual" {
+				command = `"$PI_EXECUTABLE" session context compact --instructions 'retain exact pending correction'`
+			}
+			arguments = map[string]any{"command": command}
+		case 0:
+			encoded, _ := json.Marshal(payload.Messages)
+			if mode == "manual" && !strings.Contains(string(encoded), "retain exact pending correction") {
+				t.Error("manual CLI did not deliver a handoff request")
+			}
+			if mode == "budget" && !strings.Contains(string(encoded), "working budget") {
+				t.Error("hard budget did not deliver the CLI reminder")
+			}
+			toolName = "bash"
+			arguments = map[string]any{"command": "printf handoff-preparation"}
 		case 1:
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session context new --request-id binary-handoff --handoff 'Continue by reading original dialogue through session history.'`}
@@ -119,6 +152,13 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 				t.Error("read did not recover the original user correction")
 			}
 			text = "HANDOFF_E2E_OK"
+		case 6:
+			encoded, _ := json.Marshal(payload.Messages)
+			if !strings.Contains(string(encoded), "idle manual focus") {
+				t.Error("offline compact missed its runtime reminder")
+			}
+			toolName = "bash"
+			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session context new --request-id binary-idle --handoff 'Idle manual handoff saved through CLI.'`}
 		case 5:
 			encoded, _ := json.Marshal(payload.Messages)
 			if !strings.Contains(string(encoded), "Continue the same task in context window") || !strings.Contains(string(encoded), "resume after restart") {
@@ -152,6 +192,9 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := []byte(`{"compaction":{"enabled":true,"reserveTokens":16384,"keepRecentTokens":100},"retry":{"enabled":false}}`)
+	if mode == "budget" {
+		settings = []byte(`{"compaction":{"enabled":true,"reserveTokens":0,"reminderAtTokens":90000,"handoffAtTokens":100000},"retry":{"enabled":false}}`)
+	}
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), settings, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -185,10 +228,17 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 	if len(view.Windows) != 2 || view.Records[0].Blocks[0].Text != prompt {
 		t.Fatal("durable original history or window boundary lost")
 	}
+	if output := runBinary("session", "--id", view.SessionID, "--agent-dir", agentDir, "--json", "context", "compact", "--instructions", "idle manual focus"); !strings.Contains(output, "completed") {
+		t.Fatalf("idle compact: %s", output)
+	}
 	mu.Lock()
 	count, artifact := calls, fullOutput
 	mu.Unlock()
-	if count != 5 {
+	wantCalls := 6
+	if mode != "proactive" {
+		wantCalls += 2
+	}
+	if count != wantCalls {
 		t.Fatalf("model calls = %d", count)
 	}
 	data, err := os.ReadFile(artifact)

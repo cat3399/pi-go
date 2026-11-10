@@ -142,6 +142,10 @@ type SessionConfig struct {
 	ContextWindow    uint64
 	ContextReserve   uint64
 	KeepRecentTokens uint64
+	// Explicit token thresholds take precedence over the legacy reserve-based
+	// budget. Nil retains the corresponding legacy/default calculation.
+	ReminderAtTokens *uint64
+	HandoffAtTokens  *uint64
 	// Presence flags allow production settings to preserve an explicit zero.
 	// Existing low-level callers retain zero-means-default behavior.
 	ContextReserveSet   bool
@@ -156,11 +160,9 @@ type SessionConfig struct {
 	// ResolveRuntimeSettings reads current effective settings at each dynamic
 	// control boundary. Production backs it with ModelRuntime.Snapshot.
 	ResolveRuntimeSettings func() RuntimeControlSettings
-	Summarizer             session.Summarizer
-	// ResolveSummarizer is the production seam. It is invoked once per
-	// handoff after current model/thinking/stream auth have been snapshotted.
-	// The historical Summarizer interface remains the injection seam for
-	// handoff writers in tests and embedders; production uses the current model.
+	// Deprecated: retained only as a legacy fallback for branch summaries.
+	// Context handoffs always use the ordinary Agent loop and CLI submission.
+	Summarizer        session.Summarizer
 	ResolveSummarizer func(context.Context, SummarizerResolveRequest) (session.Summarizer, error)
 	// BranchSummarizer and ResolveBranchSummarizer are the corresponding seams
 	// for navigateTree branch summaries, which retain the original summary policy.
@@ -202,9 +204,8 @@ const (
 	DefaultCompactionKeepRecentTokens uint64 = 20_000
 )
 
-// SummarizerResolveRequest contains the exact request-scoped state selected
-// for one compaction or branch summary. Handoffs preserve this stream's cache
-// and session attribution; branch summaries keep their separate request policy.
+// SummarizerResolveRequest contains the selected request configuration for a
+// branch summary. Context handoffs use ordinary Agent requests.
 type SummarizerResolveRequest struct {
 	Tools         []provider.ToolDefinition
 	Model         provider.Model
@@ -225,6 +226,8 @@ type RuntimeControlSettings struct {
 	CompactionReserveSet       bool
 	CompactionKeepRecentTokens uint64
 	CompactionKeepRecentSet    bool
+	CompactionReminderAtTokens *uint64
+	CompactionHandoffAtTokens  *uint64
 	BranchSummaryReserveTokens uint64
 	BranchSummaryReserveSet    bool
 }
@@ -243,9 +246,9 @@ type SessionState struct {
 
 // SessionActivity is the high-level product lifecycle projection exposed to
 // hosts. IsStreaming deliberately tracks the complete Agent prompt lifecycle
-// (including retry waits, automatic compaction, and queued continuations), not
-// merely an individual provider request. Manual compaction and tree navigation
-// can therefore be compacting while IsStreaming remains false, as in pi.
+// (including retry waits and queued continuations), not merely an individual
+// provider request. A requested handoff uses this same Agent pipeline; direct
+// checkpoint submissions and tree navigation can compact without streaming.
 type SessionActivity struct {
 	Phase        Phase
 	IsStreaming  bool
@@ -471,12 +474,14 @@ type AgentSession struct {
 
 	// Context requests use the existing run admission and turn boundaries.
 	// These fields and the borrowed host adapter lifetime use lifecycleMu.
+	contextCompaction         *contextCompactionRequest
 	contextRequest            *pendingContextChange
 	lastContextChange         *ContextChangeResult
 	contextAccessInstructions ContextAccessInstructions
 	contextAccessEnvironment  map[string]string
 	contextAccessCloser       io.Closer
 	contextReminderKey        string
+	contextReminderLevel      uint8
 	contextRebuildPending     bool
 
 	retryPolicy             RetryPolicy
@@ -484,6 +489,8 @@ type AgentSession struct {
 	resolveRuntimeSettings  func() RuntimeControlSettings
 	contextWindow           uint64
 	contextReserve          uint64
+	reminderAtTokens        *uint64
+	handoffAtTokens         *uint64
 	keepRecentTokens        uint64
 	keepRecentSet           bool
 	compactionEnabled       bool
@@ -512,8 +519,8 @@ type sessionRun struct {
 	retryMax              uint32
 	retryCancel           context.CancelCauseFunc
 	compaction            *runCancellation
-	overflowCompacted     bool
-	contextRecoveryFailed bool
+	stopAfterHandoff      bool
+	handoffComplete       bool
 	assistantStarted      bool
 	assistantHookStarted  bool
 	committed             []llm.ConversationMessage
@@ -557,8 +564,11 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 	if config.SessionManager == nil {
 		return nil, fmt.Errorf("%w: session manager is required", ErrInvalidConfig)
 	}
-	if config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
+	if config.HandoffAtTokens == nil && config.ContextReserve > config.ContextWindow && config.ContextWindow != 0 {
 		return nil, fmt.Errorf("%w: context reserve exceeds window", ErrInvalidConfig)
+	}
+	if err := validateContextThresholds(config.ReminderAtTokens, config.HandoffAtTokens); err != nil {
+		return nil, err
 	}
 	if !utf8.ValidString(config.BashCommandPrefix) || strings.IndexByte(config.BashCommandPrefix, 0) >= 0 {
 		return nil, fmt.Errorf("%w: bash command prefix is invalid", ErrInvalidConfig)
@@ -657,6 +667,7 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		hooks: config.Hooks, noModelMessage: config.NoModelSelectedMessage,
 		retryPolicy: config.Retry, retryEnabled: retryEnabled, resolveRuntimeSettings: config.ResolveRuntimeSettings,
 		contextWindow: config.ContextWindow, contextReserve: config.ContextReserve, keepRecentTokens: config.KeepRecentTokens,
+		reminderAtTokens: cloneUint64(config.ReminderAtTokens), handoffAtTokens: cloneUint64(config.HandoffAtTokens),
 		keepRecentSet: config.KeepRecentTokensSet, compactionEnabled: compactionEnabled,
 		summarizer: config.Summarizer, resolveSummarizer: config.ResolveSummarizer,
 		branchSummarizer: config.BranchSummarizer, resolveBranchSummarizer: config.ResolveBranchSummarizer,
@@ -679,9 +690,10 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		ConvertToLLM: config.ConvertToLLM, GetAPIKey: config.GetAPIKey,
 		MessageEnd:   s.messageEndTransform,
 		SteeringMode: config.SteeringMode, FollowUpMode: config.FollowUpMode,
-		Now:             config.Now,
-		PrepareTurn:     s.prepareTurn,
-		PrepareNextTurn: s.prepareContextChange,
+		Now:                 config.Now,
+		PrepareTurn:         s.prepareTurn,
+		PrepareNextTurn:     s.prepareContextChange,
+		ShouldStopAfterTurn: s.stopAfterContextHandoff,
 	})
 	if err != nil {
 		return nil, err
@@ -800,6 +812,15 @@ func (s *AgentSession) persistAgentMessage(ctx context.Context, message agentmsg
 	if s == nil || s.sessionManager == nil || message == nil {
 		return fmt.Errorf("%w: invalid session message", ErrTranscriptCommit)
 	}
+	// Internal handoff requests are runtime control notices, like budget and
+	// history reminders. They must not become pending durable user input.
+	if custom, ok := message.(agentmsg.Custom); ok && custom.CustomType() == "pi-go.context-request" {
+		var requestID string
+		if err := json.Unmarshal(custom.Details(), &requestID); err != nil {
+			return err
+		}
+		return s.startContextCompaction(requestID)
+	}
 	settlement, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.settlementTimeout)
 	defer cancel()
 	s.transcriptReadMu.Lock()
@@ -847,7 +868,7 @@ func (s *AgentSession) handleLoopRuntimeEvent(ctx context.Context, event agentRu
 		s.lifecycleMu.Lock()
 		if s.run == nil {
 			s.unlockLifecycle()
-			// Manual compact remains a standalone low-level lifecycle.
+			// A standalone low-level Agent can emit its own lifecycle.
 			types = []string{"agent_start"}
 			break
 		}
@@ -1185,9 +1206,6 @@ func (s *AgentSession) recordCommitted(message llm.ConversationMessage, agentMes
 		}
 		if message != nil && message.Role() == llm.RoleAssistant && model.ID() != "" {
 			s.run.terminalModel = model
-			if terminal, ok := message.(llm.AssistantTerminal); ok && terminal.FinishReason() != llm.FinishError && terminal.FinishReason() != llm.FinishAborted {
-				s.run.overflowCompacted = false
-			}
 		}
 	}
 	s.unlockLifecycle()
@@ -1234,10 +1252,6 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 	if rebuilt {
 		turn.Messages = s.loop.State().Messages()
 	}
-	compacted, err := s.compactBeforeNextAssistantResponse(ctx, turn)
-	if err != nil {
-		return TurnSnapshot{}, err
-	}
 	s.selectionMu.RLock()
 	state, executor := s.loop.runtimeSnapshot()
 	if !state.HasModel() {
@@ -1252,7 +1266,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 	resolver := s.resolveStream
 	s.mu.RUnlock()
 	s.selectionMu.RUnlock()
-	if compacted || rebuilt {
+	if rebuilt {
 		snapshot.Messages = state.Messages()
 	}
 	s.lifecycleMu.Lock()
@@ -1277,6 +1291,9 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 		OnResponse: s.hooks.AfterProviderResponse,
 	})
 	if context.Cause(ctx) == nil {
+		if err := s.contextCompactionCause(); err != nil {
+			return TurnSnapshot{}, err
+		}
 		if err := s.prepareContextReminder(&snapshot, turn.Messages); err != nil {
 			return TurnSnapshot{}, err
 		}
@@ -1925,6 +1942,19 @@ func (s *AgentSession) runSession(
 	beforeBegin func(),
 	begin func(context.Context, sessionPromptInput, []agentmsg.Message) (Result, error),
 ) (result Result, runErr error) {
+	run, err := s.admitSessionRun(ctx, true)
+	if err != nil {
+		return Result{}, err
+	}
+	return s.runAdmittedSession(run, prePromptCheck, prepare, transition, beforeBegin, begin)
+}
+
+func (s *AgentSession) runAdmittedSession(
+	run *sessionRun, prePromptCheck bool,
+	prepare func() (sessionPromptInput, error), transition sessionRunTransition,
+	beforeBegin func(), begin func(context.Context, sessionPromptInput, []agentmsg.Message) (Result, error),
+) (result Result, runErr error) {
+	var err error
 	var providerTurns, toolExecutions uint32
 	accumulate := func(next Result) Result {
 		providerTurns += next.providerTurns
@@ -1933,11 +1963,12 @@ func (s *AgentSession) runSession(
 		next.toolExecutions = toolExecutions
 		return next
 	}
-	run, err := s.admitSessionRun(ctx, true)
-	if err != nil {
-		return Result{}, err
-	}
 	defer func() {
+		compactionErr := runErr
+		if terminal, ok := result.Terminal(); ok && terminal.FinishReason() == llm.FinishAborted {
+			compactionErr = ErrAgentAborted
+		}
+		s.settleContextCompaction(run, compactionErr)
 		runErr = joinBashSettlementError(runErr, s.settleSessionRun(run))
 	}()
 	var rollback func() error
@@ -2039,11 +2070,10 @@ func (s *AgentSession) runSession(
 	result = accumulate(result)
 	for runErr == nil {
 		s.lifecycleMu.Lock()
-		handoffFailed := run.contextRecoveryFailed
-		s.unlockLifecycle()
-		if handoffFailed {
-			return result, nil
+		if run.handoffComplete {
+			run.stopAfterHandoff = false
 		}
+		s.unlockLifecycle()
 		if cause := context.Cause(run.ctx); cause != nil {
 			s.endRetrySeries(run.ctx, false, cause.Error())
 			// Cancellation after admission is represented by a settled terminal
@@ -2099,8 +2129,8 @@ func (s *AgentSession) runSession(
 				s.endRetrySeries(run.ctx, false, finalError)
 				s.resetRetryState(run)
 				// Public Abort/AbortRetry cancel only this delay. As in pi, a
-				// cancelled retry still proceeds through overflow/threshold
-				// compaction and queued-message continuation. Only cancellation
+				// cancelled retry still proceeds through queued-message
+				// continuation. Only cancellation
 				// of the owning session context (caller cancellation or shutdown)
 				// terminates the complete pipeline here.
 				if context.Cause(run.ctx) != nil {
@@ -2114,17 +2144,7 @@ func (s *AgentSession) runSession(
 				continue
 			}
 		}
-		if s.checkPostRunCompaction(run, result) {
-			result, runErr = s.runLowAgent(run, func() (Result, error) {
-				return s.loop.Continue(run.ctx)
-			})
-			result = accumulate(result)
-			continue
-		}
-		s.lifecycleMu.Lock()
-		recoveryFailed := run.contextRecoveryFailed
-		s.unlockLifecycle()
-		if recoveryFailed {
+		if failure := providerFailureFromTerminalForSession(result); failure != nil && failure.Kind() == provider.FailureContextOverflow {
 			return result, nil
 		}
 		s.resetRetryState(run)
@@ -2230,111 +2250,6 @@ func retryBudget(maxAttempts uint32) uint32 {
 	return maxAttempts - 1
 }
 
-// compactBeforeNextAssistantResponse checks the complete context at the
-// request preparation boundary. The caller includes rebuilt Agent messages
-// in the request snapshot only when a compaction has committed.
-func (s *AgentSession) compactBeforeNextAssistantResponse(ctx context.Context, turn TurnContext) (bool, error) {
-	if s == nil || context.Cause(ctx) != nil || s.sessionManager == nil || !s.compactionAvailable() || !s.AutoCompactionEnabled() {
-		return false, nil
-	}
-	state := s.State()
-	window, reserve := s.compactionLimitsFor(state.Model)
-	if window == 0 {
-		return false, nil
-	}
-	status, err := s.ContextStatus()
-	if err != nil || !compactionThresholdExceeded(status.EstimatedTokens, window, reserve) {
-		return false, nil
-	}
-
-	s.lifecycleMu.Lock()
-	run := s.run
-	s.unlockLifecycle()
-	if run == nil {
-		return false, nil
-	}
-	defer s.setSessionPhase(run, PhaseProvider)
-	if s.runCompaction(run, CompactionThreshold, false, "") {
-		return true, nil
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		return false, nil
-	}
-	s.lifecycleMu.Lock()
-	if s.run == run {
-		run.contextRecoveryFailed = true
-	}
-	s.unlockLifecycle()
-	return false, fmt.Errorf("context budget exhausted: handoff failed; original context is unchanged")
-}
-
-// checkPostRunCompaction returns true only when overflow recovery compacted
-// successfully and the caller must Continue from the Agent messages rebuilt
-// from SessionManager. Successful answers do not start compaction; an actual
-// subsequent provider request checks its budget at preparation.
-func (s *AgentSession) checkPostRunCompaction(run *sessionRun, result Result) bool {
-	terminal, ok := result.Terminal()
-	if !ok {
-		return false
-	}
-	return s.checkCompaction(run, terminal, true)
-}
-
-func (s *AgentSession) checkCompaction(run *sessionRun, terminal llm.AssistantTerminal, skipAborted bool) bool {
-	if s == nil || s.sessionManager == nil || !s.compactionAvailable() || !s.AutoCompactionEnabled() || terminal == nil {
-		return false
-	}
-	if skipAborted && terminal.FinishReason() == llm.FinishAborted {
-		return false
-	}
-	compactionBoundary, hasCompactionBoundary := s.latestCompactionBoundary()
-	if hasCompactionBoundary && !terminal.Timestamp().After(compactionBoundary) {
-		return false
-	}
-	terminalModel := s.terminalRunModel(run)
-	currentModel := s.State().Model
-	if terminalModel.ID() != "" && !sameModelIdentity(terminalModel, currentModel) {
-		return false
-	}
-	if terminalModel.ID() == "" {
-		terminalModel = currentModel
-	}
-	window, _ := s.compactionLimitsFor(terminalModel)
-	if window == 0 {
-		return false
-	}
-	if failure := providerFailureFromTerminalForSession(Result{terminal: terminal}); failure != nil && failure.Kind() == provider.FailureContextOverflow {
-		s.lifecycleMu.Lock()
-		already := run.overflowCompacted
-		if !already && s.run == run {
-			run.overflowCompacted = true
-		}
-		s.unlockLifecycle()
-		if already {
-			s.lifecycleMu.Lock()
-			run.contextRecoveryFailed = true
-			s.unlockLifecycle()
-			s.emitCompaction(run.ctx, "compaction_end", CompactionContextOverflow, nil, false, false,
-				"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.")
-			return false
-		}
-		// Preserve the failed assistant durably, but never include it in the
-		// retry context. Compaction rebuilds Agent messages from the durable
-		// branch on success.
-		s.removeLastFailureFromAgentState()
-		if s.runCompaction(run, CompactionContextOverflow, true, "") {
-			return true
-		}
-		s.lifecycleMu.Lock()
-		run.contextRecoveryFailed = true
-		s.unlockLifecycle()
-		return false
-	}
-	// A completed answer does not trigger another request or a checkpoint.
-	// If queues require continuation, the next request checks its full context.
-	return false
-}
-
 func (s *AgentSession) latestCompactionBoundary() (time.Time, bool) {
 	if s == nil || s.sessionManager == nil {
 		return time.Time{}, false
@@ -2347,29 +2262,14 @@ func (s *AgentSession) latestCompactionBoundary() (time.Time, bool) {
 	return entry.Timestamp(), ok
 }
 
-func compactionThresholdExceeded(tokens, contextWindow, reserveTokens uint64) bool {
-	if contextWindow <= reserveTokens {
-		return tokens > 0
-	}
-	return tokens > contextWindow-reserveTokens
-}
-
-func (s *AgentSession) terminalRunModel(run *sessionRun) provider.Model {
-	s.lifecycleMu.Lock()
-	defer s.unlockLifecycle()
-	if s.run != run {
-		return provider.Model{}
-	}
-	return run.terminalModel
-}
-
 func sameModelIdentity(left, right provider.Model) bool {
 	return left.Provider() == right.Provider() && left.ID() == right.ID()
 }
 
-func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64) {
+func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64, *uint64, *uint64) {
 	s.mu.RLock()
 	window, reserve := s.contextWindow, s.contextReserve
+	reminder, handoff := cloneUint64(s.reminderAtTokens), cloneUint64(s.handoffAtTokens)
 	s.mu.RUnlock()
 	if model.ContextWindow() != 0 {
 		window = model.ContextWindow()
@@ -2379,11 +2279,7 @@ func (s *AgentSession) compactionLimitsFor(model provider.Model) (uint64, uint64
 	if window > 0 && reserve >= window {
 		reserve = window / 4
 	}
-	return window, reserve
-}
-
-func (s *AgentSession) compactionAvailable() bool {
-	return s != nil && s.loop != nil && s.loop.State().HasModel()
+	return window, reserve, reminder, handoff
 }
 
 func (s *AgentSession) beginCompaction(run *sessionRun) (*runCancellation, bool) {
@@ -2446,180 +2342,44 @@ func (s *AgentSession) endBranchSummary(run *sessionRun, domain *runCancellation
 	domain.cancel(context.Canceled)
 }
 
-// AbortCompaction cancels only the current manual or automatic compaction.
-// Agent execution, retry, and branch-summary cancellation remain independent.
+// AbortCompaction cancels the requested handoff, including its ordinary Agent
+// provider/tool call or retry wait. Branch-summary cancellation stays separate.
 func (s *AgentSession) AbortCompaction() {
 	if s == nil {
 		return
 	}
 	s.lifecycleMu.Lock()
-	var cancel context.CancelCauseFunc
-	if s.run != nil && s.run.compaction != nil {
-		cancel = s.run.compaction.cancel
+	var cancel, cancelRetry context.CancelCauseFunc
+	if s.run != nil {
+		if s.run.compaction != nil {
+			cancel = s.run.compaction.cancel
+		}
+		if s.contextCompaction != nil {
+			// A queued request can be cancelled before its first request boundary.
+			if cancel == nil {
+				cancel = s.run.cancel
+			}
+			cancelRetry = s.run.retryCancel
+			if cancel != nil {
+				cancel(errCompactionCancelled)
+				cancel = nil
+			}
+			_ = s.loop.Abort(context.Background())
+		}
 	}
 	s.unlockLifecycle()
 	if cancel != nil {
 		cancel(errCompactionCancelled)
 	}
-}
-
-// runCompaction returns true only on a committed compaction. Automatic
-// failures are surfaced as compaction_end and leave the surrounding request's
-// settled result intact.
-func (s *AgentSession) runCompaction(run *sessionRun, reason CompactionReason, willRetry bool, instructions string) bool {
-	if s == nil || s.sessionManager == nil || !s.compactionAvailable() {
-		return false
+	if cancelRetry != nil {
+		cancelRetry(errCompactionCancelled)
 	}
-	domain, ok := s.beginCompaction(run)
-	if !ok {
-		return false
-	}
-	defer s.endCompaction(run, domain)
-	s.setSessionPhase(run, PhaseCompacting)
-	s.emitCompaction(domain.ctx, "compaction_start", reason, nil, false, willRetry, "")
-	input, summarizer, err := s.prepareCompaction(domain.ctx, instructions)
-	var result session.CompactResult
-	if err == nil {
-		result, err = s.compactPrepared(run, domain.ctx, reason, willRetry, instructions, input, summarizer)
-	}
-	if err != nil {
-		aborted := context.Cause(domain.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
-		errorMessage := ""
-		if !aborted {
-			prefix := "Auto-compaction failed: "
-			if reason == CompactionContextOverflow {
-				prefix = "Context overflow recovery failed: "
-			}
-			errorMessage = prefix + safeCompactionEventError(err)
-		}
-		s.emitCompaction(domain.ctx, "compaction_end", reason, nil, aborted, false, errorMessage)
-		return false
-	}
-	s.afterCompaction(domain.ctx, result, reason, willRetry)
-	s.emitCompaction(domain.ctx, "compaction_end", reason, &result, false, willRetry, "")
-	return true
 }
 
 var (
 	errCompactionCancelled          = errors.New("Compaction cancelled")
 	errExtensionCompactionCancelled = errors.New("extension cancelled compaction")
 )
-
-func (s *AgentSession) compactTranscript(run *sessionRun, ctx context.Context, reason CompactionReason, willRetry bool, instructions string) (session.CompactResult, error) {
-	input, summarizer, err := s.prepareCompaction(ctx, instructions)
-	if err != nil {
-		return session.CompactResult{}, err
-	}
-	return s.compactPrepared(run, ctx, reason, willRetry, instructions, input, summarizer)
-}
-
-func (s *AgentSession) prepareCompaction(ctx context.Context, instructions string) (session.SummaryInput, session.Summarizer, error) {
-	state := s.loop.State()
-	leaf, _ := s.sessionManager.LeafID()
-	writer, err := s.resolveCompactionWriter(ctx, state)
-	if err != nil {
-		return session.SummaryInput{}, nil, err
-	}
-	input, err := s.prepareHandoffInput(ctx, instructions, state)
-	input.SelectedLeafID = leaf
-	return input, writer, err
-}
-
-func (s *AgentSession) compactPrepared(run *sessionRun, ctx context.Context, reason CompactionReason, willRetry bool, instructions string, input session.SummaryInput, resolved session.Summarizer) (session.CompactResult, error) {
-	missing := reason == CompactionContextOverflow || input.ContextWindow != 0 && input.TokensBefore >= input.ContextWindow
-	var base session.Summarizer = sessionObservedSummarizer{session: s, run: run, reason: reason, base: resolved}
-	if missing {
-		base = providedHandoffWriter{text: missingContextHandoff}
-	}
-	writer := extensionCompactionSummarizer{session: s, reason: reason, willRetry: willRetry, instructions: instructions, base: base}
-	output, err := writer.Summarize(ctx, input)
-	if cause := context.Cause(ctx); cause != nil {
-		return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrAppendCanceled, cause)
-	}
-	var failure *provider.ProviderFailure
-	if errors.As(err, &failure) && failure.Kind() == provider.FailureContextOverflow {
-		missing, err = true, nil
-		output = session.SummaryOutput{Text: missingContextHandoff}
-	}
-	if err != nil {
-		return session.CompactResult{}, fmt.Errorf("%w: %w", session.ErrSummaryFailed, err)
-	}
-	if output.FromExtension {
-		missing = false
-	}
-	return s.commitHandoff(ctx, "", input, output, missing)
-}
-
-func (s *AgentSession) resolveCompactionSummarizer(ctx context.Context) (session.Summarizer, error) {
-	if s == nil {
-		return nil, ErrCompactionUnavailable
-	}
-	return s.resolveCompactionWriter(ctx, s.loop.State())
-}
-
-func (s *AgentSession) resolveCompactionWriter(ctx context.Context, state State) (session.Summarizer, error) {
-	s.selectionMu.RLock()
-	s.mu.RLock()
-	stream := provider.CloneStreamOptions(s.stream)
-	resolveStream := s.resolveStream
-	resolveSummarizer := s.resolveSummarizer
-	static := s.summarizer
-	validate := s.validateAccess
-	reserve := s.contextReserve
-	s.mu.RUnlock()
-	s.selectionMu.RUnlock()
-	hasModel, selected, thinking := state.HasModel(), state.Model(), state.ThinkingLevel()
-	runtimeSettings := s.resolvedRuntimeSettings()
-	retry := runtimeSettings.Retry
-	if !runtimeSettings.AutoRetryEnabled {
-		retry.MaxAttempts = 1
-	}
-	if !hasModel {
-		return nil, s.noModelSelectedError()
-	}
-	if resolveSummarizer == nil && static != nil {
-		if validate != nil {
-			if err := validate(ctx, selected); err != nil {
-				return nil, err
-			}
-		}
-		return static, nil
-	}
-	if resolveStream != nil {
-		resolved, err := resolveStream(ctx, selected)
-		if err != nil {
-			return nil, err
-		}
-		stream = provider.MergeStreamOptions(stream, resolved)
-	} else if validate != nil {
-		if err := validate(ctx, selected); err != nil {
-			return nil, err
-		}
-	}
-	stream = provider.MergeStreamOptions(stream, provider.StreamOptions{
-		OnPayload: s.hooks.BeforeProviderRequest, OnHeaders: s.hooks.BeforeProviderHeaders, OnResponse: s.hooks.AfterProviderResponse,
-	})
-	maxTokens := min(uint64(2048), selected.MaxTokens())
-	if reserve > 0 {
-		maxTokens = min(maxTokens, reserve)
-	}
-	stream.MaxTokens = &maxTokens
-	if resolveSummarizer == nil {
-		return provider.NewContextHandoffWriter(s.loop.config.provider, selected, s.loop.config.now, provider.ContextSummarizerOptions{
-			ThinkingLevel: thinking, Stream: stream, Retry: retry,
-		}, state.Tools())
-	}
-	resolved, err := resolveSummarizer(ctx, SummarizerResolveRequest{
-		Model: selected, ThinkingLevel: thinking, Stream: stream, Retry: retry, Tools: state.Tools(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	if resolved == nil || isNilInterface(resolved) {
-		return nil, ErrCompactionUnavailable
-	}
-	return resolved, nil
-}
 
 func (s *AgentSession) agentStateLLMMessages() ([]llm.ConversationMessage, error) {
 	if s == nil || s.loop == nil {
@@ -2763,31 +2523,6 @@ func optionalString(value string) *string {
 	}
 	copy := value
 	return &copy
-}
-
-type sessionObservedSummarizer struct {
-	session *AgentSession
-	run     *sessionRun
-	reason  CompactionReason
-	base    session.Summarizer
-}
-
-type summarizerWithRetryObserver interface {
-	SummarizeWithRetryObserver(context.Context, session.SummaryInput, provider.RetryObserver) (session.SummaryOutput, error)
-}
-
-func (s sessionObservedSummarizer) Summarize(ctx context.Context, input session.SummaryInput) (session.SummaryOutput, error) {
-	observable, ok := s.base.(summarizerWithRetryObserver)
-	if !ok {
-		return s.base.Summarize(ctx, input)
-	}
-	return observable.SummarizeWithRetryObserver(ctx, input, func(_ context.Context, retry provider.RetryEvent) {
-		s.session.emitSummarizationRetry(ctx, s.reason, retry)
-	})
-}
-
-func (s *AgentSession) emitSummarizationRetry(ctx context.Context, reason CompactionReason, retry provider.RetryEvent) {
-	s.emitSummarizationRetryFrom(ctx, reason, "compaction", retry)
 }
 
 func (s *AgentSession) emitSummarizationRetryFrom(ctx context.Context, reason CompactionReason, source string, retry provider.RetryEvent) {
@@ -3680,48 +3415,27 @@ func cloneHeaderMap(values map[string]string) map[string]string {
 	}
 	return copy
 }
+
+// Compact requests a handoff through the ordinary Agent tool loop and waits
+// for its CLI submission to be committed. Running callers share the same
+// request as the nonblocking context command.
 func (s *AgentSession) Compact(ctx context.Context, instructions string) (session.CompactResult, error) {
 	if s == nil {
 		return session.CompactResult{}, fmt.Errorf("%w: nil agent session", ErrInvalidRun)
 	}
-	if err := s.rejectIfClosed(); err != nil {
-		return session.CompactResult{}, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if s.sessionManager == nil {
-		return session.CompactResult{}, ErrCompactionUnavailable
-	}
-	run, err := s.admitSessionRun(ctx, false)
+	_, pending, err := s.requestContextCompaction(ctx, ContextChangeRequest{Mode: "compact", Instructions: instructions})
 	if err != nil {
 		return session.CompactResult{}, err
 	}
-	defer s.finishSessionRun(run)
-	return s.manualCompaction(run, instructions)
-}
-
-func (s *AgentSession) manualCompaction(run *sessionRun, instructions string) (session.CompactResult, error) {
-	domain, ok := s.beginCompaction(run)
-	if !ok {
-		return session.CompactResult{}, ErrBusy
+	select {
+	case <-pending.done:
+		return pending.result, pending.err
+	case <-ctx.Done():
+		return session.CompactResult{}, context.Cause(ctx)
 	}
-	defer s.endCompaction(run, domain)
-	s.setSessionPhase(run, PhaseCompacting)
-	s.emitCompaction(domain.ctx, "compaction_start", CompactionManual, nil, false, false, "")
-	result, err := s.compactTranscript(run, domain.ctx, CompactionManual, false, instructions)
-	if err != nil {
-		aborted := context.Cause(domain.ctx) != nil || errors.Is(err, session.ErrAppendCanceled) || errors.Is(err, errExtensionCompactionCancelled)
-		errorMessage := ""
-		if !aborted {
-			errorMessage = "Compaction failed: " + safeCompactionEventError(err)
-		}
-		s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, nil, aborted, false, errorMessage)
-		if errors.Is(err, errExtensionCompactionCancelled) {
-			return session.CompactResult{}, ErrAgentAborted
-		}
-		return session.CompactResult{}, err
-	}
-	s.afterCompaction(domain.ctx, result, CompactionManual, false)
-	s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, &result, false, false, "")
-	return result, nil
 }
 
 // NavigateTreeOptions mirrors pi's AgentSession.navigateTree options. Pointer

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -34,8 +33,8 @@ type upstreamOverflowCompactionScenario struct {
 	RecoveryResponse upstreamOverflowCompactionResponse `json:"recoveryResponse"`
 }
 
-// The upstream overflow scenario still exercises durable failure, continuation
-// and reopen; pi-go now recovers without making an isolated summary request.
+// Preserve the upstream overflow input and failure across restart. A checkpoint
+// now requires an explicit CLI submission, including after a provider overflow.
 func TestOverflowHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 	var corpus upstreamWorkflowCorpus
 	if err := json.Unmarshal(upstreamWorkflowCorpusJSON, &corpus); err != nil {
@@ -82,19 +81,11 @@ func TestOverflowHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 		t.Fatalf("seed: %#v %v", result, err)
 	}
 	recovered, err := runtime.Prompt(context.Background(), scenario.OverflowPrompt)
-	if err != nil || !recovered.Succeeded() || recovered.ProviderTurns() != 2 {
+	if err != nil || recovered.Succeeded() || recovered.ProviderTurns() != 1 {
 		t.Fatalf("recovery: %#v %v", recovered, err)
 	}
-	if implementation.CallCount() != 3 || starts != 1 || ends != 1 || settlements != 2 {
+	if implementation.CallCount() != 2 || starts != 0 || ends != 0 || settlements != 2 {
 		t.Fatalf("calls/events: %d %d %d %d", implementation.CallCount(), starts, ends, settlements)
-	}
-	request := implementation.Requests()[2]
-	text := contextRequestText(t, request)
-	if !strings.Contains(text, scenario.OverflowPrompt) || !strings.Contains(text, "No handoff was generated") || !strings.Contains(text, "search-original-history") || strings.Contains(text, scenario.SeedResponse.Text) {
-		t.Fatal("invalid recovery context: ", text)
-	}
-	if request.SystemPrompt() != scenario.SystemPrompt || request.StreamOptions().SessionID != scenario.SessionID {
-		t.Fatal("recovery changed runtime configuration")
 	}
 	var checkpoint session.Entry
 	failures, users := 0, 0
@@ -114,7 +105,7 @@ func TestOverflowHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 			}
 		}
 	}
-	if checkpoint.ID() == "" || users != 2 || failures != 1 {
+	if checkpoint.ID() != "" || users != 2 || failures != 1 {
 		t.Fatalf("durable recovery checkpoint/users/failures: %s %d %d", checkpoint.ID(), users, failures)
 	}
 	path, _ := manager.SessionFile()
@@ -126,15 +117,10 @@ func TestOverflowHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if window, _ := reopened.CurrentContextWindow(); window != checkpoint.ID() {
+	if window, _ := reopened.CurrentContextWindow(); window != session.InitialContextWindow {
 		t.Fatal("restart lost overflow boundary")
 	}
-	if got := len(reopened.BuildContext().Messages()); got != 3 {
+	if got := len(reopened.BuildContext().Messages()); got != 4 {
 		t.Fatalf("reopened recovery messages: %d", got)
-	}
-	for _, message := range reopened.BuildContext().Messages() {
-		if _, failed := message.(llm.AssistantFailureMessage); failed {
-			t.Fatal("failed response returned to active context")
-		}
 	}
 }

@@ -57,8 +57,8 @@ new uses an already-written short handoff, without another model call or any
 automatically retained old conversation. The original history stays readable.
 Submit progress, relevant files/modules and next direction; no fixed template
 is required. A stable request ID makes handoff retries idempotent on this branch.
-compact asks the current model for a brief handoff using the active context,
-then starts a new window with original history available on demand. During a run,
+compact sends a handoff request to the current Agent. It uses its normal tools
+to submit the handoff through new; only that submission switches windows. During a run,
 both commands return accepted before changing context at a settled turn boundary.
 status reports estimated tokens (not exact provider tokenization) and the latest
 change state. --file is only for history reads; live control uses PI_SESSION_*.
@@ -93,7 +93,7 @@ func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return callSessionControl(ctx, endpoint, token, sessionControlRequest{SessionID: *id, Action: action, Query: query, Change: change})
 	}
 	openService := func() (*application.Service, error) {
-		return application.NewService(application.ServiceOptions{Context: ctx, Production: app.ProductionConfig{AgentDir: *agentDir}, DisableReaper: true})
+		return application.NewService(application.ServiceOptions{Context: ctx, Production: app.ProductionConfig{AgentDir: *agentDir, AttachSession: AttachSession}, DisableReaper: true})
 	}
 	if args[0] == "list" {
 		if len(args) != 1 {
@@ -303,7 +303,7 @@ func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			return writeSessionJSON(stdout, stderr, response.Status)
 		}
 		value := response.Status
-		fmt.Fprintf(stdout, "Session %s · window %s\nEstimated context: %d tokens; window: %d; reserve: %d; request budget: %d\n", value.SessionID, value.WindowID, value.EstimatedTokens, value.ContextWindow, value.ReserveTokens, value.RequestBudget)
+		fmt.Fprintf(stdout, "Session %s · window %s\nEstimated context: %d tokens; window: %d; reminder at: %d; handoff at: %d\n", value.SessionID, value.WindowID, value.EstimatedTokens, value.ContextWindow, value.ReminderTokens, value.RequestBudget)
 		if value.Change != nil {
 			writeContextChange(stdout, *value.Change)
 		}

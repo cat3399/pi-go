@@ -36,8 +36,6 @@ type pendingContextChange struct {
 	started bool
 }
 
-const missingContextHandoff = "No handoff was generated because the previous context exceeded the model's capacity. Continue the same task by reading the original history as needed."
-
 type providedHandoffWriter struct{ text string }
 
 func (w providedHandoffWriter) Summarize(context.Context, session.SummaryInput) (session.SummaryOutput, error) {
@@ -89,17 +87,43 @@ func (s *AgentSession) ContextStatus() (ContextStatus, error) {
 	return s.contextStatusFor(s.State().Active)
 }
 
+func validateContextThresholds(reminder, handoff *uint64) error {
+	if reminder != nil && *reminder == 0 {
+		return fmt.Errorf("%w: compaction.reminderAtTokens must be greater than zero", ErrInvalidConfig)
+	}
+	if handoff != nil && *handoff == 0 {
+		return fmt.Errorf("%w: compaction.handoffAtTokens must be greater than zero", ErrInvalidConfig)
+	}
+	if reminder != nil && handoff != nil && *reminder > *handoff {
+		return fmt.Errorf("%w: compaction.reminderAtTokens must not exceed handoffAtTokens", ErrInvalidConfig)
+	}
+	return nil
+}
+
 func (s *AgentSession) contextStatusFor(state State) (ContextStatus, error) {
 	windowID, err := s.sessionManager.CurrentContextWindow()
 	if err != nil {
 		return ContextStatus{}, err
 	}
 	result := ContextStatus{SessionID: s.sessionManager.SessionID(), WindowID: windowID, AutoCompaction: s.AutoCompactionEnabled()}
-	result.ContextWindow, result.ReserveTokens = s.compactionLimitsFor(state.Model())
+	window, reserve, reminder, handoff := s.compactionLimitsFor(state.Model())
+	result.ContextWindow, result.ReserveTokens = window, reserve
 	if result.ContextWindow > result.ReserveTokens {
 		result.RequestBudget = result.ContextWindow - result.ReserveTokens
 	}
+	if handoff != nil {
+		result.RequestBudget = *handoff
+		// Retain the status field as a derived margin. The legacy setting no
+		// longer controls the budget when an explicit threshold is present.
+		result.ReserveTokens = result.ContextWindow - min(result.ContextWindow, *handoff)
+	}
 	result.ReminderTokens = result.RequestBudget / 5 * 4
+	if reminder != nil {
+		result.ReminderTokens = *reminder
+		if result.RequestBudget > 0 && *reminder > result.RequestBudget {
+			return ContextStatus{}, fmt.Errorf("%w: compaction.reminderAtTokens exceeds the effective handoff threshold (%d)", ErrInvalidConfig, result.RequestBudget)
+		}
+	}
 	messages := state.Messages()
 	estimate, err := session.EstimateAgentContextTokens(messages)
 	if err != nil {
@@ -123,7 +147,10 @@ func (s *AgentSession) contextStatusFor(state State) (ContextStatus, error) {
 	}
 	result.EstimatedTokens = max(estimate.Tokens, local+uint64((overhead+3)/4))
 	s.lifecycleMu.Lock()
-	if s.contextRequest != nil {
+	if s.contextCompaction != nil {
+		value := acceptedContextChange(s.contextCompaction.request)
+		result.Change = &value
+	} else if s.contextRequest != nil {
 		value := acceptedContextChange(s.contextRequest.request)
 		result.Change = &value
 	} else if s.lastContextChange != nil {
@@ -147,6 +174,10 @@ func (s *AgentSession) RequestContextChange(ctx context.Context, request Context
 	}
 	if cause := context.Cause(ctx); cause != nil {
 		return ContextChangeResult{}, cause
+	}
+	if request.Mode == "compact" {
+		result, _, err := s.requestContextCompaction(ctx, request)
+		return result, err
 	}
 	if request.ID == "" {
 		var bytes [16]byte
@@ -173,7 +204,7 @@ func (s *AgentSession) RequestContextChange(ctx context.Context, request Context
 		}
 		for _, entry := range path {
 			if previous, ok := entry.ContextHandoff(); ok && previous.RequestID == request.ID {
-				if previous.Text != request.Handoff {
+				if previous.RequestText() != request.Handoff {
 					return ContextChangeResult{}, fmt.Errorf("handoff request ID already has different content")
 				}
 				return ContextChangeResult{RequestID: request.ID, Mode: request.Mode, State: "completed", WindowID: entry.ID()}, nil
@@ -242,6 +273,7 @@ func (s *AgentSession) prepareContextChange(ctx context.Context, turn AgentLoopT
 
 func (s *AgentSession) executeContextChange(ctx context.Context, pending *pendingContextChange) (result ContextChangeResult, resultErr error) {
 	request := pending.request
+	completesManual := false
 	result = acceptedContextChange(request)
 	defer func() {
 		if resultErr != nil {
@@ -255,41 +287,81 @@ func (s *AgentSession) executeContextChange(ctx context.Context, pending *pendin
 			s.contextRequest = nil
 		}
 		copy := result
-		s.lastContextChange = &copy
+		if !completesManual {
+			s.lastContextChange = &copy
+		}
 		s.unlockLifecycle()
 	}()
-	if request.Mode == "compact" {
-		compacted, err := s.manualCompaction(pending.run, request.Instructions)
-		if err != nil {
-			return result, err
+	s.lifecycleMu.Lock()
+	manual := s.contextCompaction
+	// An already-in-flight CLI submission cannot consume a later manual
+	// request whose reminder is still queued for the model.
+	if manual != nil && (manual.run != pending.run || manual.domain == nil) {
+		manual = nil
+	}
+	var domain *runCancellation
+	if manual != nil {
+		domain = manual.domain
+		completesManual = true
+	}
+	s.unlockLifecycle()
+	ownedDomain := domain == nil
+	if ownedDomain {
+		var ok bool
+		domain, ok = s.beginCompaction(pending.run)
+		if !ok {
+			return result, ErrBusy
 		}
-		result.State, result.WindowID = "completed", compacted.Entry.ID()
-		return result, nil
+		defer s.endCompaction(pending.run, domain)
 	}
-	domain, ok := s.beginCompaction(pending.run)
-	if !ok {
-		return result, ErrBusy
-	}
-	defer s.endCompaction(pending.run, domain)
 	s.setSessionPhase(pending.run, PhaseCompacting)
-	s.emitCompaction(domain.ctx, "compaction_start", CompactionManual, nil, false, false, "")
+	if ownedDomain {
+		s.emitCompaction(domain.ctx, "compaction_start", CompactionManual, nil, false, false, "")
+	}
 	status, err := s.ContextStatus()
 	var compacted session.CompactResult
 	if err == nil {
 		leaf, _ := s.sessionManager.LeafID()
-		compacted, err = s.commitHandoff(domain.ctx, request.ID, session.SummaryInput{TokensBefore: status.EstimatedTokens, SelectedLeafID: leaf}, session.SummaryOutput{Text: request.Handoff}, false)
+		input := session.SummaryInput{TokensBefore: status.EstimatedTokens, SelectedLeafID: leaf,
+			SystemPrompt: s.loop.State().SystemPrompt(), MessagesToSummarize: s.loop.State().Messages(), ContextWindow: status.ContextWindow}
+		input.Messages, err = agentmsg.ConvertToLLM(input.MessagesToSummarize)
+		input.FileOperations = session.MessageFileOperations(input.MessagesToSummarize)
+		s.mu.RLock()
+		keepRecent := s.keepRecentTokens
+		s.mu.RUnlock()
+		input.Settings = session.CompactionSettings{Enabled: status.AutoCompaction, ReserveTokens: status.ReserveTokens, KeepRecentTokens: keepRecent}
+		if manual != nil {
+			input.Instructions = manual.request.Instructions
+		}
+		writer := extensionCompactionSummarizer{session: s, reason: CompactionManual, instructions: input.Instructions, base: providedHandoffWriter{text: request.Handoff}}
+		var output session.SummaryOutput
+		if err == nil {
+			output, err = writer.Summarize(domain.ctx, input)
+		}
+		if err == nil {
+			compacted, err = s.commitHandoff(domain.ctx, request.ID, input, output, request.Handoff)
+		}
 	}
 	if err != nil {
+		if manual != nil {
+			s.finishContextCompaction(manual, session.CompactResult{}, err)
+		}
 		aborted := context.Cause(domain.ctx) != nil || errors.Is(err, session.ErrAppendCanceled)
 		message := ""
 		if !aborted {
 			message = safeCompactionEventError(err)
 		}
-		s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, nil, aborted, false, message)
+		if ownedDomain {
+			s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, nil, aborted, false, message)
+		}
 		return result, fmt.Errorf("%w: context handoff: %w", ErrTranscriptCommit, err)
 	}
 	s.afterCompaction(domain.ctx, compacted, CompactionManual, false)
-	s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, &compacted, false, false, "")
+	if manual != nil {
+		s.finishContextCompaction(manual, compacted, nil)
+	} else {
+		s.emitCompaction(domain.ctx, "compaction_end", CompactionManual, &compacted, false, false, "")
+	}
 	entry := compacted.Entry
 	result.State, result.WindowID = "completed", entry.ID()
 	s.mu.RLock()
@@ -358,12 +430,17 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 			changed = true
 		}
 	}
-	if status.AutoCompaction && instructions.Handoff != "" && status.ReminderTokens != 0 && status.EstimatedTokens >= status.ReminderTokens {
-		key := fmt.Sprintf("%s/%s/%s/%d/%d", status.WindowID, snapshot.Model.Provider(), snapshot.Model.ID(), status.ContextWindow, status.ReserveTokens)
+	if status.AutoCompaction && instructions.Handoff != "" && status.RequestBudget != 0 && status.EstimatedTokens >= status.ReminderTokens {
+		urgent := status.EstimatedTokens >= status.RequestBudget
+		level := uint8(1)
+		if urgent {
+			level = 2
+		}
+		key := fmt.Sprintf("%s/%s/%s/%d/%d/%d", status.WindowID, snapshot.Model.Provider(), snapshot.Model.ID(), status.ContextWindow, status.RequestBudget, status.ReminderTokens)
 		s.lifecycleMu.Lock()
-		fresh := s.contextReminderKey != key
+		fresh := s.contextReminderKey != key || level > s.contextReminderLevel
 		if fresh {
-			s.contextReminderKey = key
+			s.contextReminderKey, s.contextReminderLevel = key, level
 		}
 		s.unlockLifecycle()
 		if fresh {
@@ -372,6 +449,9 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 				remaining = status.RequestBudget - status.EstimatedTokens
 			}
 			text := fmt.Sprintf("This context window has approximately %d tokens remaining for work. If that is enough to finish the current task, finish and deliver the result. Otherwise, submit a brief handoff before the budget runs out and continue in a new window. %s", remaining, instructions.Handoff)
+			if urgent {
+				text = "The working budget for this context window has been reached. Use the remaining context to submit a brief handoff now, then continue the task in a new window. You can use your existing tools to finish the handoff. " + instructions.Handoff
+			}
 			notice, err := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: "pi-go.context-notice", StringContent: &text, At: time.Now()})
 			if err != nil {
 				return err
@@ -386,42 +466,7 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 	return s.loop.SetMessages(messages)
 }
 
-func (s *AgentSession) prepareHandoffInput(ctx context.Context, instructions string, state State) (session.SummaryInput, error) {
-	messages := state.Messages()
-	if len(messages) == 0 {
-		return session.SummaryInput{}, session.ErrNothingToCompact
-	}
-	status, err := s.contextStatusFor(state)
-	if err != nil {
-		return session.SummaryInput{}, err
-	}
-	input := session.SummaryInput{SystemPrompt: state.SystemPrompt(), Instructions: instructions,
-		TokensBefore: status.EstimatedTokens, ContextWindow: status.ContextWindow, MessagesToSummarize: agentmsg.Clone(messages),
-		FileOperations: session.MessageFileOperations(messages)}
-	s.mu.RLock()
-	keepRecent := s.keepRecentTokens
-	s.mu.RUnlock()
-	input.Settings = session.CompactionSettings{Enabled: s.AutoCompactionEnabled(), ReserveTokens: status.ReserveTokens, KeepRecentTokens: keepRecent}
-	s.lifecycleMu.Lock()
-	if s.run != nil && s.run.extensionSystemPrompt != nil {
-		input.SystemPrompt = *s.run.extensionSystemPrompt
-	}
-	s.unlockLifecycle()
-	if transform := s.loop.agentLoopTransformContext(); transform != nil {
-		messages, err = transform(ctx, messages)
-		if err != nil {
-			return input, err
-		}
-	}
-	input.Messages, err = s.loop.agentLoopConvertToLLM()(ctx, messages)
-	input.Prompt = "Pause task execution and write a brief handoff for yourself to continue the same task in a fresh context window. Include current progress, relevant files or references, and the next direction. Original history remains readable, so do not restate the full conversation. Return only the handoff text; do not call tools or give a final answer to the user."
-	if instructions != "" {
-		input.Prompt += "\nAdditional focus: " + instructions
-	}
-	return input, err
-}
-
-func (s *AgentSession) commitHandoff(ctx context.Context, requestID string, input session.SummaryInput, output session.SummaryOutput, missing bool) (session.CompactResult, error) {
+func (s *AgentSession) commitHandoff(ctx context.Context, requestID string, input session.SummaryInput, output session.SummaryOutput, submittedText string) (session.CompactResult, error) {
 	if requestID == "" {
 		var bytes [16]byte
 		if _, err := rand.Read(bytes[:]); err != nil {
@@ -464,7 +509,7 @@ func (s *AgentSession) commitHandoff(ctx context.Context, requestID string, inpu
 		tokensBefore = output.TokensBefore
 	}
 	entry, err := s.sessionManager.CommitContextHandoffWithOptions(ctx, requestID, output.Text, tokensBefore, session.ContextHandoffOptions{
-		PendingEntryIDs: pending, NoHandoff: missing, Usage: output.Usage, Details: output.Details, ExpectedLeafID: &input.SelectedLeafID,
+		PendingEntryIDs: pending, SubmittedText: submittedText, Usage: output.Usage, Details: output.Details, ExpectedLeafID: &input.SelectedLeafID,
 		FromExtension: output.FromExtension, FirstKeptEntryID: output.FirstKeptEntryID, EstimatedTokensAfter: output.EstimatedTokensAfter,
 	})
 	if err != nil {
@@ -473,13 +518,11 @@ func (s *AgentSession) commitHandoff(ctx context.Context, requestID string, inpu
 	if err := s.reloadAgentMessagesFromSession(); err != nil {
 		return session.CompactResult{}, err
 	}
-	if !missing {
-		s.lifecycleMu.Lock()
-		if s.run != nil {
-			s.run.overflowCompacted = false
-		}
-		s.unlockLifecycle()
+	s.lifecycleMu.Lock()
+	if s.run != nil {
+		s.run.handoffComplete = true
 	}
+	s.unlockLifecycle()
 	estimate, err := session.EstimateAgentMessagesTokens(s.loop.State().Messages())
 	if err != nil {
 		return session.CompactResult{}, err

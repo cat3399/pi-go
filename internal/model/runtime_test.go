@@ -1439,3 +1439,84 @@ func FuzzLoadModelsDoesNotPanic(f *testing.F) {
 		_, _ = loadModels(path, embeddedBuiltinCatalog())
 	})
 }
+
+func TestCompactionTokenThresholdSettingsMergeCloneAndPreserveLegacyFields(t *testing.T) {
+	agentDir, cwd := t.TempDir(), t.TempDir()
+	path := filepath.Join(agentDir, "settings.json")
+	original := `{"compaction":{"enabled":true,"handoffAtTokens":50000,"reminderAtTokens":40000,"reserveTokens":16384,"keepRecentTokens":20000,"future":"preserved"}}`
+	writeFile(t, path, original)
+	writeFile(t, filepath.Join(cwd, ".pi-go", "settings.json"), `{"compaction":{"reminderAtTokens":45000}}`)
+	runtime, err := NewRuntime(Options{AgentDir: agentDir, WorkingDir: cwd, ProjectTrusted: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings.Compaction
+	if settings.HandoffAtTokens == nil || *settings.HandoffAtTokens != 50000 || settings.ReminderAtTokens == nil || *settings.ReminderAtTokens != 45000 {
+		t.Fatalf("merged thresholds: %#v", settings)
+	}
+	*settings.HandoffAtTokens, *settings.ReminderAtTokens = 1, 1
+	current := runtime.Snapshot().Settings.Compaction
+	if *current.HandoffAtTokens != 50000 || *current.ReminderAtTokens != 45000 {
+		t.Fatal("snapshot aliases the effective thresholds")
+	}
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != original {
+		t.Fatal("loading thresholds rewrote the settings file", err)
+	}
+	if err := runtime.SetGlobalSettings(context.Background(), func(settings *Settings) error {
+		value := false
+		settings.Compaction.Enabled = &value
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct {
+		Compaction map[string]any `json:"compaction"`
+	}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]any{"enabled": false, "handoffAtTokens": float64(50000), "reminderAtTokens": float64(40000), "reserveTokens": float64(16384), "keepRecentTokens": float64(20000), "future": "preserved"} {
+		if stored.Compaction[name] != want {
+			t.Fatalf("saved %s = %#v, want %#v", name, stored.Compaction[name], want)
+		}
+	}
+}
+
+func TestCompactionTokenThresholdSettingsRetainLastHealthyValues(t *testing.T) {
+	runtime, agentDir, _ := newTestRuntime(t, "", `{"compaction":{"handoffAtTokens":50000,"reminderAtTokens":40000}}`, false)
+	for _, invalid := range []string{
+		`{"handoffAtTokens":0}`, `{"reminderAtTokens":0}`, `{"handoffAtTokens":-1}`,
+		`{"handoffAtTokens":50000,"reminderAtTokens":60000}`, `{"reminderAtTokens":"40000"}`,
+	} {
+		writeFile(t, filepath.Join(agentDir, "settings.json"), `{"compaction":`+invalid+`}`)
+		if err := runtime.Reload(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if runtime.SettingsError() == nil {
+			t.Fatalf("invalid thresholds accepted: %s", invalid)
+		}
+		settings := runtime.Snapshot().Settings.Compaction
+		if *settings.HandoffAtTokens != 50000 || *settings.ReminderAtTokens != 40000 {
+			t.Fatal("invalid settings replaced the last healthy layer")
+		}
+	}
+	legacy := `{"compaction":{"enabled":false,"reserveTokens":123,"keepRecentTokens":456}}`
+	writeFile(t, filepath.Join(agentDir, "settings.json"), legacy)
+	if err := runtime.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	settings := runtime.Snapshot().Settings.Compaction
+	if runtime.SettingsError() != nil || settings.HandoffAtTokens != nil || settings.ReminderAtTokens != nil || settings.ReserveTokensOrDefault() != 123 || settings.KeepRecentTokensOrDefault() != 456 {
+		t.Fatalf("legacy reload: %#v %v", settings, runtime.SettingsError())
+	}
+	if data, _ := os.ReadFile(filepath.Join(agentDir, "settings.json")); string(data) != legacy {
+		t.Fatal("legacy settings were migrated on disk")
+	}
+}

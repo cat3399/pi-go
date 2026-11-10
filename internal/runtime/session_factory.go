@@ -223,6 +223,8 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 	config.Retry = retryPolicyFromSettings(options.Settings.Retry, baseRetry)
 	config.ContextReserve = options.Settings.Compaction.ReserveTokensOrDefault()
 	config.ContextReserveSet = true
+	config.ReminderAtTokens = options.Settings.Compaction.ReminderAtTokens
+	config.HandoffAtTokens = options.Settings.Compaction.HandoffAtTokens
 	config.KeepRecentTokens = options.Settings.Compaction.KeepRecentTokensOrDefault()
 	config.KeepRecentTokensSet = true
 	config.BranchSummaryReserveTokens = options.Settings.BranchSummary.ReserveTokensOrDefault()
@@ -238,6 +240,8 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 				AutoRetryEnabled:        settings.Retry.EnabledOrDefault(),
 				Retry:                   retryPolicyFromSettings(settings.Retry, baseRetry),
 				CompactionReserveTokens: settings.Compaction.ReserveTokensOrDefault(), CompactionReserveSet: true,
+				CompactionReminderAtTokens: settings.Compaction.ReminderAtTokens,
+				CompactionHandoffAtTokens:  settings.Compaction.HandoffAtTokens,
 				CompactionKeepRecentTokens: settings.Compaction.KeepRecentTokensOrDefault(), CompactionKeepRecentSet: true,
 				BranchSummaryReserveTokens: settings.BranchSummary.ReserveTokensOrDefault(), BranchSummaryReserveSet: true,
 			}

@@ -19,6 +19,7 @@ const InitialContextWindow = "initial"
 type ContextHandoff struct {
 	RequestID            string          `json:"requestId"`
 	Text                 string          `json:"text"`
+	SubmittedText        string          `json:"submittedText,omitempty"`
 	PreviousWindow       string          `json:"previousWindow"`
 	TokensBefore         uint64          `json:"tokensBefore"`
 	PendingEntryIDs      []string        `json:"pendingEntryIds,omitempty"`
@@ -33,6 +34,8 @@ type ContextHandoff struct {
 // ContextHandoffOptions preserves only inputs not yet processed by the model.
 // ExpectedLeafID guards a handoff generated outside the storage lock.
 type ContextHandoffOptions struct {
+	// SubmittedText preserves the idempotency payload when a hook replaces Text.
+	SubmittedText        string
 	PendingEntryIDs      []string
 	NoHandoff            bool
 	Usage                *CompactionUsage
@@ -41,6 +44,15 @@ type ContextHandoffOptions struct {
 	FromExtension        bool
 	FirstKeptEntryID     string
 	EstimatedTokensAfter *uint64
+}
+
+// RequestText is the original CLI payload, including when an extension
+// supplied the checkpoint text. Older checkpoints use Text directly.
+func (h ContextHandoff) RequestText() string {
+	if h.SubmittedText != "" {
+		return h.SubmittedText
+	}
+	return h.Text
 }
 
 func (h ContextHandoff) GenerationUsage() (*CompactionUsage, error) {
@@ -71,6 +83,9 @@ func (e Entry) ContextHandoff() (ContextHandoff, bool) {
 	}
 	var value ContextHandoff
 	if json.Unmarshal(payload.Data, &value) != nil || ValidateContextHandoff(value.RequestID, value.Text) != nil || value.PreviousWindow == "" {
+		return ContextHandoff{}, false
+	}
+	if value.SubmittedText != "" && ValidateContextHandoff(value.RequestID, value.SubmittedText) != nil {
 		return ContextHandoff{}, false
 	}
 	return value, true
@@ -112,6 +127,13 @@ func (m *SessionManager) CommitContextHandoffWithOptions(ctx context.Context, re
 	if err := ValidateContextHandoff(requestID, text); err != nil {
 		return Entry{}, err
 	}
+	requestText := text
+	if options.SubmittedText != "" {
+		if err := ValidateContextHandoff(requestID, options.SubmittedText); err != nil {
+			return Entry{}, err
+		}
+		requestText = options.SubmittedText
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	defer m.notifyReadChangeLocked()
@@ -127,7 +149,7 @@ func (m *SessionManager) CommitContextHandoffWithOptions(ctx context.Context, re
 	path := m.store.BranchPath()
 	for _, entry := range path {
 		if previous, ok := entry.ContextHandoff(); ok && previous.RequestID == requestID {
-			if previous.Text != text {
+			if previous.RequestText() != requestText {
 				return Entry{}, fmt.Errorf("%w: handoff request ID already has different content", ErrInvalidEntry)
 			}
 			return entry, nil
@@ -162,6 +184,9 @@ func (m *SessionManager) CommitContextHandoffWithOptions(ctx context.Context, re
 	value := ContextHandoff{RequestID: requestID, Text: text, PreviousWindow: ContextWindowID(path), TokensBefore: tokensBefore,
 		PendingEntryIDs: append([]string(nil), options.PendingEntryIDs...), NoHandoff: options.NoHandoff, Details: options.Details,
 		FromExtension: options.FromExtension, FirstKeptEntryID: options.FirstKeptEntryID, EstimatedTokensAfter: options.EstimatedTokensAfter}
+	if requestText != text {
+		value.SubmittedText = requestText
+	}
 	if options.Usage != nil {
 		var err error
 		value.Usage, err = encodeCompactionUsage(*options.Usage)

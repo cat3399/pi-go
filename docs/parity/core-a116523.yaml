@@ -291,9 +291,10 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/agent/upstream_manual_compaction_oracle_test.go, symbol: TestManualHandoffReusesUpstreamWorkflowScenario}
     intentionalGoDifference: >-
-      Manual compaction requests a brief handoff from the current model using the working
-      message prefix and cache attribution. It commits a custom window checkpoint instead
-      of an isolated full-history summary and retained tail. Original history stays readable.
+      Manual compaction sends a runtime request to the current Agent. Normal tools and
+      retry remain available; a CLI handoff submission commits the custom checkpoint.
+      There is no separate generation request or handoff output cap. Original history
+      stays readable, without an automatically retained tail.
     remainingDifference: none
 
   - id: agent_session.threshold_and_overflow_compaction
@@ -303,18 +304,22 @@ capabilities:
       path: packages/coding-agent/src/core/agent-session.ts
       symbol: _checkCompaction
     go:
-      path: internal/agent/session_runtime.go
-      symbol: func (s *AgentSession) checkCompaction
+      path: internal/agent/context_management.go
+      symbol: func (s *AgentSession) prepareContextReminder
     surfaceExposure: {application: full, jsonl: full, http: full}
     evidence:
       - {kind: go_test, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestOverflowHandoffReusesUpstreamWorkflowScenario}
-      - {kind: go_test, path: internal/agent/context_retry_test.go, symbol: TestContextThresholdCompactsThenRetriesProductionProviderWithoutDuplicateTranscript}
-      - {kind: go_test, path: internal/agent/session_runtime_test.go, symbol: TestAgentSessionCompactsBetweenToolTurnsBeforeNextProviderRequest}
+      - {kind: go_test, path: internal/agent/context_handoff_scenario_test.go, symbol: TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput}
+      - {kind: go_test, path: internal/agent/context_compaction_test.go, symbol: TestBudgetReminderEscalatesOnceAndKeepsNormalTools}
+      - {kind: go_test, path: internal/agent/context_management_test.go, symbol: TestContextThresholdsPreferExplicitTokensAndKeepLegacyFallback}
+      - {kind: go_test, path: cmd/pi-go/session_e2e_test.go, symbol: TestSessionHandoffBinaryEndToEnd}
     intentionalGoDifference: >-
-      Budget reminders let the model finish or submit a handoff. Hard limits are checked
-      only before actual provider requests, and use the same current-model handoff path.
-      Overflow starts an explicit no-handoff recovery window with unprocessed inputs and
-      history access. A final answer without queued input never triggers compaction.
+      Explicit token thresholds override the legacy reserve-derived budget. Old settings
+      remain readable without migration. Budget reminders let the model finish or submit
+      a handoff. Reaching the work budget
+      strengthens the CLI reminder without changing the normal Agent request or tools.
+      Only a CLI submission creates a window; provider overflow preserves the old window
+      and failure. A final answer without queued input never triggers another call.
       AgentLoop callbacks retain their upstream after-turn ordering.
     remainingDifference: none
 

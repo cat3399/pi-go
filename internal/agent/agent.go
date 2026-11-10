@@ -1509,3 +1509,40 @@ func isAssistantPartialMessage(message agentmsg.Message) bool {
 		return false
 	}
 }
+
+// discardQueuedAgentMessages recalls host control messages without disturbing
+// user steering/follow-up messages owned by the same Agent queues.
+func (a *Agent) discardQueuedAgentMessages(matches func(agentmsg.Message) bool) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	changed := false
+	filter := func(messages []agentmsg.Message) []agentmsg.Message {
+		kept := messages[:0]
+		for _, message := range messages {
+			if matches(message) {
+				changed = true
+			} else {
+				kept = append(kept, message)
+			}
+		}
+		clear(messages[len(kept):])
+		return kept
+	}
+	a.steeringQueue, a.followUpQueue = filter(a.steeringQueue), filter(a.followUpQueue)
+	if a.active != nil {
+		kept := a.active.queueDelivery[:0]
+		for _, delivery := range a.active.queueDelivery {
+			if matches(delivery.message) {
+				changed = true
+			} else {
+				kept = append(kept, delivery)
+			}
+		}
+		clear(a.active.queueDelivery[len(kept):])
+		a.active.queueDelivery = kept
+	}
+	if changed {
+		a.touchReadLocked(false, true)
+	}
+	return changed
+}

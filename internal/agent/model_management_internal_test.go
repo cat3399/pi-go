@@ -70,7 +70,7 @@ func TestSummaryResolversReadCurrentRetrySettingsAtInvocation(t *testing.T) {
 	}
 	enabled := false
 	retry := RetryPolicy{MaxAttempts: 4, InitialDelay: 17 * time.Millisecond, MaxDelay: 2 * time.Second}
-	var compactionRequests, branchRequests []SummarizerResolveRequest
+	var branchRequests []SummarizerResolveRequest
 	coordinator, err := NewSession(SessionConfig{
 		Provider: implementation, SessionManager: manager, Model: selected, ContextWindow: 64_000,
 		ResolveRuntimeSettings: func() RuntimeControlSettings {
@@ -78,10 +78,6 @@ func TestSummaryResolversReadCurrentRetrySettingsAtInvocation(t *testing.T) {
 				SteeringMode: QueueOneAtATime, FollowUpMode: QueueOneAtATime,
 				AutoCompactionEnabled: true, AutoRetryEnabled: enabled, Retry: retry,
 			}
-		},
-		ResolveSummarizer: func(_ context.Context, request SummarizerResolveRequest) (session.Summarizer, error) {
-			compactionRequests = append(compactionRequests, request)
-			return internalRuntimeControlSummarizer{}, nil
 		},
 		ResolveBranchSummarizer: func(_ context.Context, request SummarizerResolveRequest) (session.BranchSummarizer, error) {
 			branchRequests = append(branchRequests, request)
@@ -93,20 +89,14 @@ func TestSummaryResolversReadCurrentRetrySettingsAtInvocation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
 
-	if _, err := coordinator.resolveCompactionSummarizer(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := coordinator.resolveTreeSummarizer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	enabled = true
-	if _, err := coordinator.resolveCompactionSummarizer(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := coordinator.resolveTreeSummarizer(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for name, requests := range map[string][]SummarizerResolveRequest{"compaction": compactionRequests, "branch": branchRequests} {
+	for name, requests := range map[string][]SummarizerResolveRequest{"branch": branchRequests} {
 		if len(requests) != 2 {
 			t.Fatalf("%s requests = %d", name, len(requests))
 		}
@@ -282,7 +272,7 @@ func TestEveryRuntimeControlSetterOwnsControlMuDuringPersistence(t *testing.T) {
 	}
 }
 
-func TestPrepareCompactionSnapshotsCurrentAutoCompactionSetting(t *testing.T) {
+func TestContextStatusReadsCurrentAutoCompactionSetting(t *testing.T) {
 	selected := internalControlModel(t, "dynamic-compaction")
 	implementation, err := provider.NewScriptedProvider(provider.ScriptedConfig{})
 	if err != nil {
@@ -318,19 +308,19 @@ func TestPrepareCompactionSnapshotsCurrentAutoCompactionSetting(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = coordinator.Close(context.Background()) })
 
-	input, _, err := coordinator.prepareCompaction(context.Background(), "enabled snapshot")
+	status, err := coordinator.ContextStatus()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !input.Settings.Enabled {
+	if !status.AutoCompaction {
 		t.Fatal("prepared compaction did not capture enabled runtime setting")
 	}
 	enabled = false
-	input, _, err = coordinator.prepareCompaction(context.Background(), "disabled snapshot")
+	status, err = coordinator.ContextStatus()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.Settings.Enabled {
+	if status.AutoCompaction {
 		t.Fatal("prepared compaction retained construction-time enabled value")
 	}
 }

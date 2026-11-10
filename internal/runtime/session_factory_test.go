@@ -250,7 +250,7 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 	manager := factoryManager(t)
 	agentDir := t.TempDir()
 	settingsPath := filepath.Join(agentDir, "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","compaction":{"enabled":true,"reserveTokens":1000,"keepRecentTokens":500},"branchSummary":{"reserveTokens":250},"retry":{"enabled":true,"maxRetries":1}}`), 0o600); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","compaction":{"enabled":true,"reserveTokens":1000,"keepRecentTokens":500,"reminderAtTokens":8000,"handoffAtTokens":10000},"branchSummary":{"reserveTokens":250},"retry":{"enabled":true,"maxRetries":1}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: manager.Cwd()})
@@ -268,8 +268,12 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
+	initial, err := created.Session.ContextStatus()
+	if err != nil || initial.RequestBudget != 10000 || initial.ReminderTokens != 8000 {
+		t.Fatalf("initial thresholds: %#v %v", initial, err)
+	}
 	beforeGeneration := catalog.Snapshot().Generation
-	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"all","followUpMode":"all","compaction":{"enabled":false,"reserveTokens":2000,"keepRecentTokens":750},"branchSummary":{"reserveTokens":400},"retry":{"enabled":false,"maxRetries":3}}`), 0o600); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"all","followUpMode":"all","compaction":{"enabled":false,"reserveTokens":2000,"keepRecentTokens":750,"reminderAtTokens":7000,"handoffAtTokens":9000},"branchSummary":{"reserveTokens":400},"retry":{"enabled":false,"maxRetries":3}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := created.Session.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
@@ -282,6 +286,25 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 		t.Fatalf("reloaded runtime = generation %d settings %#v controls %s/%s compact=%t retry=%t", snapshot.Generation, snapshot.Settings,
 			created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
 	}
+	status, err := created.Session.ContextStatus()
+	if err != nil || status.RequestBudget != 9000 || status.ReminderTokens != 7000 {
+		t.Fatalf("reloaded thresholds: %#v %v", status, err)
+	}
+	legacy := []byte(`{"compaction":{"reserveTokens":2000,"keepRecentTokens":750}}`)
+	if err := os.WriteFile(settingsPath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := created.Session.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = created.Session.ContextStatus()
+	if err != nil || status.RequestBudget != 14000 || status.ReminderTokens != 11200 {
+		t.Fatalf("legacy fallback: %#v %v", status, err)
+	}
+	if data, err := os.ReadFile(settingsPath); err != nil || string(data) != string(legacy) {
+		t.Fatal("reload rewrote legacy settings", err)
+	}
+
 }
 
 func TestRuntimeControlDefiniteSettingsFailureDoesNotPublishState(t *testing.T) {
@@ -711,13 +734,8 @@ func TestModelLessProductSessionCompactSettlesBeforeHooksOrPersistence(t *testin
 	if summarizerCalls != 0 || beforeCompactCalls != 0 || len(manager.Entries()) != beforeEntries {
 		t.Fatalf("model-less compact side effects: summarizer=%d beforeHook=%d entries=%d->%d", summarizerCalls, beforeCompactCalls, beforeEntries, len(manager.Entries()))
 	}
-	if len(lifecycle) != 2 || lifecycle[0].Type() != agent.CompactionStartEventType || lifecycle[1].Type() != agent.CompactionEndEventType {
-		t.Fatalf("compact lifecycle = %#v", lifecycle)
-	}
-	ended, ok := lifecycle[1].(agent.CompactionEndEvent)
-	if !ok || ended.Result != nil || ended.Aborted || ended.ErrorMessage != "Compaction failed: "+wantError ||
-		ended.Err == nil || ended.Err.Error() != "Compaction failed: "+wantError || !errors.Is(ended.Err, agent.ErrNoModelSelected) {
-		t.Fatalf("compaction end = %#v", lifecycle[1])
+	if len(lifecycle) != 0 {
+		t.Fatalf("admission failure emitted compaction lifecycle: %#v", lifecycle)
 	}
 	if result.Session.State().Active.Phase() != agent.PhaseIdle {
 		t.Fatalf("session phase after compact = %s", result.Session.State().Active.Phase())
