@@ -299,7 +299,7 @@ func TestBudgetReminderEscalatesOnceAndKeepsNormalTools(t *testing.T) {
 		step, _ := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
 			assertNormalHandoffRequest(t, request)
 			text := contextRequestText(t, request)
-			if strings.Count(text, "tokens remaining for work") != soft || strings.Count(text, "working budget") != urgent {
+			if strings.Count(text, "tokens remaining.") != soft || strings.Count(text, "at or below the handoff threshold") != urgent {
 				t.Fatal(text)
 			}
 			if id == "final" {

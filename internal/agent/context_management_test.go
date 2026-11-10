@@ -196,14 +196,14 @@ func TestContextReminderKeepsStablePrefixAndDoesNotRepeat(t *testing.T) {
 	}
 	for _, request := range scripted.Requests() {
 		text := contextRequestText(t, request)
-		if strings.Count(text, "tokens remaining for work") != 1 {
+		if strings.Count(text, "tokens remaining.") != 1 {
 			t.Fatalf("notice duplicated or missing: %s", text)
 		}
 		if request.SystemPrompt() != "stable system" {
 			t.Fatal("system prefix changed")
 		}
 	}
-	view, err := manager.ReadHistoryView(session.HistoryViewQuery{Search: "tokens remaining for work"})
+	view, err := manager.ReadHistoryView(session.HistoryViewQuery{Search: "tokens remaining."})
 	if err != nil || len(view.Records) != 0 {
 		t.Fatal("notice became user dialogue", err)
 	}
@@ -213,17 +213,19 @@ func contextThreshold(value uint64) *uint64 { return &value }
 
 func TestContextThresholdsPreferExplicitTokensAndKeepLegacyFallback(t *testing.T) {
 	for _, test := range []struct {
-		name                                 string
-		reserve                              uint64
-		handoff, reminder                    *uint64
-		wantBudget, wantReminder, wantMargin uint64
+		name                                  string
+		reserve                               uint64
+		handoff, reminder                     *uint64
+		wantBudget, wantReminder, wantReserve uint64
 	}{
-		{"legacy", 16384, nil, nil, 111616, 89292, 16384},
-		{"explicit legacy zero", 0, nil, nil, 128000, 102400, 0},
-		{"legacy oversized reserve", 200000, nil, nil, 96000, 76800, 32000},
-		{"explicit handoff", 16384, contextThreshold(50000), nil, 50000, 40000, 78000},
-		{"explicit thresholds", 200000, contextThreshold(50000), contextThreshold(45000), 50000, 45000, 78000},
-		{"explicit reminder with legacy budget", 16384, nil, contextThreshold(60000), 111616, 60000, 16384},
+		{"legacy", 16384, nil, nil, 111616, 38708, 16384},
+		{"explicit legacy zero", 0, nil, nil, 128000, 25600, 0},
+		{"legacy oversized reserve", 200000, nil, nil, 96000, 51200, 32000},
+		{"explicit handoff", 16384, contextThreshold(50000), nil, 78000, 65600, 50000},
+		{"explicit thresholds", 200000, contextThreshold(50000), contextThreshold(60000), 78000, 60000, 50000},
+		{"explicit handoff zero", 16384, contextThreshold(0), nil, 128000, 25600, 0},
+		{"explicit threshold zeros", 16384, contextThreshold(0), contextThreshold(0), 128000, 0, 0},
+		{"explicit reminder with legacy reserve", 16384, nil, contextThreshold(60000), 111616, 60000, 16384},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: handoffModel(t), ContextReserve: test.reserve, ContextReserveSet: true, HandoffAtTokens: test.handoff, ReminderAtTokens: test.reminder})
@@ -232,7 +234,7 @@ func TestContextThresholdsPreferExplicitTokensAndKeepLegacyFallback(t *testing.T
 			}
 			defer runtime.Close(context.Background())
 			status, err := runtime.ContextStatus()
-			if err != nil || status.RequestBudget != test.wantBudget || status.ReminderTokens != test.wantReminder || status.ReserveTokens != test.wantMargin {
+			if err != nil || status.RequestBudget != test.wantBudget || status.ReminderTokens != test.wantReminder || status.ReserveTokens != test.wantReserve || status.RemainingTokens != status.ContextWindow {
 				t.Fatalf("status = %#v, %v", status, err)
 			}
 		})
@@ -241,18 +243,18 @@ func TestContextThresholdsPreferExplicitTokensAndKeepLegacyFallback(t *testing.T
 
 func TestContextThresholdReloadUsesNewValuesAndClearsRemovedOverrides(t *testing.T) {
 	settings := agent.RuntimeControlSettings{SteeringMode: agent.QueueOneAtATime, FollowUpMode: agent.QueueOneAtATime, AutoCompactionEnabled: true, AutoRetryEnabled: true, Retry: agent.RetryPolicy{MaxAttempts: 1}, CompactionReserveTokens: 16384, CompactionReserveSet: true}
-	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: handoffModel(t), HandoffAtTokens: contextThreshold(50000), ReminderAtTokens: contextThreshold(40000), ResolveRuntimeSettings: func() agent.RuntimeControlSettings { return settings }})
+	runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t), SessionManager: newSessionManager(t), Model: handoffModel(t), HandoffAtTokens: contextThreshold(50000), ReminderAtTokens: contextThreshold(60000), ResolveRuntimeSettings: func() agent.RuntimeControlSettings { return settings }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer runtime.Close(context.Background())
-	settings.CompactionHandoffAtTokens, settings.CompactionReminderAtTokens = contextThreshold(60000), contextThreshold(55000)
+	settings.CompactionHandoffAtTokens, settings.CompactionReminderAtTokens = contextThreshold(60000), contextThreshold(70000)
 	if err := runtime.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	*settings.CompactionHandoffAtTokens = 70000
+	*settings.CompactionHandoffAtTokens = 80000
 	status, err := runtime.ContextStatus()
-	if err != nil || status.RequestBudget != 60000 || status.ReminderTokens != 55000 {
+	if err != nil || status.RequestBudget != 68000 || status.ReminderTokens != 70000 || status.ReserveTokens != 60000 {
 		t.Fatalf("reloaded thresholds: %#v %v", status, err)
 	}
 	settings.CompactionHandoffAtTokens, settings.CompactionReminderAtTokens = nil, nil
@@ -260,22 +262,23 @@ func TestContextThresholdReloadUsesNewValuesAndClearsRemovedOverrides(t *testing
 		t.Fatal(err)
 	}
 	status, err = runtime.ContextStatus()
-	if err != nil || status.RequestBudget != 111616 || status.ReminderTokens != 89292 {
+	if err != nil || status.RequestBudget != 111616 || status.ReminderTokens != 38708 {
 		t.Fatalf("legacy fallback after reload: %#v %v", status, err)
 	}
 }
 
 func TestExplicitContextThresholdsDriveRemindersAndReevaluateAfterReload(t *testing.T) {
 	var runtime *agent.AgentSession
-	settings := agent.RuntimeControlSettings{SteeringMode: agent.QueueOneAtATime, FollowUpMode: agent.QueueOneAtATime, AutoCompactionEnabled: true, AutoRetryEnabled: true, Retry: agent.RetryPolicy{MaxAttempts: 1}, CompactionHandoffAtTokens: contextThreshold(50000), CompactionReminderAtTokens: contextThreshold(45000)}
+	settings := agent.RuntimeControlSettings{SteeringMode: agent.QueueOneAtATime, FollowUpMode: agent.QueueOneAtATime, AutoCompactionEnabled: true, AutoRetryEnabled: true, Retry: agent.RetryPolicy{MaxAttempts: 1}, CompactionHandoffAtTokens: contextThreshold(50000), CompactionReminderAtTokens: contextThreshold(60000)}
 	step := func(id string, tokens uint64, wantSoft, wantUrgent int, reload bool) provider.ScriptStep {
 		value, _ := provider.FactoryResponseStep(func(_ context.Context, request provider.Request, _ uint64) (llm.AssistantTerminal, error) {
+			assertNormalHandoffRequest(t, request)
 			text := contextRequestText(t, request)
-			if strings.Count(text, "tokens remaining for work") != wantSoft || strings.Count(text, "working budget") != wantUrgent {
+			if strings.Count(text, "tokens remaining.") != wantSoft || strings.Count(text, "at or below the handoff threshold") != wantUrgent {
 				t.Fatal(text)
 			}
 			if reload {
-				settings.CompactionReminderAtTokens = contextThreshold(40000)
+				settings.CompactionReminderAtTokens = contextThreshold(65000)
 				if err := runtime.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
 					t.Fatal(err)
 				}
@@ -289,13 +292,32 @@ func TestExplicitContextThresholdsDriveRemindersAndReevaluateAfterReload(t *test
 		return value
 	}
 	runtime, _, manager := manualContextFixture(t, func(config *agent.SessionConfig) {
-		config.HandoffAtTokens, config.ReminderAtTokens = contextThreshold(50000), contextThreshold(45000)
+		config.Model, _ = newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "scripted-1", ContextWindow: 1000000, MaxTokens: 4096})
+		config.HandoffAtTokens, config.ReminderAtTokens = contextThreshold(50000), contextThreshold(60000)
 		config.ResolveRuntimeSettings = func() agent.RuntimeControlSettings { return settings }
-	}, step("below", 42000, 0, 0, false), step("cross-soft", 46000, 0, 0, false), step("reload", 46000, 1, 0, true), step("cross-budget", 51000, 2, 0, false), step("final", 0, 2, 1, false))
+	}, step("ample-space", 60000, 0, 0, false), step("approach", 939000, 0, 0, false), step("cross-soft", 940000, 0, 0, false), step("reload", 940000, 1, 0, true), step("cross-handoff", 950000, 2, 0, false), step("final", 0, 2, 1, false))
 	if result, err := runtime.Run(context.Background(), "task"); err != nil || !result.Succeeded() {
 		t.Fatalf("run: %#v %v", result, err)
 	}
 	if window, _ := manager.CurrentContextWindow(); window != session.InitialContextWindow {
 		t.Fatal("reminders switched context without a CLI submission")
+	}
+}
+
+func TestContextStatusKeepsRemainingThresholdsAcrossWindowSizes(t *testing.T) {
+	for _, window := range []uint64{100000, 1000000} {
+		manager := newSessionManager(t)
+		prior, _ := newAssistantTextMessage([]llm.TextBlock{mustTextBlock(t, "prior progress")}, llm.FinishStop, mustUsage(t, 50000, 0), agentTestEpoch)
+		_, _ = manager.AppendLLMMessage(context.Background(), prior)
+		selected, _ := newAgentModel(provider.ModelSpec{Provider: "scripted", API: "scripted", ID: "scripted-1", ContextWindow: window, MaxTokens: 4096})
+		runtime, err := agent.NewSession(agent.SessionConfig{Provider: newScriptedProvider(t), SessionManager: manager, Model: selected, ReminderAtTokens: contextThreshold(60000), HandoffAtTokens: contextThreshold(50000)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, err := runtime.ContextStatus()
+		if err != nil || status.ReserveTokens != 50000 || status.ReminderTokens != 60000 || status.RemainingTokens != window-50000 || status.RequestBudget != window-50000 {
+			t.Fatalf("window %d: %#v %v", window, status, err)
+		}
+		_ = runtime.Close(context.Background())
 	}
 }

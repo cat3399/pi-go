@@ -250,7 +250,8 @@ func (s BranchSummarySettings) ReserveTokensOrDefault() uint64 {
 // CompactionSettings preserves optionality so project settings can override
 // individual global fields and an explicit enabled:false is not lost.
 type CompactionSettings struct {
-	Enabled          *bool   `json:"enabled,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+	// Both thresholds count tokens remaining in the selected model's window.
 	ReminderAtTokens *uint64 `json:"reminderAtTokens,omitempty"`
 	HandoffAtTokens  *uint64 `json:"handoffAtTokens,omitempty"`
 	ReserveTokens    *uint64 `json:"reserveTokens,omitempty"`
@@ -1749,14 +1750,8 @@ func settingsFromRaw(root map[string]json.RawMessage, label string) (Settings, e
 		if err := json.Unmarshal(raw, &s.Compaction); err != nil {
 			return s, Diagnostic{label, "compaction", "must contain boolean enabled and non-negative integer token settings"}
 		}
-		if s.Compaction.ReminderAtTokens != nil && *s.Compaction.ReminderAtTokens == 0 {
-			return s, Diagnostic{label, "compaction.reminderAtTokens", "must be greater than zero"}
-		}
-		if s.Compaction.HandoffAtTokens != nil && *s.Compaction.HandoffAtTokens == 0 {
-			return s, Diagnostic{label, "compaction.handoffAtTokens", "must be greater than zero"}
-		}
-		if s.Compaction.ReminderAtTokens != nil && s.Compaction.HandoffAtTokens != nil && *s.Compaction.ReminderAtTokens > *s.Compaction.HandoffAtTokens {
-			return s, Diagnostic{label, "compaction.reminderAtTokens", "must not exceed handoffAtTokens"}
+		if s.Compaction.ReminderAtTokens != nil && s.Compaction.HandoffAtTokens != nil && *s.Compaction.ReminderAtTokens < *s.Compaction.HandoffAtTokens {
+			return s, Diagnostic{label, "compaction.reminderAtTokens", "must not be less than handoffAtTokens (remaining tokens)"}
 		}
 	}
 	if raw, ok := root["branchSummary"]; ok {

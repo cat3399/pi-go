@@ -116,7 +116,7 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 			if mode == "manual" && !strings.Contains(string(encoded), "retain exact pending correction") {
 				t.Error("manual CLI did not deliver a handoff request")
 			}
-			if mode == "budget" && !strings.Contains(string(encoded), "working budget") {
+			if mode == "budget" && !strings.Contains(string(encoded), "at or below the handoff threshold") {
 				t.Error("hard budget did not deliver the CLI reminder")
 			}
 			toolName = "bash"
@@ -193,7 +193,7 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 	}
 	settings := []byte(`{"compaction":{"enabled":true,"reserveTokens":16384,"keepRecentTokens":100},"retry":{"enabled":false}}`)
 	if mode == "budget" {
-		settings = []byte(`{"compaction":{"enabled":true,"reserveTokens":0,"reminderAtTokens":90000,"handoffAtTokens":100000},"retry":{"enabled":false}}`)
+		settings = []byte(`{"compaction":{"enabled":true,"reserveTokens":0,"reminderAtTokens":38000,"handoffAtTokens":28000},"retry":{"enabled":false}}`)
 	}
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), settings, 0600); err != nil {
 		t.Fatal(err)

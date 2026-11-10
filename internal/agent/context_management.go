@@ -43,15 +43,18 @@ func (w providedHandoffWriter) Summarize(context.Context, session.SummaryInput) 
 }
 
 type ContextStatus struct {
-	SessionID       string               `json:"sessionId"`
-	WindowID        string               `json:"window"`
-	EstimatedTokens uint64               `json:"estimatedTokens"`
-	ContextWindow   uint64               `json:"contextWindow"`
-	ReserveTokens   uint64               `json:"reserveTokens"`
-	RequestBudget   uint64               `json:"requestBudget"`
-	ReminderTokens  uint64               `json:"reminderTokens"`
-	AutoCompaction  bool                 `json:"autoCompaction"`
-	Change          *ContextChangeResult `json:"change,omitempty"`
+	SessionID       string `json:"sessionId"`
+	WindowID        string `json:"window"`
+	EstimatedTokens uint64 `json:"estimatedTokens"`
+	ContextWindow   uint64 `json:"contextWindow"`
+	RemainingTokens uint64 `json:"remainingTokens"`
+	// ReserveTokens and ReminderTokens are remaining-context thresholds.
+	// RequestBudget is the derived usage budget retained for status consumers.
+	ReserveTokens  uint64               `json:"reserveTokens"`
+	RequestBudget  uint64               `json:"requestBudget"`
+	ReminderTokens uint64               `json:"reminderTokens"`
+	AutoCompaction bool                 `json:"autoCompaction"`
+	Change         *ContextChangeResult `json:"change,omitempty"`
 }
 
 // ContextAccessInstructions are shown only at their relevant runtime boundary.
@@ -88,14 +91,8 @@ func (s *AgentSession) ContextStatus() (ContextStatus, error) {
 }
 
 func validateContextThresholds(reminder, handoff *uint64) error {
-	if reminder != nil && *reminder == 0 {
-		return fmt.Errorf("%w: compaction.reminderAtTokens must be greater than zero", ErrInvalidConfig)
-	}
-	if handoff != nil && *handoff == 0 {
-		return fmt.Errorf("%w: compaction.handoffAtTokens must be greater than zero", ErrInvalidConfig)
-	}
-	if reminder != nil && handoff != nil && *reminder > *handoff {
-		return fmt.Errorf("%w: compaction.reminderAtTokens must not exceed handoffAtTokens", ErrInvalidConfig)
+	if reminder != nil && handoff != nil && *reminder < *handoff {
+		return fmt.Errorf("%w: compaction.reminderAtTokens must not be less than handoffAtTokens (remaining tokens)", ErrInvalidConfig)
 	}
 	return nil
 }
@@ -108,20 +105,17 @@ func (s *AgentSession) contextStatusFor(state State) (ContextStatus, error) {
 	result := ContextStatus{SessionID: s.sessionManager.SessionID(), WindowID: windowID, AutoCompaction: s.AutoCompactionEnabled()}
 	window, reserve, reminder, handoff := s.compactionLimitsFor(state.Model())
 	result.ContextWindow, result.ReserveTokens = window, reserve
-	if result.ContextWindow > result.ReserveTokens {
-		result.RequestBudget = result.ContextWindow - result.ReserveTokens
-	}
 	if handoff != nil {
-		result.RequestBudget = *handoff
-		// Retain the status field as a derived margin. The legacy setting no
-		// longer controls the budget when an explicit threshold is present.
-		result.ReserveTokens = result.ContextWindow - min(result.ContextWindow, *handoff)
+		result.ReserveTokens = *handoff
 	}
-	result.ReminderTokens = result.RequestBudget / 5 * 4
+	result.RequestBudget = window - min(window, result.ReserveTokens)
+	// Express the legacy early-reminder point in remaining tokens too. Only
+	// this default conversion uses the historical usage-budget calculation.
+	result.ReminderTokens = max(result.ReserveTokens, window-result.RequestBudget/5*4)
 	if reminder != nil {
 		result.ReminderTokens = *reminder
-		if result.RequestBudget > 0 && *reminder > result.RequestBudget {
-			return ContextStatus{}, fmt.Errorf("%w: compaction.reminderAtTokens exceeds the effective handoff threshold (%d)", ErrInvalidConfig, result.RequestBudget)
+		if *reminder < result.ReserveTokens {
+			return ContextStatus{}, fmt.Errorf("%w: compaction.reminderAtTokens is below the handoff reserve (%d remaining tokens)", ErrInvalidConfig, result.ReserveTokens)
 		}
 	}
 	messages := state.Messages()
@@ -146,6 +140,7 @@ func (s *AgentSession) contextStatusFor(state State) (ContextStatus, error) {
 		overhead += len(definition.Name()) + len(definition.Description()) + len(definition.ParametersJSON())
 	}
 	result.EstimatedTokens = max(estimate.Tokens, local+uint64((overhead+3)/4))
+	result.RemainingTokens = window - min(window, result.EstimatedTokens)
 	s.lifecycleMu.Lock()
 	if s.contextCompaction != nil {
 		value := acceptedContextChange(s.contextCompaction.request)
@@ -430,13 +425,13 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 			changed = true
 		}
 	}
-	if status.AutoCompaction && instructions.Handoff != "" && status.RequestBudget != 0 && status.EstimatedTokens >= status.ReminderTokens {
-		urgent := status.EstimatedTokens >= status.RequestBudget
+	if status.AutoCompaction && instructions.Handoff != "" && status.ContextWindow != 0 && status.RemainingTokens <= status.ReminderTokens {
+		urgent := status.RemainingTokens <= status.ReserveTokens
 		level := uint8(1)
 		if urgent {
 			level = 2
 		}
-		key := fmt.Sprintf("%s/%s/%s/%d/%d/%d", status.WindowID, snapshot.Model.Provider(), snapshot.Model.ID(), status.ContextWindow, status.RequestBudget, status.ReminderTokens)
+		key := fmt.Sprintf("%s/%s/%s/%d/%d/%d", status.WindowID, snapshot.Model.Provider(), snapshot.Model.ID(), status.ContextWindow, status.ReserveTokens, status.ReminderTokens)
 		s.lifecycleMu.Lock()
 		fresh := s.contextReminderKey != key || level > s.contextReminderLevel
 		if fresh {
@@ -444,13 +439,9 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 		}
 		s.unlockLifecycle()
 		if fresh {
-			remaining := uint64(0)
-			if status.RequestBudget > status.EstimatedTokens {
-				remaining = status.RequestBudget - status.EstimatedTokens
-			}
-			text := fmt.Sprintf("This context window has approximately %d tokens remaining for work. If that is enough to finish the current task, finish and deliver the result. Otherwise, submit a brief handoff before the budget runs out and continue in a new window. %s", remaining, instructions.Handoff)
+			text := fmt.Sprintf("This context window has approximately %d tokens remaining. If that is enough to finish the current task, finish and deliver the result. Otherwise, submit a brief handoff before the context fills up and continue in a new window. %s", status.RemainingTokens, instructions.Handoff)
 			if urgent {
-				text = "The working budget for this context window has been reached. Use the remaining context to submit a brief handoff now, then continue the task in a new window. You can use your existing tools to finish the handoff. " + instructions.Handoff
+				text = fmt.Sprintf("Only approximately %d tokens remain in this context window, at or below the handoff threshold. Use your existing tools to submit a brief handoff now, then continue the task in a new window. %s", status.RemainingTokens, instructions.Handoff)
 			}
 			notice, err := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: "pi-go.context-notice", StringContent: &text, At: time.Now()})
 			if err != nil {

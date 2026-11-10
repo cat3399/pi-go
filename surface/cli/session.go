@@ -303,7 +303,7 @@ func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, std
 			return writeSessionJSON(stdout, stderr, response.Status)
 		}
 		value := response.Status
-		fmt.Fprintf(stdout, "Session %s · window %s\nEstimated context: %d tokens; window: %d; reminder at: %d; handoff at: %d\n", value.SessionID, value.WindowID, value.EstimatedTokens, value.ContextWindow, value.ReminderTokens, value.RequestBudget)
+		fmt.Fprintf(stdout, "Session %s · window %s\nEstimated used: %d tokens; remaining: %d; window: %d\nReminder at remaining: %d tokens; handoff at remaining: %d tokens\n", value.SessionID, value.WindowID, value.EstimatedTokens, value.RemainingTokens, value.ContextWindow, value.ReminderTokens, value.ReserveTokens)
 		if value.Change != nil {
 			writeContextChange(stdout, *value.Change)
 		}

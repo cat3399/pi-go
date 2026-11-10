@@ -29,7 +29,7 @@ README 和源码位置由随二进制携带的资料决定。
   "defaultThinkingLevel": "medium",
   "steeringMode": "one-at-a-time",
   "followUpMode": "one-at-a-time",
-  "compaction": { "enabled": true, "reminderAtTokens": 40000, "handoffAtTokens": 50000 },
+  "compaction": { "enabled": true },
   "retry": { "enabled": true },
   "images": { "autoResize": true }
 }
@@ -40,9 +40,7 @@ README 和源码位置由随二进制携带的资料决定。
 `AGENTS.md` / `CLAUDE.md` 仍作为共享项目指令加载。共享 `.agents/skills` 的发现规则保持独立。
 修改后可使用 `/reload`。
 
-上下文交接的两个阈值使用 tokens，示例表示 40k 提前提醒、50k 升级为立即交接提醒。
-`handoffAtTokens` 优先于旧 `reserveTokens`；未配置新字段时自动兼容旧算法，不改写配置文件。
-`keepRecentTokens` 保持兼容读取。参数、默认回退和 CLI 提交边界见[上下文管理](context-management.md#提醒与用量)。
+上下文交接的余量阈值与兼容规则见[上下文管理](context-management.md#提醒与余量)。
 
 ## 模型失败与重试
 

@@ -311,16 +311,12 @@ capabilities:
       - {kind: go_test, path: internal/agent/upstream_overflow_compaction_oracle_test.go, symbol: TestOverflowHandoffReusesUpstreamWorkflowScenario}
       - {kind: go_test, path: internal/agent/context_handoff_scenario_test.go, symbol: TestHardBudgetContinuesMainModelPrefixThenRecoversQueuedInput}
       - {kind: go_test, path: internal/agent/context_compaction_test.go, symbol: TestBudgetReminderEscalatesOnceAndKeepsNormalTools}
-      - {kind: go_test, path: internal/agent/context_management_test.go, symbol: TestContextThresholdsPreferExplicitTokensAndKeepLegacyFallback}
-      - {kind: go_test, path: cmd/pi-go/session_e2e_test.go, symbol: TestSessionHandoffBinaryEndToEnd}
     intentionalGoDifference: >-
-      Explicit token thresholds override the legacy reserve-derived budget. Old settings
-      remain readable without migration. Budget reminders let the model finish or submit
-      a handoff. Reaching the work budget
-      strengthens the CLI reminder without changing the normal Agent request or tools.
-      Only a CLI submission creates a window; provider overflow preserves the old window
-      and failure. A final answer without queued input never triggers another call.
-      AgentLoop callbacks retain their upstream after-turn ordering.
+      Remaining-context thresholds control advance and immediate handoff reminders,
+      with the legacy reserve setting retained as a fallback. The Agent uses its normal
+      request configuration and tools. CLI submission commits the window boundary;
+      overflow preserves the existing window and failure. AgentLoop callbacks retain
+      their upstream after-turn ordering.
     remainingDifference: none
 
   - id: agent_session.model_set_and_scoped_cycle

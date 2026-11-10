@@ -51,8 +51,9 @@ JSONL 会话文件是持久对话和会话树的事实源。SessionManager 将 e
 保留 model/thinking change、compaction、branch summary、name、label 和 custom entry/message。
 短交接是带版本的 custom 检查点，SessionManager 在同一投影中识别其窗口边界；原始历史不变。
 AgentSession 在现有工具回合结束边界提交交接，并复用请求前准备更新 Agent 上下文和交付队列。
-手动、预算阈值和溢出恢复统一进入此流程，正常任务结束不会追加压缩调用。交接命令只随
-运行时预算提醒提供，历史检索入口只在换窗后的恢复消息中提供，系统提示词不注入这些说明。
+手动要求和余量提醒均由当前 Agent 使用正常工具调用 CLI 提交交接；上下文溢出保留原窗口和
+失败结果。交接命令随运行时提醒提供，历史检索入口在换窗后的恢复消息中提供，系统提示词
+不注入这些说明。
 `surface/cli` 只提供参数、帮助、输出和本地控制连接，通过 typed Application API 调用核心。
 历史 dialogue/raw 视图与搜索属于 SessionManager，可复用 ReadIndex。具体契约见
 [上下文管理](context-management.md)。

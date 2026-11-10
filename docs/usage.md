@@ -51,8 +51,8 @@ pi-go session --file /path/to/session.jsonl history search '关键词'
 ```
 
 模型也可从 bash 使用 `"$PI_EXECUTABLE" session` 查询当前会话、提交短交接后换窗，或请求
-原有摘要压缩。新窗口只带交接，原始历史仍可按 entry ID 读取。运行中的请求先返回 accepted，
-在工具批次落盘后生效；通过 `context status` 检查结果。完整命令与语义见
+当前 Agent 准备并提交交接。新窗口保留最新交接和未处理输入，原始历史仍可按 entry ID 读取。
+运行中的请求先返回 accepted，交接提交在工具批次落盘后生效；通过 `context status` 检查结果。完整命令与语义见
 [上下文管理与历史读取](context-management.md)。
 
 ## 更新程序

@@ -142,8 +142,8 @@ type SessionConfig struct {
 	ContextWindow    uint64
 	ContextReserve   uint64
 	KeepRecentTokens uint64
-	// Explicit token thresholds take precedence over the legacy reserve-based
-	// budget. Nil retains the corresponding legacy/default calculation.
+	// Thresholds count remaining context tokens. HandoffAtTokens overrides the
+	// legacy reserve; nil retains the corresponding legacy/default calculation.
 	ReminderAtTokens *uint64
 	HandoffAtTokens  *uint64
 	// Presence flags allow production settings to preserve an explicit zero.

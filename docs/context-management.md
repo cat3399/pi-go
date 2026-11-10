@@ -1,8 +1,7 @@
 # 上下文管理与历史读取
 
-`pi-go session` 提供会话发现、原始历史读取、上下文用量和短交接换窗。
-这些能力复用现有 Agent、工具执行、队列、SessionManager 和存储；不创建第二个 Agent run，
-也不把历史查询或上下文管理交给独立的摘要代理。
+`pi-go session` 提供会话发现、原始历史读取、上下文余量和短交接换窗。
+交接使用现有 Agent 工具循环，窗口边界与原始记录由 SessionManager 管理。
 
 ## 入口与会话选择
 
@@ -28,7 +27,7 @@ Terminal 的 run/TUI/RPC、Web Core 和 GUI 内嵌 Core 都装配 CLI 访问入�
 自行嵌入 Go 核心时，可使用 typed Application command/query API，或在 production assembly 中
 配置 `AttachSession`；核心不依赖 CLI 传输。
 
-系统提示词不包含交接或历史检索说明。临近预算阈值时，运行时提醒携带交接命令；
+系统提示词不包含交接或历史检索说明。上下文余量不足时，运行时提醒携带交接命令；
 换窗后的恢复消息才提供历史检索入口。不会增加常驻模型工具定义或强制的历史恢复清单。
 没有启用 bash 的接入可以直接调用相同核心 API。
 
@@ -53,8 +52,7 @@ Terminal 的 run/TUI/RPC、Web Core 和 GUI 内嵌 Core 都装配 CLI 访问入�
 
 ```sh
 "$PI_EXECUTABLE" session context new --handoff-stdin <<'HANDOFF'
-已定位取消后的状态恢复问题，主要看了 session_runtime.go 和 agent_loop.go。
-接下来补充时序测试，再修复状态恢复；具体讨论和工具输出可从历史读取。
+当前进度、相关文件或引用，以及后续方向。
 HANDOFF
 ```
 
@@ -68,55 +66,31 @@ HANDOFF
 换窗发生在同一 Session 内。窗口 ID 是检查点 entry ID，第一个窗口为 `initial`。
 连续换窗只使用最新一份交接；更早的交接和完整原文仍能直接查询，不需要递归展开摘要链。
 
-交接由主模型在既有历史前缀后生成，有机会利用 provider 已建立的缓存。
-新窗口首次读取的历史是新请求内容，后续轮次才可能复用它；原文曾在旧窗口出现，不保证首次
-读取自动命中缓存。缓存用量和成本应按 provider 实际报告计算。
+交接沿用当前 provider 请求配置和会话标识，缓存用量和成本以 provider 报告为准。
 
-## 提醒与用量
+## 提醒与余量
 
 ```sh
 "$PI_EXECUTABLE" session --json context status
 ```
 
-状态包括 Session/窗口 ID、估算 tokens、模型上下文窗口、有效交接阈值、提前提醒阈值，
-以及最近一次上下文请求的状态。JSON 中 `requestBudget` 是有效交接阈值，`reminderTokens`
-是提前提醒阈值，`reserveTokens` 是窗口减去有效预算得到的余量（最低为 0）。估算取
-“最近可用 provider usage 加消息尾部”和“活动消息加系统指令、工具定义的本地估计”中的较大值；
-不是 provider 专用 tokenizer 的精确计量。整个 Session 日志的累计大小不参与活动窗口估算。
+提醒依据当前模型窗口的剩余 tokens：窗口容量减去活动上下文估算用量，超出容量时余量为零。
+用量估算综合 provider usage、消息尾部以及系统提示和工具定义；整个 Session 历史的累计大小
+不参与计算。
 
-所有提醒参数仍位于 `settings.json` 的 `compaction` 中，单位统一为 tokens，例如：
+`settings.json` 的 `compaction.enabled` 控制自动提醒，手动交接不受影响。
+`reminderAtTokens` 和 `handoffAtTokens` 都表示余量阈值：剩余 tokens 降到前者时提醒准备交接，
+降到后者时提醒立即通过 CLI 提交交接。提前提醒阈值应不小于交接阈值。
+未配置 `handoffAtTokens` 时沿用 `reserveTokens`；未配置 `reminderAtTokens` 时沿用原有的
+提前提醒规则。`keepRecentTokens` 保持兼容读取，新交接流程不使用近期消息保留预算。
 
-```json
-{
-  "compaction": {
-    "enabled": true,
-    "reminderAtTokens": 40000,
-    "handoffAtTokens": 50000
-  }
-}
-```
+状态中的 `remainingTokens` 是当前估算余量，`reserveTokens` 和 `reminderTokens` 分别是
+有效交接余量和提前提醒余量。`requestBudget` 保留为兼容字段，表示窗口减去交接余量的派生值。
+配置加载和 reload 不改写原配置或历史会话。
 
-`enabled` 保持原含义：控制自动预算提醒，默认开启；手动请求不受它影响。
-`handoffAtTokens` 直接指定升级交接提醒的用量，`reminderAtTokens` 直接指定提前提醒的用量。
-显式阈值是正整数，提前提醒不能晚于交接提醒。新字段配置的数值不会随模型窗口大小自动缩放。
-
-兼容读取只发生在配置装配和 reload 中，不运行迁移命令，也不改写原配置或历史会话：
-
-- 配置了 `handoffAtTokens` 就使用它；未配置时沿用“模型窗口减去 `reserveTokens`”的旧算法。
-  旧 `reserveTokens` 默认 16,384；预留大于等于窗口时仍按旧规则使用窗口的四分之一，显式 0 保持 0。
-- 配置了 `reminderAtTokens` 就使用它；未配置时沿用有效交接预算约 80% 的默认提前提醒。
-- `keepRecentTokens` 的读取和存储保持兼容，新交接流程仍不使用近期消息保留预算。
-
-每次实际请求模型前检查活动上下文，包括新输入和工具结果。到达提前提醒点时给出剩余工作
-额度和 CLI 交接命令：能完成就收尾，否则准备交接；到达交接阈值时升级为“现在通过 CLI 提交交接”。
-相同窗口、模型和有效阈值下，每级只提醒一次；阈值在 reload 后改变时重新判断。
-换窗后清除旧窗口的消息和 usage。提醒不作为用户对话落盘，不改变系统提示、工具或正常输出配置，
-也不会在最终回答之后专门增加一次模型调用。
-
-所有新窗口都必须由 `context new` 提交。模型未提交、调用失败或操作取消时，保留旧窗口；
-provider 已返回上下文溢出时保留错误，不自动创建“无交接恢复”检查点或循环重试换窗。
-可切换到容量足够的模型后重新请求交接，或显式通过 CLI 提交已有交接。
-提醒和本地估计不保证任意 provider 请求一定不会超限。具体配置见[配置文档](configuration.md)。
+每次请求模型前检查余量。同一窗口、模型和阈值下，每级只提醒一次；模型或阈值改变后重新判断。
+提醒沿用正常 Agent 请求和工具循环，不改变系统提示或输出配置。正常最终答复后不追加交接调用。
+换窗以 CLI 提交的检查点为准；提交前失败或取消、provider 上下文溢出都保留原窗口。
 
 ## 原始历史与对话视图
 
@@ -184,8 +158,7 @@ CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与
 空闲会话通过既有运行准入同步执行请求；`compact` 等到模型通过 CLI 提交后返回 `completed`，
 未提交则返回失败。运行中的 `compact` 只接受交接要求，随后 `new` 的提交完成才将该要求标为完成。
 手动交接取消会中止正在生成或执行工具的 Agent 调用，并撤回尚未交付的交接要求；用户队列保持原有语义。
-外部终端可使用 `--id` 对未运行的
-会话执行命令；已有其他进程持有 writer 时会被文件锁拒绝，不会另开第二个 writer。
+外部终端可使用 `--id` 对未运行的会话执行命令；已有其他进程持有 writer 时会被文件锁拒绝，不会另开第二个 writer。
 
 `context status` 显示当前进程最近一次请求的 `accepted`、`completed`、`failed` 或 `cancelled`。
 中止或失败的 run 若没有到达切换边界，待处理请求会取消，不带入之后的新任务。
@@ -202,8 +175,8 @@ CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与
 
 短交接使用 v3 `custom` entry，`customType` 为 `pi-go.context-handoff.v1`，data 包含请求 ID、
 交接文字、上一窗口 ID、切换前估算 tokens、未处理输入的 entry 引用及可选扩展元数据。
-模型生成交接时的 usage 随普通 assistant entry 保存。旧版本的 `noHandoff` 检查点仍可读取。entry 的 parentId 指向切换前分支位置，entry ID
-即新窗口 ID。它不伪装成已经执行过全量总结的 compaction entry。
+模型生成交接时的 usage 随普通 assistant entry 保存。旧版本的 `noHandoff` 检查点仍可读取。
+entry 的 parentId 指向切换前分支位置，entry ID 即新窗口 ID。它不伪装成已经执行过全量总结的 compaction entry。
 
 SessionManager 的同一上下文投影算法识别历史摘要与交接边界。新交接不自动携带旧对话，
 只保留未处理输入；已有原版 compaction 记录仍按原始范围读取，便于打开旧会话。
@@ -211,16 +184,7 @@ SessionManager 的同一上下文投影算法识别历史摘要与交接边界�
 
 短交接和 CLI 历史视图是 pi-go 的显式扩展，原版 pi 没有这些命令。
 原版或旧版本读者可保留 custom 数据，但不会应用 pi-go 的换窗边界；不能把旧读者的活动上下文
-解释当作支持换窗。底层旧格式和分支摘要仍由上游 fixture 验证；AgentSession 的压缩策略
-明确改为短交接，与原版自动全历史摘要不同。
+解释当作支持换窗。AgentSession 使用短交接，与原版自动全历史摘要不同；旧摘要记录和分支数据
+仍按原有格式读取。
 
-职责和依赖见[核心架构](ARCHITECTURE.md)，验证入口见[测试文档](testing.md)。
-
-## 后续评估
-
-后续真实场景评估需要分别统计交接生成与历史恢复的调用、缓存命中、
-未命中输入、输出、耗时和费用，检查原文可达性、用户纠正、来源准确性与任务继续执行。
-冻结历史的信息恢复不能替代完整任务回放，也不能证明自动选择上下文策略一定更优。
-不以尽量减少查询轮次为优先目标，不增加任务专用的恢复模板或自动重要性筛选。
-
-独立保存交接草稿和跨 Session 搜索尚未引入。
+职责和依赖见[核心架构](ARCHITECTURE.md)。

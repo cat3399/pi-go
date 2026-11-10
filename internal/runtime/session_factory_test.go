@@ -250,7 +250,7 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 	manager := factoryManager(t)
 	agentDir := t.TempDir()
 	settingsPath := filepath.Join(agentDir, "settings.json")
-	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","compaction":{"enabled":true,"reserveTokens":1000,"keepRecentTokens":500,"reminderAtTokens":8000,"handoffAtTokens":10000},"branchSummary":{"reserveTokens":250},"retry":{"enabled":true,"maxRetries":1}}`), 0o600); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","compaction":{"enabled":true,"reserveTokens":1000,"keepRecentTokens":500,"reminderAtTokens":8000,"handoffAtTokens":6000},"branchSummary":{"reserveTokens":250},"retry":{"enabled":true,"maxRetries":1}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	catalog, err := model.NewRuntime(model.Options{AgentDir: agentDir, WorkingDir: manager.Cwd()})
@@ -273,7 +273,7 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 		t.Fatalf("initial thresholds: %#v %v", initial, err)
 	}
 	beforeGeneration := catalog.Snapshot().Generation
-	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"all","followUpMode":"all","compaction":{"enabled":false,"reserveTokens":2000,"keepRecentTokens":750,"reminderAtTokens":7000,"handoffAtTokens":9000},"branchSummary":{"reserveTokens":400},"retry":{"enabled":false,"maxRetries":3}}`), 0o600); err != nil {
+	if err := os.WriteFile(settingsPath, []byte(`{"steeringMode":"all","followUpMode":"all","compaction":{"enabled":false,"reserveTokens":2000,"keepRecentTokens":750,"reminderAtTokens":9000,"handoffAtTokens":7000},"branchSummary":{"reserveTokens":400},"retry":{"enabled":false,"maxRetries":3}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := created.Session.Reload(context.Background(), agent.ReloadOptions{}); err != nil {
@@ -287,7 +287,7 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 			created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
 	}
 	status, err := created.Session.ContextStatus()
-	if err != nil || status.RequestBudget != 9000 || status.ReminderTokens != 7000 {
+	if err != nil || status.RequestBudget != 9000 || status.ReminderTokens != 9000 {
 		t.Fatalf("reloaded thresholds: %#v %v", status, err)
 	}
 	legacy := []byte(`{"compaction":{"reserveTokens":2000,"keepRecentTokens":750}}`)
@@ -298,7 +298,7 @@ func TestCreateAgentSessionReloadRefreshesModelRuntimeSettingsInPlace(t *testing
 		t.Fatal(err)
 	}
 	status, err = created.Session.ContextStatus()
-	if err != nil || status.RequestBudget != 14000 || status.ReminderTokens != 11200 {
+	if err != nil || status.RequestBudget != 14000 || status.ReminderTokens != 4800 {
 		t.Fatalf("legacy fallback: %#v %v", status, err)
 	}
 	if data, err := os.ReadFile(settingsPath); err != nil || string(data) != string(legacy) {
