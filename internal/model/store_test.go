@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +21,6 @@ func cached(providerID, id string) CachedCatalog {
 func int64Pointer(value int64) *int64 { return &value }
 
 func TestStoreProviderScopedMergeAndUnknownPreservation(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	writeFile(t, path, `{"future":{"opaque":true}}`)
 	s, err := NewStore(path)
@@ -58,9 +54,6 @@ func TestStoreProviderScopedMergeAndUnknownPreservation(t *testing.T) {
 }
 
 func TestModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, "models-store.json")
 	store, err := NewStore(path)
@@ -146,9 +139,6 @@ func TestModelsStoreFullModelFixturePreservesFieldsAndCompatPresence(t *testing.
 }
 
 func TestModelsStoreDuplicateModelsUseLastDynamicOverlay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, "models-store.json")
 	writeFile(t, path, `{"fixture":{"models":[{"provider":"fixture","id":"same","name":"first","api":"openai-responses","reasoning":false},{"provider":"fixture","id":"same","name":"second","api":"openai-responses","reasoning":true}]}}`)
@@ -172,9 +162,6 @@ func TestModelsStoreDuplicateModelsUseLastDynamicOverlay(t *testing.T) {
 }
 
 func TestStoreConcurrentWriters(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	s, err := NewStore(filepath.Join(t.TempDir(), "models-store.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -196,9 +183,6 @@ func TestStoreConcurrentWriters(t *testing.T) {
 }
 
 func TestStorePreservesOpaqueEntryAndModelFields(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	writeFile(t, path, `{"one":{"models":[{"provider":"one","id":"m1","api":"openai-responses","futureModel":{"keep":true}}],"checkedAt":1,"futureEntry":{"keep":true}},"future":{"opaque":true}}`)
 	s, err := NewStore(path)
@@ -220,9 +204,6 @@ func TestStorePreservesOpaqueEntryAndModelFields(t *testing.T) {
 }
 
 func TestStoreExactProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	writeFile(t, path, `{"OpenAI":{"models":[{"provider":"OpenAI","id":"model","name":"old","api":"openai-responses","baseUrl":"https://old.invalid/v1","reasoning":false,"headers":{"X-Old":"old"},"futureModel":{"keep":true}}],"checkedAt":1,"futureEntry":{"keep":true}}}`)
 	headers := map[string]string{"X-Secret": "header-secret"}
@@ -278,9 +259,6 @@ func TestStoreExactProviderKeyAndCompleteModelRoundTrip(t *testing.T) {
 }
 
 func TestStoreKeepsCaseDistinctProviderKeys(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	content := `{"OpenAI":{"models":[{"provider":"OpenAI","id":"one","api":"openai-responses"}],"checkedAt":1},"openai":{"models":[{"provider":"openai","id":"two","api":"openai-responses"}],"checkedAt":2}}`
 	writeFile(t, path, content)
@@ -309,9 +287,6 @@ func TestStoreKeepsCaseDistinctProviderKeys(t *testing.T) {
 }
 
 func TestStoreRequiresPreexistingDurableParent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed earlier")
-	}
 	root := t.TempDir()
 	path := filepath.Join(root, "missing", "nested", "models-store.json")
 	s, err := NewStore(path)
@@ -328,9 +303,6 @@ func TestStoreRequiresPreexistingDurableParent(t *testing.T) {
 }
 
 func TestStoreRejectsNullAndRuntimeProjectsValidCatalog(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, "models-store.json")
 	writeFile(t, path, `{"broken":null,"cached":{"models":[{"provider":"cached","id":"m1","api":"openai-responses"}],"checkedAt":1},"orphan":{"models":[{"provider":"orphan","id":"m2","api":"openai-responses"}],"checkedAt":1}}`)
@@ -359,9 +331,6 @@ func TestStoreRejectsNullAndRuntimeProjectsValidCatalog(t *testing.T) {
 }
 
 func TestStoreSerializesAcrossProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	path := filepath.Join(t.TempDir(), "models-store.json")
 	command := exec.Command(os.Args[0], "-test.run=^TestStoreHelperProcess$")
 	command.Env = append(os.Environ(), "PI_GO_MODEL_STORE_HELPER=1", "PI_GO_MODEL_STORE_PATH="+path)
@@ -400,9 +369,6 @@ func TestStoreHelperProcess(t *testing.T) {
 }
 
 func TestStoreCancellationAndPublicationOutcome(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed for private durable configuration")
-	}
 	s, err := NewStore(filepath.Join(t.TempDir(), "models-store.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -445,24 +411,6 @@ func TestStoreCancellationAndPublicationOutcome(t *testing.T) {
 	}
 }
 
-func TestWindowsStorePersistenceFailsClosed(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-only contract")
-	}
-	s, err := NewStore(filepath.Join(t.TempDir(), "models-store.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.Read(context.Background(), "one"); !errors.Is(err, ErrPersistence) {
-		t.Fatalf("read = %v", err)
-	}
-	if err := s.Write(context.Background(), "one", cached("one", "model")); !errors.Is(err, ErrPersistence) {
-		t.Fatalf("write = %v", err)
-	}
-	if err := s.Delete(context.Background(), "one"); !errors.Is(err, ErrPersistence) {
-		t.Fatalf("delete = %v", err)
-	}
-}
 func contains(s, part string) bool {
 	return len(part) == 0 || (len(s) >= len(part) && (func() bool {
 		for i := 0; i+len(part) <= len(s); i++ {
