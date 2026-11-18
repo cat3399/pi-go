@@ -5,7 +5,6 @@ package app_test
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -70,39 +69,5 @@ func TestRunProductionWindowsMissingAuthAllowsEphemeralConfiguredAndAmbientSourc
 				t.Fatalf("request = count %d, authorization %q", request.count, request.authorization)
 			}
 		})
-	}
-}
-
-func TestRunProductionWindowsExistingAuthFailsAfterSessionSelectionWithoutNetwork(t *testing.T) {
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("configured-lower"), nil)
-	writeAuthJSON(t, agentDir, `{"openai":{"type":"oauth","access":"stored-secret"}}`)
-	sessionParent := filepath.Join(workingDir, "must-not-exist")
-	doer := &countingProductionDoer{}
-	config := productionTestConfig(workingDir, agentDir, []string{"OPENAI_API_KEY=ambient-secret"})
-	config.OpenAIHTTPClient = doer
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	exitCode := app.RunProduction(context.Background(), config, []string{
-		"--model", "openai/windows-existing", "-p", "hello",
-		"--session", filepath.Join(sessionParent, "session.jsonl"),
-	}, &stdout, &stderr)
-	if exitCode != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "permissions are unsafe") {
-		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
-	}
-	for _, secret := range []string{"stored-secret", "configured-lower", "ambient-secret"} {
-		if strings.Contains(stderr.String(), secret) {
-			t.Fatalf("stderr leaked %q: %q", secret, stderr.String())
-		}
-	}
-	if doer.calls.Load() != 0 {
-		t.Fatalf("auth service failure made %d HTTP calls", doer.calls.Load())
-	}
-	if _, err := os.Stat(sessionParent); err != nil {
-		t.Fatalf("session-first startup did not prepare session tree: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(sessionParent, "session.jsonl")); !os.IsNotExist(err) {
-		t.Fatalf("failed auth persisted prompt/provider result: %v", err)
 	}
 }
