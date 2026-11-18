@@ -12,7 +12,6 @@ import (
 )
 
 func TestOAuthRefreshScheduleSurvivesRestart(t *testing.T) {
-	requirePersistentAuth(t)
 	for _, providerID := range []string{OpenAICodexProviderID, AnthropicProviderID} {
 		for _, lifetime := range []time.Duration{10 * 24 * time.Hour, 8 * time.Hour, time.Hour} {
 			t.Run(providerID+"/"+lifetime.String(), func(t *testing.T) {

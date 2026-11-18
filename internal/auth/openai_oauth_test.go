@@ -229,7 +229,6 @@ func TestDeviceFlowPollsPendingSlowDownAndExchanges(t *testing.T) {
 }
 
 func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *testing.T) {
-	requirePersistentAuth(t)
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -290,7 +289,6 @@ func TestResolveStoredOAuthRefreshesOnceDurablyAndDoesNotOverwriteOnFailure(t *t
 }
 
 func TestResolveStoredOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *testing.T) {
-	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -326,7 +324,6 @@ func TestResolveStoredOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *tes
 }
 
 func TestResolveStoredOAuthAcceptsShortLivedTokensWithExplicitMinimum(t *testing.T) {
-	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

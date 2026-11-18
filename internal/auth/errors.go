@@ -15,12 +15,6 @@ var (
 	// ErrCredentialType marks a selected stored credential that the API-key
 	// subset cannot consume. It must not fall through to a lower source.
 	ErrCredentialType = errors.New("stored credential type is unsupported")
-	// ErrPersistentAuthUnavailable marks a platform where this version cannot
-	// safely admit or create a private credential file.
-	ErrPersistentAuthUnavailable = errors.New("persistent auth is unavailable on this platform")
-	// ErrPrivateAdmissionUnavailable marks an existing credential file whose
-	// private access cannot be proven by this version.
-	ErrPrivateAdmissionUnavailable = errors.New("credential file privacy cannot be verified on this platform")
 )
 
 // Kind is a stable, secret-safe failure category. Error strings must never

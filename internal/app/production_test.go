@@ -872,7 +872,6 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 		environment   []string
 		wantKey       string
 		wantModel     string
-		storedFile    bool
 	}{
 		{
 			name:          "CLI overrides stored configured and ambient",
@@ -891,7 +890,6 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 			environment:   []string{"STORED_KEY=ambient", "OPENAI_API_KEY=ambient-key"},
 			wantKey:       "stored-scoped",
 			wantModel:     "custom-stored",
-			storedFile:    true,
 		},
 		{
 			name:          "models JSON template overrides ambient",
@@ -912,9 +910,6 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if runtime.GOOS == "windows" && testCase.storedFile {
-				t.Skip("Windows v0.1 persistent auth is fail-closed; covered by Windows-specific tests")
-			}
 			workingDir := t.TempDir()
 			agentDir := t.TempDir()
 			capture := &capturedProductionRequest{}
@@ -955,9 +950,6 @@ func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
 }
 
 func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("persistent auth remains fail-closed on Windows")
-	}
 	workingDir, agentDir := t.TempDir(), t.TempDir()
 	access := productionOAuthJWT("refreshed-account")
 	var tokenCalls atomic.Int32
@@ -1030,7 +1022,6 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 		want        string
 		wantCalls   uint32
 		secrets     []string
-		storedFile  bool
 		modelAccess bool
 		exactStderr string
 	}{
@@ -1042,9 +1033,8 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, nil)
 				writeAuthJSON(t, agentDir, `{"openai":{"type":"oauth","access":"stored-secret"}}`)
 			},
-			want:       "auth.json is malformed",
-			secrets:    []string{"ambient-secret", "stored-secret"},
-			storedFile: true,
+			want:    "auth.json is malformed",
+			secrets: []string{"ambient-secret", "stored-secret"},
 		},
 		{
 			name:        "stored unresolved template does not fall through",
@@ -1054,9 +1044,8 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 				writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", nil, nil)
 				writeAuthJSON(t, agentDir, `{"openai":{"type":"api_key","key":"prefix-${MISSING_KEY}-stored-secret"}}`)
 			},
-			want:       "references missing environment variable",
-			secrets:    []string{"ambient-secret", "stored-secret"},
-			storedFile: true,
+			want:    "references missing environment variable",
+			secrets: []string{"ambient-secret", "stored-secret"},
 		},
 		{
 			name:        "failed command-backed configured key is explicit",
@@ -1110,9 +1099,6 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if runtime.GOOS == "windows" && testCase.storedFile {
-				t.Skip("Windows v0.1 rejects existing persistent auth before credential parsing")
-			}
 			workingDir := t.TempDir()
 			agentDir := t.TempDir()
 			testCase.prepare(t, agentDir)

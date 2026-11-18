@@ -72,7 +72,6 @@ func TestAnthropicBrowserLoginUsesUpstreamPKCEAndManualRedirectProtocol(t *testi
 }
 
 func TestAnthropicRefreshOmitsScopeAndStoredResolutionRefreshesOnce(t *testing.T) {
-	requirePersistentAuth(t)
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]string
@@ -138,7 +137,6 @@ func TestAnthropicRefreshOmitsScopeAndStoredResolutionRefreshesOnce(t *testing.T
 }
 
 func TestResolveAnthropicOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *testing.T) {
-	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	var refreshes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -174,7 +172,6 @@ func TestResolveAnthropicOAuthRejectsRefreshedCredentialBelowExplicitMinimum(t *
 }
 
 func TestResolveAnthropicOAuthAcceptsShortLivedTokensWithExplicitMinimum(t *testing.T) {
-	requirePersistentAuth(t)
 	now := time.Unix(2_100_000_000, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")

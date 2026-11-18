@@ -950,8 +950,6 @@ func productionAuthError(err error) error {
 		return fmt.Errorf("%w: auth.json credential type is unsupported for %s", ErrUnsupportedProductionValue, providerID)
 	case errors.Is(err, auth.ErrCommandFailed):
 		return fmt.Errorf("%w: cannot resolve command-backed %s", ErrInvalidProductionConfig, description)
-	case errors.Is(err, auth.ErrPersistentAuthUnavailable):
-		return fmt.Errorf("%w: persistent auth storage is unavailable on this platform", ErrUnsupportedProductionValue)
 	case auth.IsKind(err, auth.KindNotConfigured):
 		return fmt.Errorf("%w: %s references missing environment variable", ErrInvalidProductionConfig, description)
 	case auth.IsKind(err, auth.KindPermission):

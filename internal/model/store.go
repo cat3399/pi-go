@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -72,9 +71,6 @@ func (s *Store) Read(ctx context.Context, providerID string) (CachedCatalog, boo
 	if !validID(providerID) {
 		return CachedCatalog{}, false, fmt.Errorf("%w: invalid provider identifier", ErrInvalidConfig)
 	}
-	if runtime.GOOS == "windows" {
-		return CachedCatalog{}, false, fmt.Errorf("%w: models-store.json", ErrPersistence)
-	}
 	releaseLocal, err := acquireLocal(ctx, s.local)
 	if err != nil {
 		return CachedCatalog{}, false, err
@@ -118,9 +114,6 @@ func (s *Store) Write(ctx context.Context, providerID string, entry CachedCatalo
 	}
 	if err := validateCatalog(entry, providerID); err != nil {
 		return err
-	}
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%w: models-store.json", ErrPersistence)
 	}
 	releaseLocal, err := acquireLocal(ctx, s.local)
 	if err != nil {
@@ -171,9 +164,6 @@ func (s *Store) Write(ctx context.Context, providerID string, entry CachedCatalo
 func (s *Store) Delete(ctx context.Context, providerID string) error {
 	if !validID(providerID) {
 		return fmt.Errorf("%w: invalid provider identifier", ErrInvalidConfig)
-	}
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%w: models-store.json", ErrPersistence)
 	}
 	releaseLocal, err := acquireLocal(ctx, s.local)
 	if err != nil {
