@@ -155,6 +155,9 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 
 func providerWireRequestContract(t *testing.T, api string, request map[string]any) map[string]any {
 	t.Helper()
+	if api == provider.OpenAICodexResponsesAPI {
+		return providerWireCodexToolStrictContract(t, request)
+	}
 	if api != provider.OpenAIResponsesAPI {
 		return request
 	}
@@ -169,6 +172,41 @@ func providerWireRequestContract(t *testing.T, api string, request map[string]an
 	body = maps.Clone(body)
 	delete(body, "prompt_cache_retention")
 	delete(body, "prompt_cache_options")
+	normalized["body"] = body
+	return normalized
+}
+
+// Pinned pi sends strict:null for Codex function tools, which the Codex
+// backend treats like an omitted field and tries to coerce into strict mode.
+// pi-go sends an explicit strict:false like Codex CLI; that choice is covered
+// by TestOpenAICodexSendsExplicitNonStrictFunctionTools. Everything else in
+// the pinned tool payload is still compared unchanged.
+func providerWireCodexToolStrictContract(t *testing.T, request map[string]any) map[string]any {
+	t.Helper()
+	body, ok := request["body"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider wire request body is not an object: %T", request["body"])
+	}
+	tools, ok := body["tools"].([]any)
+	if !ok {
+		return request
+	}
+	normalizedTools := make([]any, len(tools))
+	for index, item := range tools {
+		tool, ok := item.(map[string]any)
+		if !ok || tool["type"] != "function" {
+			normalizedTools[index] = item
+			continue
+		}
+		tool = maps.Clone(tool)
+		if strict, present := tool["strict"]; present && strict == nil {
+			tool["strict"] = false
+		}
+		normalizedTools[index] = tool
+	}
+	normalized := maps.Clone(request)
+	body = maps.Clone(body)
+	body["tools"] = normalizedTools
 	normalized["body"] = body
 	return normalized
 }

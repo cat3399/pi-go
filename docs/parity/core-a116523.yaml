@@ -662,8 +662,9 @@ capabilities:
     evidence:
       - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexWebSocketStreamsAndReusesCachedContinuation}
       - {kind: go_test, path: internal/provider/openai_codex_test.go, symbol: TestOpenAICodexCachedContinuationPreservesReasoningAndNormalizesToolItems}
+      - {kind: go_test, path: internal/provider/openai_codex_strict_test.go, symbol: TestOpenAICodexSendsExplicitNonStrictFunctionTools}
       - {kind: upstream_oracle, path: internal/provider/upstream_provider_wire_oracle_test.go, symbol: TestImplementedProviderWireOraclesMatchPinnedPi}
-    intentionalGoDifference: WebSocket affinity state is synchronized explicitly and SSE fallback is an owned adapter policy.
+    intentionalGoDifference: WebSocket affinity state is synchronized explicitly and SSE fallback is an owned adapter policy. Non-strict function tools are sent with an explicit strict:false, matching Codex CLI, instead of pinned pi's strict:null; the Codex backend treats null like an omitted field and coerces schemas into strict mode, which GPT-6.2 rejects for schemas outside the strict subset. The frozen wire oracle compares every other tool field unchanged.
     remainingDifference: none
 
   - id: provider.anthropic_messages
