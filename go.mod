@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/websocket v1.8.15
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/hexops/gotextdiff v1.0.3
 	github.com/klauspost/compress v1.18.6
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	go.yaml.in/yaml/v3 v3.0.4

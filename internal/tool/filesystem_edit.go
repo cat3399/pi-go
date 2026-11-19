@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/hexops/gotextdiff/myers"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -360,8 +363,10 @@ func makeEditDiff(path, before, after string) (display, patch string, firstChang
 	}
 	var patchBuilder strings.Builder
 	fmt.Fprintf(&patchBuilder, "--- %s\n+++ %s\n", path, path)
+	width := len(strconv.Itoa(1 + max(strings.Count(before, "\n"), strings.Count(after, "\n"))))
+	omitted := fmt.Sprintf(" %*s ...", width, "")
 	var displayLines []string
-	for hunkIndex, hunk := range hunks {
+	for _, hunk := range hunks {
 		starts := hunkLineStarts(operations, hunk.first)
 		oldCount, newCount := hunkCounts(operations[hunk.first:hunk.last])
 		oldStart, newStart := starts.old, starts.new
@@ -372,8 +377,8 @@ func makeEditDiff(path, before, after string) (display, patch string, firstChang
 			newStart--
 		}
 		fmt.Fprintf(&patchBuilder, "@@ -%d,%d +%d,%d @@\n", oldStart, oldCount, newStart, newCount)
-		if hunkIndex > 0 {
-			displayLines = append(displayLines, " ...")
+		if hunk.first > 0 {
+			displayLines = append(displayLines, omitted)
 		}
 		oldLine, newLine := starts.old, starts.new
 		for _, operation := range operations[hunk.first:hunk.last] {
@@ -381,17 +386,20 @@ func makeEditDiff(path, before, after string) (display, patch string, firstChang
 			displayText := strings.TrimSuffix(operation.text, "\n")
 			switch operation.kind {
 			case '-':
-				displayLines = append(displayLines, fmt.Sprintf("-%d %s", oldLine, displayText))
+				displayLines = append(displayLines, fmt.Sprintf("-%*d %s", width, oldLine, displayText))
 				oldLine++
 			case '+':
-				displayLines = append(displayLines, fmt.Sprintf("+%d %s", newLine, displayText))
+				displayLines = append(displayLines, fmt.Sprintf("+%*d %s", width, newLine, displayText))
 				newLine++
 			default:
-				displayLines = append(displayLines, fmt.Sprintf(" %d %s", newLine, displayText))
+				displayLines = append(displayLines, fmt.Sprintf(" %*d %s", width, oldLine, displayText))
 				oldLine++
 				newLine++
 			}
 		}
+	}
+	if hunks[len(hunks)-1].last < len(operations) {
+		displayLines = append(displayLines, omitted)
 	}
 	return strings.Join(displayLines, "\n"), patchBuilder.String(), firstChangedLine
 }
@@ -420,61 +428,69 @@ func splitDiffLines(value string) []string {
 	return lines
 }
 
-// lineDiff emits a deterministic transformation. At each mismatch it chooses
-// the nearest common line as a resynchronization anchor; the result need not be
-// the mathematically shortest diff, but every operation is exact and yields an
-// applicable patch without quadratic memory on large source files.
 func lineDiff(before, after []string) []lineDiffOperation {
-	operations := make([]lineDiffOperation, 0, len(before)+len(after))
-	for oldIndex, newIndex := 0, 0; oldIndex < len(before) || newIndex < len(after); {
-		if oldIndex < len(before) && newIndex < len(after) && before[oldIndex] == after[newIndex] {
-			operations = append(operations, lineDiffOperation{kind: ' ', text: before[oldIndex]})
-			oldIndex++
-			newIndex++
-			continue
-		}
-		anchorOld, anchorNew := nearestLineAnchor(before, after, oldIndex, newIndex)
-		if anchorOld < 0 {
-			for ; oldIndex < len(before); oldIndex++ {
-				operations = append(operations, lineDiffOperation{kind: '-', text: before[oldIndex]})
-			}
-			for ; newIndex < len(after); newIndex++ {
-				operations = append(operations, lineDiffOperation{kind: '+', text: after[newIndex]})
-			}
-			break
-		}
-		for ; oldIndex < anchorOld; oldIndex++ {
-			operations = append(operations, lineDiffOperation{kind: '-', text: before[oldIndex]})
-		}
-		for ; newIndex < anchorNew; newIndex++ {
-			operations = append(operations, lineDiffOperation{kind: '+', text: after[newIndex]})
+	// Match the common prefix first, as jsdiff does. Keep unambiguous
+	// unchanged file edges out of the Myers trace.
+	start, oldEnd, newEnd := 0, len(before), len(after)
+	for start < oldEnd && start < newEnd && before[start] == after[start] {
+		start++
+	}
+	for start < oldEnd && start < newEnd && before[oldEnd-1] == after[newEnd-1] {
+		oldEnd--
+		newEnd--
+	}
+	// If the first row of the suffix also occurs in the changed region, fixing
+	// it here can force the *last* of several equal matches instead of letting
+	// Myers choose. Otherwise a shortest edit script must retain this suffix.
+	if oldEnd < len(before) && (slices.Contains(before[start:oldEnd], before[oldEnd]) || slices.Contains(after[start:newEnd], before[oldEnd])) {
+		oldEnd, newEnd = len(before), len(after)
+	}
+	old, next := before[start:oldEnd], after[start:newEnd]
+	operations := make([]lineDiffOperation, 0, len(before)+len(next))
+	emit := func(kind byte, lines []string) {
+		for _, line := range lines {
+			operations = append(operations, lineDiffOperation{kind: kind, text: line})
 		}
 	}
+	emit(' ', before[:start])
+	if !shareDiffLine(old, next) {
+		// Nothing can align. Don't allocate a Myers trace for a bulk rewrite.
+		emit('-', old)
+		emit('+', next)
+	} else {
+		edits := myers.ComputeEdits("", strings.Join(old, ""), strings.Join(next, ""))
+		cursor := 0
+		for _, edit := range edits {
+			// Myers spans are 1-based, half-open line ranges in the old text.
+			first, end := edit.Span.Start().Line()-1, edit.Span.End().Line()-1
+			emit(' ', old[cursor:first])
+			emit('-', old[first:end])
+			emit('+', splitDiffLines(edit.NewText))
+			cursor = end
+		}
+		emit(' ', old[cursor:])
+	}
+	emit(' ', before[oldEnd:])
 	return operations
 }
 
-func nearestLineAnchor(before, after []string, oldStart, newStart int) (int, int) {
-	afterPositions := make(map[string]int, len(after)-newStart)
-	for index := newStart; index < len(after); index++ {
-		if _, exists := afterPositions[after[index]]; !exists {
-			afterPositions[after[index]] = index
+func shareDiffLine(a, b []string) bool {
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if len(a) == 0 {
+		return false
+	}
+	lines := make(map[string]struct{}, len(a))
+	for _, line := range a {
+		lines[line] = struct{}{}
+	}
+	for _, line := range b {
+		if _, ok := lines[line]; ok {
+			return true
 		}
 	}
-	bestOld, bestNew, bestDistance := -1, -1, int(^uint(0)>>1)
-	for oldIndex := oldStart; oldIndex < len(before); oldIndex++ {
-		newIndex, exists := afterPositions[before[oldIndex]]
-		if !exists {
-			continue
-		}
-		distance := oldIndex - oldStart + newIndex - newStart
-		if distance < bestDistance {
-			bestOld, bestNew, bestDistance = oldIndex, newIndex, distance
-		}
-		if distance == 0 {
-			break
-		}
-	}
-	return bestOld, bestNew
+	return false
 }
 
 func diffHunks(operations []lineDiffOperation, contextLines int) []diffHunk {
