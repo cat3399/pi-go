@@ -60,7 +60,7 @@ func ResolvePath(path, cwd string) (string, error) {
 func ProjectDirectory(cwd string) string { return filepath.Join(cwd, DirectoryName) }
 
 // KnowledgeDirectory is shared by agent directories under the same data root.
-// Each build's initial source content selects a directory users can customize.
+// Its version directories contain ordinary files users can customize.
 func KnowledgeDirectory(agentDir string) string {
 	return filepath.Join(filepath.Dir(agentDir), "knowledge")
 }

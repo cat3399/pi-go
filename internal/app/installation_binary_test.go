@@ -106,7 +106,12 @@ func TestBinaryImportsOnceAndFollowsInstalledDocumentationLinks(t *testing.T) {
 		if !strings.Contains(system, "operating inside pi-go") || !strings.Contains(system, "tools, skills, and prompt templates (docs/tools.md)") {
 			t.Errorf("missing documentation navigation in deployed system prompt: %s", system)
 		}
-		for _, unwanted := range []string{"pi-go installation:", "Configuration directories:", "- Version:", "- Build:", "- Source directory:", "read the relevant local documentation and source files"} {
+		for _, required := range []string{"PI_EXECUTABLE", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL", "docs/context-management.md"} {
+			if !strings.Contains(system, required) {
+				t.Errorf("deployed system prompt lacks %q", required)
+			}
+		}
+		for _, unwanted := range []string{"PI_SESSION_TOKEN", "session context compact", "session history search", "pi-go installation:", "Configuration directories:", "- Version:", "- Build:", "- Source directory:", "read the relevant local documentation and source files"} {
 			if strings.Contains(system, unwanted) {
 				t.Errorf("deployed system prompt still includes %q", unwanted)
 			}
@@ -120,9 +125,10 @@ func TestBinaryImportsOnceAndFollowsInstalledDocumentationLinks(t *testing.T) {
 				facts[key] = value
 			}
 		}
-		docs := facts["- Additional docs"]
-		if !strings.HasPrefix(docs, filepath.Join(home, ".pi-go", "knowledge")+string(filepath.Separator)) {
-			t.Errorf("documentation path is not in the deployed installation: %q", docs)
+		root := facts["- Documentation root"]
+		docs := filepath.Join(root, "docs")
+		if root != filepath.Join(home, ".pi-go", "knowledge", "9.8.7") || strings.Count(system, root) != 1 {
+			t.Errorf("expected one versioned documentation root in the deployed prompt, got %q", root)
 			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}

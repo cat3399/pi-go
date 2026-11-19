@@ -47,8 +47,8 @@ Release workflow 会串行执行，避免并发任务同时修改同一个版本
 - 仓库没有稳定 tag 时，首个自动发布版本为 `v0.1.0`；
 - 所有 surface 共用同一个版本。选择 `all` 时不检查最高稳定版本的资产是否齐全，始终按照 `patch`、
   `minor` 或 `major` 创建新版本并重新构建全部 surface；
-- 单独选择 surface 时，若它尚未完整出现在最高稳定版本中，Release 会把它追加到现有 tag 和
-  GitHub Release，不递增版本；已经完整存在时才按照所选级别创建新版本；
+- 单独选择 surface 时，若它尚未完整出现在最高稳定版本中，Release 从已有 tag 对应的提交构建，
+  追加到同一版本，确保随包携带的公共源码和文档一致；已经完整存在时才按照所选级别创建新版本；
 - **Build** 不占用版本号。选择 `all` 时使用下一补丁版本作为 SemVer 基准；单独选择 surface 时使用
   同一套缺失判断，最后统一追加 `-dev.<commit>`；
 - 同一版本会注入 Go CLI、内嵌 Web UI、GUI bridge、移动端 Go 库，以及 Android 的

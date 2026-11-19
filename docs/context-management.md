@@ -27,8 +27,8 @@ Terminal 的 run/TUI/RPC、Web Core 和 GUI 内嵌 Core 都装配 CLI 访问入�
 自行嵌入 Go 核心时，可使用 typed Application command/query API，或在 production assembly 中
 配置 `AttachSession`；核心不依赖 CLI 传输。
 
-系统提示词不包含交接或历史检索说明。上下文余量不足时，运行时提醒携带交接命令；
-换窗后的恢复消息才提供历史检索入口。不会增加常驻模型工具定义或强制的历史恢复清单。
+启用 `bash` 时，默认系统提示仅指向本文，供需要回看当前或其他已保存的对话时查阅。
+交接命令随运行时提醒提供，具体历史检索命令在换窗后的恢复消息中给出；不增加常驻模型工具或强制恢复清单。
 没有启用 bash 的接入可以直接调用相同核心 API。
 
 ## 统一的短交接流程

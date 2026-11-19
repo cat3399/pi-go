@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/cat3399/pi-go/internal/product"
 )
 
 type releaseAsset struct {
@@ -45,7 +47,7 @@ func (u *Updater) resolve(ctx context.Context, requested string) (resolvedReleas
 	}
 	var releases []release
 	if requested != "" {
-		version, _ := stableVersion(requested)
+		version, _ := product.StableVersion(requested)
 		body, err := u.read(ctx, api+"/releases/tags/v"+version, 8<<20)
 		if err != nil {
 			return resolvedRelease{}, err
@@ -78,7 +80,7 @@ func (u *Updater) resolve(ctx context.Context, requested string) (resolvedReleas
 	}
 	eligible := make([]release, 0, len(releases))
 	for _, r := range releases {
-		v, ok := stableVersion(r.Tag)
+		v, ok := product.StableVersion(r.Tag)
 		if ok && r.Tag == "v"+v && !r.Draft && !r.Prerelease {
 			eligible = append(eligible, r)
 		}

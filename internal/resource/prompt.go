@@ -3,6 +3,7 @@ package resource
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -240,8 +241,14 @@ func BuildSystemPrompt(options BuildSystemPromptOptions) string {
 		seen[value] = struct{}{}
 		guidelines = append(guidelines, value)
 	}
-	if containsString(tools, "bash") && !containsString(tools, "grep") && !containsString(tools, "find") && !containsString(tools, "ls") {
-		addGuideline("Use bash for file operations like ls, rg, find")
+	if containsString(tools, "bash") {
+		if !containsString(tools, "grep") && !containsString(tools, "find") && !containsString(tools, "ls") {
+			addGuideline("Use bash for file operations like ls, rg, find")
+		}
+		addGuideline(`In bash, "$PI_EXECUTABLE" runs the current pi-go binary. PI_SESSION_ID identifies this session; PI_SESSION_FILE is its JSONL path (unset for in-memory sessions). PI_PROVIDER, PI_MODEL and PI_REASONING_LEVEL give the selected provider, model and reasoning level.`)
+		if options.DocsPath != "" {
+			addGuideline("To view this or another conversation, see docs/context-management.md.")
+		}
 	}
 	for _, guideline := range options.PromptGuidelines {
 		if normalized := strings.TrimFunc(guideline, isECMAScriptWhitespace); normalized != "" {
@@ -264,15 +271,18 @@ In addition to the tools above, you may have access to other custom tools depend
 Guidelines:
 %s`, product.Name, toolsList, strings.Join(guidelines, "\n"))
 	if options.DocsPath != "" {
+		locations := fmt.Sprintf("- Main documentation: %s\n- Additional docs: %s\n- Resolve docs/... under Additional docs, not the current working directory", options.ReadmePath, options.DocsPath)
+		root := filepath.Dir(options.ReadmePath)
+		if options.ReadmePath == filepath.Join(root, "README.md") && options.DocsPath == filepath.Join(root, "docs") {
+			locations = fmt.Sprintf("- Documentation root: %s\n- Resolve README.md and docs/... under this root, not the current working directory", root)
+		}
 		prompt += fmt.Sprintf(`
 
-pi-go documentation (read only when the user asks about pi-go itself):
-- Main documentation: %s
-- Additional docs: %s
-- When reading pi-go docs, resolve docs/... under Additional docs, not the current working directory
+Local documentation for the references above and for questions about pi-go itself:
+%s
 - When asked about: usage and sessions (docs/usage.md), configuration and environment variables (docs/configuration.md), providers and authentication (docs/providers.md), models (docs/models.md), tools, skills, and prompt templates (docs/tools.md), interfaces (docs/SURFACES.md, docs/gui.md, docs/mobile.md), building and releasing (docs/RELEASING.md)
 - When working on pi-go topics, read the docs and follow .md cross-references before implementing
-- Always read pi-go .md files completely and follow links to related docs`, options.ReadmePath, options.DocsPath)
+- Always read pi-go .md files completely and follow links to related docs`, locations)
 	}
 	prompt += appendSection + formatContextFiles(options.ContextFiles)
 	if hasRead {

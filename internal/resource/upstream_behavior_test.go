@@ -29,6 +29,46 @@ func TestAssembleUsesOnlySelectedToolGuidelines(t *testing.T) {
 	}
 }
 
+func TestBashRuntimeGuidanceTracksToolsAndDocumentation(t *testing.T) {
+	root := t.TempDir()
+	options := BuildSystemPromptOptions{CWD: root, ReadmePath: filepath.Join(root, "README.md"), DocsPath: filepath.Join(root, "docs")}
+	guidance := []string{"PI_EXECUTABLE", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"}
+	const history = "docs/context-management.md"
+	check := func(wantEnvironment, wantHistory bool) string {
+		t.Helper()
+		prompt := BuildSystemPrompt(options)
+		for _, variable := range guidance {
+			if strings.Contains(prompt, variable) != wantEnvironment {
+				t.Errorf("presence of %s with tools %v = %v, want %v", variable, options.SelectedTools, !wantEnvironment, wantEnvironment)
+			}
+		}
+		if strings.Contains(prompt, history) != wantHistory {
+			t.Errorf("unexpected history reference in %q", prompt)
+		}
+		for _, unwanted := range []string{"session history read", "session context", "PI_SESSION_TOKEN", "PI_SESSION_ENDPOINT", "handoff"} {
+			if strings.Contains(prompt, unwanted) {
+				t.Errorf("operational details leaked into prompt: %s", unwanted)
+			}
+		}
+		return prompt
+	}
+	check(true, true) // Default tools.
+	options.SelectedTools = []string{"bash", "ls"}
+	options.DocsPath = filepath.Join(root, "alternative")
+	if prompt := check(true, true); !strings.Contains(prompt, options.DocsPath) || !strings.Contains(prompt, options.ReadmePath) {
+		t.Fatal("overridden docs directory displaced the embedded README")
+	}
+	options.SelectedTools = []string{"read", "terminal"}
+	check(false, false)
+	options.SelectedTools = []string{"bash"}
+	options.DocsPath = ""
+	check(true, false)
+	options.DocsPath = filepath.Join(root, "docs")
+	custom := "My replacement prompt"
+	options.CustomPrompt = &custom
+	check(false, false)
+}
+
 func TestExplicitResourcePathsRemainEnabledByNoFlags(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(root, "agent")

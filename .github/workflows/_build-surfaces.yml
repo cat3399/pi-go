@@ -11,6 +11,10 @@ on:
         description: Semantic version embedded in artifacts
         required: true
         type: string
+      source_sha:
+        description: Source commit for the version (defaults to the triggering commit)
+        type: string
+        required: false
       production:
         description: Build production variants where a surface supports them
         required: false
@@ -91,6 +95,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Go with module and build cache
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -123,6 +129,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Go with module and build cache
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -144,7 +152,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: surface/web/_frontend/.next/cache
-          key: web-next-${{ runner.os }}-${{ hashFiles('surface/ui/package-lock.json', 'surface/web/_frontend/package-lock.json') }}-${{ github.sha }}
+          key: web-next-${{ runner.os }}-${{ hashFiles('surface/ui/package-lock.json', 'surface/web/_frontend/package-lock.json') }}-${{ inputs.source_sha || github.sha }}
           restore-keys: |
             web-next-${{ runner.os }}-${{ hashFiles('surface/ui/package-lock.json', 'surface/web/_frontend/package-lock.json') }}-
 
@@ -182,8 +190,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
+      - name: Preserve embedded source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Go with module and build cache
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -247,6 +261,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - name: Set up Go with module and build cache
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

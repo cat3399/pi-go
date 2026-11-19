@@ -40,6 +40,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
       surfaces: ${{ steps.version.outputs.surfaces }}
       release_exists: ${{ steps.version.outputs.release_exists }}
     steps:
@@ -101,6 +102,12 @@ jobs:
             fi
           fi
           tag="v$version"
+          # A later surface for an existing version must embed the same source tree.
+          source_sha=$GITHUB_SHA
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            source_sha=$(git rev-parse --verify "refs/tags/$tag^{commit}")
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "surfaces=$surfaces" >> "$GITHUB_OUTPUT"
@@ -114,6 +121,7 @@ jobs:
     with:
       surface: ${{ needs.version.outputs.surfaces }}
       version: ${{ needs.version.outputs.version }}
+      source_sha: ${{ needs.version.outputs.source_sha }}
       production: true
     secrets:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -213,7 +221,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_EXISTS: ${{ needs.version.outputs.release_exists }}
           TAG: ${{ needs.version.outputs.tag }}
-          TARGET_SHA: ${{ github.sha }}
+          TARGET_SHA: ${{ needs.version.outputs.source_sha }}
         run: |
           if [[ "$RELEASE_EXISTS" == true ]]; then
             gh release upload "$TAG" dist-new/* dist-meta/SHA256SUMS \

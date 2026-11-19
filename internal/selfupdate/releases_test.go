@@ -201,7 +201,7 @@ func TestMissingOrInvalidReleaseFailsExplicitly(t *testing.T) {
 
 func TestStableVersionOrdering(t *testing.T) {
 	for _, invalid := range []string{"1", "1.2", "1.02.3", "01.2.3", "1.2.3-rc.1", "1.2.3+build", "1.2.3/other", "latest"} {
-		if _, ok := stableVersion(invalid); ok {
+		if _, ok := product.StableVersion(invalid); ok {
 			t.Errorf("accepted %q", invalid)
 		}
 	}

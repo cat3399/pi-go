@@ -11,7 +11,7 @@
 | 项目信任记录 | `~/.pi-go/agent/trust.json` |
 | 用户技能、模板 | `~/.pi-go/agent/skills/`、`prompts/` |
 | 项目设置、技能、模板 | `<项目>/.pi-go/settings.json`、`skills/`、`prompts/` |
-| 内置源码和文档 | `~/.pi-go/knowledge/<构建标识>/` |
+| 内置源码和文档 | 正式版 `~/.pi-go/knowledge/<版本号>/`；开发版见[本地源码](self-knowledge.md) |
 
 `PI_GO_AGENT_DIR` 覆盖用户数据目录；支持 `--agent-dir` 的入口以该参数为最高优先级。相对路径
 相对于指定的工作目录解析，`~` 展开为用户主目录。内置资料放在所选 agent 目录的同级
