@@ -41,7 +41,7 @@ interface PinchState {
   imageY: number;
 }
 
-const MIN_SCALE = 1;
+const MIN_SCALE = 0.5;
 const MAX_SCALE = 5;
 
 function clamp(value: number, minimum: number, maximum: number): number {
@@ -82,8 +82,8 @@ export function ImagePreview({ src, alt = "附件图片", onClose }: ImagePrevie
     const maxY = image && stage
       ? Math.max(0, (image.clientHeight * scale - stage.clientHeight) / 2)
       : 0;
-    const next = scale <= MIN_SCALE
-      ? { scale: MIN_SCALE, x: 0, y: 0 }
+    const next = scale <= 1
+      ? { scale, x: 0, y: 0 }
       : {
           scale,
           x: clamp(candidate.x, -maxX, maxX),
@@ -268,7 +268,7 @@ export function ImagePreview({ src, alt = "附件图片", onClose }: ImagePrevie
           draggable={false}
           style={{ transform: `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale})` }}
           onDoubleClick={(event) => {
-            if (viewRef.current.scale > 1) reset();
+            if (viewRef.current.scale !== 1) reset();
             else zoomAt(2, event.clientX, event.clientY);
           }}
           onLoad={() => applyView(viewRef.current)}

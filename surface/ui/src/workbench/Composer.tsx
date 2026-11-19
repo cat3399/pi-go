@@ -18,6 +18,7 @@ import { AnchoredPopover } from "../primitives/AnchoredPopover";
 import { ContextUsageIndicator } from "../primitives/ContextUsageIndicator";
 import { ImagePreview } from "../primitives/ImagePreview";
 import { SelectMenu } from "../primitives/SelectMenu";
+import { pastedAttachments } from "./composer-paste";
 import { validateUploadFiles } from "../upload-files";
 import {
   matchSlashCommands,
@@ -118,6 +119,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadError, setUploadError] = useState("");
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [pastedFiles, setPastedFiles] = useState<File[]>([]);
   const [pendingUploadConflict, setPendingUploadConflict] = useState<PendingUploadConflict | null>(null);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashDismissed, setSlashDismissed] = useState(false);
@@ -289,6 +291,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   useEffect(() => {
     uploadGenerationRef.current += 1;
+    setPastedFiles([]);
     setPendingUploadConflict(null);
     setUploadResult(null);
     setUploadError("");
@@ -382,6 +385,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const accepted = files
       .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
       .slice(0, Math.max(0, MAX_ATTACHED_IMAGES - draft.getSnapshot().content.images.length));
+    setUploadError(accepted.length < files.length ? "部分图片未添加：最多 10 张，每张不能超过 10 MiB。" : "");
     try {
       const next = await Promise.all(accepted.map((file) => new Promise<{ data: string; mimeType: string }>((resolve, reject) => {
         const reader = new FileReader();
@@ -577,6 +581,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 event.target.value = "";
               }}
             />
+            {pastedFiles.length > 0 && (
+              <div className="pi-composer-upload-conflict" role="group" aria-label="确认上传文件">
+                <p>将 {pastedFiles.map((file) => file.name).join("、")} 保存到工作区 {props.workingDirectory}？</p>
+                <div>
+                  <button type="button" disabled={props.busy || uploadBusy} onClick={() => {
+                    setPastedFiles([]);
+                    void prepareUpload(pastedFiles);
+                  }}>上传文件</button>
+                  <button type="button" onClick={() => setPastedFiles([])}>取消</button>
+                </div>
+              </div>
+            )}
             {Boolean(uploadBusy || pendingUploadConflict || uploadError || uploadResult?.skipped.length || uploadResult?.errors.length) && (
               <div className="pi-composer-upload-feedback">
                 {uploadBusy && (
@@ -694,6 +710,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           setText(event.target.value);
           setSlashDismissed(false);
         }}
+        onPaste={(event) => {
+          const paste = pastedAttachments(event.clipboardData);
+          if (!paste || props.busy) return;
+          if (!paste.hasText) event.preventDefault();
+          if (paste.images.length) void addImages(paste.images);
+          if (!paste.uploads.length) return;
+          if (uploadBusy || pastedFiles.length || pendingUploadConflict) {
+            setUploadError("请先完成当前文件上传或取消后再粘贴。");
+          } else if (!props.workingDirectory.trim()) {
+            setUploadError("请先选择工作区");
+          } else {
+            try {
+              validateUploadFiles(paste.uploads);
+              setAttachmentMenuOpen(false);
+              setPastedFiles(paste.uploads);
+            } catch (error) {
+              setUploadError(error instanceof Error ? error.message : String(error));
+            }
+          }
+        }}
         onKeyDown={onKeyDown}
         onCompositionStart={() => {
           composingRef.current = true;
@@ -712,7 +748,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               aria-haspopup="menu"
               aria-expanded={attachmentMenuOpen}
               aria-controls={attachmentMenuOpen ? attachmentMenuId : undefined}
-              disabled={props.busy || uploadBusy}
+              disabled={props.busy || uploadBusy || pastedFiles.length > 0}
               onClick={() => setAttachmentMenuOpen((open) => !open)}
             >
               <Plus size={18} />
