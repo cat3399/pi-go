@@ -8,7 +8,6 @@ import (
 )
 
 func TestStandardOpenAIAndCodexCredentialsAreIndependent(t *testing.T) {
-	requirePersistentAuth(t)
 	store, err := NewStore(Options{Path: filepath.Join(t.TempDir(), "auth.json")})
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +42,6 @@ func TestStandardOpenAIAndCodexCredentialsAreIndependent(t *testing.T) {
 }
 
 func TestAnthropicResolutionPrecedenceAndHeaderOwnedAuth(t *testing.T) {
-	requirePersistentAuth(t)
 	store, err := NewStore(Options{Path: filepath.Join(t.TempDir(), "auth.json")})
 	if err != nil {
 		t.Fatal(err)

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1340,9 +1339,6 @@ func TestRuntimeConcurrentSnapshotAndReload(t *testing.T) {
 }
 
 func TestGlobalSettingsCancellationFaultAndUpstreamFileModeCompatibility(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("durable settings writes are not implemented on Windows")
-	}
 	r, agent, _ := newTestRuntime(t, `{"providers":{}}`, `{"defaultModel":"gpt-5.5"}`, false)
 	release, err := acquireLocal(context.Background(), r.local)
 	if err != nil {
@@ -1400,9 +1396,6 @@ func TestGlobalSettingsCancellationFaultAndUpstreamFileModeCompatibility(t *test
 }
 
 func TestGlobalSettingsRequiresPreexistingDurableParent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows v0.1 fails closed earlier")
-	}
 	root := t.TempDir()
 	agent := filepath.Join(root, "missing", "agent")
 	r, err := NewRuntime(Options{AgentDir: agent, WorkingDir: root})
@@ -1415,16 +1408,6 @@ func TestGlobalSettingsRequiresPreexistingDurableParent(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "missing")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("missing ancestor was created: %v", statErr)
-	}
-}
-
-func TestWindowsGlobalSettingsPersistenceFailsClosed(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows-only contract")
-	}
-	r, _, _ := newTestRuntime(t, "", "", false)
-	if err := r.SetGlobalSettings(context.Background(), func(s *Settings) error { s.DefaultModel = "model"; return nil }); !errors.Is(err, ErrPersistence) {
-		t.Fatalf("settings write = %v", err)
 	}
 }
 

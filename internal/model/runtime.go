@@ -737,9 +737,6 @@ func (r *Runtime) SetGlobalSettings(ctx context.Context, change func(*Settings) 
 	if change == nil {
 		return fmt.Errorf("%w: nil settings change", ErrInvalidConfig)
 	}
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%w: global settings.json", ErrPersistence)
-	}
 	path := filepath.Join(r.options.AgentDir, "settings.json")
 	releaseLocal, err := acquireLocal(ctx, r.local)
 	if err != nil {
@@ -2625,9 +2622,6 @@ type atomicWriteFaults struct {
 }
 
 func atomicWrite(ctx context.Context, path string, data []byte, label string, faults atomicWriteFaults) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%w: %s", ErrPersistence, label)
-	}
 	if err := contextCause(ctx); err != nil {
 		return err
 	}
@@ -2702,6 +2696,11 @@ func requireExistingDirectory(path, label string) error {
 }
 
 func syncModelDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		// Windows cannot flush a directory handle; os.Rename publishes through
+		// MoveFileEx(MOVEFILE_REPLACE_EXISTING) and the file data is already synced.
+		return nil
+	}
 	directory, err := os.Open(path)
 	if err != nil {
 		return err

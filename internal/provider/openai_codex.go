@@ -261,6 +261,12 @@ func encodeOpenAICodexRequest(request Request) ([]byte, error) {
 	return encoded, nil
 }
 
+// normalizeCodexToolStrict makes non-strict function tools explicit. The
+// Codex backend treats an omitted or null strict field as a request to
+// coerce the schema into strict mode: GPT-6.2 rejects the whole request
+// when a schema cannot be coerced (for example a top-level oneOf), and a
+// coercible schema forces the model to fill every optional property.
+// Codex CLI sends strict:false for its function tools; pinned pi sends null.
 func normalizeCodexToolStrict(body map[string]any) {
 	normalize := func(tools []any) {
 		for _, item := range tools {
@@ -268,8 +274,8 @@ func normalizeCodexToolStrict(body map[string]any) {
 			if !ok || tool["type"] != "function" {
 				continue
 			}
-			if strict, present := tool["strict"]; present && strict == false {
-				tool["strict"] = nil
+			if strict, present := tool["strict"]; !present || strict == nil {
+				tool["strict"] = false
 			}
 		}
 	}

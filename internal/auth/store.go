@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"unicode/utf8"
 )
@@ -102,9 +101,6 @@ func (s *Store) ModifyOAuth(ctx context.Context, provider string, fn func(OAuthC
 	if !validProviderID(provider) || fn == nil {
 		return OAuthCredential{}, false, failure(KindInvalid, "modify OAuth credential", provider, nil)
 	}
-	if runtime.GOOS == "windows" {
-		return OAuthCredential{}, false, failure(KindUnsupported, "modify OAuth credential", provider, ErrPersistentAuthUnavailable)
-	}
 	releaseLocal, err := s.acquireLocal(ctx, "modify OAuth credential", provider)
 	if err != nil {
 		return OAuthCredential{}, false, err
@@ -186,9 +182,6 @@ func (s *Store) mutate(ctx context.Context, operation, provider string, change f
 	if cause := context.Cause(ctx); cause != nil {
 		return failure(KindCancelled, operation, provider, cause)
 	}
-	if runtime.GOOS == "windows" {
-		return failure(KindUnsupported, operation, provider, ErrPersistentAuthUnavailable)
-	}
 	releaseLocal, err := s.acquireLocal(ctx, operation, provider)
 	if err != nil {
 		return err
@@ -233,9 +226,6 @@ func (s *Store) readRoot() (map[string]json.RawMessage, bool, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, false, failure(KindInvalid, "read auth file", "", nil)
-	}
-	if runtime.GOOS == "windows" {
-		return nil, false, failure(KindPermission, "read auth file", "", ErrPrivateAdmissionUnavailable)
 	}
 	// File-mode admission is intentionally disabled for compatibility with
 	// existing pi installations. Atomic writes still publish mode 0600.
@@ -296,9 +286,8 @@ func (s *Store) atomicWrite(data []byte, operation, provider string) error {
 		return failure(KindIO, operation, provider, err)
 	}
 	completed = true
-	// Persistent Windows auth is fail-closed before this path because v0.1 has
-	// no DACL admission/creation implementation. On supported platforms the
-	// directory sync makes the rename as durable as the filesystem allows.
+	// Best-effort directory sync makes the rename as durable as the filesystem
+	// allows. Windows cannot flush a directory handle, so it is ignored there.
 	if directoryFile, err := os.Open(directory); err == nil {
 		_ = directoryFile.Sync()
 		_ = directoryFile.Close()

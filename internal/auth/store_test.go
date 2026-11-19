@@ -23,15 +23,7 @@ func newTestStore(t *testing.T) *Store {
 	return store
 }
 
-func requirePersistentAuth(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("v0.1 persistent auth is intentionally fail-closed on Windows")
-	}
-}
-
 func TestStoreRoundTripPreservesUnknownProviderAndPermissions(t *testing.T) {
-	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -66,7 +58,6 @@ func TestStoreRoundTripPreservesUnknownProviderAndPermissions(t *testing.T) {
 }
 
 func TestStoreMalformedFilesAreNeverOverwrittenAndOrdinaryModesAreAccepted(t *testing.T) {
-	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -102,7 +93,6 @@ func TestStoreMalformedFilesAreNeverOverwrittenAndOrdinaryModesAreAccepted(t *te
 }
 
 func TestStoreFailureBeforeRenamePreservesOriginalAndCleansTemporary(t *testing.T) {
-	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
 		t.Fatal(err)
@@ -131,7 +121,6 @@ func TestStoreFailureBeforeRenamePreservesOriginalAndCleansTemporary(t *testing.
 }
 
 func TestStoreSerializesConcurrentStoresAndLockContentionIsCancellable(t *testing.T) {
-	requirePersistentAuth(t)
 	directory := t.TempDir()
 	first, err := NewStore(Options{Path: filepath.Join(directory, "auth.json")})
 	if err != nil {
@@ -180,7 +169,6 @@ func TestStoreSerializesConcurrentStoresAndLockContentionIsCancellable(t *testin
 }
 
 func TestStoreSameInstanceWaitIsContextAwareAndReleasesAfterCancellation(t *testing.T) {
-	requirePersistentAuth(t)
 	directory := t.TempDir()
 	path := filepath.Join(directory, "auth.json")
 	if err := os.Mkdir(path+".lock", 0o700); err != nil {
@@ -233,7 +221,6 @@ func TestStoreSameInstanceWaitIsContextAwareAndReleasesAfterCancellation(t *test
 }
 
 func TestSeparateProcessWritersContendMergeAndRelease(t *testing.T) {
-	requirePersistentAuth(t)
 	directory := t.TempDir()
 	path := filepath.Join(directory, "auth.json")
 	marker := filepath.Join(directory, "first-holds-lock")
@@ -296,7 +283,6 @@ func TestSeparateProcessWritersContendMergeAndRelease(t *testing.T) {
 }
 
 func TestSeparateProcessFailureReleasesForHealthyWriter(t *testing.T) {
-	requirePersistentAuth(t)
 	path := filepath.Join(t.TempDir(), "auth.json")
 	failed := authHelperCommand(path, "fail", "", "", "")
 	if output, err := failed.CombinedOutput(); err != nil {
@@ -412,7 +398,6 @@ func TestAuthProcessHelper(t *testing.T) {
 }
 
 func TestRuntimeOverlayDoesNotPersistAndDeleteClearsBoth(t *testing.T) {
-	requirePersistentAuth(t)
 	store := newTestStore(t)
 	if err := store.SetAPIKey(context.Background(), "openai", "stored", nil); err != nil {
 		t.Fatal(err)
