@@ -11,3 +11,7 @@ build/android/build/
 build/android/gen/
 build/android/local.properties
 build/android/overlay.json
+
+# Local Android signing keys, not build inputs to distribute.
+*.keystore
+*.jks

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "next dev --webpack -H 127.0.0.1 -p 30141",
     "build": "next build --webpack",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {
