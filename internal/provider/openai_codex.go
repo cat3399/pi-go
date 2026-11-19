@@ -182,10 +182,10 @@ func (p *OpenAICodexResponsesProvider) Stream(ctx context.Context, request Reque
 	if options.Fetch != nil {
 		streamConfig.client = options.Fetch
 	}
-	if options.Transport == TransportSSE {
+	if !responsesWebSocketEnabled(options, request.Model().Compat().OpenAIResponses, true) {
 		return streamConfig.newSSEStream()
 	}
-	return newOpenAICodexHybridStream(streamConfig)
+	return newOpenAIResponsesHybridStream(streamConfig.transportConfig())
 }
 
 func encodeOpenAICodexRequest(request Request) ([]byte, error) {

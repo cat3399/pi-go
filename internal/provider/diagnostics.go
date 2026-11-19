@@ -106,7 +106,7 @@ func captureResponse(ctx context.Context, response *http.Response) {
 		return
 	}
 	// This body is already recorded as original WebSocket messages.
-	if _, websocket := response.Body.(*codexWebSocketBody); websocket {
+	if _, websocket := response.Body.(*responsesWebSocketBody); websocket {
 		return
 	}
 	c.mu.Lock()

@@ -317,7 +317,6 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if err != nil {
 		return newResponsesFailureStream(ctx, clock, request.Model(), FailureInvalidRequest, err, "")
 	}
-	streamContext, cancel, timeoutCancel := streamContextWithTimeout(ctx, options.TimeoutMS)
 	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; p.dialect == responsesDialectOpenAI && sessionID != "" && options.CacheRetention != CacheRetentionNone {
 		format := "openai"
@@ -338,41 +337,67 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, request Request) E
 	if options.Fetch != nil {
 		client = options.Fetch
 	}
-	return &openAIResponsesStream{
-		ctx:                     streamContext,
-		cancel:                  cancel,
-		timeoutCancel:           timeoutCancel,
-		endpoint:                endpoint,
-		apiKey:                  requestAPIKey(request, p.apiKey),
-		authHeader:              map[responsesDialect]string{responsesDialectOpenAI: "authorization", responsesDialectAzure: "api-key"}[p.dialect],
-		displayName:             displayName,
-		configurationError:      configurationError,
-		client:                  client,
-		clock:                   clock,
-		timestamp:               clock(),
-		payload:                 payload,
-		diagnostics:             newStreamDiagnostics(options, request.Model(), payload),
-		model:                   request.Model(),
-		headers:                 headers,
-		maxEventBytes:           p.maxEventBytes,
-		maxErrorBodyBytes:       p.maxErrorBodyBytes,
-		onResponse:              options.OnResponse,
-		onHeaders:               options.OnHeaders,
-		headerOverrides:         cloneHeaderOverrides(options.HeaderOverrides),
-		maxRetries:              valueOrZero32(options.MaxRetries),
-		maxRetryDelayMS:         cloneUint64(options.MaxRetryDelayMS),
-		serviceTier:             options.ServiceTier,
-		applyServiceTierPricing: p.dialect == responsesDialectOpenAI,
-		grammarProperties:       grammarProperties,
-		configurationFail:       p.configurationFail,
-		slots:                   make(map[int]*responsesTextSlot),
-		reasoningSlots:          make(map[int]*responsesReasoningSlot),
-		toolSlots:               make(map[int]*responsesToolSlot),
-		completedOutputs:        make(map[int]struct{}),
-		completedItemIDs:        make(map[int]string),
-		completedPhases:         make(map[int]string),
-		pendingReasoning:        make(map[int]*responsesCompletedReasoning),
+	newStream := func(client HTTPDoer, websocket bool) *openAIResponsesStream {
+		var streamContext context.Context
+		var cancel context.CancelCauseFunc
+		timeoutCancel := context.CancelFunc(func() {})
+		onResponse := options.OnResponse
+		maxRetries := valueOrZero32(options.MaxRetries)
+		if websocket {
+			streamContext, cancel = context.WithCancelCause(ctx)
+			onResponse = nil
+			maxRetries = 0
+		} else {
+			streamContext, cancel, timeoutCancel = streamContextWithTimeout(ctx, options.TimeoutMS)
+		}
+		return &openAIResponsesStream{
+			ctx:                     streamContext,
+			cancel:                  cancel,
+			timeoutCancel:           timeoutCancel,
+			endpoint:                endpoint,
+			apiKey:                  requestAPIKey(request, p.apiKey),
+			authHeader:              map[responsesDialect]string{responsesDialectOpenAI: "authorization", responsesDialectAzure: "api-key"}[p.dialect],
+			displayName:             displayName,
+			configurationError:      configurationError,
+			client:                  client,
+			clock:                   clock,
+			timestamp:               clock(),
+			payload:                 payload,
+			diagnostics:             newStreamDiagnostics(options, request.Model(), payload),
+			model:                   request.Model(),
+			headers:                 cloneStrings(headers),
+			maxEventBytes:           p.maxEventBytes,
+			maxErrorBodyBytes:       p.maxErrorBodyBytes,
+			onResponse:              onResponse,
+			onHeaders:               options.OnHeaders,
+			headerOverrides:         cloneHeaderOverrides(options.HeaderOverrides),
+			maxRetries:              maxRetries,
+			maxRetryDelayMS:         cloneUint64(options.MaxRetryDelayMS),
+			serviceTier:             options.ServiceTier,
+			applyServiceTierPricing: p.dialect == responsesDialectOpenAI,
+			grammarProperties:       grammarProperties,
+			configurationFail:       p.configurationFail,
+			slots:                   make(map[int]*responsesTextSlot),
+			reasoningSlots:          make(map[int]*responsesReasoningSlot),
+			toolSlots:               make(map[int]*responsesToolSlot),
+			completedOutputs:        make(map[int]struct{}),
+			completedItemIDs:        make(map[int]string),
+			completedPhases:         make(map[int]string),
+			pendingReasoning:        make(map[int]*responsesCompletedReasoning),
+		}
 	}
+	if responsesWebSocketEnabled(options, compat, false) {
+		config := responsesTransportConfig{
+			ctx: ctx, endpoint: endpoint, payload: payload, model: request.Model(),
+			client: client, clock: clock, maxEventBytes: p.maxEventBytes, options: options,
+			scopeKey:       responsesTransportScope(endpoint, request.Model(), requestAPIKey(request, p.apiKey), headers, options.HeaderOverrides),
+			omitHTTPFields: true,
+			newSSEStream:   func() EventStream { return newStream(client, false) },
+			newStream:      func(client HTTPDoer) *openAIResponsesStream { return newStream(client, true) },
+		}
+		return newOpenAIResponsesHybridStream(config)
+	}
+	return newStream(client, false)
 }
 
 func valueOrZero32(value *uint32) uint32 {

@@ -42,6 +42,24 @@ README 和源码位置由随二进制携带的资料决定。
 
 上下文交接的余量阈值与兼容规则见[上下文管理](context-management.md#提醒与余量)。
 
+## 模型传输
+
+`settings.json` 的 `transport` 选择支持多种传输方式的模型请求使用哪种方式：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | Codex 默认尝试 WebSocket；普通和 Azure Responses 在渠道或模型声明支持时尝试，可使用增量上下文。 |
+| `sse` | 使用 HTTP SSE。 |
+| `websocket` | 尝试 WebSocket，每次发送完整上下文。 |
+| `websocket-cached` | 尝试 WebSocket；条件满足时使用 `previous_response_id` 和增量输入，否则发送完整上下文。 |
+
+`transport` 是设置级选择；渠道或模型可以通过 `compat.supportsWebsockets` 声明能力，
+配置示例见[模型配置](models.md#responses-websocket)。`sse` 始终选择 SSE；显式声明能力为
+`false` 时，即使选择了 WebSocket 也会使用 SSE。普通 Responses 未声明能力时，显式选择
+`websocket` 或 `websocket-cached` 仍会尝试 WebSocket。
+
+即使显式选择 WebSocket，流开始前连接失败也可能回退 SSE；流开始后不会在同一次请求中切换。
+
 ## 模型失败与重试
 
 自动重试默认开启，失败后最多再请求 3 次，依次等待 2、4、8 秒：

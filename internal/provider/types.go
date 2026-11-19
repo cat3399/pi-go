@@ -74,11 +74,10 @@ type CostTier struct {
 }
 
 // OpenAIResponsesCompat is the adapter-owned subset of pi's Responses
-// compatibility contract. Pointer booleans preserve an explicit false value
-// from catalog data. The Responses adapter consumes SupportsDeveloperRole;
-// the remaining fields are retained as typed model data for later adapter
-// features rather than leaking a vendor wire map into the generic request.
+// compatibility contract. Pointer booleans preserve explicit false values.
+// Protocol and transport capabilities remain model data owned by the adapter.
 type OpenAIResponsesCompat struct {
+	SupportsWebsockets              *bool
 	SupportsDeveloperRole           *bool
 	SessionAffinityFormat           *string
 	SupportsLongCacheRetention      *bool
@@ -861,6 +860,7 @@ func CloneModelCompat(value ModelCompat) ModelCompat {
 	copy := ModelCompat{}
 	if value.OpenAIResponses != nil {
 		copy.OpenAIResponses = &OpenAIResponsesCompat{
+			SupportsWebsockets:              cloneBool(value.OpenAIResponses.SupportsWebsockets),
 			SupportsDeveloperRole:           cloneBool(value.OpenAIResponses.SupportsDeveloperRole),
 			SessionAffinityFormat:           cloneString(value.OpenAIResponses.SessionAffinityFormat),
 			SupportsLongCacheRetention:      cloneBool(value.OpenAIResponses.SupportsLongCacheRetention),

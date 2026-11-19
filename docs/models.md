@@ -57,6 +57,32 @@ pi-go run --model local/local-model -p "hello"
 运行中查询实际模型与推理级别的方法见 [运行状态](self-knowledge.md)，认证方式见
 [Provider](providers.md)。
 
+## Responses WebSocket
+
+`api: "openai-responses"` 只选择协议，不表示服务端支持 WebSocket。默认 `transport: "auto"`
+下，可以为确认支持 WebSocket 的渠道声明能力：
+
+```json
+{
+  "providers": {
+    "gateway": {
+      "api": "openai-responses",
+      "baseUrl": "https://gateway.example.com/v1",
+      "apiKey": "${GATEWAY_API_KEY}",
+      "compat": { "supportsWebsockets": true },
+      "models": [
+        { "id": "model-a" },
+        { "id": "model-b", "compat": { "supportsWebsockets": false } }
+      ]
+    }
+  }
+}
+```
+
+将地址和模型 ID 替换为实际值。渠道的 `compat` 由模型继承；示例中的 `model-b` 显式关闭
+WebSocket。已有模型也可以在 `modelOverrides.<模型 ID>.compat` 中覆盖。能力声明仅控制是否
+尝试，不能保证服务端支持或请求最终使用 WebSocket。传输模式和优先级见[配置](configuration.md#模型传输)。
+
 ## 同步内置模型
 
 开发时在仓库根目录运行：

@@ -27,6 +27,8 @@ type responsesFailureSpec struct {
 	vendorCode  string
 	retryAfter  *time.Duration
 	shouldRetry *bool
+
+	codexCompressionRejected bool
 }
 
 type responsesTextSlot struct {
@@ -90,6 +92,8 @@ type openAIResponsesStream struct {
 	onResponse              ResponseHook
 	onHeaders               HeaderHook
 	headerOverrides         map[string]*string
+	prepareHeaders          func(http.Header)
+	validateHeaders         func(http.Header) error
 	maxRetries              uint32
 	maxRetryDelayMS         *uint64
 	serviceTier             string
@@ -100,6 +104,9 @@ type openAIResponsesStream struct {
 	grammarProperties       map[string]string
 	configurationFail       *responsesFailureSpec
 	preflight               *responsesFailureSpec
+
+	codexUncompressedPayload []byte
+	codexCompressionFallback bool
 
 	lifecycleMu sync.Mutex
 	body        io.ReadCloser
@@ -322,13 +329,22 @@ func (s *openAIResponsesStream) Next() (event llm.StreamEvent, err error) {
 }
 
 func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
-	for retryIndex := uint32(0); ; retryIndex++ {
+	for retryIndex := uint32(0); ; {
+		if cause := context.Cause(s.ctx); cause != nil {
+			return s.cancellationFailure(cause)
+		}
 		failure = s.initializeAttempt()
 		if failure != nil {
 			s.diagnostics.failure(failure.kind, failure.message, failure.cause, failure.vendorCode)
 		}
 		if failure == nil {
+			s.codexUncompressedPayload = nil
 			return nil
+		}
+		// Encoding recovery gets one immediate attempt of its own, without
+		// consuming or resetting the normal transport/rate-limit retry budget.
+		if s.retryCodexWithoutCompression(failure) {
+			continue
 		}
 		shouldRetry := providerShouldRetry(failure.kind, failure.httpStatus, failure.shouldRetry)
 		if s.codexRetry {
@@ -349,6 +365,7 @@ func (s *openAIResponsesStream) initialize() (failure *responsesFailureSpec) {
 			failure.message = safeResponsesErrorText(err, failure.message)
 			return failure
 		}
+		retryIndex++
 	}
 }
 
@@ -371,6 +388,9 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 			message: "Could not construct OpenAI Responses request",
 		}
 	}
+	if s.codexCompressionFallback {
+		captureFromContext(request.Context()).request(s.payload)
+	}
 	if validBearerAPIKey(s.apiKey) {
 		if s.authHeader == "api-key" {
 			request.Header.Set("api-key", s.apiKey)
@@ -383,8 +403,22 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 	for name, value := range s.headers {
 		request.Header.Set(name, value)
 	}
+	if s.prepareHeaders != nil {
+		s.prepareHeaders(request.Header)
+	}
 	if err := applyFinalHeaders(request.Header, s.model, s.onHeaders, s.headerOverrides); err != nil {
 		return &responsesFailureSpec{kind: FailureInvalidRequest, cause: err, message: "OpenAI Responses header hook failed"}
+	}
+	if s.codexCompressionFallback {
+		// Static overrides or hooks must not label the recovered JSON as zstd,
+		// or retain a length belonging to the previous compressed representation.
+		request.Header.Del("Content-Encoding")
+		request.Header.Del("Content-Length")
+	}
+	if s.validateHeaders != nil {
+		if err := s.validateHeaders(request.Header); err != nil {
+			return &responsesFailureSpec{kind: FailureConfiguration, cause: err, message: err.Error()}
+		}
 	}
 	authorized := openAIHTTPHeadersHaveAuthorization(request.Header)
 	if s.authHeader == "api-key" {
@@ -436,7 +470,9 @@ func (s *openAIResponsesStream) initializeAttempt() (failure *responsesFailureSp
 		return &responsesFailureSpec{kind: FailureInvalidResponse, cause: cause, message: cause.Error()}
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return s.httpStatusFailure(response)
+		failure = s.httpStatusFailure(response)
+		failure.codexCompressionRejected = failure.codexCompressionRejected && strings.EqualFold(request.Header.Get("Content-Encoding"), "zstd")
+		return failure
 	}
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if response.Header.Get("Content-Type") != "" && (contentTypeErr != nil || !strings.EqualFold(mediaType, "text/event-stream")) {
@@ -518,6 +554,8 @@ func (s *openAIResponsesStream) httpStatusFailure(response *http.Response) *resp
 		vendorCode:  vendorCode,
 		retryAfter:  retryAfter,
 		shouldRetry: providerRetryOverride(response.Header),
+		codexCompressionRejected: s.codexUncompressedPayload != nil && response.StatusCode == http.StatusBadRequest &&
+			readErr == nil && !truncated && isCodexBareBadRequest(body),
 	}
 }
 

@@ -2387,6 +2387,11 @@ func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat,
 	if err := validateCompatBoolFields(object, owner, "supportsLongCacheRetention"); err != nil {
 		return provider.ModelCompat{}, err
 	}
+	if api == OpenAIResponsesAPI || api == AzureOpenAIResponsesAPI || api == OpenAICodexResponsesAPI {
+		if err := validateCompatBoolFields(object, owner, "supportsWebsockets"); err != nil {
+			return provider.ModelCompat{}, err
+		}
+	}
 	if api == "anthropic-messages" {
 		return provider.ModelCompat{
 			AnthropicMessages: &provider.AnthropicMessagesCompat{
@@ -2419,6 +2424,7 @@ func decodeCompat(raw json.RawMessage, owner, api string) (provider.ModelCompat,
 	supportsOpenAIGrammarTools := compatBool(object, "supportsOpenAIGrammarTools")
 	return provider.ModelCompat{
 		OpenAIResponses: &provider.OpenAIResponsesCompat{
+			SupportsWebsockets:              compatBool(object, "supportsWebsockets"),
 			SupportsDeveloperRole:           supportsDeveloperRole,
 			SessionAffinityFormat:           sessionAffinityFormat,
 			SupportsLongCacheRetention:      supportsLongCacheRetention,
@@ -2826,6 +2832,7 @@ func mergeCompat(base, override provider.ModelCompat) provider.ModelCompat {
 			result.OpenAIResponses = &provider.OpenAIResponsesCompat{}
 		}
 		target := result.OpenAIResponses
+		copyBool(&target.SupportsWebsockets, value.SupportsWebsockets)
 		copyBool(&target.SupportsDeveloperRole, value.SupportsDeveloperRole)
 		copyBool(&target.SupportsLongCacheRetention, value.SupportsLongCacheRetention)
 		copyBool(&target.SupportsStrictMode, value.SupportsStrictMode)
