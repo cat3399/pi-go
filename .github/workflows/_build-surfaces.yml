@@ -202,6 +202,7 @@ jobs:
           cache-dependency-path: |
             surface/ui/package-lock.json
             surface/gui/frontend/package-lock.json
+            surface/web/_frontend/package-lock.json
 
       - name: Install Linux WebView build dependencies
         if: runner.os == 'Linux'
@@ -214,6 +215,7 @@ jobs:
         run: |
           npm --prefix surface/ui ci
           npm --prefix surface/gui/frontend ci
+          npm --prefix surface/web/_frontend ci
 
       - name: Build and package native GUI
         shell: bash

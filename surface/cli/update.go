@@ -18,11 +18,7 @@ func RunUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 // RunUpdateForBuild is also used by the independently packaged GUI command.
 func RunUpdateForBuild(ctx context.Context, args []string, stdout, stderr io.Writer, build product.BuildInfo) int {
-	name := "pi-go"
-	if build.Surface == "gui" {
-		name = "pi-go-gui"
-	}
-	return runUpdateCommand(ctx, args, stdout, stderr, name, func() updateService {
+	return runUpdateCommand(ctx, args, stdout, stderr, commandName(build), func() updateService {
 		return selfupdate.New(build)
 	})
 }

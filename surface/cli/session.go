@@ -11,12 +11,11 @@ import (
 	"strings"
 
 	"github.com/cat3399/pi-go/internal/agent"
-	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-const sessionHelp = `Usage: pi-go session [--id ID] [--agent-dir DIR] [--file JSONL] [--json] <command>
+const sessionHelp = `Usage: %s [--id ID] [--agent-dir DIR] [--file JSONL] [--json] <command>
 
 Commands:
   list             List saved sessions and the current live session
@@ -30,7 +29,7 @@ explicit JSONL without opening a writer. Accepted changes run after the current
 tool batch; context status reports completion. Output is never truncated here.
 `
 
-const historyHelp = `Usage: pi-go session [options] history <read|search|windows> [options]
+const historyHelp = `Usage: %s [options] history <read|search|windows> [options]
 
   read [--view dialogue|raw] [--entry ID ...]
   search QUERY [--view dialogue|raw] [--case-sensitive]
@@ -46,7 +45,7 @@ lines with entry ID, block index and line number; use read --entry ID to expand.
 Long output uses bash's existing full-output file and read continuation.
 `
 
-const contextHelp = `Usage: pi-go session [options] context <status|new|compact> [options]
+const contextHelp = `Usage: %s [options] context <status|new|compact> [options]
 
   status
   new --handoff-stdin | --handoff-file PATH | --handoff TEXT
@@ -65,11 +64,16 @@ change state. --file is only for history reads; live control uses PI_SESSION_*.
 `
 
 func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return CommandLine{}.runSession(ctx, args, stdin, stdout, stderr)
+}
+
+func (c CommandLine) runSession(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	name := commandName(c.Build) + " session"
 	if len(args) == 0 || sessionIsHelp(args[0]) {
-		fmt.Fprint(stdout, sessionHelp)
+		fmt.Fprintf(stdout, sessionHelp, name)
 		return 0
 	}
-	root := flag.NewFlagSet("pi-go session", flag.ContinueOnError)
+	root := flag.NewFlagSet(name, flag.ContinueOnError)
 	root.SetOutput(stderr)
 	id := root.String("id", os.Getenv("PI_SESSION_ID"), "session ID")
 	agentDir := root.String("agent-dir", os.Getenv("PI_SESSION_AGENT_DIR"), "agent data directory")
@@ -83,17 +87,19 @@ func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	args = root.Args()
 	if len(args) == 0 {
-		fmt.Fprint(stdout, sessionHelp)
+		fmt.Fprintf(stdout, sessionHelp, name)
 		return 0
 	}
-	fail := func(err error) int { fmt.Fprintln(stderr, "pi-go session:", err); return 1 }
+	fail := func(err error) int { fmt.Fprintln(stderr, name+":", err); return 1 }
 	endpoint, token := os.Getenv("PI_SESSION_ENDPOINT"), os.Getenv("PI_SESSION_TOKEN")
 	live := endpoint != "" && *id == os.Getenv("PI_SESSION_ID") && *file == ""
 	call := func(action string, query session.HistoryViewQuery, change agent.ContextChangeRequest) (sessionControlResponse, error) {
 		return callSessionControl(ctx, endpoint, token, sessionControlRequest{SessionID: *id, Action: action, Query: query, Change: change})
 	}
 	openService := func() (*application.Service, error) {
-		return application.NewService(application.ServiceOptions{Context: ctx, Production: app.ProductionConfig{AgentDir: *agentDir, AttachSession: AttachSession}, DisableReaper: true})
+		config := c.productionConfig()
+		config.AgentDir = *agentDir
+		return application.NewService(application.ServiceOptions{Context: ctx, Production: config, DisableReaper: true})
 	}
 	if args[0] == "list" {
 		if len(args) != 1 {
@@ -136,9 +142,9 @@ func RunSession(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 	if len(args) < 2 || sessionIsHelp(args[1]) {
 		if args[0] == "history" {
-			fmt.Fprint(stdout, historyHelp)
+			fmt.Fprintf(stdout, historyHelp, name)
 		} else {
-			fmt.Fprint(stdout, contextHelp)
+			fmt.Fprintf(stdout, contextHelp, name)
 		}
 		return 0
 	}

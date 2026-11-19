@@ -30,6 +30,7 @@ mkdir -p "$binary_dir"
 
 npm --prefix "$repo_dir/surface/ui" run check
 npm --prefix "$gui_dir/frontend" run build
+PI_GO_VERSION="$version" npm --prefix "$repo_dir/surface/web/_frontend" run build
 
 binary_name=pi-go-gui
 if [[ "$(go env GOOS)" == windows ]]; then
@@ -37,7 +38,7 @@ if [[ "$(go env GOOS)" == windows ]]; then
 fi
 (
 	cd "$gui_dir"
-	go build -tags production -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version -X=github.com/cat3399/pi-go/internal/product.Distribution=archive" -o "$binary_dir/$binary_name" .
+	go build -tags production,pi_go_webui -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$version -X=github.com/cat3399/pi-go/internal/product.Distribution=archive" -o "$binary_dir/$binary_name" .
 )
 
 if [[ "$(go env GOOS)" == windows ]]; then

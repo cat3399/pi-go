@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -14,20 +14,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/product"
-	"github.com/cat3399/pi-go/surface/cli"
 	websurface "github.com/cat3399/pi-go/surface/web"
 )
 
-func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
-	flags := flag.NewFlagSet("pi-go web", flag.ContinueOnError)
+func (c CommandLine) runWeb(ctx context.Context, args []string, stderr io.Writer) int {
+	config := c.productionConfig()
+	flags := flag.NewFlagSet(commandName(c.Build)+" web", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	listen := flags.String("listen", "127.0.0.1:30141", "HTTP listen address")
-	cwd := flags.String("cwd", "", "default working directory")
-	agentDir := flags.String("agent-dir", "", "pi-go agent directory (defaults to PI_GO_AGENT_DIR or ~/.pi-go/agent)")
-	docsDir := flags.String("docs-dir", "", "pi-go documentation directory override")
+	flags.StringVar(&config.WorkingDir, "cwd", "", "default working directory")
+	flags.StringVar(&config.AgentDir, "agent-dir", "", "pi-go agent directory (defaults to PI_GO_AGENT_DIR or ~/.pi-go/agent)")
+	flags.StringVar(&config.DocsDir, "docs-dir", "", "pi-go documentation directory override")
 	password := flags.String("password", os.Getenv("PI_GO_WEB_PASSWORD"), "remote access password (or PI_GO_WEB_PASSWORD)")
 	apiOnly := flags.Bool("api-only", false, "serve only the Go API (for the frontend development server)")
 	assetsDir := flags.String("assets-dir", "", "serve browser assets from a directory instead of the embedded production export")
@@ -61,13 +60,7 @@ func runWeb(ctx context.Context, args []string, stderr io.Writer) int {
 		return 1
 	}
 	service, err := application.NewService(application.ServiceOptions{
-		Context: ctx,
-		Production: app.ProductionConfig{
-			AttachSession: cli.AttachSession,
-			WorkingDir:    *cwd,
-			AgentDir:      *agentDir,
-			DocsDir:       *docsDir,
-		},
+		Context: ctx, Production: config,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "pi-go web:", err)

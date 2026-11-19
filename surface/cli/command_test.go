@@ -1,18 +1,21 @@
-package main
+package cli
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
+
+	"github.com/cat3399/pi-go/internal/product"
 )
+
+var terminalCLI = CommandLine{Build: product.CLIBuildInfo()}
 
 func TestUnifiedCommandShowsAvailableSurfaces(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), nil, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := terminalCLI.Run(nil, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, command := range []string{"run", "tui", "web", "rpc", "update"} {
+	for _, command := range []string{"run", "tui", "web", "rpc", "models", "session", "update", "version", "help"} {
 		if !strings.Contains(stdout.String(), "  "+command) {
 			t.Fatalf("usage does not contain %q: %s", command, stdout.String())
 		}
@@ -21,7 +24,7 @@ func TestUnifiedCommandShowsAvailableSurfaces(t *testing.T) {
 
 func TestUpdateHelpDoesNotOpenApplication(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"update", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := terminalCLI.Run([]string{"update", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "pi-go update") {
@@ -31,14 +34,14 @@ func TestUpdateHelpDoesNotOpenApplication(t *testing.T) {
 
 func TestTUIHelpDoesNotOpenApplication(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"tui", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := terminalCLI.Run([]string{"tui", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
 func TestUnifiedCommandRejectsUnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"unknown"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
+	if code := terminalCLI.Run([]string{"unknown"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
 		t.Fatalf("exit code = %d", code)
 	}
 	if !strings.Contains(stderr.String(), `unknown command "unknown"`) {
@@ -48,7 +51,7 @@ func TestUnifiedCommandRejectsUnknownSubcommand(t *testing.T) {
 
 func TestWebHelpDoesNotRequireEmbeddedAssets(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"web", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := terminalCLI.Run([]string{"web", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, stderr.String())
 	}
 }

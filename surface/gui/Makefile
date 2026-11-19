@@ -7,6 +7,7 @@ GOEXE := $(shell go env GOEXE)
 setup:
 	npm --prefix ../ui ci
 	npm --prefix frontend ci
+	npm --prefix ../web/_frontend ci
 
 check:
 	npm --prefix ../ui run check
@@ -16,10 +17,11 @@ check:
 frontend-build:
 	npm --prefix ../ui run check
 	npm --prefix frontend run build
+	PI_GO_VERSION="$(VERSION)" npm --prefix ../web/_frontend run build
 
 build: frontend-build
 	mkdir -p "$(BIN_DIR)"
-	go build -tags production -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$(VERSION)" -o "$(BIN_DIR)/pi-go-gui$(GOEXE)" .
+	go build -tags production,pi_go_webui -trimpath -ldflags "-X=github.com/cat3399/pi-go/internal/product.Version=$(VERSION)" -o "$(BIN_DIR)/pi-go-gui$(GOEXE)" .
 
 dev:
 	npm --prefix frontend run build:dev

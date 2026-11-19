@@ -14,15 +14,20 @@ import (
 
 // RunModels is the command-line adapter for installed built-in data updates.
 func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return CommandLine{}.runModels(ctx, args, stdout, stderr)
+}
+
+func (c CommandLine) runModels(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	name := commandName(c.Build) + " models"
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, "Usage: pi-go models update [--source <models.dev JSON file>] [--agent-dir <path>]")
+		fmt.Fprintf(stdout, "Usage: %s update [--source <models.dev JSON file>] [--agent-dir <path>]\n", name)
 		return 0
 	}
 	if args[0] != "update" {
-		fmt.Fprintf(stderr, "pi-go models: unknown command %q\n", args[0])
+		fmt.Fprintf(stderr, "%s: unknown command %q\n", name, args[0])
 		return 2
 	}
-	flags := flag.NewFlagSet("pi-go models update", flag.ContinueOnError)
+	flags := flag.NewFlagSet(name+" update", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	source := flags.String("source", "", "replay a saved models.dev JSON file instead of downloading it")
 	agentDir := flags.String("agent-dir", "", "agent data directory")
@@ -33,7 +38,7 @@ func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "pi-go models update: unexpected arguments")
+		fmt.Fprintln(stderr, name+" update: unexpected arguments")
 		return 2
 	}
 	paths, err := app.ResolveProductionPaths(app.ProductionConfig{AgentDir: *agentDir})
@@ -45,7 +50,7 @@ func RunModels(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintln(stdout, "Syncing built-in models from models.dev...")
 	diff, err := model.SyncBuiltinCatalog(ctx, target, *source)
 	if err != nil {
-		fmt.Fprintln(stderr, "pi-go models update:", err)
+		fmt.Fprintln(stderr, name+" update:", err)
 		return 1
 	}
 	fmt.Fprint(stdout, diff.String())

@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -9,20 +9,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/internal/provider"
-	"github.com/cat3399/pi-go/surface/cli"
 	tuisurface "github.com/cat3399/pi-go/surface/tui"
 )
 
-func runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("pi-go tui", flag.ContinueOnError)
+func (c CommandLine) runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	config := c.productionConfig()
+	flags := flag.NewFlagSet(commandName(c.Build)+" tui", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	cwd := flags.String("cwd", "", "working directory for a new session")
-	agentDir := flags.String("agent-dir", "", "pi-go agent directory (defaults to PI_GO_AGENT_DIR or ~/.pi-go/agent)")
-	docsDir := flags.String("docs-dir", "", "pi-go documentation directory override")
+	flags.StringVar(&config.WorkingDir, "cwd", "", "working directory for a new session")
+	flags.StringVar(&config.AgentDir, "agent-dir", "", "pi-go agent directory (defaults to PI_GO_AGENT_DIR or ~/.pi-go/agent)")
+	flags.StringVar(&config.DocsDir, "docs-dir", "", "pi-go documentation directory override")
 	sessionID := flags.String("session", "", "open an existing session ID")
 	modelRef := flags.String("model", "", "initial model as provider/model-id")
 	thinking := flags.String("thinking", "", "initial thinking level")
@@ -76,13 +75,7 @@ func runTUI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	service, err := application.NewService(application.ServiceOptions{
-		Context: ctx,
-		Production: app.ProductionConfig{
-			AttachSession: cli.AttachSession,
-			WorkingDir:    *cwd,
-			AgentDir:      *agentDir,
-			DocsDir:       *docsDir,
-		},
+		Context: ctx, Production: config,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "pi-go tui:", err)

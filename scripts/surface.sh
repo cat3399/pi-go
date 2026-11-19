@@ -32,7 +32,7 @@ Actions:
 Surfaces:
   terminal  CLI and TUI (default), output: bin/pi-go
   web       CLI, TUI, and embedded Web UI, output: bin/pi-go
-  gui       Desktop GUI, output: bin/pi-go-gui
+  gui       Desktop GUI and CLI, output: bin/pi-go-gui
   mobile    Android app, output: surface/mobile/bin/pi-go-mobile.apk
 
 Build variables:
@@ -94,13 +94,13 @@ case "$action:$surface" in
 	check:terminal)
 		require_no_args "$@"
 		cd "$repo_dir"
-		exec go test ./internal/... ./cmd/pi-go ./surface/tui
+		exec go test ./internal/... ./cmd/pi-go ./surface/cli ./surface/tui
 		;;
 	check:web)
 		require_no_args "$@"
 		"$repo_dir/scripts/webui.sh" check
 		cd "$repo_dir"
-		exec go test ./surface/web ./cmd/pi-go
+		exec go test ./surface/web ./surface/cli ./cmd/pi-go
 		;;
 	check:gui)
 		require_no_args "$@"

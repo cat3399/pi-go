@@ -1,16 +1,14 @@
 package main
 
 import (
-	"context"
 	"embed"
-	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"os"
+	"strings"
 
 	coreapp "github.com/cat3399/pi-go/internal/app"
-	"github.com/cat3399/pi-go/internal/installation"
 	"github.com/cat3399/pi-go/internal/product"
 	"github.com/cat3399/pi-go/surface/cli"
 	wails "github.com/wailsapp/wails/v3/pkg/application"
@@ -29,46 +27,69 @@ type launchOptions struct {
 	devToolsEnabled bool
 }
 
-func parseLaunchOptions(args []string) (launchOptions, error) {
+func desktopFlags(options *launchOptions, output io.Writer) *flag.FlagSet {
 	flags := flag.NewFlagSet("pi-go-gui", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	var options launchOptions
+	flags.SetOutput(output)
 	flags.StringVar(&options.cwd, "cwd", "", "default working directory for the embedded pi-go core")
 	flags.StringVar(&options.agentDir, "agent-dir", "", "pi-go agent directory")
 	flags.StringVar(&options.docsDir, "docs-dir", "", "pi-go documentation directory override")
 	flags.StringVar(&options.defaultRemote, "remote", "", "initial remote pi-go endpoint")
 	flags.BoolVar(&options.devToolsEnabled, "devtools", false, "enable WebView developer tools")
-	if err := flags.Parse(args); err != nil {
-		return launchOptions{}, err
-	}
-	if flags.NArg() != 0 {
-		return launchOptions{}, errors.New("unexpected positional arguments")
-	}
-	return options, nil
+	return flags
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "session" {
-		os.Exit(cli.RunSession(context.Background(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
-	}
-	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println(product.Version)
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "update" {
-		os.Exit(cli.RunUpdateForBuild(context.Background(), os.Args[2:], os.Stdout, os.Stderr, product.GUIBuildInfo()))
-	}
-	options, err := parseLaunchOptions(os.Args[1:])
-	if err != nil {
-		log.Fatal(err)
-	}
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, openDesktop))
+}
 
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, open func(launchOptions) error) int {
+	var options launchOptions
+	flags := desktopFlags(&options, stderr)
+	if !isDesktopInvocation(args, flags) {
+		commands := cli.CommandLine{
+			Build: product.GUIBuildInfo(), SourceBundles: guiSourceBundles(),
+			ExtraHelp: func(w io.Writer) {
+				fmt.Fprintln(w, "Desktop: pi-go-gui [options] (opens a window when no command is given)")
+				flags.SetOutput(w)
+				flags.PrintDefaults()
+			},
+		}
+		return commands.Run(args, stdin, stdout, stderr)
+	}
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintf(stderr, "pi-go-gui: unexpected positional argument %q after desktop options\n", flags.Arg(0))
+		return 2
+	}
+	if err := open(options); err != nil {
+		fmt.Fprintln(stderr, "pi-go-gui:", err)
+		return 1
+	}
+	return 0
+}
+
+// Only a desktop option (not a bare word that happens to match its name) can
+// select the window path. All subcommands and their arguments stay with the CLI.
+func isDesktopInvocation(args []string, flags *flag.FlagSet) bool {
+	if len(args) == 0 || args[0] == "--" {
+		return true
+	}
+	name, _, _ := strings.Cut(args[0], "=")
+	return strings.HasPrefix(name, "-") && flags.Lookup(strings.TrimLeft(name, "-")) != nil
+}
+
+func openDesktop(options launchOptions) error {
 	bridge := NewGUIBridge(coreapp.ProductionConfig{
 		AttachSession: cli.AttachSession,
 		WorkingDir:    options.cwd,
 		AgentDir:      options.agentDir,
 		DocsDir:       options.docsDir,
-		SourceBundles: []installation.SourceBundle{{Prefix: "surface/gui", Files: guiSources}},
+		SourceBundles: guiSourceBundles(),
 	}, options.defaultRemote, product.Version)
 
 	application := wails.New(wails.Options{
@@ -98,7 +119,5 @@ func main() {
 		},
 	})
 
-	if err := application.Run(); err != nil {
-		log.Fatal(fmt.Errorf("run pi-go GUI: %w", err))
-	}
+	return application.Run()
 }
