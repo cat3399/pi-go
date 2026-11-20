@@ -39,7 +39,7 @@ func TestSyncModelsDevRoutingControlsAndMetadata(t *testing.T) {
 	before, _ := json.Marshal(policy)
 	requests := 0
 	client := fixtureClient(t, raw, &requests)
-	doc, err := syncCatalog(context.Background(), client, policy, "")
+	doc, err := Sync(context.Background(), policy, SyncOptions{Client: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestSyncExplicitEmptyProviderAndReproducibleReplay(t *testing.T) {
 	source["openai"].(map[string]any)["models"] = map[string]any{}
 	raw, _ = json.Marshal(source)
 	requests := 0
-	downloaded, err := syncCatalog(context.Background(), fixtureClient(t, raw, &requests), policy, "")
+	downloaded, err := Sync(context.Background(), policy, SyncOptions{Client: fixtureClient(t, raw, &requests)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,9 +247,8 @@ func TestSyncExplicitEmptyProviderAndReproducibleReplay(t *testing.T) {
 	if err := os.WriteFile(input, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	// Nil client proves offline replay cannot use a network fallback.
-	replayed, err := syncCatalog(context.Background(), nil, policy, input)
-	if err != nil || !reflect.DeepEqual(downloaded, replayed) {
+	replayed, err := Sync(context.Background(), policy, SyncOptions{SourceFile: input, Client: fixtureClient(t, raw, &requests)})
+	if err != nil || requests != 1 || !reflect.DeepEqual(downloaded, replayed) {
 		t.Fatalf("replay differs from network snapshot: %v", err)
 	}
 	target := filepath.Join(t.TempDir(), Filename)
@@ -267,13 +266,13 @@ func TestSyncHTTPFailureAndCancellation(t *testing.T) {
 		client := &http.Client{Transport: syncRoundTripper(func(r *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("not a catalog")), Header: make(http.Header)}, nil
 		})}
-		if _, err := syncCatalog(context.Background(), client, policy, ""); err == nil || !strings.Contains(err.Error(), fmt.Sprint(status)) {
+		if _, err := Sync(context.Background(), policy, SyncOptions{Client: client}); err == nil || !strings.Contains(err.Error(), fmt.Sprint(status)) {
 			t.Fatalf("HTTP %d did not fail explicitly: %v", status, err)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := syncCatalog(ctx, nil, policy, ""); !errors.Is(err, context.Canceled) {
+	if _, err := Sync(ctx, policy, SyncOptions{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation lost: %v", err)
 	}
 }

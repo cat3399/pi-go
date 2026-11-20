@@ -57,19 +57,20 @@ type Diagnostic struct{ Source, Path, Message string }
 func (d Diagnostic) Error() string { return fmt.Sprintf("%s %s: %s", d.Source, d.Path, d.Message) }
 
 type Model struct {
-	Provider         string                             `json:"provider"`
-	ID               string                             `json:"id"`
-	Name             string                             `json:"name"`
-	API              string                             `json:"api"`
-	BaseURL          string                             `json:"baseUrl"`
-	Headers          map[string]string                  `json:"headers,omitempty"`
-	Reasoning        bool                               `json:"reasoning"`
-	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
-	Input            []provider.InputKind               `json:"input,omitempty"`
-	Cost             provider.CostRates                 `json:"cost"`
-	ContextWindow    uint64                             `json:"contextWindow"`
-	MaxTokens        uint64                             `json:"maxTokens"`
-	Compat           provider.ModelCompat               `json:"-"`
+	Provider             string                             `json:"provider"`
+	ID                   string                             `json:"id"`
+	Name                 string                             `json:"name"`
+	API                  string                             `json:"api"`
+	BaseURL              string                             `json:"baseUrl"`
+	Headers              map[string]string                  `json:"headers,omitempty"`
+	Reasoning            bool                               `json:"reasoning"`
+	ThinkingLevelMap     map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
+	DefaultThinkingLevel provider.ThinkingLevel             `json:"defaultThinkingLevel,omitempty"`
+	Input                []provider.InputKind               `json:"input,omitempty"`
+	Cost                 provider.CostRates                 `json:"cost"`
+	ContextWindow        uint64                             `json:"contextWindow"`
+	MaxTokens            uint64                             `json:"maxTokens"`
+	Compat               provider.ModelCompat               `json:"-"`
 	// UnsupportedFields and UnknownFields are parser diagnostics attached to a
 	// runtime projection. They are not model metadata and are intentionally not
 	// part of CachedCatalog's durable model contract.
@@ -81,7 +82,7 @@ type Model struct {
 func (m Model) Ref() (provider.Model, error) {
 	return provider.NewModel(provider.ModelSpec{
 		Provider: m.Provider, API: m.API, ID: m.ID, Name: m.Name, BaseURL: m.BaseURL,
-		Headers: m.Headers, Reasoning: m.Reasoning, ThinkingLevelMap: m.ThinkingLevelMap, Input: m.Input,
+		Headers: m.Headers, Reasoning: m.Reasoning, ThinkingLevelMap: m.ThinkingLevelMap, DefaultThinkingLevel: m.DefaultThinkingLevel, Input: m.Input,
 		Cost: m.Cost, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens, Compat: m.Compat,
 	})
 }
@@ -114,19 +115,20 @@ type ProviderConfig struct {
 // modelOverride keeps presence separate from a zero value so config overlays do
 // not accidentally erase builtin metadata.
 type modelOverride struct {
-	Name              *string
-	Reasoning         *bool
-	ThinkingLevelMap  map[provider.ThinkingLevel]*string
-	Input             *[]provider.InputKind
-	Cost              *modelCostOverride
-	ContextWindow     *uint64
-	MaxTokens         *uint64
-	Headers           map[string]string
-	Compat            provider.ModelCompat
-	CompatPresent     bool
-	UnsupportedFields []string
-	UnknownFields     []string
-	compatRaw         json.RawMessage
+	Name                 *string
+	Reasoning            *bool
+	ThinkingLevelMap     map[provider.ThinkingLevel]*string
+	DefaultThinkingLevel provider.ThinkingLevel
+	Input                *[]provider.InputKind
+	Cost                 *modelCostOverride
+	ContextWindow        *uint64
+	MaxTokens            *uint64
+	Headers              map[string]string
+	Compat               provider.ModelCompat
+	CompatPresent        bool
+	UnsupportedFields    []string
+	UnknownFields        []string
+	compatRaw            json.RawMessage
 }
 
 type modelCostOverride struct {
@@ -728,6 +730,16 @@ func validateConfiguredProvider(config ProviderConfig, baseline []Model) error {
 			first = resolved
 		}
 	}
+	for id, candidate := range byID {
+		override := config.overrides[id]
+		if candidate.DefaultThinkingLevel == "" && override.DefaultThinkingLevel == "" {
+			continue
+		}
+		m := applyModelOverride(cloneModel(candidate), override)
+		if !provider.SupportsThinkingLevel(m.Reasoning, m.ThinkingLevelMap, m.DefaultThinkingLevel) {
+			return Diagnostic{"models.json", path + "." + id + ".defaultThinkingLevel", "must be a supported thinking level"}
+		}
+	}
 	return nil
 }
 
@@ -1270,6 +1282,9 @@ func applyModelOverride(model Model, override modelOverride) Model {
 	if override.Reasoning != nil {
 		model.Reasoning = *override.Reasoning
 	}
+	if override.DefaultThinkingLevel != "" {
+		model.DefaultThinkingLevel = override.DefaultThinkingLevel
+	}
 	if override.ThinkingLevelMap != nil {
 		if model.ThinkingLevelMap == nil {
 			model.ThinkingLevelMap = make(map[provider.ThinkingLevel]*string)
@@ -1473,6 +1488,11 @@ func parseOverride(providerID, modelID, api string, raw json.RawMessage) (modelO
 	} else if present {
 		result.Reasoning = &value
 	}
+	level, err := parseDefaultThinkingLevel(o, providerID+"/"+modelID)
+	if err != nil {
+		return result, err
+	}
+	result.DefaultThinkingLevel = level
 	if rawValue, present := o["thinkingLevelMap"]; present {
 		value, err := decodeThinkingLevelMap(rawValue, providerID)
 		if err != nil {
@@ -1523,7 +1543,7 @@ func parseOverride(providerID, modelID, api string, raw json.RawMessage) (modelO
 	}
 	for key := range o {
 		switch key {
-		case "name", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
+		case "name", "reasoning", "thinkingLevelMap", "defaultThinkingLevel", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
 		default:
 			result.UnknownFields = append(result.UnknownFields, key)
 		}
@@ -1562,6 +1582,9 @@ func parseModel(providerID, providerAPI string, index int, raw json.RawMessage) 
 	} else if present {
 		m.Reasoning = value
 	}
+	if m.DefaultThinkingLevel, err = parseDefaultThinkingLevel(o, providerID+"/"+id); err != nil {
+		return m, err
+	}
 	if m.ThinkingLevelMap, err = decodeThinkingLevelMap(o["thinkingLevelMap"], providerID); err != nil {
 		return m, err
 	}
@@ -1594,7 +1617,7 @@ func parseModel(providerID, providerAPI string, index int, raw json.RawMessage) 
 	}
 	for key := range o {
 		switch key {
-		case "id", "name", "api", "baseUrl", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
+		case "id", "name", "api", "baseUrl", "reasoning", "thinkingLevelMap", "defaultThinkingLevel", "input", "cost", "contextWindow", "maxTokens", "headers", "compat":
 		default:
 			m.UnknownFields = append(m.UnknownFields, key)
 		}
@@ -2190,6 +2213,18 @@ func requiredPositiveUint64(raw json.RawMessage, owner, key string) (uint64, err
 		return 0, Diagnostic{"models.json", key, "must be a positive integer"}
 	}
 	return value, nil
+}
+
+func parseDefaultThinkingLevel(o map[string]json.RawMessage, owner string) (provider.ThinkingLevel, error) {
+	raw, exists := o["defaultThinkingLevel"]
+	if !exists {
+		return "", nil
+	}
+	var level provider.ThinkingLevel
+	if json.Unmarshal(raw, &level) != nil || !level.Valid() {
+		return "", Diagnostic{"models.json", owner + ".defaultThinkingLevel", "must be a valid thinking level"}
+	}
+	return level, nil
 }
 
 func decodeThinkingLevelMap(raw json.RawMessage, owner string) (map[provider.ThinkingLevel]*string, error) {

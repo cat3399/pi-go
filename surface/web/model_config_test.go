@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/surfacewire"
 )
 
@@ -24,6 +26,33 @@ func modelConfigurationServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+type modelSyncAPI struct {
+	application.API
+	calls int
+}
+
+func (api *modelSyncAPI) SyncBuiltinModels(context.Context) (application.ModelSyncResult, error) {
+	api.calls++
+	return application.ModelSyncResult{Published: true, Summary: "preview", FullOutputPath: "/core/tmp/full.log"}, nil
+}
+
+func TestModelSyncHTTPContract(t *testing.T) {
+	api := &modelSyncAPI{}
+	server, err := New(Options{Application: api})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "/api/v1/models/update"
+	response := serveModelRequest(t, server, http.MethodPost, path, []byte(`{}`))
+	var result map[string]any
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || result["published"] != true || result["summary"] != "preview" || result["fullOutputPath"] != "/core/tmp/full.log" {
+		t.Fatalf("sync = %d %s", response.Code, response.Body.String())
+	}
+	if invalid := serveModelRequest(t, server, http.MethodPost, path, []byte(`{"source":"/tmp/snapshot","target":"/tmp/models.json"}`)); invalid.Code != http.StatusBadRequest || api.calls != 1 {
+		t.Fatalf("unexpected sync with client options: %d / %d calls", invalid.Code, api.calls)
+	}
 }
 
 func TestModelManagementListsDisabledProvidersAndPreservesCustomUpdates(t *testing.T) {
@@ -126,6 +155,15 @@ func TestAPIKeyAndAvailableModelsContract(t *testing.T) {
 	empty := serveModelRequest(t, server, http.MethodGet, "/api/v1/models", nil)
 	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"modelList":[]`) {
 		t.Fatalf("models after delete = %d %s", empty.Code, empty.Body.String())
+	}
+}
+
+func TestModelPresetLookupHTTPContract(t *testing.T) {
+	server := modelConfigurationServer(t)
+	response := serveModelRequest(t, server, http.MethodPost, "/api/v1/models-config/presets", []byte(`{"providerId":"gateway","models":[{"id":"gpt-5.4","api":"openai-completions"},{"id":"unknown-alias"}]}`))
+	var models []map[string]json.RawMessage
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &models) != nil || len(models) != 2 || string(models[0]["reasoning"]) != "true" || models[0]["thinkingLevelMap"] == nil || len(models[1]) != 1 {
+		t.Fatalf("lookup = %d %s", response.Code, response.Body.String())
 	}
 }
 

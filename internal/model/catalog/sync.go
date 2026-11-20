@@ -17,30 +17,33 @@ import (
 const ModelsDevURL = "https://models.dev/api.json"
 const maxSourceBytes = 64 << 20
 
-// Sync reads the public models.dev catalog, or replays a saved response. The
-// locally shipped policy owns provider scope, routing, defaults and exceptions.
-func Sync(ctx context.Context, policy Policy, sourceFile string) (Document, error) {
-	return syncCatalog(ctx, &http.Client{Timeout: 30 * time.Second}, policy, sourceFile)
+type SyncOptions struct {
+	SourceFile string
+	Client     interface {
+		Do(*http.Request) (*http.Response, error)
+	}
 }
 
-func syncCatalog(ctx context.Context, client *http.Client, policy Policy, sourceFile string) (Document, error) {
+// Sync reads the public models.dev catalog, or replays a saved response. The
+// locally shipped policy owns provider scope, routing, defaults and exceptions.
+func Sync(ctx context.Context, policy Policy, options SyncOptions) (Document, error) {
 	if err := policy.Validate(); err != nil {
 		return Document{}, err
 	}
 	if err := context.Cause(ctx); err != nil {
 		return Document{}, err
 	}
-	raw, err := readSource(ctx, client, sourceFile)
+	raw, err := readSource(ctx, options)
 	if err != nil {
 		return Document{}, err
 	}
 	return projectModelsDev(ctx, policy, raw)
 }
 
-func readSource(ctx context.Context, client *http.Client, sourceFile string) ([]byte, error) {
+func readSource(ctx context.Context, options SyncOptions) ([]byte, error) {
 	var reader io.ReadCloser
-	if sourceFile != "" {
-		file, err := os.Open(sourceFile)
+	if options.SourceFile != "" {
+		file, err := os.Open(options.SourceFile)
 		if err != nil {
 			return nil, fmt.Errorf("read models.dev snapshot: %w", err)
 		}
@@ -51,6 +54,10 @@ func readSource(ctx context.Context, client *http.Client, sourceFile string) ([]
 			return nil, err
 		}
 		request.Header.Set("Accept", "application/json")
+		client := options.Client
+		if client == nil {
+			client = &http.Client{Timeout: 30 * time.Second}
+		}
 		response, err := client.Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("fetch models.dev: %w", err)

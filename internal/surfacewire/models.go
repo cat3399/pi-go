@@ -9,10 +9,11 @@ import (
 )
 
 type ModelListItem struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Provider     string `json:"provider"`
-	ProviderName string `json:"providerName"`
+	ID                   string                 `json:"id"`
+	Name                 string                 `json:"name"`
+	Provider             string                 `json:"provider"`
+	ProviderName         string                 `json:"providerName"`
+	DefaultThinkingLevel provider.ThinkingLevel `json:"defaultThinkingLevel,omitempty"`
 }
 
 type ModelsView struct {
@@ -52,7 +53,7 @@ func Models(ctx context.Context, api application.API, cwd string) (ModelsView, e
 		result.Models[key] = candidate.Name
 		result.ModelList = append(result.ModelList, ModelListItem{
 			ID: candidate.ID, Name: candidate.Name, Provider: candidate.Provider,
-			ProviderName: candidate.ProviderName,
+			ProviderName: candidate.ProviderName, DefaultThinkingLevel: candidate.DefaultThinkingLevel,
 		})
 		result.ThinkingLevels[key] = append([]provider.ThinkingLevel(nil), candidate.ThinkingLevels...)
 		if len(candidate.ThinkingLevelMap) != 0 {

@@ -48,13 +48,13 @@ func (c CommandLine) runModels(ctx context.Context, args []string, stdout, stder
 	}
 	target := filepath.Join(paths.AgentDir, catalog.Filename)
 	fmt.Fprintln(stdout, "Syncing built-in models from models.dev...")
-	diff, err := model.SyncBuiltinCatalog(ctx, target, *source)
+	result, err := model.SyncBuiltinCatalog(ctx, target, catalog.SyncOptions{SourceFile: *source})
 	if err != nil {
 		fmt.Fprintln(stderr, name+" update:", err)
 		return 1
 	}
-	fmt.Fprint(stdout, diff.String())
-	if diff.Published {
+	fmt.Fprint(stdout, result)
+	if result.Published {
 		fmt.Fprintln(stdout, "Updated", target, "(takes effect on startup or reload)")
 	}
 	return 0

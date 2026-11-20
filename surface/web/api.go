@@ -51,6 +51,7 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("DELETE /api/v1/projects", handleProjectRemove(api))
 
 	mux.HandleFunc("GET /api/v1/models", handleModels(api))
+	mux.HandleFunc("POST /api/v1/models/update", handleBuiltinModelSync(api))
 	mux.HandleFunc("GET /api/v1/model-providers", handleModelProviders(api))
 	mux.HandleFunc("GET /api/v1/model-providers/{provider}/models", handleProviderModels(api))
 	mux.HandleFunc("PATCH /api/v1/model-providers/{provider}", handleBuiltinProviderUpdate(api))
@@ -58,6 +59,7 @@ func registerAPIRoutes(mux *http.ServeMux, api application.API) {
 	mux.HandleFunc("DELETE /api/v1/model-providers/{provider}/config", handleModelProviderWrite(api))
 	mux.HandleFunc("GET /api/v1/models-config", handleModelsConfigRead(api))
 	mux.HandleFunc("PUT /api/v1/models-config", handleModelsConfigWrite(api))
+	mux.HandleFunc("POST /api/v1/models-config/presets", handleModelPresets(api))
 	mux.HandleFunc("POST /api/v1/models-config/discover", handleModelDiscovery(api))
 	mux.HandleFunc("GET /api/v1/models-config/catalog", handleModelCatalog(api))
 	mux.HandleFunc("POST /api/v1/models-config/test", handleModelProbe(api))

@@ -15,8 +15,8 @@ import type {
   EventSubscription,
   FileList,
   FilePreview,
-  ModelsView,
-  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery,
+  ModelsView, ModelSyncResult,
+  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery, DiscoveredModel, ModelPresetRequest,
   ProjectInfo,
   SessionView,
   SessionResources,
@@ -249,6 +249,10 @@ export class RemoteApplicationClient implements ApplicationClient {
     return this.request(`/api/v1/models?${query.toString()}`);
   }
 
+  syncBuiltinModels(): Promise<ModelSyncResult> {
+    return this.request("/api/v1/models/update", { method: "POST", body: "{}" });
+  }
+
   modelProviders(cwd: string): Promise<ModelProviderInfo[]> {
     return this.request(`/api/v1/model-providers?${new URLSearchParams({ cwd })}`);
   }
@@ -275,6 +279,10 @@ export class RemoteApplicationClient implements ApplicationClient {
   async deleteProviderCredential(providerId: string, credentialType: string): Promise<void> {
     await this.request(credentialType === "oauth" ? `/api/v1/auth/logout/${encodeURIComponent(providerId)}` : `/api/v1/auth/api-key/${encodeURIComponent(providerId)}`,
       { method: credentialType === "oauth" ? "POST" : "DELETE" });
+  }
+
+  lookupModelPresets(request: ModelPresetRequest): Promise<DiscoveredModel[]> {
+    return this.request("/api/v1/models-config/presets", { method: "POST", body: JSON.stringify(request) });
   }
 
   discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery> {

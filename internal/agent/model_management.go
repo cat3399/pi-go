@@ -388,8 +388,11 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 	state := s.loop.State()
 	previous, hadPrevious, previousThinking := state.Model(), state.HasModel(), state.ThinkingLevel()
 	desired := previousThinking
+	useModelDefault := explicitThinking == nil && model.DefaultThinkingLevel() != "" && (!hadPrevious || !previous.Equal(model))
 	if explicitThinking != nil {
 		desired = *explicitThinking
+	} else if useModelDefault {
+		desired = model.DefaultThinkingLevel()
 	} else if !hadPrevious || !previous.Reasoning() {
 		var err error
 		desired, err = s.currentDefaultThinking()
@@ -400,7 +403,7 @@ func (s *AgentSession) setModelSelectionLocked(ctx context.Context, model provid
 	}
 	selectedThinking := model.ClampThinkingLevel(desired)
 	thinkingChanged := selectedThinking != previousThinking
-	persistThinking := thinkingChanged && (model.Reasoning() || selectedThinking != provider.ThinkingOff)
+	persistThinking := thinkingChanged && !useModelDefault && (model.Reasoning() || selectedThinking != provider.ThinkingOff)
 	providerID, modelID := model.Provider(), model.ID()
 	update := SettingsUpdate{DefaultProvider: &providerID, DefaultModel: &modelID}
 	if persistThinking {
@@ -528,7 +531,9 @@ func (s *AgentSession) setThinkingLevelLocked(level provider.ThinkingLevel) (thi
 		s.unlockLifecycle()
 		return thinkingSelectionEvent{}, nil
 	}
-	persistDefault := (hasModel && model.Reasoning()) || selected != provider.ThinkingOff
+	// A session override on a model with its own default belongs in the
+	// transcript, not in the global preference used by unrelated models.
+	persistDefault := model.DefaultThinkingLevel() == "" && ((hasModel && model.Reasoning()) || selected != provider.ThinkingOff)
 	var settingsWrite SettingsWriteResult
 	var settingsErr error
 	if persistDefault {

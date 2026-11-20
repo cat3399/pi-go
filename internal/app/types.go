@@ -199,7 +199,7 @@ func validateDependencies(deps Dependencies) (runtimeDependencies, error) {
 func catalogModelFromProvider(value provider.Model) model.Model {
 	return model.Model{
 		Provider: value.Provider(), API: value.API(), ID: value.ID(), Name: value.Name(), BaseURL: value.BaseURL(),
-		Headers: value.Headers(), Reasoning: value.Reasoning(), ThinkingLevelMap: value.ThinkingLevelMap(),
+		Headers: value.Headers(), Reasoning: value.Reasoning(), ThinkingLevelMap: value.ThinkingLevelMap(), DefaultThinkingLevel: value.DefaultThinkingLevel(),
 		Input: value.Input(), Cost: value.Cost(), ContextWindow: value.ContextWindow(), MaxTokens: value.MaxTokens(), Compat: value.Compat(),
 	}
 }

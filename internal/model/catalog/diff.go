@@ -3,10 +3,13 @@ package catalog
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type Diff struct {
@@ -17,7 +20,6 @@ type Diff struct {
 	Changed   []string
 	Defaults  []string
 	Providers []string
-	Published bool
 }
 
 // Compare expects validated documents. Upstream index changes are not model changes.
@@ -106,12 +108,56 @@ func displayValue(value string) string {
 	return value
 }
 
-// String is intentionally a short terminal summary, not a generated report.
-func (d Diff) String() string {
+type SyncResult struct {
+	Published      bool   `json:"published"`
+	Summary        string `json:"summary"`
+	FullOutputPath string `json:"fullOutputPath,omitempty"`
+}
+
+func (r SyncResult) String() string {
+	if r.FullOutputPath != "" {
+		return r.Summary + "[Output truncated. Full output: " + r.FullOutputPath + "]\n"
+	}
+	return r.Summary
+}
+
+const maxSummaryBytes = 50 * 1024
+
+// Report preserves the complete diff before the caller replaces the old catalog.
+// A failed log write can therefore be retried without losing the original changes.
+func (d Diff) Report() (SyncResult, error) {
+	summary, truncated := d.format(10)
+	if len(summary) > maxSummaryBytes {
+		end := maxSummaryBytes - 1
+		for !utf8.RuneStart(summary[end]) {
+			end--
+		}
+		summary, truncated = summary[:end]+"\n", true
+	}
+	result := SyncResult{Summary: summary}
+	if !truncated {
+		return result, nil
+	}
+	file, err := os.CreateTemp("", "pi-models-update-*.log")
+	if err == nil {
+		full, _ := d.format(-1)
+		_, writeErr := file.WriteString(full)
+		err = errors.Join(writeErr, file.Close())
+	}
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("save complete model update report: %w", err)
+	}
+	result.FullOutputPath = file.Name()
+	return result, nil
+}
+
+func (d Diff) format(maxPerGroup int) (string, bool) {
 	var text strings.Builder
-	fmt.Fprintf(&text, "%s: %s -> %s\n", d.After.Models.Name, sourceRevision(d.Before.Models), sourceRevision(d.After.Models))
+	var truncated bool
+	revision := func(source Source) string { return sourceRevision(source, maxPerGroup >= 0) }
+	fmt.Fprintf(&text, "%s: %s -> %s\n", d.After.Models.Name, revision(d.Before.Models), revision(d.After.Models))
 	if d.Before.Policy != d.After.Policy {
-		fmt.Fprintf(&text, "Local policy: %s -> %s\n", sourceRevision(d.Before.Policy), sourceRevision(d.After.Policy))
+		fmt.Fprintf(&text, "Local policy: %s -> %s\n", revision(d.Before.Policy), revision(d.After.Policy))
 	}
 	fmt.Fprintf(&text, "Models: +%d / -%d / ~%d; defaults: %d; provider metadata: %d\n", len(d.Added), len(d.Removed), len(d.Changed), len(d.Defaults), len(d.Providers))
 	for _, group := range []struct {
@@ -119,24 +165,22 @@ func (d Diff) String() string {
 		values []string
 	}{{"+", d.Added}, {"-", d.Removed}, {"~", d.Changed}, {"default", d.Defaults}, {"provider", d.Providers}} {
 		for i, value := range group.values {
-			if i == 10 {
+			if i == maxPerGroup {
+				truncated = true
 				fmt.Fprintf(&text, "  %s ... %d more\n", group.label, len(group.values)-i)
 				break
 			}
 			fmt.Fprintf(&text, "  %s %s\n", group.label, value)
 		}
 	}
-	if !d.Published {
-		text.WriteString("Already up to date.\n")
-	}
-	return text.String()
+	return text.String(), truncated
 }
 
-func sourceRevision(source Source) string {
+func sourceRevision(source Source, short bool) string {
 	if source.Revision != "" {
 		return source.Revision
 	}
-	if len(source.Integrity) > 23 {
+	if short && len(source.Integrity) > 23 {
 		return source.Integrity[:23]
 	}
 	return source.Integrity

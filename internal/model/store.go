@@ -19,18 +19,19 @@ import (
 // CachedModel is the complete public model contract of models-store.json.
 // Runtime parse diagnostics deliberately live on Model instead of this type.
 type CachedModel struct {
-	Provider         string                             `json:"provider"`
-	ID               string                             `json:"id"`
-	Name             string                             `json:"name,omitempty"`
-	API              string                             `json:"api"`
-	BaseURL          string                             `json:"baseUrl,omitempty"`
-	Headers          map[string]string                  `json:"headers,omitempty"`
-	Reasoning        bool                               `json:"reasoning"`
-	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
-	Input            []provider.InputKind               `json:"input,omitempty"`
-	Cost             provider.CostRates                 `json:"cost"`
-	ContextWindow    uint64                             `json:"contextWindow"`
-	MaxTokens        uint64                             `json:"maxTokens"`
+	Provider             string                             `json:"provider"`
+	ID                   string                             `json:"id"`
+	Name                 string                             `json:"name,omitempty"`
+	API                  string                             `json:"api"`
+	BaseURL              string                             `json:"baseUrl,omitempty"`
+	Headers              map[string]string                  `json:"headers,omitempty"`
+	Reasoning            bool                               `json:"reasoning"`
+	ThinkingLevelMap     map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
+	DefaultThinkingLevel provider.ThinkingLevel             `json:"defaultThinkingLevel,omitempty"`
+	Input                []provider.InputKind               `json:"input,omitempty"`
+	Cost                 provider.CostRates                 `json:"cost"`
+	ContextWindow        uint64                             `json:"contextWindow"`
+	MaxTokens            uint64                             `json:"maxTokens"`
 	// Compat is the original JSON object, kept separately because the runtime
 	// exposes it as a typed provider.ModelCompat selected by API dialect.
 	// Keeping its wire spelling makes cache read/write lossless for adapters
@@ -382,6 +383,9 @@ func validateCatalog(entry CachedCatalog, providerID string) error {
 		if !validValue(m.ID) || !validID(m.Provider) || m.Provider != providerID || !validValue(m.API) || m.Name != "" && !validValue(m.Name) || m.BaseURL != "" && !validValue(m.BaseURL) {
 			return Diagnostic{"models-store.json", providerID, "contains an invalid model"}
 		}
+		if m.DefaultThinkingLevel != "" && !provider.SupportsThinkingLevel(m.Reasoning, m.ThinkingLevelMap, m.DefaultThinkingLevel) {
+			return Diagnostic{"models-store.json", providerID, "defaultThinkingLevel must be a supported thinking level"}
+		}
 		for name, value := range m.Headers {
 			if !validValue(name) || !utf8.ValidString(value) || strings.ContainsFunc(value, unicode.IsControl) {
 				return Diagnostic{"models-store.json", providerID, "contains an invalid model"}
@@ -419,11 +423,11 @@ func cachedRuntimeModel(entry CachedCatalog, index int) Model {
 		return cloneModel(entry.runtimeModels[index])
 	}
 	model := entry.Models[index]
-	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens}
+	return Model{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, DefaultThinkingLevel: model.DefaultThinkingLevel, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens}
 }
 
 func cachedFromRuntimeModel(model Model, compat json.RawMessage) CachedModel {
-	return CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Compat: append(json.RawMessage(nil), compat...)}
+	return CachedModel{Provider: model.Provider, ID: model.ID, Name: model.Name, API: model.API, BaseURL: model.BaseURL, Headers: cloneHeaders(model.Headers), Reasoning: model.Reasoning, DefaultThinkingLevel: model.DefaultThinkingLevel, ThinkingLevelMap: cloneThinkingMap(model.ThinkingLevelMap), Input: cloneInputKinds(model.Input), Cost: provider.CostRates{Input: model.Cost.Input, Output: model.Cost.Output, CacheRead: model.Cost.CacheRead, CacheWrite: model.Cost.CacheWrite, Tiers: append([]provider.CostTier(nil), model.Cost.Tiers...)}, ContextWindow: model.ContextWindow, MaxTokens: model.MaxTokens, Compat: append(json.RawMessage(nil), compat...)}
 }
 
 // writeCachedModelFields replaces every member of the public Model contract;
@@ -439,6 +443,9 @@ func writeCachedModelFields(object map[string]json.RawMessage, model CachedModel
 	if model.Headers != nil {
 		values["headers"] = cloneHeaders(model.Headers)
 	}
+	if model.DefaultThinkingLevel != "" {
+		values["defaultThinkingLevel"] = model.DefaultThinkingLevel
+	}
 	if model.ThinkingLevelMap != nil {
 		values["thinkingLevelMap"] = cloneThinkingMap(model.ThinkingLevelMap)
 	}
@@ -451,7 +458,7 @@ func writeCachedModelFields(object map[string]json.RawMessage, model CachedModel
 	if model.MaxTokens != 0 {
 		values["maxTokens"] = model.MaxTokens
 	}
-	for _, key := range []string{"name", "baseUrl", "headers", "thinkingLevelMap", "input", "contextWindow", "maxTokens", "compat"} {
+	for _, key := range []string{"name", "baseUrl", "headers", "thinkingLevelMap", "defaultThinkingLevel", "input", "contextWindow", "maxTokens", "compat"} {
 		delete(object, key)
 	}
 	for key, value := range values {

@@ -13,6 +13,7 @@ import (
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/auth"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
+	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
 )
 
@@ -31,12 +32,13 @@ type ModelSelection struct {
 }
 
 type AvailableModel struct {
-	Provider         string
-	ProviderName     string
-	ID               string
-	Name             string
-	ThinkingLevels   []provider.ThinkingLevel
-	ThinkingLevelMap map[provider.ThinkingLevel]*string
+	Provider             string
+	ProviderName         string
+	ID                   string
+	Name                 string
+	ThinkingLevels       []provider.ThinkingLevel
+	DefaultThinkingLevel provider.ThinkingLevel // Effective new-session level after scope and capability clamping.
+	ThinkingLevelMap     map[provider.ThinkingLevel]*string
 }
 
 type ModelsSnapshot struct {
@@ -88,6 +90,22 @@ type ProviderAuthInfo struct {
 	OAuthName      string
 	Builtin        bool
 	Enabled        bool
+}
+
+type ModelSyncResult = catalog.SyncResult
+
+func (s *Service) SyncBuiltinModels(ctx context.Context) (ModelSyncResult, error) {
+	s.modelMu.Lock()
+	defer s.modelMu.Unlock()
+	result, err := modelcatalog.SyncBuiltinCatalog(normalizeContext(ctx), filepath.Join(s.paths.AgentDir, catalog.Filename), catalog.SyncOptions{Client: s.modelHTTP})
+	if err != nil && !result.Published {
+		return result, err
+	}
+	// An unchanged file may already have been updated by the CLI since startup.
+	if reloadErr := s.refreshModelConfiguration(ctx); reloadErr != nil {
+		err = errors.Join(err, fmt.Errorf("catalog is installed, but refreshing active models failed: %w", reloadErr))
+	}
+	return result, err
 }
 
 type BuiltinProviderUpdate struct {
@@ -187,6 +205,11 @@ func (s *Service) ListModels(ctx context.Context, cwd string) (ModelsSnapshot, e
 		}
 		if ref, refErr := candidate.Ref(); refErr == nil {
 			entry.ThinkingLevels = ref.SupportedThinkingLevels()
+			desired := candidate.PreferredThinkingLevel(snapshot.Settings.DefaultThinkingLevel)
+			if pinned := pins[candidate.Provider+"/"+candidate.ID]; pinned != "" {
+				desired = pinned
+			}
+			entry.DefaultThinkingLevel = ref.ClampThinkingLevel(desired)
 		}
 		result.Models = append(result.Models, entry)
 		if result.DefaultModel == nil && candidate.Provider == snapshot.Settings.DefaultProvider && candidate.ID == snapshot.Settings.DefaultModel {
@@ -469,19 +492,23 @@ func (s *Service) writeModelsConfigLocked(ctx context.Context, document ModelsCo
 	if err := os.MkdirAll(s.paths.AgentDir, 0o700); err != nil {
 		return err
 	}
-	err = writeFileAtomic(filepath.Join(s.paths.AgentDir, "models.json"), encoded, 0o600)
-	if err == nil {
-		// Catalog refresh changes future selection only. AgentState keeps the
-		// current model, queues, and running provider call.
-		for _, managed := range s.activeSessions() {
-			if services := managed.session.Runtime().Services(); services != nil && services.ModelRuntime != nil {
-				if reloadErr := services.ModelRuntime.Reload(context.WithoutCancel(normalizeContext(ctx))); reloadErr != nil {
-					return reloadErr
-				}
-			}
-		}
-		s.publishConfiguration("", true, false)
+	if err := writeFileAtomic(filepath.Join(s.paths.AgentDir, "models.json"), encoded, 0o600); err != nil {
+		return err
 	}
+	return s.refreshModelConfiguration(ctx)
+}
+
+// Refresh future selection only. AgentState keeps the current model, queues and
+// running provider call. Finish notifying readers even if the caller disconnects.
+func (s *Service) refreshModelConfiguration(ctx context.Context) error {
+	ctx = context.WithoutCancel(normalizeContext(ctx))
+	var err error
+	for _, managed := range s.activeSessions() {
+		if services := managed.session.Runtime().Services(); services != nil && services.ModelRuntime != nil {
+			err = errors.Join(err, services.ModelRuntime.Reload(ctx))
+		}
+	}
+	s.publishConfiguration("", true, false)
 	return err
 }
 

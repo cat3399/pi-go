@@ -9,11 +9,11 @@ import {
 } from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import type { ModelListItem, ModelsView, SelectedModel } from "../contracts";
+import { modelThinkingChoices } from "./model-thinking";
 import { AnchoredPopover } from "../primitives/AnchoredPopover";
 import { useInputModality } from "../primitives/useInputModality";
 
 interface ModelConfigControlProps {
-  active: boolean;
   models: ModelsView | null;
   model: SelectedModel | null;
   thinkingLevel: string;
@@ -25,7 +25,6 @@ interface ModelConfigControlProps {
 type ConfigPage = "root" | "models" | "thinking";
 
 const thinkingLabels: Record<string, string> = {
-  auto: "自动",
   off: "关闭",
   minimal: "极低",
   low: "低",
@@ -73,13 +72,7 @@ export function ModelConfigControl(props: ModelConfigControlProps) {
     || props.models?.models[capabilityKey]
     || props.model?.modelId
     || "未选择模型";
-  const thinkingLevels = [
-    ...(!props.active ? ["auto"] : []),
-    ...(props.models?.thinkingLevels[capabilityKey] ?? []),
-  ].filter((value, index, values) => values.indexOf(value) === index);
-  if (props.thinkingLevel && !thinkingLevels.includes(props.thinkingLevel)) {
-    thinkingLevels.unshift(props.thinkingLevel);
-  }
+  const thinkingLevels = modelThinkingChoices(props.models, props.model);
   const disabled = props.disabled || modelOptions.length === 0;
   const groups = useMemo(() => {
     const grouped = new Map<string, { id: string; label: string; models: ModelListItem[] }>();

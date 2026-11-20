@@ -201,6 +201,14 @@ func (b *GUIBridge) Models(cwd string) (surfacewire.ModelsView, error) {
 	return surfacewire.Models(b.context(), api, cwd)
 }
 
+func (b *GUIBridge) SyncBuiltinModels() (coreapplication.ModelSyncResult, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return coreapplication.ModelSyncResult{}, err
+	}
+	return api.SyncBuiltinModels(b.context())
+}
+
 func (b *GUIBridge) ModelProviders(cwd string) ([]surfacewire.ModelProviderInfo, error) {
 	api, err := b.localAPI()
 	if err != nil {
@@ -259,6 +267,14 @@ func (b *GUIBridge) DeleteProviderCredential(providerID, credentialType string) 
 		return err
 	}
 	return api.DeleteProviderCredential(b.context(), providerID, credentialType)
+}
+
+func (b *GUIBridge) LookupModelPresets(query coreapplication.ModelPresetRequest) ([]coreapplication.DiscoveredModel, error) {
+	api, err := b.localAPI()
+	if err != nil {
+		return nil, err
+	}
+	return api.LookupModelPresets(b.context(), query)
 }
 
 func (b *GUIBridge) DiscoverModels(providerID, definition string) (map[string]any, error) {

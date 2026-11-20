@@ -207,6 +207,9 @@ func modelWire(value provider.Model) map[string]any {
 		"baseUrl": value.BaseURL(), "reasoning": value.Reasoning(), "input": value.Input(),
 		"cost": value.Cost(), "contextWindow": value.ContextWindow(), "maxTokens": value.MaxTokens(),
 	}
+	if level := value.DefaultThinkingLevel(); level != "" {
+		model["defaultThinkingLevel"] = level
+	}
 	if levels := value.ThinkingLevelMap(); len(levels) != 0 {
 		model["thinkingLevelMap"] = levels
 	}

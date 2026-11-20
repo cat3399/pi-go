@@ -548,6 +548,7 @@ func TestCreateAgentSessionBootstrapSelectionMatrix(t *testing.T) {
 	t.Run("explicit model and thinking take priority without eager auth", func(t *testing.T) {
 		manager := factoryManager(t)
 		explicit := factoryCatalogModel("explicit", "chosen")
+		explicit.DefaultThinkingLevel = provider.ThinkingMinimal
 		fallback := factoryCatalogModel("openai", "gpt-5.5")
 		high := provider.ThinkingHigh
 		result := createFactorySession(t, manager, agentruntime.SessionFactoryOptions{
@@ -574,6 +575,7 @@ func TestCreateAgentSessionBootstrapSelectionMatrix(t *testing.T) {
 		manager := factoryManager(t)
 		first := factoryCatalogModel("scope", "first")
 		preferred := factoryCatalogModel("scope", "preferred")
+		preferred.DefaultThinkingLevel = provider.ThinkingMedium
 		scopeThinking := provider.ThinkingHigh
 		result := createFactorySession(t, manager, agentruntime.SessionFactoryOptions{
 			AllModels: []model.Model{first, preferred}, Availability: availableFactoryModels(map[string]bool{"scope": true}),
@@ -625,6 +627,7 @@ func TestCreateAgentSessionBootstrapSelectionMatrix(t *testing.T) {
 		appendFactoryUser(t, manager)
 		before := len(manager.Entries())
 		saved := factoryCatalogModel("saved", "model")
+		saved.DefaultThinkingLevel = provider.ThinkingMinimal
 		result := createFactorySession(t, manager, agentruntime.SessionFactoryOptions{
 			AllModels: []model.Model{saved}, Availability: availableFactoryModels(map[string]bool{"saved": true}),
 			Settings: model.Settings{DefaultThinkingLevel: provider.ThinkingLow},

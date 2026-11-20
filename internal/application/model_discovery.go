@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cat3399/pi-go/internal/auth"
+	"github.com/cat3399/pi-go/internal/provider"
 )
 
 const (
@@ -31,9 +32,16 @@ type ModelProviderDraft struct {
 	Headers map[string]string `json:"headers"`
 }
 
+// Discovery returns the service's ID and name only. Explicit preset lookups
+// may additionally return capabilities, never prices, routes or credentials.
 type DiscoveredModel struct {
-	ID   string `json:"id"`
-	Name string `json:"name,omitempty"`
+	ID               string                             `json:"id"`
+	Name             string                             `json:"name,omitempty"`
+	Reasoning        *bool                              `json:"reasoning,omitempty"`
+	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap,omitempty"`
+	Input            []provider.InputKind               `json:"input,omitzero"`
+	ContextWindow    uint64                             `json:"contextWindow,omitempty"`
+	MaxTokens        uint64                             `json:"maxTokens,omitempty"`
 }
 
 type ModelDiscoveryResult struct {

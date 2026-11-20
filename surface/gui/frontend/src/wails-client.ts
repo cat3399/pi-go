@@ -16,8 +16,8 @@ import type {
   EventSubscription,
   FileList,
   FilePreview,
-  ModelsView,
-  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery,
+  ModelsView, ModelSyncResult,
+  ModelProviderInfo, ProviderModelInfo, ModelsConfig, ModelProviderConfig, ModelDiscovery, DiscoveredModel, ModelPresetRequest,
   ProjectInfo,
   SessionView,
   SessionResources,
@@ -138,6 +138,7 @@ export class WailsApplicationClient implements ApplicationClient {
     return call("Models", cwd);
   }
 
+  syncBuiltinModels(): Promise<ModelSyncResult> { return call("SyncBuiltinModels"); }
   modelProviders(cwd: string): Promise<ModelProviderInfo[]> { return call("ModelProviders", cwd); }
   providerModels(cwd: string, providerId: string): Promise<ProviderModelInfo[]> { return call("ProviderModels", cwd, providerId); }
   setBuiltinProviderEnabled(providerId: string, enabled: boolean, only = false): Promise<void> { return call("SetBuiltinProviderEnabled", providerId, enabled, only); }
@@ -145,6 +146,7 @@ export class WailsApplicationClient implements ApplicationClient {
   writeModelProvider(providerId: string, definition: ModelProviderConfig | null): Promise<void> { return call("WriteModelProvider", providerId, definition ? JSON.stringify(definition) : ""); }
   setProviderAPIKey(providerId: string, key: string): Promise<void> { return call("SetProviderAPIKey", providerId, key); }
   deleteProviderCredential(providerId: string, credentialType: string): Promise<void> { return call("DeleteProviderCredential", providerId, credentialType); }
+  lookupModelPresets(request: ModelPresetRequest): Promise<DiscoveredModel[]> { return call("LookupModelPresets", request); }
   discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery> { return call("DiscoverModels", providerId, JSON.stringify(definition)); }
 
   readDraftText(key: string): Promise<DraftText> {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -214,6 +215,10 @@ func Write(ctx context.Context, path string, doc Document) (changed bool, err er
 		return false, err
 	}
 	changed = true
+	if runtime.GOOS == "windows" {
+		// The file is synced; Windows does not support flushing its parent directory.
+		return true, nil
+	}
 	directory, err := os.Open(dir)
 	if err == nil {
 		err = directory.Sync()

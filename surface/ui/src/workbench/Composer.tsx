@@ -31,6 +31,7 @@ import {
 import type { ToolPreset } from "../tool-presets";
 import type { StreamingInputBehavior } from "../streaming-input-behavior";
 import { ComposerInput, ComposerSendButton } from "./ComposerInput";
+import { modelThinkingChoices } from "./model-thinking";
 import { ModelConfigControl, thinkingLevelLabel } from "./ModelConfigControl";
 import type { SendBehavior } from "./useApplicationController";
 import { draftRevision, type ComposerDraft, type DraftFile } from "./composer-drafts";
@@ -154,16 +155,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return () => { cancelled = true; };
   }, [props.draft, draftState.content.images]);
 
-  const modelCapabilityKey = props.model
-    ? `${props.model.provider}:${props.model.modelId}`
-    : "";
-  const thinkingLevels = [
-    ...(!props.active ? ["auto"] : []),
-    ...(props.models?.thinkingLevels[modelCapabilityKey] ?? []),
-  ].filter((value, index, values) => values.indexOf(value) === index);
-  if (props.thinkingLevel && !thinkingLevels.includes(props.thinkingLevel)) {
-    thinkingLevels.unshift(props.thinkingLevel);
-  }
+  const thinkingLevels = modelThinkingChoices(props.models, props.model);
   const modelNotice = props.models?.modelError || props.models?.modelScopeWarnings?.join("\n") || "";
   const projectOptions = (props.projects ?? []).map((project) => ({
     value: project.path,
@@ -778,7 +770,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               />
             )}
             <ModelConfigControl
-              active={props.active}
               models={props.models}
               model={props.model}
               thinkingLevel={props.thinkingLevel}

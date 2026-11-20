@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -83,19 +84,20 @@ func projectBuiltinCatalog(document catalog.Document) (*builtinCatalog, error) {
 // Built-in metadata uses the runtime Model shape. In particular, an empty baseUrl
 // is valid for Azure; models.json's nonempty user-property schema is different.
 type catalogModel struct {
-	Provider         string                             `json:"provider"`
-	ID               string                             `json:"id"`
-	Name             string                             `json:"name"`
-	API              string                             `json:"api"`
-	BaseURL          string                             `json:"baseUrl"`
-	Headers          map[string]string                  `json:"headers"`
-	Reasoning        bool                               `json:"reasoning"`
-	ThinkingLevelMap map[provider.ThinkingLevel]*string `json:"thinkingLevelMap"`
-	Input            []provider.InputKind               `json:"input"`
-	Cost             provider.CostRates                 `json:"cost"`
-	ContextWindow    uint64                             `json:"contextWindow"`
-	MaxTokens        uint64                             `json:"maxTokens"`
-	Compat           json.RawMessage                    `json:"compat"`
+	Provider             string                             `json:"provider"`
+	ID                   string                             `json:"id"`
+	Name                 string                             `json:"name"`
+	API                  string                             `json:"api"`
+	BaseURL              string                             `json:"baseUrl"`
+	Headers              map[string]string                  `json:"headers"`
+	Reasoning            bool                               `json:"reasoning"`
+	ThinkingLevelMap     map[provider.ThinkingLevel]*string `json:"thinkingLevelMap"`
+	DefaultThinkingLevel provider.ThinkingLevel             `json:"defaultThinkingLevel"`
+	Input                []provider.InputKind               `json:"input"`
+	Cost                 provider.CostRates                 `json:"cost"`
+	ContextWindow        uint64                             `json:"contextWindow"`
+	MaxTokens            uint64                             `json:"maxTokens"`
+	Compat               json.RawMessage                    `json:"compat"`
 }
 
 func projectBuiltinModel(providerID string, raw json.RawMessage) (Model, error) {
@@ -105,7 +107,7 @@ func projectBuiltinModel(providerID string, raw json.RawMessage) (Model, error) 
 	}
 	id := wire.ID
 	model := Model{Provider: wire.Provider, ID: wire.ID, Name: wire.Name, API: wire.API, BaseURL: wire.BaseURL,
-		Headers: wire.Headers, Reasoning: wire.Reasoning, ThinkingLevelMap: wire.ThinkingLevelMap, Input: wire.Input,
+		Headers: wire.Headers, Reasoning: wire.Reasoning, ThinkingLevelMap: wire.ThinkingLevelMap, DefaultThinkingLevel: wire.DefaultThinkingLevel, Input: wire.Input,
 		Cost: wire.Cost, ContextWindow: wire.ContextWindow, MaxTokens: wire.MaxTokens, compatRaw: bytes.Clone(wire.Compat)}
 	if len(wire.Compat) != 0 {
 		var err error
@@ -120,7 +122,7 @@ func projectBuiltinModel(providerID string, raw json.RawMessage) (Model, error) 
 	}
 	for key := range object {
 		switch key {
-		case "provider", "id", "name", "api", "baseUrl", "headers", "reasoning", "thinkingLevelMap", "input", "cost", "contextWindow", "maxTokens", "compat", "modelsDev":
+		case "provider", "id", "name", "api", "baseUrl", "headers", "reasoning", "thinkingLevelMap", "defaultThinkingLevel", "input", "cost", "contextWindow", "maxTokens", "compat", "modelsDev":
 		default:
 			model.UnknownFields = append(model.UnknownFields, key)
 		}
@@ -159,6 +161,14 @@ func (c *builtinCatalog) provider(id string) ProviderConfig {
 	return ProviderConfig{}
 }
 
+// LoadBuiltinModels reads only the baseline for catalog suggestions, with the
+// same embedded fallback as a fresh Runtime. Discovery must not depend on the
+// working directory, provider credentials, user overrides or selection filters.
+func LoadBuiltinModels(agentDir string) []Model {
+	baseline, _ := loadBuiltinCatalog(filepath.Join(agentDir, catalog.Filename), nil)
+	return cloneModels(baseline.models)
+}
+
 func builtinModels() []Model {
 	models := append([]Model(nil), embeddedBuiltinCatalog().models...)
 	for i := range models {
@@ -177,33 +187,42 @@ func builtinProviderConfigs() []ProviderConfig {
 
 // SyncBuiltinCatalog updates only the target built-in data file. It does not
 // modify adjacent settings, user models, authentication, or provider caches.
-// The same operation backs development sync and the installed-data command.
-func SyncBuiltinCatalog(ctx context.Context, target, sourceFile string) (catalog.Diff, error) {
+// CLI, development sync and the Application service share publication and reporting.
+func SyncBuiltinCatalog(ctx context.Context, target string, options catalog.SyncOptions) (catalog.SyncResult, error) {
 	baseline, err := catalog.Decode(embeddedCatalogJSON)
 	if err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
 	previous, err := catalog.Read(target)
 	if errors.Is(err, os.ErrNotExist) {
 		previous = baseline
 	} else if err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
 	if _, err := projectBuiltinCatalog(previous); err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
 	policy, err := catalog.DecodePolicy(embeddedCatalogPolicyJSON)
 	if err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
-	updated, err := catalog.Sync(ctx, policy, sourceFile)
+	updated, err := catalog.Sync(ctx, policy, options)
 	if err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
 	if _, err := projectBuiltinCatalog(updated); err != nil {
-		return catalog.Diff{}, err
+		return catalog.SyncResult{}, err
 	}
-	diff := catalog.Compare(previous, updated)
-	diff.Published, err = catalog.Write(ctx, target, updated)
-	return diff, err
+	result, err := catalog.Compare(previous, updated).Report()
+	if err != nil {
+		return catalog.SyncResult{}, fmt.Errorf("catalog not updated: %w", err)
+	}
+	result.Published, err = catalog.Write(ctx, target, updated)
+	if err != nil && result.FullOutputPath != "" {
+		err = fmt.Errorf("%w (full change report: %s)", err, result.FullOutputPath)
+	}
+	if err == nil && !result.Published {
+		result.Summary += "Already up to date.\n"
+	}
+	return result, err
 }

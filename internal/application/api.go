@@ -63,6 +63,7 @@ type API interface {
 	ListModels(context.Context, string) (ModelsSnapshot, error)
 	GetUISettings(context.Context, string) (UISettings, error)
 	SetTheme(context.Context, string, string) (UISettings, error)
+	SyncBuiltinModels(context.Context) (ModelSyncResult, error)
 	ListModelProviders(context.Context, string) ([]ProviderAuthInfo, error)
 	ListProviderModels(context.Context, string, string) ([]ProviderModelInfo, error)
 	SetBuiltinProviderEnabled(context.Context, string, BuiltinProviderUpdate) error
@@ -72,6 +73,7 @@ type API interface {
 	StartProviderOAuth(context.Context, string) (*ProviderOAuthLogin, error)
 	ReadModelsConfig(context.Context) (ModelsConfigDocument, error)
 	WriteModelsConfig(context.Context, ModelsConfigDocument) error
+	LookupModelPresets(context.Context, ModelPresetRequest) ([]DiscoveredModel, error)
 	DiscoverModels(context.Context, string, ModelProviderDraft) (ModelDiscoveryResult, error)
 	QueryModelCatalog(context.Context, string, string, string, int) (ModelCatalogResult, error)
 	TestModel(context.Context, string, json.RawMessage, json.RawMessage) (ModelProbeResult, error)

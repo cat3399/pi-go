@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/cat3399/pi-go/internal/model"
+	"github.com/cat3399/pi-go/internal/model/catalog"
 )
 
 func main() {
@@ -23,13 +24,13 @@ func main() {
 	defer stop()
 	const target = "internal/model/catalogdata/catalog.json"
 	fmt.Fprintln(os.Stdout, "Syncing built-in models from models.dev...")
-	diff, err := model.SyncBuiltinCatalog(ctx, target, *source)
+	result, err := model.SyncBuiltinCatalog(ctx, target, catalog.SyncOptions{SourceFile: *source})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sync-models:", err)
 		os.Exit(1)
 	}
-	fmt.Fprint(os.Stdout, diff.String())
-	if diff.Published {
+	fmt.Fprint(os.Stdout, result)
+	if result.Published {
 		fmt.Fprintln(os.Stdout, "Updated", target)
 	}
 }

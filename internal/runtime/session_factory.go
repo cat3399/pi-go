@@ -109,7 +109,7 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 		fallback = &message
 	}
 
-	thinking := model.DefaultThinkingLevel
+	thinking := selected.PreferredThinkingLevel(options.Settings.DefaultThinkingLevel)
 	if options.ExplicitThinkingLevel != nil {
 		thinking = *options.ExplicitThinkingLevel
 	} else if hasExistingSession && hasThinkingEntry {
@@ -118,8 +118,6 @@ func CreateAgentSession(ctx context.Context, options SessionFactoryOptions) (Cre
 		}
 	} else if scopedThinking != nil {
 		thinking = *scopedThinking
-	} else if options.Settings.DefaultThinkingLevel != "" {
-		thinking = options.Settings.DefaultThinkingLevel
 	}
 	config := options.BaseConfig
 	config.Stream = provider.MergeStreamOptions(

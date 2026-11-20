@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +15,10 @@ import (
 )
 
 func TestModelsUpdateReplayReloadAndFailurePreserveUserData(t *testing.T) {
-	agentDir := t.TempDir()
+	agentDir, logs := t.TempDir(), t.TempDir()
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(key, logs)
+	}
 	files := map[string]string{
 		"models.json":       `{"providers":{"openai":{"apiKey":"fixture-key","modelOverrides":{"gpt-5.4":{"contextWindow":45000,"cost":{"input":0.25}}}}}}`,
 		"settings.json":     `{"defaultProvider":"openai","defaultModel":"gpt-5.4"}`,
@@ -67,6 +72,9 @@ func TestModelsUpdateReplayReloadAndFailurePreserveUserData(t *testing.T) {
 	if code := RunModels(context.Background(), args, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "Already up to date") {
 		t.Fatalf("identical replay was not a no-op (%d): %s / %s", code, stdout.String(), stderr.String())
 	}
+	if strings.Contains(stdout.String(), "Full output:") {
+		t.Fatal("identical replay advertised a truncated record")
+	}
 	invalid := filepath.Join(t.TempDir(), "invalid.json")
 	if err := os.WriteFile(invalid, []byte(`{"openai":{"id":"openai","models":{}}}`), 0600); err != nil {
 		t.Fatal(err)
@@ -79,6 +87,48 @@ func TestModelsUpdateReplayReloadAndFailurePreserveUserData(t *testing.T) {
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("failed update replaced the last healthy catalog")
+	}
+	// Install a known prior snapshot. A failed report must leave that baseline
+	// in place so a retry can still record all twelve removals.
+	for _, p := range doc.Providers {
+		if p.ID != "openai" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(p.Models[p.API]["gpt-5.4"], &entry); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 12 {
+			id := fmt.Sprintf("previous-%02d", i)
+			entry["id"] = id
+			p.Models[p.API][id], _ = json.Marshal(entry)
+		}
+	}
+	if _, err := catalog.Write(context.Background(), path, doc); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("cannot save full output", func(t *testing.T) {
+		for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
+			t.Setenv(key, filepath.Join(logs, "missing"))
+		}
+		stdout.Reset()
+		stderr.Reset()
+		if code := RunModels(context.Background(), args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "catalog not updated") || strings.Contains(stdout.String(), "Full output:") {
+			t.Fatalf("report failure = %d, %s / %s", code, stdout.String(), stderr.String())
+		}
+	})
+	stdout.Reset()
+	stderr.Reset()
+	if code := RunModels(context.Background(), args, &stdout, &stderr); code != 0 {
+		t.Fatalf("retry = %d: %s", code, stderr.String())
+	}
+	_, tail, found := strings.Cut(stdout.String(), "[Output truncated. Full output: ")
+	logPath, _, closed := strings.Cut(tail, "]\n")
+	if !found || !closed || filepath.Dir(logPath) != logs || strings.Contains(stdout.String(), "openai/previous-11") {
+		t.Fatalf("missing bounded CLI report: %s", stdout.String())
+	}
+	if raw, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(raw), "  - openai/previous-11\n") {
+		t.Fatalf("missing original change after retry: %v", err)
 	}
 	for name, contents := range files {
 		raw, err := os.ReadFile(filepath.Join(agentDir, name))

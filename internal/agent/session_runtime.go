@@ -591,6 +591,15 @@ func NewSession(config SessionConfig) (*AgentSession, error) {
 		} else {
 			config.ThinkingLevel = provider.ThinkingOff
 		}
+		if level := config.Model.DefaultThinkingLevel(); level != "" {
+			hasEntry, err := sessionBranchHasThinkingEntry(config.SessionManager)
+			if err != nil {
+				return nil, err
+			}
+			if !hasEntry {
+				config.ThinkingLevel = level
+			}
+		}
 	}
 	if !config.ThinkingLevel.Valid() {
 		return nil, fmt.Errorf("%w: invalid thinking level %q", ErrInvalidConfig, config.ThinkingLevel)

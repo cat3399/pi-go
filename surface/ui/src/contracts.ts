@@ -40,6 +40,7 @@ export interface ModelListItem {
   name: string;
   provider: string;
   providerName?: string;
+  defaultThinkingLevel?: string;
 }
 
 export interface ModelsView {
@@ -483,6 +484,7 @@ export interface ApplicationClient {
   readResource<K extends keyof SessionResources>(sessionId: string, kind: K, query?: ReadResourceRequest, known?: string): Promise<ResourceResponse<SessionResources[K]>>;
   createSession(input: CreateSessionRequest): Promise<CreateSessionResult>;
   models(cwd: string): Promise<ModelsView>;
+  syncBuiltinModels(): Promise<ModelSyncResult>;
   modelProviders(cwd: string): Promise<ModelProviderInfo[]>;
   providerModels(cwd: string, providerId: string): Promise<ProviderModelInfo[]>;
   setBuiltinProviderEnabled(providerId: string, enabled: boolean, only?: boolean): Promise<void>;
@@ -490,6 +492,7 @@ export interface ApplicationClient {
   writeModelProvider(providerId: string, definition: ModelProviderConfig | null): Promise<void>;
   setProviderAPIKey(providerId: string, key: string): Promise<void>;
   deleteProviderCredential(providerId: string, credentialType: string): Promise<void>;
+  lookupModelPresets(request: ModelPresetRequest): Promise<DiscoveredModel[]>;
   discoverModels(providerId: string, definition: ModelProviderConfig): Promise<ModelDiscovery>;
   readDraftText(key: string): Promise<DraftText>;
   writeDraftText(key: string, update: DraftTextUpdate): Promise<DraftTextWriteResult>;
@@ -507,6 +510,12 @@ export interface ApplicationClient {
   dispatch<T = unknown>(sessionId: string, command: Record<string, unknown>): Promise<T>;
   subscribe(after: number | string, observer: EventObserver, sessionIds?: string[]): EventSubscription;
   close(): void;
+}
+
+export interface ModelSyncResult {
+  published: boolean;
+  summary: string;
+  fullOutputPath?: string;
 }
 
 export interface ModelProviderInfo {
@@ -536,9 +545,13 @@ export interface ProviderModelInfo {
 export interface ModelDefinition {
   id: string;
   name?: string;
+  api?: string;
+  baseUrl?: string;
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+  defaultThinkingLevel?: string;
   input?: string[];
   [key: string]: unknown;
 }
@@ -558,8 +571,15 @@ export interface ModelsConfig {
   [key: string]: unknown;
 }
 
+export type DiscoveredModel = Pick<ModelDefinition, "id" | "name" | "reasoning" | "thinkingLevelMap" | "input" | "contextWindow" | "maxTokens">;
+
+export interface ModelPresetRequest {
+  providerId: string;
+  models: { id: string; api: string; baseUrl: string }[];
+}
+
 export interface ModelDiscovery {
-  models: { id: string; name?: string }[];
+  models: DiscoveredModel[];
   endpoint: string;
 }
 

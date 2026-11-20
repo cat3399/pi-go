@@ -25,6 +25,7 @@ import {
   type ToolPreset,
 } from "../tool-presets";
 import { assistantResponseKey, assistantUsage, type LatestAssistantUsageInfo } from "./message";
+import { isThinkingLevel, modelThinkingChoices, sessionDraftThinking } from "./model-thinking";
 import { SessionImageCache } from "./session-images";
 import { RefreshScheduler } from "./refresh-scheduler";
 import { applicationDataFor, type ApplicationDataStore, type DirectoryWindow, type HistoryWindow } from "./application-data";
@@ -145,11 +146,6 @@ function defaultModel(models: ModelsView | null): SelectedModel | null {
   return first ? { provider: first.provider, modelId: first.id } : null;
 }
 
-function defaultThinkingLevel(models: ModelsView | null, model: SelectedModel | null): string {
-  if (!models || !model) return "auto";
-  return models.thinkingLevelPins[`${model.provider}/${model.modelId}`] ?? "auto";
-}
-
 function sameProjectPath(left: string, right: string): boolean {
   const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
   return normalize(left) === normalize(right);
@@ -171,8 +167,11 @@ export function useApplicationController(client: ApplicationClient): Application
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [newSessionCwd, setNewSessionCwd] = useState("");
-  const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
-  const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState("auto");
+  const [modelOverride, setModelOverride] = useState<SelectedModel | null>(null);
+  const newSessionModel = useMemo(() => modelOverride && models?.modelList.some((m) => m.provider === modelOverride.provider && m.id === modelOverride.modelId)
+    ? modelOverride : defaultModel(models), [models, modelOverride]);
+  const [thinkingOverride, setThinkingOverride] = useState("");
+  const draftThinking = sessionDraftThinking(models, newSessionModel, thinkingOverride);
   const [toolPreset, setToolPresetState] = useState<ToolPreset>("default");
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
@@ -187,8 +186,6 @@ export function useApplicationController(client: ApplicationClient): Application
   const selectionRef = useRef(0);
   const selection = selectionRef.current;
   const generationRef = useRef(0);
-  const newSessionModelOverriddenRef = useRef(false);
-  const newSessionThinkingOverriddenRef = useRef(false);
   const sessionStatsOpenRef = useRef(false);
   const activeGenerationTimingRef = useRef<ActiveGenerationTiming | null>(null);
   const modelsRequestRef = useRef(0);
@@ -202,13 +199,6 @@ export function useApplicationController(client: ApplicationClient): Application
     const value = await data.cached("models", cwd, () => client.models(cwd));
     if (generation !== generationRef.current || request !== modelsRequestRef.current) return null;
     setModels(value);
-    if (activeSessionRef.current === null) {
-      const model = defaultModel(value);
-      if (!newSessionModelOverriddenRef.current) setNewSessionModel(model);
-      if (!newSessionThinkingOverriddenRef.current) {
-        setNewSessionThinkingLevel(defaultThinkingLevel(value, model));
-      }
-    }
     return value;
   }, [client, data]);
 
@@ -395,8 +385,6 @@ export function useApplicationController(client: ApplicationClient): Application
     data.stop();
     data.select(scopeOwner, null);
     activeSessionRef.current = null;
-    newSessionModelOverriddenRef.current = false;
-    newSessionThinkingOverriddenRef.current = false;
     setStatus("connecting");
     setError("");
     setSnapshot(null);
@@ -406,8 +394,8 @@ export function useApplicationController(client: ApplicationClient): Application
     setRuntimeState(null);
     setActiveSessionId(null);
     setNewSessionCwd("");
-    setNewSessionModel(null);
-    setNewSessionThinkingLevel("auto");
+    setModelOverride(null);
+    setThinkingOverride("");
     setToolPresetState("default");
     setSlashCommands([]);
     setSlashCommandsLoading(false);
@@ -527,8 +515,6 @@ export function useApplicationController(client: ApplicationClient): Application
     activeSessionRef.current = null;
     data.select(scopeOwner, null);
     setHistoryWindow(null);
-    newSessionModelOverriddenRef.current = false;
-    newSessionThinkingOverriddenRef.current = false;
     setActiveSessionId(null);
     setSessionLoading(false);
     setSessionView(null);
@@ -539,9 +525,8 @@ export function useApplicationController(client: ApplicationClient): Application
     sessionStatsOpenRef.current = false;
     setSessionStatsOpen(false);
     setNewSessionCwd(nextCwd);
-    const model = defaultModel(models);
-    setNewSessionModel(model);
-    setNewSessionThinkingLevel(defaultThinkingLevel(models, model));
+    setModelOverride(null);
+    setThinkingOverride("");
     setToolPresetState("default");
     setMessages([]);
     setStreamingMessage(null);
@@ -696,9 +681,7 @@ export function useApplicationController(client: ApplicationClient): Application
             provider: newSessionModel.provider,
             modelId: newSessionModel.modelId,
           } : {}),
-          ...(newSessionThinkingLevel !== "auto" ? {
-            thinkingLevel: newSessionThinkingLevel,
-          } : {}),
+          thinkingLevel: draftThinking.requested,
           toolNames: getToolNamesForPreset(toolPreset),
         });
         sessionID = created.sessionId;
@@ -821,7 +804,7 @@ export function useApplicationController(client: ApplicationClient): Application
     client,
     newSessionModel,
     newSessionCwd,
-    newSessionThinkingLevel,
+    draftThinking.requested,
     handleBuiltinSlashCommand,
     loadSession,
     loadSlashCommands,
@@ -869,11 +852,8 @@ export function useApplicationController(client: ApplicationClient): Application
     setError("");
     const sessionID = activeSessionRef.current;
     if (!sessionID) {
-      newSessionModelOverriddenRef.current = true;
-      setNewSessionModel(model);
-      if (!newSessionThinkingOverriddenRef.current) {
-        setNewSessionThinkingLevel(defaultThinkingLevel(models, model));
-      }
+      setModelOverride(model);
+      setThinkingOverride("");
       return;
     }
     try {
@@ -897,12 +877,14 @@ export function useApplicationController(client: ApplicationClient): Application
   const changeThinkingLevel = useCallback(async (level: string) => {
     setError("");
     const sessionID = activeSessionRef.current;
-    if (!sessionID) {
-      newSessionThinkingOverriddenRef.current = true;
-      setNewSessionThinkingLevel(level);
+    if (!isThinkingLevel(level) || (!sessionID && !modelThinkingChoices(models, newSessionModel).includes(level))) {
+      setError("请选择模型支持的思考强度");
       return;
     }
-    if (level === "auto") return;
+    if (!sessionID) {
+      setThinkingOverride(level);
+      return;
+    }
     try {
       await client.dispatch(sessionID, { type: "set_thinking_level", level });
       setRuntimeState((current) => ({ ...current, thinkingLevel: level }));
@@ -910,7 +892,7 @@ export function useApplicationController(client: ApplicationClient): Application
       setError(errorMessage(thinkingError));
       throw thinkingError;
     }
-  }, [client, data]);
+  }, [client, models, newSessionModel]);
 
   const changeToolPreset = useCallback(async (preset: ToolPreset) => {
     setError("");
@@ -1146,7 +1128,7 @@ export function useApplicationController(client: ApplicationClient): Application
     : newSessionModel;
   const thinkingLevel = activeSessionId
     ? runtimeState?.thinkingLevel ?? sessionView?.context.thinkingLevel ?? "off"
-    : newSessionThinkingLevel;
+    : draftThinking.level;
   const queuedMessages = runtimeState?.queuedMessages ?? emptyQueue;
   const pendingMessages: AgentMessage[] = activeSessionId
     ? [...queuedMessages.steering, ...queuedMessages.followUp].map((text, index) => ({ id: `queue-${index}`, role: "user", content: text, pending: true }))

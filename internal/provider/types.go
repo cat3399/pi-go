@@ -145,6 +145,7 @@ type ModelSpec struct {
 	Provider, API, ID, Name, BaseURL string
 	Reasoning                        bool
 	ThinkingLevelMap                 map[ThinkingLevel]*string
+	DefaultThinkingLevel             ThinkingLevel // Optional model-specific selection preference.
 	Input                            []InputKind
 	Cost                             CostRates
 	ContextWindow, MaxTokens         uint64
@@ -163,16 +164,17 @@ type Model struct {
 }
 
 type modelMetadata struct {
-	name             string
-	baseURL          string
-	reasoning        bool
-	thinkingLevelMap map[ThinkingLevel]*string
-	input            []InputKind
-	cost             CostRates
-	contextWindow    uint64
-	maxTokens        uint64
-	headers          map[string]string
-	compat           ModelCompat
+	name                 string
+	baseURL              string
+	reasoning            bool
+	thinkingLevelMap     map[ThinkingLevel]*string
+	defaultThinkingLevel ThinkingLevel
+	input                []InputKind
+	cost                 CostRates
+	contextWindow        uint64
+	maxTokens            uint64
+	headers              map[string]string
+	compat               ModelCompat
 }
 
 // NewModel constructs a complete model value. Every field required by pi's
@@ -184,7 +186,7 @@ func NewModel(spec ModelSpec) (Model, error) {
 	}
 	model := Model{provider: spec.Provider, api: spec.API, id: spec.ID, metadata: modelMetadata{
 		name: spec.Name, baseURL: spec.BaseURL, reasoning: spec.Reasoning,
-		thinkingLevelMap: cloneThinkingLevelMap(spec.ThinkingLevelMap), input: input, cost: cloneCostRates(spec.Cost),
+		thinkingLevelMap: cloneThinkingLevelMap(spec.ThinkingLevelMap), defaultThinkingLevel: spec.DefaultThinkingLevel, input: input, cost: cloneCostRates(spec.Cost),
 		contextWindow: spec.ContextWindow, maxTokens: spec.MaxTokens, headers: cloneStrings(spec.Headers), compat: CloneModelCompat(spec.Compat),
 	}}
 	if err := model.validate(); err != nil {
@@ -232,6 +234,9 @@ func validateModelSpec(spec ModelSpec, input []InputKind) error {
 		if kind != InputText && kind != InputImage {
 			return fmt.Errorf("%w: unsupported input kind %q", ErrInvalidModel, kind)
 		}
+	}
+	if level := spec.DefaultThinkingLevel; level != "" && !SupportsThinkingLevel(spec.Reasoning, spec.ThinkingLevelMap, level) {
+		return fmt.Errorf("%w: defaultThinkingLevel must be a supported thinking level", ErrInvalidModel)
 	}
 	for level, mapped := range spec.ThinkingLevelMap {
 		if !level.Valid() {
@@ -293,7 +298,7 @@ func (m Model) validate() error {
 	return validateModelSpec(ModelSpec{
 		Provider: m.provider, API: m.api, ID: m.id, Name: m.metadata.name,
 		BaseURL: m.metadata.baseURL, Reasoning: m.metadata.reasoning,
-		ThinkingLevelMap: m.metadata.thinkingLevelMap, Input: m.metadata.input,
+		ThinkingLevelMap: m.metadata.thinkingLevelMap, DefaultThinkingLevel: m.metadata.defaultThinkingLevel, Input: m.metadata.input,
 		Cost: m.metadata.cost, ContextWindow: m.metadata.contextWindow,
 		MaxTokens: m.metadata.maxTokens, Headers: m.metadata.headers,
 		Compat: m.metadata.compat,
@@ -324,13 +329,14 @@ func assistantProvenanceForModel(model Model) llm.AssistantProvenance {
 
 // Equal follows pi model identity: provider plus model id. API is an adapter
 // property and catalog metadata must not change logical model equality.
-func (m Model) Equal(other Model) bool { return m.provider == other.provider && m.id == other.id }
-func (m Model) Name() string           { return m.metadata.name }
-func (m Model) BaseURL() string        { return m.metadata.baseURL }
-func (m Model) Reasoning() bool        { return m.metadata.reasoning }
-func (m Model) ContextWindow() uint64  { return m.metadata.contextWindow }
-func (m Model) MaxTokens() uint64      { return m.metadata.maxTokens }
-func (m Model) Cost() CostRates        { return cloneCostRates(m.metadata.cost) }
+func (m Model) Equal(other Model) bool              { return m.provider == other.provider && m.id == other.id }
+func (m Model) Name() string                        { return m.metadata.name }
+func (m Model) BaseURL() string                     { return m.metadata.baseURL }
+func (m Model) Reasoning() bool                     { return m.metadata.reasoning }
+func (m Model) DefaultThinkingLevel() ThinkingLevel { return m.metadata.defaultThinkingLevel }
+func (m Model) ContextWindow() uint64               { return m.metadata.contextWindow }
+func (m Model) MaxTokens() uint64                   { return m.metadata.maxTokens }
+func (m Model) Cost() CostRates                     { return cloneCostRates(m.metadata.cost) }
 
 // WithBaseURL returns the same immutable model with an auth-resolved endpoint.
 // Provider/model/API identity and all remaining metadata are preserved.
@@ -383,23 +389,23 @@ func (m Model) ThinkingLevelMap() map[ThinkingLevel]*string {
 
 var extendedThinkingLevels = []ThinkingLevel{ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax}
 
-// SupportedThinkingLevels and ClampThinkingLevel mirror pi's models.ts.
 // A null mapping disables any level (including off); xhigh/max are opt-in.
-func (m Model) SupportedThinkingLevels() []ThinkingLevel {
-	if !m.Reasoning() {
-		return []ThinkingLevel{ThinkingOff}
+func SupportsThinkingLevel(reasoning bool, mapping map[ThinkingLevel]*string, level ThinkingLevel) bool {
+	if !reasoning {
+		return level == ThinkingOff
 	}
-	mapping := m.ThinkingLevelMap()
+	if mapped, configured := mapping[level]; configured {
+		return level.Valid() && mapped != nil
+	}
+	return level.Valid() && level != ThinkingXHigh && level != ThinkingMax
+}
+
+func (m Model) SupportedThinkingLevels() []ThinkingLevel {
 	levels := make([]ThinkingLevel, 0, len(extendedThinkingLevels))
 	for _, level := range extendedThinkingLevels {
-		mapped, configured := mapping[level]
-		if configured && mapped == nil {
-			continue
+		if SupportsThinkingLevel(m.Reasoning(), m.metadata.thinkingLevelMap, level) {
+			levels = append(levels, level)
 		}
-		if (level == ThinkingXHigh || level == ThinkingMax) && !configured {
-			continue
-		}
-		levels = append(levels, level)
 	}
 	return levels
 }

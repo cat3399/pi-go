@@ -11,6 +11,18 @@ import (
 
 const DefaultThinkingLevel = provider.ThinkingMedium
 
+// PreferredThinkingLevel supplies the fallback only when neither the caller,
+// the session transcript nor a scope pin requested a level.
+func (m *Model) PreferredThinkingLevel(settings provider.ThinkingLevel) provider.ThinkingLevel {
+	if m != nil && m.DefaultThinkingLevel != "" {
+		return m.DefaultThinkingLevel
+	}
+	if settings != "" {
+		return settings
+	}
+	return DefaultThinkingLevel
+}
+
 // ProviderDefault preserves pi's provider preference order. A map alone cannot
 // represent this ordering, which is observable when more than one provider's
 // default model is available.
@@ -399,7 +411,7 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 			AllModels: options.AllModels, HasConfiguredAuth: options.Availability.HasConfiguredAuth,
 			HasConfiguredModelAuth: options.Availability.HasConfiguredModelAuth, ProviderDefaults: options.ProviderDefaults,
 		})
-		thinking := resolveInitialThinking(options.CLIThinkingLevel, resolved.ThinkingLevel, options.DefaultThinkingLevel)
+		thinking := resolveInitialThinking(options.CLIThinkingLevel, resolved.ThinkingLevel, resolved.Model, options.DefaultThinkingLevel)
 		if resolved.Model != nil && (options.Availability.SupportsRoute == nil || !options.Availability.SupportsRoute(*resolved.Model)) {
 			resolved.Error = `Model "` + resolved.Model.Provider + `/` + resolved.Model.ID + `" is not supported by a registered provider route.`
 			resolved.Model = nil
@@ -416,12 +428,12 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 				}
 			}
 		}
-		thinking := resolveInitialThinking(options.CLIThinkingLevel, selected.ThinkingLevel, options.DefaultThinkingLevel)
+		thinking := resolveInitialThinking(options.CLIThinkingLevel, selected.ThinkingLevel, &selected.Model, options.DefaultThinkingLevel)
 		return InitialModelResult{Model: modelPointer(selected.Model), ThinkingLevel: thinking, Scope: scope}
 	}
 	if options.DefaultProvider != "" && options.DefaultModelID != "" {
 		if saved := exactProviderModel(options.AllModels, options.DefaultProvider, options.DefaultModelID); saved != nil && options.Availability.Selectable(*saved) {
-			thinking := resolveInitialThinking(options.CLIThinkingLevel, nil, options.DefaultThinkingLevel)
+			thinking := resolveInitialThinking(options.CLIThinkingLevel, nil, saved, options.DefaultThinkingLevel)
 			return InitialModelResult{Model: saved, ThinkingLevel: thinking, Scope: scope}
 		}
 	}
@@ -430,13 +442,13 @@ func ResolveInitialModel(options InitialModelOptions) InitialModelResult {
 	}
 	if selected := preferredAvailableModel(available, options.ProviderDefaults); selected != nil {
 		return InitialModelResult{
-			Model: selected, ThinkingLevel: resolveInitialThinking(options.CLIThinkingLevel, nil, options.DefaultThinkingLevel), Scope: scope,
+			Model: selected, ThinkingLevel: resolveInitialThinking(options.CLIThinkingLevel, nil, selected, options.DefaultThinkingLevel), Scope: scope,
 		}
 	}
-	return InitialModelResult{ThinkingLevel: resolveInitialThinking(options.CLIThinkingLevel, nil, options.DefaultThinkingLevel), Scope: scope}
+	return InitialModelResult{ThinkingLevel: resolveInitialThinking(options.CLIThinkingLevel, nil, nil, options.DefaultThinkingLevel), Scope: scope}
 }
 
-func resolveInitialThinking(cli, selected, settings *provider.ThinkingLevel) provider.ThinkingLevel {
+func resolveInitialThinking(cli, selected *provider.ThinkingLevel, model *Model, settings *provider.ThinkingLevel) provider.ThinkingLevel {
 	if cli != nil {
 		return *cli
 	}
@@ -444,9 +456,9 @@ func resolveInitialThinking(cli, selected, settings *provider.ThinkingLevel) pro
 		return *selected
 	}
 	if settings != nil {
-		return *settings
+		return model.PreferredThinkingLevel(*settings)
 	}
-	return DefaultThinkingLevel
+	return model.PreferredThinkingLevel("")
 }
 
 type RestoreModelOptions struct {
@@ -559,6 +571,7 @@ func buildFallbackModel(providerID, modelID string, models []Model, preferences 
 	}
 	base = cloneModel(base)
 	base.ID, base.Name = modelID, modelID
+	base.DefaultThinkingLevel = "" // A custom ID does not inherit another model's preference.
 	return &base
 }
 
