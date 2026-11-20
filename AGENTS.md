@@ -18,6 +18,8 @@ fallback 到 TypeScript pi。
 修改前应调查原版完整调用链和状态所有权。不要根据孤立类型猜测架构，也不要臆造原版
 不存在的约束，再以此为由降低能力。
 
+不要把复现路径当作修复边界。定位根因，检查同一行为的其他路径，修复并验证实际受影响的部分。
+
 ## 核心架构
 
 核心调用链保持为 `Runtime -> AgentSession -> Agent -> AgentLoop`，SessionManager 与
