@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/agent"
@@ -20,10 +21,7 @@ import (
 	"github.com/cat3399/pi-go/internal/session"
 )
 
-var contextCLIInstructions = agent.ContextAccessInstructions{
-	Handoff: `Use bash to run "${PI_EXECUTABLE}" session context new --handoff-stdin and supply the handoff on stdin (for example, with a quoted heredoc). Include current progress, relevant files and the next direction. This saves the handoff and switches windows after the current tool batch; continue the same task afterward.`,
-	History: `Original history is available through bash. Search with "${PI_EXECUTABLE}" session history search 'query'; read a matching record with "${PI_EXECUTABLE}" session history read --entry ID. Use --view raw to include tool calls and results, or session history --help for window/range options. Read only what you need to continue.`,
-}
+const contextHandoffInstruction = `Use bash to run "${PI_EXECUTABLE}" session context new --handoff-stdin and supply the handoff on stdin (for example, with a quoted heredoc). Include current progress, relevant files and the next direction. This saves the handoff and switches windows after the current tool batch; continue the same task afterward.`
 
 type sessionControlRequest struct {
 	SessionID string                     `json:"sessionId"`
@@ -43,7 +41,7 @@ type sessionControlResponse struct {
 // AttachSession mounts a CLI-only wire protocol over the typed Application
 // boundary. The loopback listener is capability-scoped to this session and is
 // closed by the owning AgentSession on replacement or shutdown.
-func AttachSession(current *agent.AgentSession, agentDir string) error {
+func AttachSession(current *agent.AgentSession, agentDir, docsDir string) error {
 	var secret [32]byte
 	if _, err := rand.Read(secret[:]); err != nil {
 		return err
@@ -54,7 +52,11 @@ func AttachSession(current *agent.AgentSession, agentDir string) error {
 		return fmt.Errorf("start session CLI access: %w", err)
 	}
 	server := &http.Server{Handler: sessionControlHandler(application.BorrowSessionContext(current), token), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-	if err := current.ConfigureContextAccess(contextCLIInstructions, map[string]string{
+	instructions := agent.ContextAccessInstructions{
+		Handoff: contextHandoffInstruction,
+		History: fmt.Sprintf("To look up original dialogue or tool results, see %s (原始历史与对话视图).", filepath.Join(docsDir, "context-management.md")),
+	}
+	if err := current.ConfigureContextAccess(instructions, map[string]string{
 		"PI_SESSION_ENDPOINT":  "http://" + listener.Addr().String() + "/session",
 		"PI_SESSION_TOKEN":     token,
 		"PI_SESSION_AGENT_DIR": agentDir,

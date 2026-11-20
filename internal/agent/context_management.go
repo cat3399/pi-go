@@ -406,23 +406,32 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 	}
 	messages = agentmsg.Clone(messages)
 	changed := false
-	if instructions.History != "" && status.WindowID != session.InitialContextWindow {
-		found := false
-		for _, message := range messages {
-			if custom, ok := message.(agentmsg.Custom); ok && custom.CustomType() == "pi-go.context-history" {
-				found = true
+	if instructions.History != "" && status.WindowID != session.InitialContextWindow && len(messages) > 0 {
+		switch checkpoint := messages[0].(type) {
+		case agentmsg.Custom:
+			if checkpoint.CustomType() == session.ContextHandoffType {
+				text, _ := checkpoint.StringContent()
+				header, body, ok := strings.Cut(text, "\n\n<handoff>\n")
+				if ok && !strings.HasSuffix(header, instructions.History) {
+					messages[0], err = agentmsg.NewCustomText(checkpoint.CustomType(), header+" "+instructions.History+"\n\n<handoff>\n"+body, checkpoint.Display(), checkpoint.Details(), checkpoint.Timestamp())
+					changed = true
+				}
+			}
+		case agentmsg.CompactionSummary:
+			// Legacy summaries have no handoff header; keep the hint beside them.
+			var next agentmsg.Custom
+			if len(messages) > 1 {
+				next, _ = messages[1].(agentmsg.Custom)
+			}
+			if next.CustomType() != "pi-go.context-history" {
+				var hint agentmsg.Custom
+				hint, err = agentmsg.NewCustomText("pi-go.context-history", instructions.History, false, nil, checkpoint.Timestamp())
+				messages = append(messages[:1], append([]agentmsg.Message{hint}, messages[1:]...)...)
+				changed = true
 			}
 		}
-		if !found {
-			text := fmt.Sprintf("Context window %s. %s", status.WindowID, instructions.History)
-			notice, err := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: "pi-go.context-history", StringContent: &text, At: time.Now()})
-			if err != nil {
-				return err
-			}
-			// Place retrieval instructions beside the checkpoint, before new input.
-			position := min(1, len(messages))
-			messages = append(messages[:position], append([]agentmsg.Message{notice}, messages[position:]...)...)
-			changed = true
+		if err != nil {
+			return err
 		}
 	}
 	if status.AutoCompaction && instructions.Handoff != "" && status.ContextWindow != 0 && status.RemainingTokens <= status.ReminderTokens {

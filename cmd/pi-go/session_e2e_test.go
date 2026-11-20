@@ -81,12 +81,27 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 			if strings.Contains(systemPrefix, "session context new") || strings.Contains(systemPrefix, "session history search") {
 				t.Error("context instructions polluted system prompt")
 			}
-			encoded, _ := json.Marshal(payload.Messages)
-			if strings.Contains(string(encoded), "Original history is available through bash") {
-				t.Error("history instructions appeared before a window switch")
-			}
 		} else if string(payload.Messages[0].Content) != systemPrefix {
 			t.Error("system/tool capability prefix changed across handoff")
+		}
+		const guide = "To look up original dialogue or tool results, see "
+		guideCount := 0
+		var guidePath string
+		for _, message := range payload.Messages {
+			content := string(message.Content)
+			guideCount += strings.Count(content, guide)
+			if _, rest, ok := strings.Cut(content, guide); ok {
+				if !strings.Contains(content, "Continue the same task in context window") {
+					t.Error("history guide is not part of the handoff message")
+				}
+				path, _, _ := strings.Cut(rest, " (原始历史与对话视图)")
+				if err := json.Unmarshal([]byte(`"`+path+`"`), &guidePath); err != nil {
+					t.Errorf("invalid document path in history guide: %v", err)
+				}
+			}
+		}
+		if calls <= 3 && guideCount != 0 || calls >= 4 && calls <= 8 && guideCount != 1 {
+			t.Errorf("call %d has %d history guides", calls, guideCount)
 		}
 		if payload.ToolChoice == "none" || payload.MaxTokens == 2048 || len(payload.Tools) == 0 {
 			t.Error("handoff restricted the normal tool/output request")
@@ -113,9 +128,6 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 			if strings.Contains(string(encoded), original) || strings.Contains(string(encoded), "original history filler") || !strings.Contains(string(encoded), "Continue the same task in context window") {
 				t.Error("new window did not contain only the handoff")
 			}
-			if !strings.Contains(string(encoded), "session history search") {
-				t.Error("new window omitted history access instructions")
-			}
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session history read --view dialogue --window initial`}
 		case 5:
@@ -141,8 +153,15 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 			if !strings.Contains(string(encoded), "Continue the same task in context window") || !strings.Contains(string(encoded), "resume after restart") {
 				t.Error("fresh process did not restore the handoff context")
 			}
-			text = "RESTART_OK"
+			toolName = "read"
+			arguments = map[string]any{"path": guidePath}
 		case 8:
+			content := string(payload.Messages[len(payload.Messages)-1].Content)
+			if !strings.Contains(content, "session history search") || !strings.Contains(content, "session history read --entry") {
+				t.Error("reading the linked document did not recover the history commands")
+			}
+			text = "RESTART_OK"
+		case 9:
 			encoded, _ := json.Marshal(payload.Messages)
 			if !strings.Contains(string(encoded), "idle manual focus") {
 				t.Error("offline compact missed its runtime reminder")
@@ -212,7 +231,7 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 	mu.Lock()
 	count, artifact := calls, fullOutput
 	mu.Unlock()
-	if count != 8 {
+	if count != 9 {
 		t.Fatalf("model calls = %d", count)
 	}
 	data, err := os.ReadFile(artifact)

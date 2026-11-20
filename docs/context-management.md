@@ -28,7 +28,7 @@ Terminal 的 run/TUI/RPC、Web Core 和 GUI 内嵌 Core 都装配 CLI 访问入�
 配置 `AttachSession`；核心不依赖 CLI 传输。
 
 启用 `bash` 时，默认系统提示仅指向本文，供需要回看当前或其他已保存的对话时查阅。
-交接命令随运行时提醒提供，具体历史检索命令在换窗后的恢复消息中给出；不增加常驻模型工具或强制恢复清单。
+交接命令随运行时提醒提供；换窗后的恢复消息指向本文，只有需要核对原文时才需检索历史。
 没有启用 bash 的接入可以直接调用相同核心 API。
 
 ## 统一的短交接流程
@@ -94,12 +94,19 @@ HANDOFF
 
 ## 原始历史与对话视图
 
+需要核对原文时，先搜索关键词，再用命中记录的 entry ID 读取完整内容：
+
+```sh
+"$PI_EXECUTABLE" session history search '关键词'
+"$PI_EXECUTABLE" session history read --entry <entry-id>
+```
+
+默认只查对话；若要查工具调用或结果，在搜索或读取命令上加 `--view raw`。其他常用查询：
+
 ```sh
 "$PI_EXECUTABLE" session history windows
 "$PI_EXECUTABLE" session history read --view dialogue
 "$PI_EXECUTABLE" session history read --window initial --view dialogue
-"$PI_EXECUTABLE" session history search '关键词' --view dialogue
-"$PI_EXECUTABLE" session history read --view raw --entry <entry-id>
 ```
 
 默认查询当前分支的全部窗口。`--window current` 选择当前窗口，`--window <entry-id>` 选择
