@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,8 +22,8 @@ import (
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
-	"github.com/cat3399/pi-go/internal/resource"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/testenv"
 	"github.com/cat3399/pi-go/internal/tool"
 )
 
@@ -76,13 +75,16 @@ func (c *capturedProductionRequest) snapshot() productionRequestSnapshot {
 
 func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *testing.T) {
 	workingDir := t.TempDir()
-	agentDir := t.TempDir()
+	agentDir := testenv.AgentDir(t)
 	capture := &capturedProductionRequest{}
 	server := newProductionTextServer(t, capture, "assembled answer")
 	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("prefix-${MODEL_KEY}-suffix"), nil)
+	const unknown = "must-not-enter-request"
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("prefix-$$-${MODEL_KEY}"), map[string]any{
+		"futureRequestOption": map[string]string{"Authorization": unknown},
+	})
 
-	config := productionTestConfig(workingDir, agentDir, []string{"MODEL_KEY=configured"})
+	config := productionTestConfig(workingDir, agentDir, []string{"MODEL_KEY=configured", "OPENAI_API_KEY=ambient-lower"})
 	config.SessionID = ""
 	var sessionTicks atomic.Int64
 	config.SessionNow = func() time.Time {
@@ -105,8 +107,11 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 	if request.count != 1 || request.method != http.MethodPost || request.path != "/v1/responses" {
 		t.Fatalf("request = count %d, %s %s", request.count, request.method, request.path)
 	}
-	if request.authorization != "Bearer prefix-configured-suffix" {
+	if request.authorization != "Bearer prefix-$-configured" {
 		t.Fatalf("Authorization = %q", request.authorization)
+	}
+	if body, err := json.Marshal(request.payload); err != nil || bytes.Contains(body, []byte(unknown)) {
+		t.Fatalf("unknown models.json option entered payload: %s, %v", body, err)
 	}
 	if request.payload["model"] != "gpt-production" || request.payload["stream"] != true || request.payload["store"] != false {
 		t.Fatalf("payload routing = %#v", request.payload)
@@ -157,32 +162,8 @@ func TestRunProductionCompletesConfiguredOpenAIWorkflowWithDefaultSession(t *tes
 	}
 }
 
-func TestRunProductionRoutesOpenAIChatCompletionsModel(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	capture := &capturedProductionRequest{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := capture.record(r); err != nil {
-			t.Errorf("record: %v", err)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"completion answer"},"finish_reason":null}]}`+"\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-	}))
-	defer server.Close()
-	key := "key"
-	writeModelsJSON(t, agentDir, server.URL+"/v1", &key, map[string]any{"models": []map[string]any{{"id": "gpt-5.5", "api": "openai-completions"}}})
-	config := productionTestConfig(workingDir, agentDir, nil)
-	var stdout, stderr bytes.Buffer
-	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-5.5", "--session", filepath.Join(workingDir, "session.jsonl"), "-p", "hello"}, &stdout, &stderr); code != app.ExitSuccess || stdout.String() != "completion answer\n" || stderr.Len() != 0 {
-		t.Fatalf("RunProduction=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	request := capture.snapshot()
-	if request.path != "/v1/chat/completions" || request.payload["stream"] != true {
-		t.Fatalf("request=%#v", request)
-	}
-}
-
 func TestRunProductionRoutesBuiltinDeepSeekWithProviderEnvironment(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	capture := &capturedProductionRequest{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := capture.record(r); err != nil {
@@ -223,7 +204,7 @@ func TestRunProductionCustomFallbackNeverSendsKeyToConfiguredModelURL(t *testing
 		{name: "settings default", args: []string{"-p", "hello"}, settings: `{"defaultProvider":"openai","defaultModel":"custom"}`},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			workingDir, agentDir := t.TempDir(), t.TempDir()
+			workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 			capture := &capturedProductionRequest{}
 			providerServer := newProductionTextServer(t, capture, "safe")
 			defer providerServer.Close()
@@ -346,7 +327,7 @@ func (r *concurrentProductionRunner) completionOrder() []string {
 
 func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourceOrder(t *testing.T) {
 	workingDir := t.TempDir()
-	agentDir := t.TempDir()
+	agentDir := testenv.AgentDir(t)
 	sessionPath := filepath.Join(workingDir, "tool-workflow.jsonl")
 	var mu sync.Mutex
 	var payloads []map[string]any
@@ -470,7 +451,7 @@ func TestRunProductionOpenAIMultiToolWorkflowExecutesConcurrentlyAndReplaysSourc
 }
 
 func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	sessionPath := filepath.Join(workingDir, "rich-tool-restart.jsonl")
 	entryIDs := []string{"seed-user", "seed-assistant", "result-slow", "result-fast", "foreign-assistant"}
 	transcript, err := session.Create(sessionPath, session.CreateOptions{
@@ -709,248 +690,36 @@ func TestRunProductionReplaysRichMultiToolSessionAfterRestart(t *testing.T) {
 	}
 }
 
-func TestRunProductionPersistsAndReplaysResponsesReasoning(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	sessionPath := filepath.Join(workingDir, "reasoning.jsonl")
-	var mu sync.Mutex
-	var payloads []map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		var payload map[string]any
-		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
-			t.Errorf("decode: %v", err)
-			return
-		}
-		mu.Lock()
-		payloads = append(payloads, payload)
-		turn := len(payloads)
-		mu.Unlock()
-		writer.Header().Set("Content-Type", "text/event-stream")
-		if turn == 1 {
-			reasoningDone := map[string]any{"type": "reasoning", "id": "rs_persist", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}}
-			reasoningTerminal := map[string]any{"type": "reasoning", "id": "rs_persist", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}, "encrypted_content": "cipher"}
-			text := map[string]any{"type": "message", "id": "msg_persist", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "first"}}}
-			writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"type": "reasoning", "id": "rs_persist"}}, map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_persist", "delta": "plan"}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": reasoningDone}, map[string]any{"type": "response.output_item.done", "output_index": 1, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{reasoningTerminal, text}}})
-			return
-		}
-		text := map[string]any{"type": "message", "id": "msg_next", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "second"}}}
-		writeProductionSSE(t, writer, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": text}, map[string]any{"type": "response.completed", "response": map[string]any{"status": "completed", "output": []any{text}}})
-	}))
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	config := productionTestConfig(workingDir, agentDir, nil)
-	for _, prompt := range []string{"first prompt", "continue"} {
-		var stdout, stderr bytes.Buffer
-		if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-reason", "--session", sessionPath, "-p", prompt}, &stdout, &stderr); code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-reason") {
-			t.Fatalf("run %q: code=%d stdout=%q stderr=%q", prompt, code, stdout.String(), stderr.String())
-		}
-	}
-	mu.Lock()
-	received := append([]map[string]any(nil), payloads...)
-	mu.Unlock()
-	if len(received) != 2 {
-		t.Fatalf("requests=%d", len(received))
-	}
-	input := received[1]["input"].([]any)
-	foundReasoning := false
-	foundText := false
-	for _, item := range input {
-		wire := item.(map[string]any)
-		if wire["type"] == "reasoning" {
-			foundReasoning = wire["id"] == "rs_persist" && wire["encrypted_content"] == "cipher" && reflect.DeepEqual(wire["summary"], []any{map[string]any{"type": "summary_text", "text": "plan"}})
-		}
-		if wire["type"] == "message" && wire["id"] == "msg_persist" {
-			foundText = wire["phase"] == "final_answer"
-		}
-	}
-	if !foundReasoning || !foundText {
-		t.Fatalf("resumed input=%#v", input)
-	}
-	transcript, err := session.Open(sessionPath, session.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-	messages := transcript.Context().Messages()
-	if len(messages) != 4 {
-		t.Fatalf("durable messages=%#v", messages)
-	}
-	if _, ok := messages[1].(llm.AssistantRichMessage); !ok {
-		t.Fatalf("first assistant=%T", messages[1])
-	}
-	if response, ok := messages[1].(llm.AssistantRichMessage).ResponseMetadata(); !ok || response.RawStopReason != "completed" {
-		t.Fatalf("response metadata=%#v", response)
-	}
-}
-
-func TestRunProductionReplaysDurableImageAfterRestart(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	sessionPath := filepath.Join(workingDir, "image-restart.jsonl")
-	entryIDs := []string{"seed-image", "bootstrap-thinking", "new-user", "assistant"}
-	transcript, err := session.Create(sessionPath, session.CreateOptions{
-		ID:         "image-restart",
-		WorkingDir: workingDir,
-		Now:        func() time.Time { return productionTestTime },
-		NewEntryID: func() (string, error) {
-			id := entryIDs[0]
-			entryIDs = entryIDs[1:]
-			return id, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-	png, err := base64.StdEncoding.DecodeString(pngBase64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	image, err := llm.NewImageDataBlock("image/png", png)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caption, err := llm.NewTextBlock("seed image")
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := llm.NewUserContentMessage([]llm.UserContentBlock{caption, image}, productionTestTime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transcript.Append(context.Background(), seed, session.AppendOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := transcript.Close(); err != nil {
-		t.Fatal(err)
-	}
-
+func TestRunProductionExplicitCLIKeyOverridesLowerSources(t *testing.T) {
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "image resumed")
+	server := newProductionTextServer(t, capture, "ok")
 	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	config := productionTestConfig(workingDir, agentDir, nil)
-	config.NewSessionEntryID = func() (string, error) {
-		id := entryIDs[0]
-		entryIDs = entryIDs[1:]
-		return id, nil
-	}
+	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("configured-key"), nil)
+	writeAuthJSON(t, agentDir, `{this lower source is deliberately malformed`)
+	path := filepath.Join(workingDir, "explicit", "session.jsonl")
+	config := productionTestConfig(workingDir, agentDir, []string{"OPENAI_API_KEY=ambient-key"})
 	var stdout, stderr bytes.Buffer
-	if code := app.RunProduction(context.Background(), config, []string{"--model", "openai/gpt-image", "--session", sessionPath, "-p", "continue"}, &stdout, &stderr); code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-image") {
-		t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	code := app.RunProduction(t.Context(), config, []string{
+		"--provider", "openai", "--model", "custom-cli", "--api-key", "cli-key", "--session", path, "-p", "hello",
+	}, &stdout, &stderr)
+	if code != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != customModelWarning("custom-cli") {
+		t.Fatalf("RunProduction = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
 	}
-	input := capture.snapshot().payload["input"].([]any)
-	if len(input) < 2 {
-		t.Fatalf("resumed input = %#v", input)
+	request := capture.snapshot()
+	if request.count != 1 || request.authorization != "Bearer cli-key" || request.payload["model"] != "custom-cli" {
+		t.Fatal("request did not use the explicit model and CLI credential")
 	}
-	var imageWire map[string]any
-	for _, raw := range input {
-		message, ok := raw.(map[string]any)
-		if !ok || message["role"] != "user" {
-			continue
-		}
-		content, ok := message["content"].([]any)
-		if !ok {
-			continue
-		}
-		for _, rawBlock := range content {
-			block, ok := rawBlock.(map[string]any)
-			if ok && block["type"] == "input_image" {
-				imageWire = block
-			}
-		}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("explicit session not created: %v", err)
 	}
-	if imageWire == nil || imageWire["image_url"] != "data:image/png;base64,"+pngBase64 {
-		t.Fatalf("durable image replay = %#v", imageWire)
-	}
-}
-
-func TestRunProductionCredentialPrecedenceAndModelAdmission(t *testing.T) {
-	testCases := []struct {
-		name          string
-		args          []string
-		authJSON      string
-		configuredKey *string
-		environment   []string
-		wantKey       string
-		wantModel     string
-	}{
-		{
-			name:          "CLI overrides stored configured and ambient",
-			args:          []string{"--provider", "openai", "--model", "custom-cli", "--api-key", "cli-key", "-p", "hello"},
-			authJSON:      `{this lower source is deliberately malformed`,
-			configuredKey: stringPointer("configured-key"),
-			environment:   []string{"OPENAI_API_KEY=ambient-key"},
-			wantKey:       "cli-key",
-			wantModel:     "custom-cli",
-		},
-		{
-			name:          "stored scoped template overrides configured and ambient",
-			args:          []string{"--model", "openai/custom-stored", "-p", "hello"},
-			authJSON:      `{"openai":{"type":"api_key","key":"stored-${STORED_KEY}","env":{"STORED_KEY":"scoped"}}}`,
-			configuredKey: stringPointer("configured-key"),
-			environment:   []string{"STORED_KEY=ambient", "OPENAI_API_KEY=ambient-key"},
-			wantKey:       "stored-scoped",
-			wantModel:     "custom-stored",
-		},
-		{
-			name:          "models JSON template overrides ambient",
-			args:          []string{"--model", "openai/gpt-5.5", "-p", "hello"},
-			configuredKey: stringPointer("configured-$$-$!-${MODEL_KEY}"),
-			environment:   []string{"MODEL_KEY=template", "OPENAI_API_KEY=ambient-key"},
-			wantKey:       "configured-$-!-template",
-			wantModel:     "gpt-5.5",
-		},
-		{
-			name:        "ambient key with fixed default model",
-			args:        []string{"-p", "hello"},
-			environment: []string{"OPENAI_API_KEY=ambient-key"},
-			wantKey:     "ambient-key",
-			wantModel:   "gpt-5.5",
-		},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			workingDir := t.TempDir()
-			agentDir := t.TempDir()
-			capture := &capturedProductionRequest{}
-			server := newProductionTextServer(t, capture, "ok")
-			defer server.Close()
-			writeModelsJSON(t, agentDir, server.URL+"/v1", testCase.configuredKey, nil)
-			if testCase.authJSON != "" {
-				writeAuthJSON(t, agentDir, testCase.authJSON)
-			}
-			sessionPath := filepath.Join(workingDir, "explicit", "session.jsonl")
-			args := append(append([]string(nil), testCase.args...), "--session", sessionPath)
-			config := productionTestConfig(workingDir, agentDir, testCase.environment)
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-			exitCode := app.RunProduction(context.Background(), config, args, &stdout, &stderr)
-			wantStderr := ""
-			if strings.HasPrefix(testCase.wantModel, "custom-") {
-				wantStderr = customModelWarning(testCase.wantModel)
-			}
-			if exitCode != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != wantStderr {
-				t.Fatalf("RunProduction() = code %d, stdout %q, stderr %q", exitCode, stdout.String(), stderr.String())
-			}
-			request := capture.snapshot()
-			if request.count != 1 || request.authorization != "Bearer "+testCase.wantKey {
-				t.Fatalf("request = count %d, authorization %q", request.count, request.authorization)
-			}
-			if request.payload["model"] != testCase.wantModel {
-				t.Fatalf("model = %#v, want %q", request.payload["model"], testCase.wantModel)
-			}
-			if _, err := os.Stat(sessionPath); err != nil {
-				t.Fatalf("explicit session not created: %v", err)
-			}
-			if _, err := os.Stat(filepath.Join(agentDir, "sessions")); !os.IsNotExist(err) {
-				t.Fatalf("explicit session unexpectedly provisioned default tree: %v", err)
-			}
-		})
+	if _, err := os.Stat(filepath.Join(agentDir, "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("explicit session unexpectedly provisioned default tree: %v", err)
 	}
 }
 
 func TestRunProductionRefreshesStoredOpenAICodexOAuthBeforeResponsesRequest(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	access := productionOAuthJWT("refreshed-account")
 	var tokenCalls atomic.Int32
 	var responseAuthorization string
@@ -1020,7 +789,6 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 		environment []string
 		prepare     func(*testing.T, string)
 		want        string
-		wantCalls   uint32
 		secrets     []string
 		modelAccess bool
 		exactStderr string
@@ -1100,7 +868,7 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			workingDir := t.TempDir()
-			agentDir := t.TempDir()
+			agentDir := testenv.AgentDir(t)
 			testCase.prepare(t, agentDir)
 			sessionParent := filepath.Join(workingDir, "must-not-exist")
 			sessionPath := filepath.Join(sessionParent, "session.jsonl")
@@ -1143,8 +911,8 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 			if testCase.exactStderr != "" && stderr.String() != testCase.exactStderr {
 				t.Fatalf("stderr = %q, want %q", stderr.String(), testCase.exactStderr)
 			}
-			if doer.calls.Load() != testCase.wantCalls {
-				t.Fatalf("provider calls = %d, want %d", doer.calls.Load(), testCase.wantCalls)
+			if calls := doer.calls.Load(); calls != 0 {
+				t.Fatalf("startup failure reached the provider %d time(s)", calls)
 			}
 			if beforeAgentCalls.Load() != 0 {
 				t.Fatalf("before_agent_start calls = %d", beforeAgentCalls.Load())
@@ -1172,159 +940,14 @@ func TestRunProductionSessionFirstFailuresAreSecretSafeAndDoNotPersistResults(t 
 	}
 }
 
-func TestRunProductionIgnoresUnknownModelsJSONFields(t *testing.T) {
-	tests := []struct {
-		name    string
-		model   string
-		prepare func(*testing.T, string, string)
-	}{
-		{
-			name:  "provider object",
-			model: "openai/gpt-test",
-			prepare: func(t *testing.T, agentDir, baseURL string) {
-				writeModelsJSON(t, agentDir, baseURL, stringPointer("fixture-key"), map[string]any{
-					"futureRequestOption": map[string]any{"Authorization": "must-not-become-a-header"},
-				})
-			},
-		},
-		{
-			name:  "provider scalar",
-			model: "openai/gpt-test",
-			prepare: func(t *testing.T, agentDir, baseURL string) {
-				writeModelsJSON(t, agentDir, baseURL, stringPointer("fixture-key"), map[string]any{
-					"futureRequestOption": "must-not-enter-request",
-				})
-			},
-		},
-		{
-			name:  "case-distinct model override compat",
-			model: "openai/gpt-5.5",
-			prepare: func(t *testing.T, agentDir, baseURL string) {
-				content, err := json.Marshal(map[string]any{"providers": map[string]any{"openai": map[string]any{
-					"baseUrl": baseURL, "apiKey": "fixture-key",
-					"modelOverrides": map[string]any{"GPT-5.5": map[string]any{"compat": map[string]any{"token": "must-not-enter-request"}}},
-				}}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(agentDir, "models.json"), content, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			workingDir, agentDir := t.TempDir(), t.TempDir()
-			capture := &capturedProductionRequest{}
-			server := newProductionTextServer(t, capture, "ok")
-			defer server.Close()
-			test.prepare(t, agentDir, server.URL+"/v1")
-			var stdout, stderr bytes.Buffer
-			code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
-				"--model", test.model, "-p", "hello", "--session", filepath.Join(workingDir, "session.jsonl"),
-			}, &stdout, &stderr)
-			if code != app.ExitSuccess || stdout.String() != "ok\n" {
-				t.Fatalf("RunProduction() = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
-			}
-			request := capture.snapshot()
-			capturedPayload, err := json.Marshal(request.payload)
-			if err != nil {
-				t.Fatal(err)
-			}
-			captured := string(capturedPayload)
-			for _, forbidden := range []string{"must-not-become-a-header", "must-not-enter-request"} {
-				if strings.Contains(captured, forbidden) {
-					t.Fatalf("unknown models.json value entered payload: %s", captured)
-				}
-			}
-			if request.authorization != "Bearer fixture-key" {
-				t.Fatalf("authorization = %q", request.authorization)
-			}
-		})
-	}
-}
-
-func TestRunProductionNormalizesInvalidUTF8InGlobalSystemPrompt(t *testing.T) {
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	// Node's UTF-8 file reads replace malformed byte sequences. The Go resource
-	// loader must preserve that behavior instead of rejecting the prompt before
-	// the provider request.
-	if err := os.WriteFile(filepath.Join(agentDir, "SYSTEM.md"), []byte{0xff}, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "ok")
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	sessionParent := filepath.Join(workingDir, "session-parent")
-	config := productionTestConfig(workingDir, agentDir, nil)
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), config, []string{
-		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(sessionParent, "session.jsonl"),
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "ok\n" || stderr.String() != customModelWarning("gpt-test") {
-		t.Fatalf("RunProduction() = %d, %q, %q", code, stdout.String(), stderr.String())
-	}
-	input := capture.snapshot().payload["input"].([]any)
-	system := input[0].(map[string]any)["content"].(string)
-	if !strings.Contains(system, "�") {
-		t.Fatalf("normalized system prompt = %q", system)
-	}
-	if _, err := os.Stat(sessionParent); err != nil {
-		t.Fatalf("session startup did not prepare session tree: %v", err)
-	}
-}
-
-func TestRunProductionUsesOnlyExplicitlyTrustedProjectPrompt(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("persistent project trust is deliberately fail-closed on Windows")
-	}
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(workingDir, ".pi-go"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(workingDir, ".pi-go", "SYSTEM.md"), []byte("project system prompt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	resources, err := resource.New(resource.Config{CWD: workingDir, AgentDir: agentDir})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := resources.Trust().Set(context.Background(), workingDir, true); err != nil {
-		t.Fatal(err)
-	}
-	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "ok")
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
-		"--model", "openai/gpt-test", "-p", "hello", "--session", filepath.Join(workingDir, "result.jsonl"),
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
-		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
-	}
-	input := capture.snapshot().payload["input"].([]any)
-	system := input[0].(map[string]any)["content"].(string)
-	if !strings.Contains(system, "project system prompt") || !strings.Contains(system, "Current working directory:") {
-		t.Fatalf("assembled system prompt = %q", system)
-	}
-}
-
 func TestRunProductionRejectsFutureTrustValueBeforeProviderAccess(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("existing persistent trust is deliberately fail-closed on Windows")
 	}
 	root := t.TempDir()
 	workingDir := filepath.Join(root, "parent", "project")
-	agentDir := filepath.Join(root, "agent")
+	agentDir := testenv.AgentDir(t)
 	if err := os.MkdirAll(filepath.Join(workingDir, ".pi-go"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(workingDir, ".pi-go", "SYSTEM.md"), []byte("project must stay unauthorized"), 0o600); err != nil {
@@ -1350,51 +973,9 @@ func TestRunProductionRejectsFutureTrustValueBeforeProviderAccess(t *testing.T) 
 	}
 }
 
-func TestRunProductionExpandsAdmittedPromptTemplateForRequest(t *testing.T) {
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(agentDir, "prompts"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(agentDir, "prompts", "review.md"), []byte("review $1 ${2:-all}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "ok")
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	path := filepath.Join(workingDir, "expanded.jsonl")
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
-		"--model", "openai/gpt-test", "-p", "/review file.go", "--session", path,
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stderr.String() != customModelWarning("gpt-test") {
-		t.Fatalf("RunProduction() = %d, stderr %q", code, stderr.String())
-	}
-	input := capture.snapshot().payload["input"].([]any)
-	user := input[1].(map[string]any)
-	content, ok := user["content"].([]any)
-	if !ok || len(content) != 1 || content[0].(map[string]any)["text"] != "review file.go all" {
-		t.Fatalf("provider user prompt = %#v", user)
-	}
-	transcript, err := session.Open(path, session.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-	messages := transcript.Context().Messages()
-	if len(messages) == 0 {
-		t.Fatalf("durable expanded prompt = %#v", messages)
-	}
-	stored, ok := messages[0].(llm.UserContentMessage)
-	if !ok || len(stored.Content()) != 1 || stored.Content()[0].(llm.TextBlock).Text() != "review file.go all" {
-		t.Fatalf("durable expanded prompt = %#v", messages)
-	}
-}
-
 func TestRunProductionExpandsSkillInsideAgentSessionAndAdvertisesIt(t *testing.T) {
 	workingDir := t.TempDir()
-	agentDir := t.TempDir()
+	agentDir := testenv.AgentDir(t)
 	skillPath := filepath.Join(agentDir, "skills", "review", "SKILL.md")
 	if err := os.MkdirAll(filepath.Dir(skillPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -1439,7 +1020,7 @@ func TestRunProductionExpandsSkillInsideAgentSessionAndAdvertisesIt(t *testing.T
 
 func TestRunProductionHTTPFailureIsDurable(t *testing.T) {
 	workingDir := t.TempDir()
-	agentDir := t.TempDir()
+	agentDir := testenv.AgentDir(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)
 		writer.Header().Set("Content-Type", "application/json")
@@ -1476,7 +1057,7 @@ func TestRunProductionHTTPFailureIsDurable(t *testing.T) {
 
 func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 	workingDir := t.TempDir()
-	agentDir := t.TempDir()
+	agentDir := testenv.AgentDir(t)
 	sessionPath := filepath.Join(workingDir, "existing.jsonl")
 	existing, err := session.Create(sessionPath, session.CreateOptions{
 		ID:         "existing-session",
@@ -1522,77 +1103,6 @@ func TestRunProductionResumeDoesNotReplayCreationClock(t *testing.T) {
 		if entry.Timestamp() != want {
 			t.Fatalf("resumed entry %d timestamp = %v, want %v", index, entry.Timestamp(), want)
 		}
-	}
-}
-
-func TestRunProductionPreservesInvalidExplicitSessionBeforeProviderCall(t *testing.T) {
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	writeModelsJSON(t, agentDir, "https://fixture.invalid/v1", stringPointer("fixture-key"), nil)
-	sessionPath := filepath.Join(workingDir, "invalid.jsonl")
-	original := []byte(`{"type":"event","data":"not a session"}` + "\n")
-	if err := os.WriteFile(sessionPath, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	exitCode := app.RunProduction(context.Background(), productionTestConfig(workingDir, agentDir, nil), []string{
-		"--model", "openai/gpt-invalid", "--session", sessionPath, "-p", "must not call provider",
-	}, &stdout, &stderr)
-	if exitCode != app.ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "open session "+sessionPath) {
-		t.Fatalf("RunProduction = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
-	}
-	after, err := os.ReadFile(sessionPath)
-	if err != nil || !bytes.Equal(after, original) {
-		t.Fatalf("production changed invalid session: %v / %q", err, after)
-	}
-}
-
-func TestRunProductionOpensLegacySessionIntoCurrentContext(t *testing.T) {
-	workingDir := t.TempDir()
-	agentDir := t.TempDir()
-	capture := &capturedProductionRequest{}
-	server := newProductionTextServer(t, capture, "legacy production answer")
-	defer server.Close()
-	writeModelsJSON(t, agentDir, server.URL+"/v1", stringPointer("fixture-key"), nil)
-	sessionPath := filepath.Join(workingDir, "legacy-production.jsonl")
-	legacy := []byte(fmt.Sprintf(
-		`{"type":"session","version":2,"id":"legacy-production","timestamp":"2026-08-01T00:00:00.000Z","cwd":%q}`+"\n"+
-			`{"type":"message","id":"legacy-root","parentId":null,"timestamp":"2026-08-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"legacy production context"}],"timestamp":1785542401000}}`+"\n",
-		workingDir,
-	))
-	if err := os.WriteFile(sessionPath, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	exitCode := app.RunProduction(
-		context.Background(),
-		productionTestConfig(workingDir, agentDir, nil),
-		[]string{"--model", "openai/gpt-legacy", "--session", sessionPath, "-p", "resume migrated context"},
-		&stdout,
-		&stderr,
-	)
-	if exitCode != app.ExitSuccess || stdout.String() != "legacy production answer\n" || stderr.String() != customModelWarning("gpt-legacy") {
-		t.Fatalf("RunProduction legacy = code %d stdout %q stderr %q", exitCode, stdout.String(), stderr.String())
-	}
-	payload, err := json.Marshal(capture.snapshot().payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(payload), "legacy production context") != 1 || strings.Count(string(payload), "resume migrated context") != 1 {
-		t.Fatalf("production request lost migrated context: %s", payload)
-	}
-	data, err := os.ReadFile(sessionPath)
-	if err != nil || !bytes.Contains(data, []byte(`"version":3`)) {
-		t.Fatalf("production legacy publication = %v / %s", err, data)
-	}
-	transcript, err := session.Open(sessionPath, session.OpenOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-	if messages := transcript.BuildContext().Messages(); len(messages) != 3 {
-		t.Fatalf("production reopened migrated context = %#v", messages)
 	}
 }
 

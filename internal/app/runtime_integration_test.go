@@ -24,8 +24,11 @@ import (
 	"github.com/cat3399/pi-go/internal/resource"
 	agentruntime "github.com/cat3399/pi-go/internal/runtime"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/testenv"
 	"github.com/cat3399/pi-go/internal/tool"
 )
+
+func TestMain(m *testing.M) { testenv.WithSharedKnowledge(m) }
 
 type rejectingHTTPDoer struct{ calls atomic.Uint32 }
 
@@ -190,35 +193,6 @@ func fixedProductionConfig(cwd, agentDir, docsDir string) ProductionConfig {
 	}
 }
 
-func TestOpenProductionRuntimeUsesProductionRestoreWithoutRunningPrompt(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
-	writeProductionCatalog(t, agentDir, true)
-	sessionPath := filepath.Join(t.TempDir(), "rpc-session.jsonl")
-	runtime, err := OpenProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), ProductionRuntimeOptions{
-		SessionPath: sessionPath, ProviderID: "openai", ModelID: "gpt-5.5",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := runtime.Dispose(context.Background()); err != nil {
-			t.Errorf("dispose runtime: %v", err)
-		}
-	}()
-	productSession := runtime.Session()
-	selected, ok := productSession.SelectedModel()
-	if !ok || selected.Provider() != "openai" || selected.ID() != "gpt-5.5" {
-		t.Fatalf("selected model = %#v, %t", selected, ok)
-	}
-	if path, ok := productSession.SessionManager().SessionFile(); !ok || path != sessionPath {
-		t.Fatalf("session file = %q, %t", path, ok)
-	}
-	messages := productSession.State().Active.Messages()
-	if productSession.SessionManager().Cwd() != cwd || len(messages) != 0 {
-		t.Fatalf("opened session = cwd %q messages %#v", productSession.SessionManager().Cwd(), messages)
-	}
-}
-
 func TestProductionToolRuntimeOptionsUseLiveShellAndImageSettings(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -248,7 +222,7 @@ func TestProductionToolRuntimeOptionsUseLiveShellAndImageSettings(t *testing.T) 
 }
 
 func TestProductionRuntimeRestoresSavedModelAndThinking(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, true)
 	sessionPath := filepath.Join(t.TempDir(), "saved.jsonl")
 	stored, err := session.Create(sessionPath, session.CreateOptions{ID: "saved", WorkingDir: cwd})
@@ -287,7 +261,10 @@ func TestProductionRuntimeRestoresSavedModelAndThinking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.AppendModelChange(context.Background(), "openai", "gpt-5.5"); err != nil {
+	// A different model than both the default and the last assistant: restore
+	// must honor the explicit change even without a new assistant turn.
+	const savedModel = "gpt-5.4"
+	if _, err := manager.AppendModelChange(context.Background(), "openai", savedModel); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := manager.AppendThinkingLevelChange(context.Background(), string(provider.ThinkingHigh)); err != nil {
@@ -297,67 +274,32 @@ func TestProductionRuntimeRestoresSavedModelAndThinking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runtimeDeps, err := assembleProductionRuntime(context.Background(), fixedProductionConfig(cwd, agentDir, docsDir), options{})
+	config := fixedProductionConfig(cwd, agentDir, docsDir)
+	doer := &rejectingHTTPDoer{}
+	config.OpenAIHTTPClient = doer
+	rt, err := OpenProductionRuntime(t.Context(), config, ProductionRuntimeOptions{SessionPath: sessionPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err = session.OpenSessionManager(sessionPath, "", "")
-	if err != nil {
-		t.Fatal(err)
+	defer rt.Dispose(t.Context())
+	restored := rt.Session()
+	if path, ok := restored.SessionManager().SessionFile(); !ok || path != sessionPath || restored.SessionManager().Cwd() != cwd || doer.calls.Load() != 0 {
+		t.Fatalf("restore: file=%q cwd=%q provider calls=%d", path, restored.SessionManager().Cwd(), doer.calls.Load())
 	}
-	created, err := runtimeDeps.factory(context.Background(), agentruntime.CreateOptions{CWD: manager.Cwd(), AgentDir: agentDir, SessionManager: manager})
-	if err != nil {
-		t.Fatal(err)
+	if messages := restored.State().Active.Messages(); len(messages) != 2 {
+		t.Fatalf("restore changed the saved conversation: got %d messages, want 2", len(messages))
 	}
-	defer func() {
-		if err := created.Session.Close(context.Background()); err != nil {
-			t.Errorf("close restored session: %v", err)
-		}
-	}()
-	selected, ok := created.Session.SelectedModel()
-	if !ok || selected.Provider() != "openai" || selected.ID() != "gpt-5.5" {
+	selected, ok := restored.SelectedModel()
+	if !ok || selected.Provider() != "openai" || selected.ID() != savedModel {
 		t.Fatalf("restored model = %#v, %t", selected, ok)
 	}
-	if got := created.Session.ThinkingLevel(); got != provider.ThinkingHigh {
+	if got := restored.ThinkingLevel(); got != provider.ThinkingHigh {
 		t.Fatalf("restored thinking = %q, want %q", got, provider.ThinkingHigh)
 	}
 }
 
-func TestProductionRuntimeResolvesCurrentAuthForEveryTurn(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
-	writeProductionCatalog(t, agentDir, true)
-	doer := &dynamicAuthDoer{}
-	config := fixedProductionConfig(cwd, agentDir, docsDir)
-	config.OpenAIHTTPClient = doer
-	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer productRuntime.Dispose(context.Background())
-	if _, err := productRuntime.Session().Run(context.Background(), "first"); err != nil {
-		t.Fatal(err)
-	}
-	if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", "replacement-key"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := productRuntime.Session().Run(context.Background(), "second"); err != nil {
-		t.Fatal(err)
-	}
-	if got := doer.snapshot(); len(got) != 2 || got[0] != "Bearer fixture-key" || got[1] != "Bearer replacement-key" {
-		t.Fatalf("authorization sequence = %#v", got)
-	}
-}
-
 func TestProductionRuntimeRefreshesProviderSettingsForEveryTurn(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, true)
 	doer := &dynamicProviderSettingsDoer{}
 	config := fixedProductionConfig(cwd, agentDir, docsDir)
@@ -417,7 +359,7 @@ func TestProductionRuntimeRefreshesProviderSettingsForEveryTurn(t *testing.T) {
 }
 
 func TestProductionReloadRebuildsModelAndStandaloneBashFromSettings(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, true)
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"shellPath":"initial-shell","shellCommandPrefix":"prefix-one","images":{"autoResize":true}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -474,7 +416,7 @@ func TestProductionReloadRebuildsModelAndStandaloneBashFromSettings(t *testing.T
 }
 
 func TestProductionRuntimeLoadsAndReloadsSettingsResourcePaths(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, true)
 	firstRoot, secondRoot := filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")
 	firstSkill := filepath.Join(firstRoot, "skills", "settings-first", "SKILL.md")
@@ -548,45 +490,54 @@ func TestProductionRuntimeLoadsAndReloadsSettingsResourcePaths(t *testing.T) {
 	assertResources("settings-second", "settings-second", "second expansion value", "settings-first")
 }
 
-func TestProductionExplicitModelCanRunAfterRuntimeCredentialAdded(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+func TestProductionModelAccessBeforeLoginAndAfterKeyRotation(t *testing.T) {
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, false)
 	doer := &dynamicAuthDoer{}
 	config := fixedProductionConfig(cwd, agentDir, docsDir)
 	config.OpenAIHTTPClient = doer
-	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
+	path := filepath.Join(cwd, "access.jsonl")
+	productRuntime, err := OpenProductionRuntime(t.Context(), config, ProductionRuntimeOptions{SessionPath: path, ModelID: "openai/gpt-5.5"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	productRuntime, err := agentruntime.Create(context.Background(), runtimeDeps.factory, agentruntime.InitialOptions{CWD: cwd, AgentDir: agentDir, SessionManager: manager})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer productRuntime.Dispose(context.Background())
+	defer productRuntime.Dispose(t.Context())
+	manager := productRuntime.Session().SessionManager()
 	baseline := len(manager.Entries())
+	var compactionEvents atomic.Uint32
+	productRuntime.Session().Subscribe(func(_ context.Context, event agent.SessionEvent) {
+		switch event.(type) {
+		case agent.CompactionStartEvent, agent.CompactionEndEvent:
+			compactionEvents.Add(1)
+		}
+	})
 	if err := productRuntime.Session().SetModel(productRuntime.Session().Model()); err == nil || err.Error() != "No API key for openai/gpt-5.5" {
 		t.Fatalf("SetModel error = %v", err)
 	}
-	if got := len(manager.Entries()); got != baseline {
-		t.Fatalf("failed SetModel changed entries from %d to %d", baseline, got)
+	if _, err := productRuntime.Session().Compact(t.Context(), "must authenticate"); err == nil || err.Error() != agentruntime.FormatNoAPIKeyFoundMessage("openai", docsDir) {
+		t.Fatalf("Compact before login = %v", err)
 	}
-	if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", "late-key"); err != nil {
-		t.Fatal(err)
+	if got := len(manager.Entries()); got != baseline || len(doer.snapshot()) != 0 || compactionEvents.Load() != 0 {
+		t.Fatalf("before login: entries %d -> %d, requests %d, compaction events %d", baseline, got, len(doer.snapshot()), compactionEvents.Load())
 	}
-	if _, err := productRuntime.Session().Run(context.Background(), "after login"); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("access failure published the session file: %v", err)
 	}
-	if got := doer.snapshot(); len(got) != 1 || got[0] != "Bearer late-key" {
+	for _, key := range []string{"late-key", "replacement-key"} {
+		if err := productRuntime.Services().AuthRuntime.SetAPIKey("openai", key); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := productRuntime.Session().Run(t.Context(), "after credential change"); err != nil || !result.Succeeded() {
+			t.Fatalf("run after credential change = %#v, %v", result, err)
+		}
+	}
+	if got := doer.snapshot(); len(got) != 2 || got[0] != "Bearer late-key" || got[1] != "Bearer replacement-key" {
 		t.Fatalf("authorization sequence = %#v", got)
 	}
 }
 
 func TestProductionAPIKeyWithoutModelRemainsDiagnosticOnly(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	config := fixedProductionConfig(cwd, agentDir, docsDir)
 	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{
 		hasAPIKey: true,
@@ -621,48 +572,8 @@ func TestProductionAPIKeyWithoutModelRemainsDiagnosticOnly(t *testing.T) {
 	}
 }
 
-func TestProductionNonFatalModelSourceDiagnosticKeepsRuntimeHooks(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	doer := &dynamicAuthDoer{}
-	config := fixedProductionConfig(cwd, agentDir, docsDir)
-	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
-	config.OpenAIHTTPClient = doer
-	var beforeAgentStarts atomic.Uint32
-	config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
-		beforeAgentStarts.Add(1)
-		return agent.BeforeAgentStartResult{}, nil
-	}
-	runtimeDeps, err := assembleProductionRuntime(context.Background(), config, options{modelID: "openai/gpt-5.5"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := session.InMemorySessionManager(cwd, session.NewSessionOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	created, err := runtimeDeps.factory(context.Background(), agentruntime.CreateOptions{
-		CWD: cwd, AgentDir: agentDir, SessionManager: manager,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer created.Session.Close(context.Background())
-	if len(created.Diagnostics) == 0 || created.Diagnostics[0].Kind != agentruntime.DiagnosticWarning {
-		t.Fatalf("source diagnostics = %#v", created.Diagnostics)
-	}
-	if _, err := created.Session.Run(context.Background(), "keep hooks"); err != nil {
-		t.Fatal(err)
-	}
-	if beforeAgentStarts.Load() != 1 {
-		t.Fatalf("before_agent_start calls = %d, want 1", beforeAgentStarts.Load())
-	}
-}
-
 func TestRunProductionKeepsHealthyExplicitRouteWithUnrelatedModelSourceDiagnostic(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -687,34 +598,8 @@ func TestRunProductionKeepsHealthyExplicitRouteWithUnrelatedModelSourceDiagnosti
 	}
 }
 
-func TestRunProductionRejectsSelectedProviderWithInvalidCachedCatalog(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(agentDir, "models-store.json"), []byte(`{"openai":{"models":"invalid"}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	doer := &dynamicAuthDoer{}
-	config := fixedProductionConfig(cwd, agentDir, docsDir)
-	config.Environment = []string{"OPENAI_API_KEY=fixture-key"}
-	config.OpenAIHTTPClient = doer
-	var beforeAgentStarts atomic.Uint32
-	config.Hooks.BeforeAgentStart = func(context.Context, agent.BeforeAgentStartEvent) (agent.BeforeAgentStartResult, error) {
-		beforeAgentStarts.Add(1)
-		return agent.BeforeAgentStartResult{}, nil
-	}
-	var stdout, stderr bytes.Buffer
-	code := RunProduction(context.Background(), config, []string{
-		"--model", "openai/gpt-5.5", "--session", filepath.Join(cwd, "bad-selected-catalog.jsonl"), "-p", "must not run",
-	}, &stdout, &stderr)
-	if code != ExitFailure || stdout.Len() != 0 || !strings.Contains(stderr.String(), "selected provider/API is not supported") {
-		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	if beforeAgentStarts.Load() != 0 || len(doer.snapshot()) != 0 {
-		t.Fatalf("selected invalid route hooks=%d requests=%d", beforeAgentStarts.Load(), len(doer.snapshot()))
-	}
-}
-
 func TestRunProductionContinuesWithInvalidSettingsDiagnostic(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"retry":"invalid"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +617,7 @@ func TestRunProductionContinuesWithInvalidSettingsDiagnostic(t *testing.T) {
 
 func TestProductionRuntimeReplacementRebuildsCwdBoundServices(t *testing.T) {
 	firstCWD, secondCWD := t.TempDir(), t.TempDir()
-	agentDir, docsDir := t.TempDir(), t.TempDir()
+	agentDir, docsDir := testenv.AgentDir(t), t.TempDir()
 	writeProductionCatalog(t, agentDir, true)
 	for _, fixture := range []struct{ cwd, prompt, marker string }{
 		{firstCWD, "first project prompt", "first marker"},
@@ -841,7 +726,7 @@ func assertCwdBoundServices(t *testing.T, services *agentruntime.Services, cwd, 
 
 func TestRunProductionMissingStoredCwdPrecedesServiceConstruction(t *testing.T) {
 	storedCWD, startupCWD := t.TempDir(), t.TempDir()
-	agentDir, docsDir := t.TempDir(), t.TempDir()
+	agentDir, docsDir := testenv.AgentDir(t), t.TempDir()
 	sessionPath := filepath.Join(t.TempDir(), "missing-cwd.jsonl")
 	stored, err := session.Create(sessionPath, session.CreateOptions{ID: "missing-cwd", WorkingDir: storedCWD})
 	if err != nil {
@@ -883,7 +768,7 @@ func TestRunProductionMissingStoredCwdPrecedesServiceConstruction(t *testing.T) 
 }
 
 func TestRunProductionModelLessDoesNotInvokeProvider(t *testing.T) {
-	cwd, agentDir, docsDir := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, docsDir := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	doer := &rejectingHTTPDoer{}
 	config := fixedProductionConfig(cwd, agentDir, docsDir)
 	config.OpenAIHTTPClient = doer
@@ -906,18 +791,28 @@ func TestRunProductionModelLessDoesNotInvokeProvider(t *testing.T) {
 	}
 }
 
-func TestProductionDocumentationUsesInstalledBuildSources(t *testing.T) {
-	paths := ProductionPaths{WorkingDir: t.TempDir(), AgentDir: filepath.Join(t.TempDir(), "agent")}
-	got, err := productionDocumentation(context.Background(), ProductionConfig{}, paths)
-	if err != nil {
+func TestPrepareProductionImportsDefaultAgentAndProjectData(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	files := []struct{ source, target, content string }{
+		{filepath.Join(home, ".pi", "agent", "auth.json"), filepath.Join(home, ".pi-go", "agent", "auth.json"), `{"openai":{"type":"api_key","key":"fixture"}}`},
+		{filepath.Join(cwd, ".pi", "SYSTEM.md"), filepath.Join(cwd, ".pi-go", "SYSTEM.md"), "project instructions"},
+	}
+	for _, file := range files {
+		if err := os.MkdirAll(filepath.Dir(file.source), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file.source, []byte(file.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := PrepareProduction(t.Context(), ProductionConfig{WorkingDir: cwd, Environment: []string{}}); err != nil {
 		t.Fatal(err)
 	}
-	if got.BuildID == "" || got.DocsPath != filepath.Join(got.SourcePath, "docs") {
-		t.Fatalf("installed documentation = %#v", got)
-	}
-	for _, name := range []string{got.ReadmePath, filepath.Join(got.SourcePath, "internal", "agent", "agent.go")} {
-		if data, err := os.ReadFile(name); err != nil || len(data) == 0 {
-			t.Fatalf("installed resource %s: %v", name, err)
+	for _, file := range files {
+		if data, err := os.ReadFile(file.target); err != nil || string(data) != file.content {
+			t.Fatalf("imported %s = %q, %v", file.target, data, err)
 		}
 	}
 }

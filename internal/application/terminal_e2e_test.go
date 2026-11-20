@@ -21,6 +21,7 @@ import (
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/application"
 	"github.com/cat3399/pi-go/internal/terminal"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 // Only the provider is deterministic. Tool registration/selection, PTY,
@@ -120,7 +121,7 @@ func TestProductionTerminalSharedByAgentAndSurfacesAcrossReload(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cwd, agentDir := t.TempDir(), t.TempDir()
+	cwd, agentDir := t.TempDir(), testenv.AgentDir(t)
 	models, _ := json.Marshal(map[string]any{"providers": map[string]any{"terminal-test": map[string]any{
 		"api": "openai-completions", "baseUrl": server.URL + "/v1", "apiKey": "terminal-test-key",
 		"models": []any{map[string]any{"id": modelID, "name": "Terminal E2E", "contextWindow": 32000, "maxTokens": 1024}},

@@ -10,19 +10,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/app"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/testenv"
 	coderwebsocket "github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 )
 
 func TestRunProductionRoutesBuiltinAzureOpenAIResponses(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	var captured map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/openai/v1/responses" || request.URL.Query().Get("api-version") != "2026-preview" {
@@ -70,7 +70,7 @@ func TestRunProductionRoutesBuiltinAzureOpenAIResponses(t *testing.T) {
 }
 
 func TestRunProductionRoutesAnthropicWithRequestTimeHeaders(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	var captured map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/v1/messages" {
@@ -120,77 +120,19 @@ func TestRunProductionRoutesAnthropicWithRequestTimeHeaders(t *testing.T) {
 	}
 }
 
-func TestRunProductionRoutesModelsJSONOnlyOpenAICompatibleProvider(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	var authorization string
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		authorization = request.Header.Get("Authorization")
-		if request.URL.Path != "/v1/chat/completions" {
-			t.Errorf("request path = %q", request.URL.Path)
-		}
-		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"compatible answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-	}))
-	defer server.Close()
-	writeProviderModelsJSON(t, agentDir, map[string]any{
-		"deepseek": map[string]any{
-			"baseUrl": server.URL + "/v1", "api": "openai-completions", "apiKey": "deepseek-key",
-			"models": []map[string]any{{"id": "deepseek-v4flsh"}},
-		},
-	})
-	config := productionTestConfig(workingDir, agentDir, nil)
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), config, []string{
-		"--model", "deepseek/deepseek-v4flsh", "--session", filepath.Join(workingDir, "compatible.jsonl"), "-p", "hello",
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "compatible answer\n" || stderr.Len() != 0 || authorization != "Bearer deepseek-key" {
-		t.Fatalf("RunProduction = %d stdout=%q stderr=%q authorization=%q", code, stdout.String(), stderr.String(), authorization)
-	}
-}
-
-func TestRunProductionRoutesHeaderOwnedOpenAICompatibleProvider(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/v1/chat/completions" {
-			t.Errorf("request path = %q", request.URL.Path)
-		}
-		if got := request.Header.Get("cf-aig-authorization"); got != "Bearer gateway-token" {
-			t.Errorf("cf-aig-authorization = %q", got)
-		}
-		if values := request.Header.Values("X-Empty"); len(values) != 1 || values[0] != "" {
-			t.Errorf("empty header values = %#v", values)
-		}
-		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"header answer\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
-	}))
-	defer server.Close()
-	writeProviderModelsJSON(t, agentDir, map[string]any{
-		"gateway": map[string]any{
-			"baseUrl": server.URL + "/v1", "api": "openai-completions",
-			"headers": map[string]string{"cf-aig-authorization": "Bearer gateway-token", "X-Empty": ""},
-			"models":  []map[string]any{{"id": "gateway-model"}},
-		},
-	})
-	config := productionTestConfig(workingDir, agentDir, nil)
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), config, []string{
-		"--model", "gateway/gateway-model", "--session", filepath.Join(workingDir, "header-owned.jsonl"), "-p", "hello",
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "header answer\n" || stderr.Len() != 0 {
-		t.Fatalf("RunProduction = %d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-}
-
 func TestRunProductionSelectsHeaderOwnedModelWithoutExplicitSelection(t *testing.T) {
 	for _, headerOwner := range []string{"provider", "model"} {
 		t.Run(headerOwner, func(t *testing.T) {
-			workingDir, agentDir := t.TempDir(), t.TempDir()
+			workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				if request.URL.Path != "/v1/chat/completions" {
 					t.Errorf("request path = %q", request.URL.Path)
 				}
 				if got := request.Header.Get("cf-aig-authorization"); got != "Bearer gateway-token" {
 					t.Errorf("cf-aig-authorization = %q", got)
+				}
+				if values := request.Header.Values("X-Empty"); len(values) != 1 || values[0] != "" {
+					t.Errorf("empty header values = %#v", values)
 				}
 				writer.Header().Set("Content-Type", "text/event-stream")
 				_, _ = fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"default header answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
@@ -200,11 +142,12 @@ func TestRunProductionSelectsHeaderOwnedModelWithoutExplicitSelection(t *testing
 				"baseUrl": server.URL + "/v1", "api": "openai-completions",
 				"models": []map[string]any{{"id": "gateway-default"}},
 			}
+			headers := map[string]string{"cf-aig-authorization": "Bearer gateway-token", "X-Empty": ""}
 			if headerOwner == "provider" {
-				providerConfig["headers"] = map[string]string{"cf-aig-authorization": "Bearer gateway-token"}
+				providerConfig["headers"] = headers
 			} else {
 				providerConfig["models"] = []map[string]any{{
-					"id": "gateway-default", "headers": map[string]string{"cf-aig-authorization": "Bearer gateway-token"},
+					"id": "gateway-default", "headers": headers,
 				}}
 			}
 			writeProviderModelsJSON(t, agentDir, map[string]any{"gateway": providerConfig})
@@ -221,7 +164,7 @@ func TestRunProductionSelectsHeaderOwnedModelWithoutExplicitSelection(t *testing
 }
 
 func TestRunProductionMergesStoredCacheRetentionEnvWithoutProjectingOtherEnv(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	var captured map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if got := request.Header.Get("Authorization"); got != "Bearer stored-key" {
@@ -229,6 +172,10 @@ func TestRunProductionMergesStoredCacheRetentionEnvWithoutProjectingOtherEnv(t *
 		}
 		if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
 			t.Errorf("decode request: %v", err)
+		}
+		wire, err := json.Marshal([]any{request.Header, captured})
+		if err != nil || bytes.Contains(wire, []byte("must-not-leak")) || bytes.Contains(wire, []byte("ambient-secret")) {
+			t.Errorf("unexpected projection of unrelated credentials into the HTTP request (encode error: %v)", err)
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writeProviderSSE(t, writer, map[string]any{
@@ -239,10 +186,10 @@ func TestRunProductionMergesStoredCacheRetentionEnvWithoutProjectingOtherEnv(t *
 	}))
 	defer server.Close()
 	writeProviderModelsJSON(t, agentDir, map[string]any{
-		"openai": map[string]any{"baseUrl": server.URL + "/v1"},
+		"openai": map[string]any{"baseUrl": server.URL + "/v1", "apiKey": "configured-lower"},
 	})
-	writeAuthJSON(t, agentDir, `{"openai":{"type":"api_key","key":"stored-key","env":{"PI_CACHE_RETENTION":"long","UNRELATED_SECRET":"must-not-leak"}}}`)
-	config := productionTestConfig(workingDir, agentDir, []string{"PI_CACHE_RETENTION=short", "UNRELATED_SECRET=ambient-secret"})
+	writeAuthJSON(t, agentDir, `{"openai":{"type":"api_key","key":"stored-${KEY}","env":{"KEY":"key","PI_CACHE_RETENTION":"long","UNRELATED_SECRET":"must-not-leak"}}}`)
+	config := productionTestConfig(workingDir, agentDir, []string{"KEY=ambient", "OPENAI_API_KEY=ambient-lower", "PI_CACHE_RETENTION=short", "UNRELATED_SECRET=ambient-secret"})
 	var stdout, stderr bytes.Buffer
 	code := app.RunProduction(context.Background(), config, []string{
 		"--model", "openai/gpt-5.5", "--session", filepath.Join(workingDir, "stored-env.jsonl"), "-p", "hello",
@@ -255,48 +202,10 @@ func TestRunProductionMergesStoredCacheRetentionEnvWithoutProjectingOtherEnv(t *
 	}
 }
 
-func TestRunProductionForwardsProviderRetrySettingsOnEachTurn(t *testing.T) {
-	workingDir, agentDir := t.TempDir(), t.TempDir()
-	var attempts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if attempt := attempts.Add(1); attempt == 1 {
-			writer.Header().Set("Content-Type", "application/json")
-			writer.WriteHeader(http.StatusTooManyRequests)
-			_, _ = fmt.Fprint(writer, `{"error":{"message":"retry","code":"rate_limit_exceeded"}}`)
-			return
-		}
-		writer.Header().Set("Content-Type", "text/event-stream")
-		writeProviderSSE(t, writer,
-			map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{
-				"type": "message", "id": "msg-retry", "role": "assistant", "status": "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": "retried"}},
-			}},
-			map[string]any{"type": "response.completed", "response": map[string]any{
-				"status": "completed", "usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-			}},
-		)
-	}))
-	defer server.Close()
-	writeProviderModelsJSON(t, agentDir, map[string]any{
-		"openai": map[string]any{"baseUrl": server.URL + "/v1", "apiKey": "configured-key"},
-	})
-	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), []byte(`{"httpIdleTimeoutMs":1234,"websocketConnectTimeoutMs":0,"retry":{"provider":{"timeoutMs":2345,"maxRetries":1,"maxRetryDelayMs":0}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config := productionTestConfig(workingDir, agentDir, nil)
-	var stdout, stderr bytes.Buffer
-	code := app.RunProduction(context.Background(), config, []string{
-		"--model", "openai/gpt-5.5", "--session", filepath.Join(workingDir, "provider-retry.jsonl"), "-p", "hello",
-	}, &stdout, &stderr)
-	if code != app.ExitSuccess || stdout.String() != "retried\n" || stderr.Len() != 0 || attempts.Load() != 2 {
-		t.Fatalf("RunProduction = %d stdout=%q stderr=%q attempts=%d", code, stdout.String(), stderr.String(), attempts.Load())
-	}
-}
-
 func TestRunProductionRoutesIndependentOpenAICodexOAuthOverWebSocket(t *testing.T) {
 	provider.ResetOpenAICodexWebSocketDebugStats("")
 	defer provider.CloseOpenAICodexWebSocketSessions("")
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	modelID, ok := modelcatalog.DefaultModelID(modelcatalog.OpenAICodexProviderID)
 	if !ok {
 		t.Fatal("built-in OpenAI Codex default is missing")

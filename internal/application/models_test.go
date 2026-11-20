@@ -18,6 +18,7 @@ import (
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 type modelSyncHTTPFunc func(*http.Request) (*http.Response, error)
@@ -26,7 +27,7 @@ func (f modelSyncHTTPFunc) Do(r *http.Request) (*http.Response, error) { return 
 
 func TestSyncBuiltinModelsRefreshesActiveSelectionWithoutSwitchingModels(t *testing.T) {
 	ctx := context.Background()
-	cwd, agentDir, logs := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, agentDir, logs := t.TempDir(), testenv.AgentDir(t), t.TempDir()
 	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
 		t.Setenv(key, logs)
 	}
@@ -93,7 +94,7 @@ func TestSyncBuiltinModelsRefreshesActiveSelectionWithoutSwitchingModels(t *test
 
 func TestPerModelThinkingDefaultsInConfigurationAndSessions(t *testing.T) {
 	ctx := context.Background()
-	cwd, dir := t.TempDir(), t.TempDir()
+	cwd, dir := t.TempDir(), testenv.AgentDir(t)
 	settings := `{"defaultProvider":"gateway","defaultModel":"a","defaultThinkingLevel":"medium"}`
 	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(settings), 0600); err != nil {
 		t.Fatal(err)
@@ -186,7 +187,7 @@ func TestListModelsUsesProductionAuthAndReturnsOnlyAvailableRoutes(t *testing.T)
 
 func TestBuiltinProviderSelectionPreservesCustomConfigCredentialsAndCurrentModel(t *testing.T) {
 	ctx := context.Background()
-	cwd, agentDir := t.TempDir(), t.TempDir()
+	cwd, agentDir := t.TempDir(), testenv.AgentDir(t)
 	service, err := NewService(ServiceOptions{Production: app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir, Environment: []string{}}, DisableReaper: true})
 	if err != nil {
 		t.Fatal(err)

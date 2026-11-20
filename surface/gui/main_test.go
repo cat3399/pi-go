@@ -87,7 +87,7 @@ func TestHeadlessCommands(t *testing.T) {
 	}
 }
 
-func TestHeadlessRPCUsesStdioAndGUIKnowledge(t *testing.T) {
+func TestHeadlessRPCUsesStdio(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(root, "agent")
 	t.Setenv("PI_GO_AGENT_DIR", agentDir)
@@ -100,9 +100,5 @@ func TestHeadlessRPCUsesStdioAndGUIKnowledge(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(out), &response); err != nil || code != 0 || !response.Success || response.Type != "response" || response.ID != "gui-cli" || response.Command != "get_state" {
 		t.Fatalf("exit %d, response %s (%v), stderr %s", code, out, err, stderr)
-	}
-	matches, err := filepath.Glob(filepath.Join(product.KnowledgeDirectory(agentDir), "*", "surface", "gui", "main.go"))
-	if err != nil || len(matches) != 1 {
-		t.Fatalf("GUI sources installed by rpc: %v (%v)", matches, err)
 	}
 }

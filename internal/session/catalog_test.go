@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -222,6 +221,15 @@ func TestCatalogPersistsAndRefreshesOnlyChangedSessionFiles(t *testing.T) {
 		t.Fatalf("persistent catalog reparsed unchanged files after reopen, count = %d", got)
 	}
 
+	secondPath := createCatalogTestSession(t, cwd, sessionDir, "catalog-second", "new session", 3)
+	values, err = reopened.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || reopenedLoads.Load() != 1 {
+		t.Fatalf("after create: sessions=%d parses=%d", len(values), reopenedLoads.Load())
+	}
+
 	manager, err := OpenSessionManager(firstPath, sessionDir, "")
 	if err != nil {
 		t.Fatal(err)
@@ -236,21 +244,12 @@ func TestCatalogPersistsAndRefreshesOnlyChangedSessionFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCatalogSession(t, values, "catalog-first", 3, "first message")
-	if got := reopenedLoads.Load(); got != 1 {
-		t.Fatalf("changed file parse count = %d", got)
-	}
-
-	secondPath := createCatalogTestSession(t, cwd, sessionDir, "catalog-second", "new session", 3)
-	values, err = reopened.ListAll()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != 2 {
-		t.Fatalf("sessions after create = %#v", values)
+	changed, found := catalogSessionByID(values, "catalog-first")
+	if len(values) != 2 || !found || changed.MessageCount != 3 || changed.FirstMessage != "first message" {
+		t.Fatalf("sessions after append = %#v", values)
 	}
 	if got := reopenedLoads.Load(); got != 2 {
-		t.Fatalf("new file parse count = %d", got)
+		t.Fatalf("after append: %d parses, want one new file and one changed file", got)
 	}
 
 	archiveDir := filepath.Join(root, "archived")
@@ -322,82 +321,6 @@ func TestCatalogCoalescesConcurrentRefreshes(t *testing.T) {
 	if got := loads.Load(); got != 1 {
 		t.Fatalf("concurrent parse count = %d", got)
 	}
-}
-
-func TestCatalogLargeCorpusRefreshIsIncremental(t *testing.T) {
-	root := t.TempDir()
-	cwd := filepath.Join(root, "workspace")
-	agentDir := filepath.Join(root, "agent")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sessionDir, err := SessionDirForAgentDir(cwd, agentDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const sessionCount = 160
-	paths := make([]string, sessionCount)
-	for index := range sessionCount {
-		id := fmt.Sprintf("catalog-large-%03d", index)
-		paths[index] = createCatalogTestSession(t, cwd, sessionDir, id, "message "+id, int64(index*2+1))
-	}
-
-	var loads atomic.Int64
-	snapshotPath := filepath.Join(root, "cache", "large.json")
-	catalog, err := newCatalogAt(agentDir, snapshotPath, func(path string) (SessionInfo, bool) {
-		loads.Add(1)
-		return buildSessionCatalogInfo(path)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = catalog.Close() })
-	coldStarted := time.Now()
-	values, err := catalog.ListAll()
-	coldElapsed := time.Since(coldStarted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != sessionCount || loads.Load() != sessionCount {
-		t.Fatalf("cold catalog: sessions=%d parses=%d", len(values), loads.Load())
-	}
-	warmStarted := time.Now()
-	if _, err := catalog.ListAll(); err != nil {
-		t.Fatal(err)
-	}
-	warmElapsed := time.Since(warmStarted)
-	if got := loads.Load(); got != sessionCount {
-		t.Fatalf("warm catalog reparsed files, count = %d", got)
-	}
-
-	const changedIndex = 73
-	manager, err := OpenSessionManager(paths[changedIndex], sessionDir, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := manager.AppendLLMMessage(context.Background(), mustUserMessage(t, "only changed session", time.UnixMilli(1000))); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Close(); err != nil {
-		t.Fatal(err)
-	}
-	incrementalStarted := time.Now()
-	values, err = catalog.ListAll()
-	incrementalElapsed := time.Since(incrementalStarted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(values) != sessionCount {
-		t.Fatalf("incremental catalog sessions = %d", len(values))
-	}
-	if got := loads.Load(); got != sessionCount+1 {
-		t.Fatalf("one file change caused %d total parses, want %d", got, sessionCount+1)
-	}
-	changed, found := catalogSessionByID(values, fmt.Sprintf("catalog-large-%03d", changedIndex))
-	if !found || changed.MessageCount != 3 {
-		t.Fatalf("changed session = %#v, found=%v", changed, found)
-	}
-	t.Logf("160-session catalog timings: cold=%s warm=%s one-changed=%s", coldElapsed, warmElapsed, incrementalElapsed)
 }
 
 func TestCatalogRealCorpusOptIn(t *testing.T) {

@@ -247,24 +247,21 @@ func TestFloodAndLogQuotaAreBounded(t *testing.T) {
 	s := testService(t)
 	id := testOpen(t, s)
 	start := time.Now()
-	r, err := s.Do(context.Background(), Request{Action: Run, ID: id, Command: "dd if=/dev/zero bs=65536 count=513 2>/dev/null", Wait: duration(time.Second)}, Agent)
+	r, err := s.Do(context.Background(), Request{Action: Run, ID: id, Command: "stty -opost && dd if=/dev/zero bs=65536 count=513 2>/dev/null", Wait: duration(time.Second)}, Agent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if time.Since(start) > 2*time.Second || len(r.Text) > MaxOutputBytes {
 		t.Fatalf("flood escaped bounds: %d bytes in %s", len(r.Text), time.Since(start))
 	}
-	// Total log throughput depends on the host PTY and concurrent filesystem
-	// tests. The per-operation wait/output assertions above remain strict.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for r.Terminal.State != "exited" {
-		r, err = s.Do(ctx, Request{Action: Read, ID: id, Wait: duration(50 * time.Millisecond)}, Agent)
-		if err != nil {
-			t.Fatal(err)
-		}
+	// Wait at the quota cursor: the shell must stop without a reader draining
+	// or projecting each chunk of the flood.
+	end := int64(logBytes)
+	r, err = s.Do(t.Context(), Request{Action: Read, ID: id, After: &end, Wait: duration(30 * time.Second)}, Agent)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(r.Terminal.Error, "log limit") {
+	if r.Terminal.State != "exited" || !strings.Contains(r.Terminal.Error, "log limit") {
 		t.Fatalf("missing quota failure: %+v", r.Terminal)
 	}
 	stat, err := os.Stat(r.Terminal.LogPath)

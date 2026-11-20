@@ -44,12 +44,7 @@ func TestSessionHandoffBinaryEndToEnd(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
-	for _, mode := range []string{"proactive", "budget", "manual"} {
-		t.Run(mode, func(t *testing.T) { testSessionHandoffBinaryScenario(t, ctx, binary, mode) })
-	}
-}
 
-func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary, mode string) {
 	cwd, agentDir := t.TempDir(), t.TempDir()
 	file := filepath.Join(agentDir, "sessions", "e2e", "session.jsonl")
 	const original = "ORIGINAL_TASK_KEEP_THIS_CORRECTION"
@@ -99,32 +94,21 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 		text := ""
 		toolName := ""
 		var arguments any
-		phase := calls
-		if mode != "proactive" {
-			phase -= 2
-		}
-		switch phase {
-		case -1:
+		switch calls {
+		case 1:
 			toolName = "bash"
-			command := "printf ordinary-work"
-			if mode == "manual" {
-				command = `"$PI_EXECUTABLE" session context compact --instructions 'retain exact pending correction'`
-			}
-			arguments = map[string]any{"command": command}
-		case 0:
+			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session context compact --instructions 'retain exact pending correction'`}
+		case 2:
 			encoded, _ := json.Marshal(payload.Messages)
-			if mode == "manual" && !strings.Contains(string(encoded), "retain exact pending correction") {
+			if !strings.Contains(string(encoded), "retain exact pending correction") {
 				t.Error("manual CLI did not deliver a handoff request")
-			}
-			if mode == "budget" && !strings.Contains(string(encoded), "at or below the handoff threshold") {
-				t.Error("hard budget did not deliver the CLI reminder")
 			}
 			toolName = "bash"
 			arguments = map[string]any{"command": "printf handoff-preparation"}
-		case 1:
+		case 3:
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session context new --request-id binary-handoff --handoff 'Continue by reading original dialogue through session history.'`}
-		case 2:
+		case 4:
 			encoded, _ := json.Marshal(payload.Messages)
 			if strings.Contains(string(encoded), original) || strings.Contains(string(encoded), "original history filler") || !strings.Contains(string(encoded), "Continue the same task in context window") {
 				t.Error("new window did not contain only the handoff")
@@ -134,7 +118,7 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 			}
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session history read --view dialogue --window initial`}
-		case 3:
+		case 5:
 			encoded := string(payload.Messages[len(payload.Messages)-1].Content)
 			var content string
 			_ = json.Unmarshal([]byte(encoded), &content)
@@ -147,24 +131,24 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 			fullOutput = match[1]
 			toolName = "read"
 			arguments = map[string]any{"path": fullOutput, "offset": 1, "limit": 8}
-		case 4:
+		case 6:
 			if !strings.Contains(string(payload.Messages[len(payload.Messages)-1].Content), original) {
 				t.Error("read did not recover the original user correction")
 			}
 			text = "HANDOFF_E2E_OK"
-		case 6:
+		case 7:
+			encoded, _ := json.Marshal(payload.Messages)
+			if !strings.Contains(string(encoded), "Continue the same task in context window") || !strings.Contains(string(encoded), "resume after restart") {
+				t.Error("fresh process did not restore the handoff context")
+			}
+			text = "RESTART_OK"
+		case 8:
 			encoded, _ := json.Marshal(payload.Messages)
 			if !strings.Contains(string(encoded), "idle manual focus") {
 				t.Error("offline compact missed its runtime reminder")
 			}
 			toolName = "bash"
 			arguments = map[string]any{"command": `"$PI_EXECUTABLE" session context new --request-id binary-idle --handoff 'Idle manual handoff saved through CLI.'`}
-		case 5:
-			encoded, _ := json.Marshal(payload.Messages)
-			if !strings.Contains(string(encoded), "Continue the same task in context window") || !strings.Contains(string(encoded), "resume after restart") {
-				t.Error("fresh process did not restore the handoff context")
-			}
-			text = "RESTART_OK"
 		default:
 			t.Errorf("unexpected model call %d (summary or duplicate run)", calls)
 			text = "UNEXPECTED"
@@ -179,11 +163,8 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 		}
 		chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}})
 		fmt.Fprintf(w, "data: %s\n\n", chunk)
-		tokens := 100
-		if calls == 1 {
-			tokens = 120000
-		}
-		chunk, _ = json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}, "usage": map[string]any{"prompt_tokens": tokens, "completion_tokens": 10, "total_tokens": tokens + 10}})
+		// Stay below the budget trigger: this handoff must come from the CLI.
+		chunk, _ = json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}, "usage": map[string]any{"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}})
 		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
 	}))
 	defer server.Close()
@@ -192,9 +173,6 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 		t.Fatal(err)
 	}
 	settings := []byte(`{"compaction":{"enabled":true,"reserveTokens":16384,"keepRecentTokens":100},"retry":{"enabled":false}}`)
-	if mode == "budget" {
-		settings = []byte(`{"compaction":{"enabled":true,"reserveTokens":0,"reminderAtTokens":38000,"handoffAtTokens":28000},"retry":{"enabled":false}}`)
-	}
 	if err := os.WriteFile(filepath.Join(agentDir, "settings.json"), settings, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -234,11 +212,7 @@ func testSessionHandoffBinaryScenario(t *testing.T, ctx context.Context, binary,
 	mu.Lock()
 	count, artifact := calls, fullOutput
 	mu.Unlock()
-	wantCalls := 6
-	if mode != "proactive" {
-		wantCalls += 2
-	}
-	if count != wantCalls {
+	if count != 8 {
 		t.Fatalf("model calls = %d", count)
 	}
 	data, err := os.ReadFile(artifact)

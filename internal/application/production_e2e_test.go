@@ -19,7 +19,10 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/provider"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
+
+func TestMain(m *testing.M) { testenv.WithSharedKnowledge(m) }
 
 // TestProductionApplicationToolPersistenceAndReopenEndToEnd deliberately keeps
 // only the remote model deterministic. Everything on the product side is the
@@ -34,7 +37,7 @@ func TestProductionApplicationToolPersistenceAndReopenEndToEnd(t *testing.T) {
 		resumedAnswer = "APPLICATION_E2E_RESUMED_OK"
 	)
 
-	workingDir, agentDir := t.TempDir(), t.TempDir()
+	workingDir, agentDir := t.TempDir(), testenv.AgentDir(t)
 	capture := &applicationE2EProviderCapture{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		payload := make(map[string]any)

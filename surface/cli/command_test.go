@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,6 +21,26 @@ func TestUnifiedCommandShowsAvailableSurfaces(t *testing.T) {
 		if !strings.Contains(stdout.String(), "  "+command) {
 			t.Fatalf("usage does not contain %q: %s", command, stdout.String())
 		}
+	}
+}
+
+func TestHelpAndVersionDoNotInitializeUserData(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(product.AgentDirectoryEnvironment, "")
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	for _, flag := range []string{"--help", "--version"} {
+		var stdout, stderr bytes.Buffer
+		if code := terminalCLI.Run([]string{flag}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("%s: exit %d: %s", flag, code, &stderr)
+		}
+		if flag == "--version" && stdout.String() != terminalCLI.Build.Version+"\n" {
+			t.Fatalf("--version = %q", stdout.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, product.DirectoryName)); !os.IsNotExist(err) {
+		t.Fatalf("help/version should leave user data absent: stat error = %v", err)
 	}
 }
 

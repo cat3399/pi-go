@@ -16,6 +16,7 @@ import (
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/model/catalog"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 func TestDiscoverModelsResolvesDraftAuthAndNormalizesCommonCatalogShapes(t *testing.T) {
@@ -88,7 +89,7 @@ func TestPresetLookupUsesExactBuiltinIDsAndDisambiguatesByChannel(t *testing.T) 
 
 func TestTypedAndDiscoveredModelsCarryInstalledCapabilitiesIntoCustomChannelSession(t *testing.T) {
 	ctx := context.Background()
-	cwd, agentDir := t.TempDir(), t.TempDir()
+	cwd, agentDir := t.TempDir(), testenv.AgentDir(t)
 	// Add an installed-only model; a lookup in the embedded or effective
 	// (user-overridden) catalog would yield the wrong thinking levels.
 	doc, err := catalog.Read(filepath.Join("..", "model", "catalogdata", "catalog.json"))
@@ -138,34 +139,35 @@ func TestTypedAndDiscoveredModelsCarryInstalledCapabilitiesIntoCustomChannelSess
 	if err != nil || len(selected) != 1 || !reflect.DeepEqual(selected[0], typed[0]) {
 		t.Fatalf("explicit lookup for a selected ID: %+v, %v", selected, err)
 	}
-	selected[0].Name = result.Models[0].Name // Keep the name supplied by the channel.
-	for _, preset := range []DiscoveredModel{typed[0], selected[0]} {
-		config, err := json.Marshal(map[string]any{"api": draft.API, "baseUrl": draft.BaseURL, "apiKey": draft.APIKey, "models": []DiscoveredModel{preset}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := service.WriteModelProvider(ctx, "gateway", config); err != nil {
-			t.Fatal(err)
-		}
-		wantLevels := []provider.ThinkingLevel{provider.ThinkingOff, provider.ThinkingLow, provider.ThinkingMedium, provider.ThinkingHigh, provider.ThinkingMax}
-		view, err := service.ListModels(ctx, cwd)
-		if err != nil || len(view.Models) != 1 || !slices.Equal(view.Models[0].ThinkingLevels, wantLevels) {
-			t.Fatalf("available models = %+v, %v", view.Models, err)
-		}
-		state, err := service.NewSession(ctx, NewSessionOptions{CWD: cwd, Provider: "gateway", ModelID: "openai/installed-only"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		m := state.Model
-		if m.Provider() != "gateway" || m.ID() != "openai/installed-only" || m.Name() != preset.Name || m.API() != draft.API || m.BaseURL() != draft.BaseURL || len(m.Headers()) != 0 || m.Cost().Input != 0 || m.Compat().OpenAIResponses != nil {
-			t.Fatal("import changed channel identity, routing, price or headers")
-		}
-		if m.ContextWindow() != 90000 || m.MaxTokens() != 7000 || !slices.Contains(m.Input(), provider.InputImage) || !slices.Equal(m.SupportedThinkingLevels(), wantLevels) {
-			t.Fatalf("session lost imported capabilities: %v", m.SupportedThinkingLevels())
-		}
-		if effort, ok := m.ThinkingEffort(provider.ThinkingMax); !ok || effort != "peak" {
-			t.Fatalf("mapped max effort = %q, %v", effort, ok)
-		}
+	// Both selections produced the same preset. Persist the channel's label and
+	// exercise the common write -> list -> session path once.
+	preset := selected[0]
+	preset.Name = result.Models[0].Name
+	config, err := json.Marshal(map[string]any{"api": draft.API, "baseUrl": draft.BaseURL, "apiKey": draft.APIKey, "models": []DiscoveredModel{preset}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.WriteModelProvider(ctx, "gateway", config); err != nil {
+		t.Fatal(err)
+	}
+	wantLevels := []provider.ThinkingLevel{provider.ThinkingOff, provider.ThinkingLow, provider.ThinkingMedium, provider.ThinkingHigh, provider.ThinkingMax}
+	view, err := service.ListModels(ctx, cwd)
+	if err != nil || len(view.Models) != 1 || !slices.Equal(view.Models[0].ThinkingLevels, wantLevels) {
+		t.Fatalf("available models = %+v, %v", view.Models, err)
+	}
+	state, err := service.NewSession(ctx, NewSessionOptions{CWD: cwd, Provider: "gateway", ModelID: "openai/installed-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := state.Model
+	if m.Provider() != "gateway" || m.ID() != "openai/installed-only" || m.Name() != preset.Name || m.API() != draft.API || m.BaseURL() != draft.BaseURL || len(m.Headers()) != 0 || m.Cost().Input != 0 || m.Compat().OpenAIResponses != nil {
+		t.Fatal("import changed channel identity, routing, price or headers")
+	}
+	if m.ContextWindow() != 90000 || m.MaxTokens() != 7000 || !slices.Contains(m.Input(), provider.InputImage) || !slices.Equal(m.SupportedThinkingLevels(), wantLevels) {
+		t.Fatalf("session lost imported capabilities: %v", m.SupportedThinkingLevels())
+	}
+	if effort, ok := m.ThinkingEffort(provider.ThinkingMax); !ok || effort != "peak" {
+		t.Fatalf("mapped max effort = %q, %v", effort, ok)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 func TestRunProductionWindowsMissingAuthAllowsEphemeralConfiguredAndAmbientSources(t *testing.T) {
@@ -44,7 +45,7 @@ func TestRunProductionWindowsMissingAuthAllowsEphemeralConfiguredAndAmbientSourc
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			workingDir := t.TempDir()
-			agentDir := t.TempDir()
+			agentDir := testenv.AgentDir(t)
 			capture := &capturedProductionRequest{}
 			server := newProductionTextServer(t, capture, "ok")
 			defer server.Close()

@@ -2,18 +2,18 @@ package application
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/session"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 func TestServiceImportSessionReconcilesReplacementIdentity(t *testing.T) {
 	cwd := t.TempDir()
-	agentDir := filepath.Join(t.TempDir(), "agent")
+	agentDir := testenv.AgentDir(t)
 	externalDir := t.TempDir()
 	imported, err := session.CreateSessionManager(cwd, externalDir, session.NewSessionOptions{ID: "imported-session"})
 	if err != nil {

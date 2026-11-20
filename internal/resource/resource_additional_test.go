@@ -404,7 +404,7 @@ func TestReloadFailureBeforeFirstSnapshotAndCancellationRetention(t *testing.T) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := s.Reload(ctx); !errors.Is(err, context.Canceled) {
+	if err := s.Reload(ctx); !errors.Is(err, context.Canceled) || !errors.Is(err, ErrTrustStore) {
 		t.Fatalf("cancelled reload = %v", err)
 	}
 	snapshot, err := s.Snapshot()

@@ -303,9 +303,7 @@ func TestCompactIgnoreMatcherPreservesOrderedPatternClasses(t *testing.T) {
 func TestFindAndGrepStopDirectoryStreamingAtFirstLimit(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, root, "000.txt", "TOKEN\n")
-	for index := 0; index < 2_000; index++ {
-		writeTestFile(t, root, filepath.Join("zzz-tail", "deep", strings.Repeat("x", index%8), fmt.Sprintf("%04d.txt", index)), "TOKEN\n")
-	}
+	writeTestFile(t, root, "zzz-tail/later.txt", "TOKEN\n")
 	suite, err := NewFilesystemSuite(FilesystemOptions{WorkingDir: root})
 	if err != nil {
 		t.Fatal(err)

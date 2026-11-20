@@ -12,10 +12,11 @@ import (
 
 	"github.com/cat3399/pi-go/internal/app"
 	"github.com/cat3399/pi-go/internal/terminal"
+	"github.com/cat3399/pi-go/internal/testenv"
 )
 
 func TestLiveTerminalRetainsIdleSessionWithoutMarkingAgentBusy(t *testing.T) {
-	cwd, agentDir := t.TempDir(), t.TempDir()
+	cwd, agentDir := t.TempDir(), testenv.AgentDir(t)
 	if err := os.WriteFile(filepath.Join(agentDir, "models.json"), []byte(`{"providers":{"terminal-test":{"api":"openai-completions","baseUrl":"http://127.0.0.1:1","apiKey":"test","models":[{"id":"test","contextWindow":4096,"maxTokens":512}]}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}

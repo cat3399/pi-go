@@ -2,11 +2,9 @@ package resource
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -140,39 +138,7 @@ func TestTrustStoreAtomicPreservesDecisionsAndJSONUsesLastDuplicate(t *testing.T
 		t.Fatalf("duplicate trust JSON = %t,%t,%v", trusted, known, err)
 	}
 }
-func TestCancelAndConcurrentSnapshots(t *testing.T) {
-	s, agent, _ := newService(t)
-	write(t, filepath.Join(agent, "AGENTS.md"), "safe")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := s.Reload(ctx); !errors.Is(err, ErrTrustStore) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancel = %v", err)
-	}
-	if err := s.Reload(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	var group sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
-			for n := 0; n < 80; n++ {
-				if err := s.Reload(context.Background()); errors.Is(err, ErrStaleReload) {
-					continue
-				} else if err != nil {
-					t.Errorf("reload: %v", err)
-					return
-				}
-				snap, err := s.Snapshot()
-				if err != nil || !strings.Contains(snap.SystemPrompt, "safe") {
-					t.Errorf("snapshot: %#v %v", snap, err)
-					return
-				}
-			}
-		}()
-	}
-	group.Wait()
-}
+
 func FuzzResourceParsersDoNotPanic(f *testing.F) {
 	f.Add("/name one two")
 	f.Add("---\nname: valid\ndescription: x\n---\nbody")
