@@ -13,7 +13,7 @@ pi-go 通过同一套 Go Agent 核心提供命令行、TUI、Web 和桌面入口
 - [Surface 架构](SURFACES.md)
 - [桌面应用](gui.md)
 - [Android 移动端](mobile.md)
-- [测试与兼容性验证](testing.md)
+- [测试与验证](testing.md)
 - [构建与发布](RELEASING.md)
 
 源码按职责组织：[internal/app](../internal/app/) 装配产品服务，

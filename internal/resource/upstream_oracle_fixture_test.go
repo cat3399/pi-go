@@ -10,23 +10,13 @@ import (
 	"testing"
 )
 
-func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
+func TestFrontmatterAndSourceFixtures(t *testing.T) {
 	var oracle struct {
-		UpstreamCommit string `json:"upstreamCommit"`
-		Generator      struct {
-			NodeVersion, Corpus string
-		} `json:"generator"`
 		Frontmatter struct {
 			ScalarAlias struct {
 				Frontmatter map[string]any `json:"frontmatter"`
 				Body        string         `json:"body"`
 			} `json:"scalarAlias"`
-			Merge struct {
-				Frontmatter map[string]any `json:"frontmatter"`
-			} `json:"merge"`
-			Typed struct {
-				Frontmatter map[string]any `json:"frontmatter"`
-			} `json:"typed"`
 		} `json:"frontmatter"`
 		PromptSources []struct {
 			Description, Source, Scope, Origin, BaseDir string
@@ -34,32 +24,30 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 	}
 	data, err := os.ReadFile("testdata/upstream_oracle.json")
 	if err != nil {
-		t.Fatalf("read frozen upstream oracle: %v", err)
+		t.Fatalf("read resource fixture: %v", err)
 	}
 	if err := json.Unmarshal(data, &oracle); err != nil {
-		t.Fatalf("decode frozen upstream oracle: %v", err)
+		t.Fatalf("decode resource fixture: %v", err)
 	}
-	if oracle.UpstreamCommit != "a116523434806910336b9de3e38a41aa5860030b" {
-		t.Fatalf("unexpected upstream oracle commit %q", oracle.UpstreamCommit)
+	var inputs struct {
+		Frontmatter struct{ ScalarAlias, Merge, Typed string }
 	}
-	if oracle.Generator.NodeVersion != "v24.18.1" || oracle.Generator.Corpus != "upstream_oracle_corpus.json" {
-		t.Fatalf("unpinned oracle generator metadata = %#v", oracle.Generator)
+	data, err = os.ReadFile("testdata/upstream_oracle_corpus.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat("testdata/" + oracle.Generator.Corpus); err != nil {
-		t.Fatalf("oracle corpus is unavailable: %v", err)
+	if err := json.Unmarshal(data, &inputs); err != nil {
+		t.Fatal(err)
 	}
-	front, body, err := parseFrontmatter("---\nsummary: &summary aliased text\ndescription: *summary\n---\nbody")
-	if err != nil || front["description"] != oracle.Frontmatter.ScalarAlias.Frontmatter["description"] || body != oracle.Frontmatter.ScalarAlias.Body {
-		t.Fatalf("scalar alias = %#v, %q, %v; frozen upstream = %#v", front, body, err, oracle.Frontmatter.ScalarAlias)
+	front, body, err := parseFrontmatter(inputs.Frontmatter.ScalarAlias)
+	if err != nil || !reflect.DeepEqual(front, oracle.Frontmatter.ScalarAlias.Frontmatter) || body != oracle.Frontmatter.ScalarAlias.Body {
+		t.Fatalf("scalar alias = %#v, %q, %v; want %#v", front, body, err, oracle.Frontmatter.ScalarAlias)
 	}
-	if _, expanded := oracle.Frontmatter.Merge.Frontmatter["<<"]; !expanded {
-		t.Fatal("frozen upstream merge fixture was not generated from the YAML parser")
+	if _, _, err := parseFrontmatter(inputs.Frontmatter.Merge); err == nil {
+		t.Fatal("accepted a YAML merge key")
 	}
-	if _, _, err := parseFrontmatter("---\ndefaults: &defaults\n  description: merged\n<<: *defaults\n---\nbody"); err == nil {
-		t.Fatal("Go hardening unexpectedly expanded the merge accepted by the frozen upstream oracle")
-	}
-	if _, ok := oracle.Frontmatter.Typed.Frontmatter["name"].(float64); !ok {
-		t.Fatalf("frozen typed name is not numeric: %#v", oracle.Frontmatter.Typed.Frontmatter)
+	if _, _, err := frontmatter(inputs.Frontmatter.Typed); err == nil {
+		t.Fatal("accepted invalid types for known frontmatter fields")
 	}
 	if len(oracle.PromptSources) != 3 || oracle.PromptSources[0].Scope != "user" || oracle.PromptSources[1].Scope != "project" || oracle.PromptSources[2].Scope != "temporary" || oracle.PromptSources[2].Origin != "top-level" || oracle.PromptSources[2].BaseDir != "<root>/additional" {
 		t.Fatalf("frozen source provenance = %#v", oracle.PromptSources)
@@ -97,10 +85,7 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 		Description, Source, Scope, Origin, BaseDir string
 	}, 0, len(snapshot.Templates))
 	for _, template := range snapshot.Templates {
-		// Namespace is an intentional product difference; compare discovery
-		// order and provenance against the unchanged upstream fixture.
-		baseDir := strings.Replace(template.Source.BaseDir, root, "<root>", 1)
-		baseDir = strings.Replace(baseDir, "/project/.pi-go/", "/project/.pi/", 1)
+		baseDir := filepath.ToSlash(strings.Replace(template.Source.BaseDir, root, "<root>", 1))
 		gotSources = append(gotSources, struct {
 			Description, Source, Scope, Origin, BaseDir string
 		}{
@@ -111,7 +96,10 @@ func TestFrozenUpstreamFrontmatterAndSourceOracle(t *testing.T) {
 			BaseDir:     baseDir,
 		})
 	}
+	// The recorded project source uses .pi; check the actual .pi-go location in this scenario.
+	projectSource := &oracle.PromptSources[1]
+	projectSource.BaseDir = strings.Replace(projectSource.BaseDir, "/project/.pi/", "/project/.pi-go/", 1)
 	if !reflect.DeepEqual(gotSources, oracle.PromptSources) {
-		t.Fatalf("prompt discovery provenance = %#v, frozen upstream = %#v", gotSources, oracle.PromptSources)
+		t.Fatalf("prompt discovery provenance = %#v, want %#v", gotSources, oracle.PromptSources)
 	}
 }

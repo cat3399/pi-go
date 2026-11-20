@@ -1,8 +1,4 @@
-# 测试与兼容性验证
-
-Go Core 的兼容性证据记录在 [capability 清单](parity/core-a116523.yaml)，固定上游 commit 为
-`a116523434806910336b9de3e38a41aa5860030b`。清单区分冻结 scenario 验证、依据源码契约实现并测试，
-以及仍存在的集成差异；它记录 Core 范围，不是当前各 Surface 的功能列表。
+# 测试与验证
 
 ## 本地检查
 
@@ -29,17 +25,14 @@ make check SURFACE=gui
 make check SURFACE=mobile
 ```
 
-## 上游 fixture
+## 回归样本
 
-冻结 oracle 由上游实际生产入口生成，Go 测试直接读取已提交的结果。运行测试不需要启动
-TypeScript pi。生成方式、环境版本与归一化范围见：
+Go 测试直接读取仓库内的场景输入和预期结果，验证会话中的事件顺序、落盘与恢复，以及工具和资源的行为。
+产品契约有意变更时，按新契约更新受影响的断言并核对差异，不用一次运行的输出批量覆盖预期结果。
 
-- [AgentSession workflow](../internal/agent/testdata/README.md)
+- [会话工作流](../internal/agent/testdata/README.md)
 - [资源解析与模板](../internal/resource/testdata/README.md)
 - [工具与文件发现](../internal/tool/testdata/README.md)
-
-更新 oracle 时核对上游 revision 与完整结果差异。pi-go 的产品名称、独立目录和安装资料是明确的
-产品差异；兼容性测试保留上游原始 fixture，并只在相应比较边界归一化目录名称。
 
 ## 数据读取性能验证
 

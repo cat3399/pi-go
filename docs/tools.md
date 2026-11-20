@@ -92,6 +92,5 @@ Review $1, with attention to $ARGUMENTS.
 
 ## 扩展契约
 
-Go 核心提供工具结果、事件、自定义消息、生命周期 hook 和资源来源等 typed 契约，供进程内
-装配使用。TypeScript 扩展 / npm 包的发现和执行不在当前生产加载器的能力范围内。
+扩展由宿主在 Go 进程内装配。核心提供生命周期 hook，以及表示事件、工具结果、自定义消息和资源来源的类型。
 接口定义见[扩展契约](../internal/agent/extensions.go)，状态所有权见 [核心架构](ARCHITECTURE.md)。

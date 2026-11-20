@@ -33,8 +33,6 @@ var upstreamWorkflowCorpusJSON []byte
 var upstreamWorkflowOracleJSON []byte
 
 type upstreamWorkflowCorpus struct {
-	UpstreamCommit     string                             `json:"upstreamCommit"`
-	NodeVersion        string                             `json:"nodeVersion"`
 	Scenario           upstreamWorkflowScenario           `json:"scenario"`
 	QueueAbortScenario upstreamQueueAbortScenario         `json:"queueAbortScenario"`
 	RetryScenario      upstreamRetryScenario              `json:"retryScenario"`
@@ -74,11 +72,8 @@ type upstreamWorkflowScenario struct {
 	} `json:"responses"`
 }
 
-// TestUpstreamAgentSessionWorkflowOracle is intentionally a workflow-level
-// contract. The expected value is produced by the pinned TypeScript
-// createAgentSession() implementation; the Go side runs the production
-// CreateAgentSession factory with deterministic provider/tool inputs.
-func TestUpstreamAgentSessionWorkflowOracle(t *testing.T) {
+// Exercise the production session factory with deterministic provider and tool inputs.
+func TestAgentSessionWorkflowFixture(t *testing.T) {
 	var corpus upstreamWorkflowCorpus
 	if err := json.Unmarshal(upstreamWorkflowCorpusJSON, &corpus); err != nil {
 		t.Fatalf("decode workflow corpus: %v", err)
@@ -90,9 +85,6 @@ func TestUpstreamAgentSessionWorkflowOracle(t *testing.T) {
 	expectedObject, ok := expectedRoot.(map[string]any)
 	if !ok {
 		t.Fatal("workflow oracle root is not an object")
-	}
-	if expectedObject["upstreamCommit"] != corpus.UpstreamCommit {
-		t.Fatalf("oracle commit = %v, corpus commit = %s", expectedObject["upstreamCommit"], corpus.UpstreamCommit)
 	}
 	expectedScenario, ok := expectedObject["scenario"].(map[string]any)
 	if !ok {
@@ -412,10 +404,10 @@ func TestUpstreamAgentSessionWorkflowOracle(t *testing.T) {
 		},
 	}
 	if difference := workflowJSONDifference("scenario", expectedScenario, canonicalWorkflowJSON(t, actualScenario)); difference != "" {
-		t.Fatalf("Go AgentSession workflow differs from pinned TypeScript oracle: %s", difference)
+		t.Fatalf("AgentSession workflow differs from fixture: %s", difference)
 	}
 	if difference := workflowJSONDifference("scenario.session.header", expectedScenario["session"].(map[string]any)["header"], fileHeader); difference != "" {
-		t.Fatalf("physical workflow header differs from pinned TypeScript oracle: %s", difference)
+		t.Fatalf("physical workflow header differs from fixture: %s", difference)
 	}
 }
 

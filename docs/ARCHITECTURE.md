@@ -63,28 +63,27 @@ AgentSession 在现有工具回合结束边界提交交接，并复用请求前�
 
 Application Service 管理每个活动会话的独立 Runtime。通过 Service 执行 fork 时，Runtime 复制
 所选历史并创建独立实例，由 Service 注册新会话；源会话的生成、工具与队列继续运行。
-单 Runtime 的 `Fork` 仍保留原版替换语义，`CreateFork` 提供独立分支的装配路径，两者共用
-节点选择、before-fork hook 和历史复制逻辑。
+直接调用 `Runtime.Fork` 会替换该 Runtime 的当前会话；`Runtime.CreateFork` 返回独立 Runtime。
+两者共用节点选择、before-fork hook 和历史复制逻辑。
 
 `SessionManager.ReadSnapshot` 在同一读取边界取得摘要、选中 leaf、按需生成的上下文和树，
 并返回数据代次、条目日志版本与分支视图版本。追加和切分支分别推进对应版本；首次 assistant
-触发落盘时延续原数据代次，重新打开、替换或新建会话则使用新代次。版本不写入原版 JSONL。
+触发落盘时延续原数据代次，重新打开、替换或新建会话则使用新代次。这些版本不写入会话 JSONL。
 `SubscribeChanges` 提供可合并的版本失效通知，Application 将其转发为独立资源事件；它不替代
-原版 Agent 事件。`AppendMessageWithReceipt` 区分条目已接受、已落盘和写入结果不确定，首次
+Agent 的运行事件。`AppendMessageWithReceipt` 区分条目已接受、已落盘和写入结果不确定，首次
 落盘失败时仍返回已进入内存视图的条目身份，不把 `message_end` 当成提交回执。
 Agent 在自身状态锁内分配运行消息身份与运行态、配置、队列版本；`ReadSnapshot` 只投影当前
-生成内容、待确认消息和工具进度，不复制已完成的历史。AgentSession 的独立观察接口将原版事件
-附上这些身份，并在实际写入后发出 `MessageReceipt`。读取与写入确认共用短期串行边界，避免
+生成内容、待确认消息和工具进度，不复制已完成的历史。AgentSession 的观察接口为消息事件
+附上运行消息身份，并在实际写入后发出 `MessageReceipt`。读取与写入确认共用短期串行边界，避免
 同一消息既出现在已接受历史中，又留在待确认快照中。Application 转发这些元数据，不另建消息状态。
 Agent 的配置和队列另有可合并通知；AgentSession 在 lifecycle 与 bash 的各自锁内维护读版本，
-覆盖原版事件之前或之后发生的实际状态变化，例如 `auto_retry_start` 之后进入等待。相关事件
+在状态变化时推进版本，例如发出 `auto_retry_start` 后进入等待。相关事件
 附带当时的 activity 快照与版本，读取时分别校验 Agent、activity 和 bash，不用 Agent 的状态
 版本代替整个产品生命周期。Runtime control 写入与 reload 发出配置失效通知；有效配置仍由
 原有 settings 解析器提供。Application 在 Runtime 入驻、回收和替换时通知资源可用性变化；
 模型定义、认证、项目信任和技能配置写入后，按全局或工作目录发布配置失效通知，不替代 AgentSession
 执行 reload。
-资源失效、写入回执与运行消息身份用于 Application 资源同步；JSONL RPC 保留原版事件词汇，
-不转发这组新增同步元数据。
+资源失效、写入回执与运行消息身份用于 Application 资源同步；JSONL RPC 的会话事件不携带这组元数据。
 Application 的会话快照保留这组版本，并校验历史与运行态来自同一 Runtime binding；运行态和
 目录解析出的父会话关系仍是独立资源，不能用会话日志版本把它们宣称为全局原子快照。
 
@@ -126,10 +125,3 @@ context/tree 时仍保留原来的全量投影语义，不把页面预算套到�
 和文档目录交给 resource service，供默认提示词生成文档导航。
 
 详见[配置与目录](configuration.md)和[本地源码](self-knowledge.md)。
-
-## 实现对应关系
-
-pi 的 Agent、AgentLoop、AgentSession、SessionManager 生产调用链及其行为是移植依据。
-固定的上游 revision、复用 fixture 和完整 scenario 见[测试与兼容性验证](testing.md)。
-pi-go 使用独立的产品目录、Go 工具链和 Surface；TypeScript extension loader 与 extension
-custom UI 不在 Go 运行时内执行，核心保留 typed hooks 和 custom data 契约。

@@ -1,10 +1,10 @@
 # pi-go
 
-pi-go 是 [pi](https://github.com/cat3399/pi) Agent Runtime 的 Go 实现，提供命令行、终端、
-Web、桌面和 Android 入口。Go Core 管理模型调用、工具执行、会话树、队列、重试与上下文压缩。
+pi-go 是用 Go 编写的编程 Agent 运行时。CLI、TUI、Web 和桌面应用共用同一套核心，
+Android 客户端连接远程服务。核心管理模型调用、工具执行、会话树、队列、重试与上下文压缩。
 
-用户数据存放在 `~/.pi-go/agent`，项目配置使用 `.pi-go`。首次使用时可以从已有的 pi 目录
-自动复制兼容数据。包含 Core 的二进制随构建携带使用文档和源码，部署后仍可在本地查阅实现。
+用户数据存放在 `~/.pi-go/agent`，项目配置使用 `.pi-go`。带有核心的二进制内嵌使用文档和源码，
+部署后可离线查阅。
 
 ## 快速开始
 
@@ -61,5 +61,5 @@ Web 开发使用 Next HMR 与自动重载的 Go API；生产运行只需内嵌�
 - [工具、技能和模板](docs/tools.md)
 - [版本、运行状态与本地源码](docs/self-knowledge.md)
 - [核心架构](docs/ARCHITECTURE.md)
-- [测试与兼容性验证](docs/testing.md)
+- [测试与验证](docs/testing.md)
 - [构建与发布](docs/RELEASING.md)

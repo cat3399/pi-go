@@ -1,8 +1,12 @@
-# Frozen upstream tool oracle
+# Filesystem tool fixtures
 
-`upstream_oracle.json` is generated from the pinned upstream pi checkout's
-production exports, not from the Go implementation. The corpus and exact Node,
-rg, and fd versions are recorded in `upstream_oracle_corpus.json`. Managed-tool
+The Go tests read `upstream_oracle_corpus.json` and `upstream_oracle.json`
+to check the text limit, glob matching and ignore rules for file discovery.
+
+## Reproducing the recorded results (optional)
+
+The snapshot was captured from the pi revision in the corpus, which also
+records the exact Node, rg, and fd versions used by the generator. Managed-tool
 inputs are accepted only when the current `platform-arch` has an explicit
 SHA-256 entry; an unregistered platform fails closed instead of trusting the
 version banner. The frozen corpus currently registers `darwin-arm64` only;

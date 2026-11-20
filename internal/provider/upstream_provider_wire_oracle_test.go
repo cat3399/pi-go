@@ -19,8 +19,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-const providerWireUpstreamCommit = "a116523434806910336b9de3e38a41aa5860030b"
-
 var providerWireHeaderNames = []string{
 	"accept",
 	"content-type",
@@ -42,8 +40,7 @@ var providerWireHeaderNames = []string{
 }
 
 type providerWireOracle struct {
-	UpstreamCommit string                 `json:"upstreamCommit"`
-	Scenarios      []providerWireScenario `json:"scenarios"`
+	Scenarios []providerWireScenario `json:"scenarios"`
 }
 
 type providerWireScenario struct {
@@ -109,7 +106,7 @@ type providerWireOpts struct {
 	AzureDeploymentName  string            `json:"azureDeploymentName"`
 }
 
-func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
+func TestProviderWireScenarios(t *testing.T) {
 	raw, err := os.ReadFile("testdata/upstream_provider_wire_oracle.json")
 	if err != nil {
 		t.Fatal(err)
@@ -117,9 +114,6 @@ func TestImplementedProviderWireOraclesMatchPinnedPi(t *testing.T) {
 	var oracle providerWireOracle
 	if err := json.Unmarshal(raw, &oracle); err != nil {
 		t.Fatal(err)
-	}
-	if oracle.UpstreamCommit != providerWireUpstreamCommit {
-		t.Fatalf("upstream commit = %q, want %q", oracle.UpstreamCommit, providerWireUpstreamCommit)
 	}
 
 	seen := make(map[string]bool, len(oracle.Scenarios))
@@ -176,11 +170,8 @@ func providerWireRequestContract(t *testing.T, api string, request map[string]an
 	return normalized
 }
 
-// Pinned pi sends strict:null for Codex function tools, which the Codex
-// backend treats like an omitted field and tries to coerce into strict mode.
-// pi-go sends an explicit strict:false like Codex CLI; that choice is covered
-// by TestOpenAICodexSendsExplicitNonStrictFunctionTools. Everything else in
-// the pinned tool payload is still compared unchanged.
+// The recorded tool payload uses strict:null. TestOpenAICodexSendsExplicitNonStrictFunctionTools
+// checks the required strict:false on the wire; compare all other tool fields unchanged here.
 func providerWireCodexToolStrictContract(t *testing.T, request map[string]any) map[string]any {
 	t.Helper()
 	body, ok := request["body"].(map[string]any)
@@ -554,7 +545,7 @@ func assertProviderWireJSON(t *testing.T, label string, got, want any) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(gotJSON, wantJSON) {
-		t.Fatalf("%s differs from pinned pi\n--- got ---\n%s\n--- want ---\n%s", label, gotJSON, wantJSON)
+		t.Fatalf("%s differs from wire fixture\n--- got ---\n%s\n--- want ---\n%s", label, gotJSON, wantJSON)
 	}
 }
 

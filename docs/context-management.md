@@ -176,15 +176,11 @@ CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与
 短交接使用 v3 `custom` entry，`customType` 为 `pi-go.context-handoff.v1`，data 包含请求 ID、
 交接文字、上一窗口 ID、切换前估算 tokens、未处理输入的 entry 引用及可选扩展元数据。
 模型生成交接时的 usage 随普通 assistant entry 保存。旧版本的 `noHandoff` 检查点仍可读取。
-entry 的 parentId 指向切换前分支位置，entry ID 即新窗口 ID。它不伪装成已经执行过全量总结的 compaction entry。
+entry 的 `parentId` 指向切换前的分支位置，entry ID 即新窗口 ID。读取器需要识别该 `customType`
+才能应用换窗边界。
 
-SessionManager 的同一上下文投影算法识别历史摘要与交接边界。新交接不自动携带旧对话，
-只保留未处理输入；已有原版 compaction 记录仍按原始范围读取，便于打开旧会话。
-模型与 thinking 等分支配置仍从完整分支恢复。旧 entry ID、分支结构和原文不改变。
-
-短交接和 CLI 历史视图是 pi-go 的显式扩展，原版 pi 没有这些命令。
-原版或旧版本读者可保留 custom 数据，但不会应用 pi-go 的换窗边界；不能把旧读者的活动上下文
-解释当作支持换窗。AgentSession 使用短交接，与原版自动全历史摘要不同；旧摘要记录和分支数据
-仍按原有格式读取。
+SessionManager 从同一条分支恢复上下文：遇到短交接时使用交接文字和未处理的输入；
+已有的 `compaction` 条目仍按记录中的摘要与保留范围读取。模型与 thinking 等配置从完整分支恢复。
+换窗不改写旧 entry ID、分支结构或消息原文。
 
 职责和依赖见[核心架构](ARCHITECTURE.md)。

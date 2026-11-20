@@ -9,10 +9,10 @@ Web、桌面 GUI 和 App 的「设置 → 模型」按内置、自定义渠道�
 
 内置渠道可分别启用、禁用，也可「仅启用此内置渠道」；该操作只调整内置渠道，保留自定义
 渠道与所有凭据。选择状态存入 `models.json` 的 `providers.<id>.enabled`，省略时默认启用。
-这是 pi-go 的配置扩展：关闭后从可选模型和新会话的自动选择中排除，全部关闭不会回退成
-全部启用。现有会话的当前模型、进行中的请求与恢复时保存的模型保持原行为；显式 CLI
-模型参数仍按原版的认证和路由语义解析。配置保存会刷新活动 Runtime 的模型目录，
-不替换 AgentState；`enabledModels` 仍只表示原版的模型循环范围。
+禁用渠道后，它的模型不再出现在可选列表中，也不参与新会话的自动选择；全部禁用不会自动重新启用。
+保存配置会刷新活动 Runtime 的模型目录，不切换当前模型，不中断请求，也不阻止恢复会话中保存的模型。
+显式指定 `--model` 不受渠道开关过滤，但仍需可用的认证和路由。`settings.json` 中的 `enabledModels`
+用于指定模型循环范围，不是渠道开关。
 
 `models.json` 位于用户数据目录，用于添加模型和覆盖 Provider / 模型属性。下面是一个本地
 OpenAI Chat Completions 兼容服务的配置示例；地址和模型 ID 应替换成服务实际提供的值：
@@ -92,9 +92,8 @@ make sync-models
 make sync-models ARGS='-source /path/to/models.dev.json'
 ```
 
-默认直接读取 [models.dev 的公开 JSON 接口](https://models.dev/api.json)，不下载 pi 的 npm
-包，也不解析 JavaScript。`-source` 可以回放保存的同一接口响应，以重现或回退模型资料；
-原来的 `-version` 参数已移除。完成后终端会显示新增、移除、参数变更等差异。
+默认从 [models.dev 的公开 JSON 接口](https://models.dev/api.json) 读取模型资料；`-source`
+可使用已保存的接口响应重现一次同步。完成后终端会列出新增、移除和参数变更的模型。
 
 `internal/model/catalogdata/policy.json` 是随 Go 程序发布的本地适配规则，维护有序的默认模型、
 已实现的 Provider 身份、协议、地址、特殊模型列表和兼容性修正。同步不会改写该文件。
@@ -126,9 +125,8 @@ Runtime 使用这份目录作为内置基线；文件不存在时使用二进制
 
 合并顺序仍为：内置基线 → 已注册 Provider 的动态目录缓存 → 用户 Provider / 模型定义与
 `modelOverrides`。默认模型选择仍先考虑显式选择、会话、scope 和用户 `settings.json`，
-只有需要自动回退时才使用内置 Provider 默认模型。已安装目录整体替换嵌入基线，所以上游移除的
+只有需要自动回退时才使用内置 Provider 默认模型。已安装目录整体替换嵌入基线，因此新目录中移除的
 模型不会被旧的嵌入数据重新补回；用户自己的模型定义仍然保留。
 
 同步器与 Runtime 共用数据格式及解析逻辑，完整下载、解析后才发布单个文件，失败不替换旧目录。
 支持的 Provider 身份、认证逻辑和协议实现继续由 Go 代码负责；新增协议能力仍需实现相应适配器。
-固定的上游模型示例保存在测试 fixture 中，与日常更新的数据分开维护。
