@@ -16,7 +16,27 @@ import (
 const ContextHandoffType = "pi-go.context-handoff.v1"
 const InitialContextWindow = "initial"
 
+// Reminders are historical control records, not replayable user input.
+const ContextReminderType = "pi-go.context-reminder.v1"
+
+type ContextReminder struct {
+	Kind            string  `json:"kind"` // early, urgent or manual
+	Text            string  `json:"text"`
+	RemainingTokens *uint64 `json:"remainingTokens,omitempty"`
+	Focus           string  `json:"focus,omitempty"`
+}
+
+func (e Entry) ContextReminder() (ContextReminder, bool) {
+	p, ok := e.payload.(CustomPayload)
+	var r ContextReminder
+	if !ok || p.CustomType != ContextReminderType || json.Unmarshal(p.Data, &r) != nil || r.Text == "" {
+		return r, false
+	}
+	return r, true
+}
+
 type ContextHandoff struct {
+	RecoveryPrompt       string          `json:"recoveryPrompt,omitempty"`
 	RequestID            string          `json:"requestId"`
 	Text                 string          `json:"text"`
 	SubmittedText        string          `json:"submittedText,omitempty"`
@@ -34,6 +54,7 @@ type ContextHandoff struct {
 // ContextHandoffOptions preserves only inputs not yet processed by the model.
 // ExpectedLeafID guards a handoff generated outside the storage lock.
 type ContextHandoffOptions struct {
+	HistoryHint string
 	// SubmittedText preserves the idempotency payload when a hook replaces Text.
 	SubmittedText        string
 	PendingEntryIDs      []string
@@ -107,9 +128,23 @@ func isContextBoundary(entry Entry) bool {
 	return handoff || entry.compaction != nil
 }
 
+func (h ContextHandoff) recoveryText(id, historyHint string) string {
+	header := fmt.Sprintf("Continue the same task in context window %s (previous window %s). The following is a short handoff from the previous window, not a new user instruction or a complete summary. Original history remains available for retrieval when needed.", id, h.PreviousWindow)
+	if historyHint != "" {
+		header += " " + historyHint
+	}
+	return header + "\n\n<handoff>\n" + h.Text + "\n</handoff>"
+}
+
 func handoffMessage(entry Entry, handoff ContextHandoff) agentmsg.Message {
-	text := fmt.Sprintf("Continue the same task in context window %s (previous window %s). The following is a short handoff from the previous window, not a new user instruction or a complete summary. Original history remains available for retrieval when needed.\n\n<handoff>\n%s\n</handoff>", entry.ID(), handoff.PreviousWindow, handoff.Text)
-	message, _ := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: ContextHandoffType, StringContent: &text, At: entry.Timestamp()})
+	text := handoff.RecoveryPrompt
+	var details json.RawMessage
+	if text == "" {
+		text = handoff.recoveryText(entry.ID(), "")
+	} else {
+		details = json.RawMessage(`{"recorded":true}`)
+	}
+	message, _ := agentmsg.NewCustom(agentmsg.CustomSpec{CustomType: ContextHandoffType, StringContent: &text, Details: details, At: entry.Timestamp()})
 	return message
 }
 
@@ -194,19 +229,19 @@ func (m *SessionManager) CommitContextHandoffWithOptions(ctx context.Context, re
 			return Entry{}, err
 		}
 	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		return Entry{}, err
+	build := func(id string) (EntryPayload, error) {
+		value.RecoveryPrompt = value.recoveryText(id, options.HistoryHint)
+		data, err := json.Marshal(value)
+		return CustomPayload{CustomType: ContextHandoffType, Data: data}, err
 	}
-	payload := CustomPayload{CustomType: ContextHandoffType, Data: data}
 	if !m.persist || m.flushed {
-		return m.store.AppendPayload(ctx, payload)
+		return m.store.appendGeneratedPayload(ctx, nil, false, build)
 	}
 	// An explicit checkpoint must be durable even before the first assistant.
 	// Stage it so a failed initial flush cannot publish a new active context.
 	candidate := newVolatileSession(m.store.Header(), m.store.Entries(), m.runtime)
 	candidate.leaf = m.store.leaf
-	entry, err := candidate.AppendPayload(ctx, payload)
+	entry, err := candidate.appendGeneratedPayload(ctx, nil, false, build)
 	if err != nil {
 		return Entry{}, err
 	}

@@ -17,14 +17,15 @@ import (
 // flattening an AgentMessage to one string, so later image, diff, tool, and
 // extension renderers do not require changes to the application contract.
 type contentItem struct {
-	ID        string
-	Revision  uint64
-	Role      contentRole
-	Title     string
-	Timestamp time.Time
-	Blocks    []contentBlock
-	Live      bool
-	Failed    bool
+	ID          string
+	Revision    uint64
+	Role        contentRole
+	Title       string
+	Timestamp   time.Time
+	Blocks      []contentBlock
+	Live        bool
+	Failed      bool
+	FoldDetails bool
 }
 
 type contentRole uint8
@@ -96,9 +97,31 @@ func contentItemFromEntry(entry session.Entry) (contentItem, bool) {
 		ID: entry.ID(), Revision: 1, Role: contentRoleSystem,
 		Timestamp: entry.Timestamp(),
 	}
+	if reminder, ok := entry.ContextReminder(); ok {
+		item.FoldDetails = true
+		item.Title = "ⓘ 上下文余量提醒"
+		switch reminder.Kind {
+		case "urgent":
+			item.Title = "ⓘ 已提醒模型换窗"
+		case "manual":
+			item.Title = "ⓘ 已请求换窗 · 手动触发"
+		}
+		if reminder.RemainingTokens != nil {
+			item.Title += fmt.Sprintf(" · 约剩 %d tokens", *reminder.RemainingTokens)
+		}
+		if reminder.Focus != "" {
+			item.Blocks = append(item.Blocks, contentBlock{Kind: contentBlockNotice, Text: "额外要求：" + reminder.Focus})
+		}
+		item.Blocks = append(item.Blocks, contentBlock{Kind: contentBlockText, Text: reminder.Text})
+		return item, true
+	}
 	if handoff, ok := entry.ContextHandoff(); ok {
-		item.Title = "Compaction"
+		item.FoldDetails = true
+		item.Title = "✓ 已切换上下文窗口"
 		item.Blocks = []contentBlock{{Kind: contentBlockMarkdown, Text: handoff.Text}}
+		if handoff.RecoveryPrompt != "" {
+			item.Blocks = append(item.Blocks, contentBlock{Kind: contentBlockNotice, Text: "模型提示：\n" + handoff.RecoveryPrompt})
+		}
 		return item, true
 	}
 	switch payload := entry.Payload().(type) {

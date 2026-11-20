@@ -130,7 +130,7 @@ func (s *AgentSession) requestContextCompaction(ctx context.Context, request Con
 	return result, pending, runErr
 }
 
-func (s *AgentSession) startContextCompaction(requestID string) error {
+func (s *AgentSession) startContextCompaction(ctx context.Context, requestID, text string) error {
 	s.lifecycleMu.Lock()
 	pending := s.contextCompaction
 	if pending == nil || pending.run != s.run || pending.request.ID != requestID {
@@ -142,13 +142,17 @@ func (s *AgentSession) startContextCompaction(requestID string) error {
 		s.unlockLifecycle()
 		return cause
 	}
-	ctx, cancel := context.WithCancelCause(pending.run.ctx)
-	pending.domain = &runCancellation{ctx: ctx, cancel: cancel}
+	focus := pending.request.Instructions
+	runCtx, cancel := context.WithCancelCause(pending.run.ctx)
+	pending.domain = &runCancellation{ctx: runCtx, cancel: cancel}
 	pending.run.compaction = pending.domain
 	pending.run.phase = PhaseCompacting
 	s.unlockLifecycle()
-	s.emitCompaction(ctx, "compaction_start", CompactionManual, nil, false, false, "")
-	return context.Cause(ctx)
+	s.emitCompaction(runCtx, "compaction_start", CompactionManual, nil, false, false, "")
+	if err := context.Cause(runCtx); err != nil {
+		return err
+	}
+	return s.recordContextReminder(ctx, session.ContextReminder{Kind: "manual", Text: text, Focus: focus})
 }
 
 func (s *AgentSession) contextCompactionCause() error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -391,8 +392,17 @@ func (s *AgentSession) contextAccessSnapshot() (ContextAccessInstructions, map[s
 	return s.contextAccessInstructions, environment
 }
 
+func (s *AgentSession) recordContextReminder(ctx context.Context, reminder session.ContextReminder) error {
+	data, err := json.Marshal(reminder)
+	if err != nil {
+		return err
+	}
+	_, err = s.AppendCustomEntry(ctx, session.ContextReminderType, data)
+	return err
+}
+
 // Capability instructions live at the point of use, never in SystemPrompt.
-func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages []agentmsg.Message) error {
+func (s *AgentSession) prepareContextReminder(ctx context.Context, snapshot *TurnSnapshot, messages []agentmsg.Message) error {
 	instructions, _ := s.contextAccessSnapshot()
 	if instructions.Handoff == "" && instructions.History == "" {
 		return nil
@@ -409,7 +419,7 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 	if instructions.History != "" && status.WindowID != session.InitialContextWindow && len(messages) > 0 {
 		switch checkpoint := messages[0].(type) {
 		case agentmsg.Custom:
-			if checkpoint.CustomType() == session.ContextHandoffType {
+			if checkpoint.CustomType() == session.ContextHandoffType && len(checkpoint.Details()) == 0 { // legacy checkpoint
 				text, _ := checkpoint.StringContent()
 				header, body, ok := strings.Cut(text, "\n\n<handoff>\n")
 				if ok && !strings.HasSuffix(header, instructions.History) {
@@ -443,9 +453,6 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 		key := fmt.Sprintf("%s/%s/%s/%d/%d/%d", status.WindowID, snapshot.Model.Provider(), snapshot.Model.ID(), status.ContextWindow, status.ReserveTokens, status.ReminderTokens)
 		s.lifecycleMu.Lock()
 		fresh := s.contextReminderKey != key || level > s.contextReminderLevel
-		if fresh {
-			s.contextReminderKey, s.contextReminderLevel = key, level
-		}
 		s.unlockLifecycle()
 		if fresh {
 			text := fmt.Sprintf("This context window has approximately %d tokens remaining. If that is enough to finish the current task, finish and deliver the result. Otherwise, submit a brief handoff before the context fills up and continue in a new window. %s", status.RemainingTokens, instructions.Handoff)
@@ -456,6 +463,16 @@ func (s *AgentSession) prepareContextReminder(snapshot *TurnSnapshot, messages [
 			if err != nil {
 				return err
 			}
+			kind := "early"
+			if urgent {
+				kind = "urgent"
+			}
+			if err := s.recordContextReminder(ctx, session.ContextReminder{Kind: kind, Text: text, RemainingTokens: &status.RemainingTokens}); err != nil {
+				return err
+			}
+			s.lifecycleMu.Lock()
+			s.contextReminderKey, s.contextReminderLevel = key, level
+			s.unlockLifecycle()
 			messages, changed = append(messages, notice), true
 		}
 	}
@@ -508,8 +525,9 @@ func (s *AgentSession) commitHandoff(ctx context.Context, requestID string, inpu
 	if output.FromExtension {
 		tokensBefore = output.TokensBefore
 	}
+	access, _ := s.contextAccessSnapshot()
 	entry, err := s.sessionManager.CommitContextHandoffWithOptions(ctx, requestID, output.Text, tokensBefore, session.ContextHandoffOptions{
-		PendingEntryIDs: pending, SubmittedText: submittedText, Usage: output.Usage, Details: output.Details, ExpectedLeafID: &input.SelectedLeafID,
+		HistoryHint: access.History, PendingEntryIDs: pending, SubmittedText: submittedText, Usage: output.Usage, Details: output.Details, ExpectedLeafID: &input.SelectedLeafID,
 		FromExtension: output.FromExtension, FirstKeptEntryID: output.FirstKeptEntryID, EstimatedTokensAfter: output.EstimatedTokensAfter,
 	})
 	if err != nil {

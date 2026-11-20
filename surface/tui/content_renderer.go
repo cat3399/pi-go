@@ -70,6 +70,9 @@ func (r *contentRenderer) Render(item contentItem, width int) []string {
 	if title == "" {
 		title = "Message"
 	}
+	if item.FoldDetails && !r.toolsExpanded {
+		return []string{r.theme.mutedStyle().Render(Truncate("▸ "+title, width, "…", false))}
+	}
 	if item.Live {
 		title += "  " + r.theme.mutedStyle().Render("streaming")
 	}

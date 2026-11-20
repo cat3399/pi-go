@@ -77,6 +77,9 @@ func visibleRunEntry(entry Entry) bool {
 	if entry.typeName == "compaction" || entry.typeName == "branch_summary" {
 		return true
 	}
+	if _, ok := entry.ContextReminder(); ok {
+		return true
+	}
 	if _, ok := entry.ContextHandoff(); ok {
 		return true
 	}

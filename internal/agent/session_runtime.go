@@ -828,7 +828,8 @@ func (s *AgentSession) persistAgentMessage(ctx context.Context, message agentmsg
 		if err := json.Unmarshal(custom.Details(), &requestID); err != nil {
 			return err
 		}
-		return s.startContextCompaction(requestID)
+		text, _ := custom.StringContent()
+		return s.startContextCompaction(ctx, requestID, text)
 	}
 	settlement, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.settlementTimeout)
 	defer cancel()
@@ -1303,7 +1304,7 @@ func (s *AgentSession) prepareTurn(ctx context.Context, turn TurnContext) (TurnS
 		if err := s.contextCompactionCause(); err != nil {
 			return TurnSnapshot{}, err
 		}
-		if err := s.prepareContextReminder(&snapshot, turn.Messages); err != nil {
+		if err := s.prepareContextReminder(ctx, &snapshot, turn.Messages); err != nil {
 			return TurnSnapshot{}, err
 		}
 	}

@@ -120,8 +120,12 @@ func TestManualHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 		}
 	}
 	entries := manager.Entries()
-	if len(entries) != len(original)+3 {
-		t.Fatal("unexpected transcript writes")
+	if len(entries) != len(original)+4 {
+		t.Fatal("expected reminder, assistant submission, tool receipt and checkpoint")
+	}
+	reminder, ok := entries[len(original)].ContextReminder()
+	if !ok || reminder.Kind != "manual" || reminder.Focus != scenario.CustomInstructions || !strings.Contains(text, reminder.Text) {
+		t.Fatalf("manual request not recorded verbatim: %#v", reminder)
 	}
 	for i, entry := range original {
 		if !bytes.Equal(entry.RawJSON(), entries[i].RawJSON()) {
@@ -143,8 +147,9 @@ func TestManualHandoffReusesUpstreamWorkflowScenario(t *testing.T) {
 	if window, _ := reopened.CurrentContextWindow(); window != result.Entry.ID() {
 		t.Fatal("restart lost window")
 	}
-	if len(reopened.BuildContext().AgentMessages()) != 1 {
-		t.Fatal("restart retained old conversation")
+	restored := reopened.BuildContext().Messages()
+	if len(restored) != 1 || messageText(t, restored[0]) != handoff.RecoveryPrompt || !strings.Contains(handoff.RecoveryPrompt, handoffInstructions().History) {
+		t.Fatal("restart did not restore exactly the saved recovery prompt")
 	}
 	history, err := reopened.ReadHistoryView(session.HistoryViewQuery{})
 	if err != nil || len(history.Records) != 5 {

@@ -302,6 +302,26 @@ func TestExplicitContextThresholdsDriveRemindersAndReevaluateAfterReload(t *test
 	if window, _ := manager.CurrentContextWindow(); window != session.InitialContextWindow {
 		t.Fatal("reminders switched context without a CLI submission")
 	}
+	var kinds []string
+	for _, entry := range manager.Entries() {
+		if reminder, ok := entry.ContextReminder(); ok {
+			kinds = append(kinds, reminder.Kind)
+			if reminder.RemainingTokens == nil || !strings.Contains(reminder.Text, handoffInstructions().Handoff) {
+				t.Fatalf("incomplete reminder: %#v", reminder)
+			}
+		}
+	}
+	if strings.Join(kinds, ",") != "early,early,urgent" {
+		t.Fatalf("recorded reminders: %v", kinds)
+	}
+	for _, msg := range manager.BuildContext().Messages() {
+		switch msg.(type) {
+		case llm.UserTextMessage, llm.UserContentMessage:
+			if strings.Contains(messageText(t, msg), handoffInstructions().Handoff) {
+				t.Fatal("historical control reminder replayed")
+			}
+		}
+	}
 }
 
 func TestContextStatusKeepsRemainingThresholdsAcrossWindowSizes(t *testing.T) {

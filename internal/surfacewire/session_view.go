@@ -150,10 +150,14 @@ func BuildSessionContext(snapshot application.SessionSnapshot, deferThinking, de
 }
 
 func ProjectEntry(entry session.Entry, deferThinking, deferMedia bool) (json.RawMessage, bool, error) {
+	if reminder, ok := entry.ContextReminder(); ok {
+		return marshalRaw(map[string]any{"role": "custom", "customType": session.ContextReminderType, "content": reminder.Text, "display": true,
+			"details": map[string]any{"kind": reminder.Kind, "remainingTokens": reminder.RemainingTokens, "focus": reminder.Focus}, "timestamp": entry.Timestamp().UnixMilli()})
+	}
 	if handoff, ok := entry.ContextHandoff(); ok {
 		return marshalRaw(map[string]any{
 			"role": "custom", "customType": "compaction", "content": handoff.Text, "display": true,
-			"details":   map[string]any{"tokensBefore": handoff.TokensBefore, "strategy": "handoff", "noHandoff": handoff.NoHandoff},
+			"details":   map[string]any{"tokensBefore": handoff.TokensBefore, "strategy": "handoff", "noHandoff": handoff.NoHandoff, "recoveryPrompt": handoff.RecoveryPrompt},
 			"timestamp": entry.Timestamp().UnixMilli(),
 		})
 	}

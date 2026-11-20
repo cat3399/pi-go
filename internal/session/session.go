@@ -708,6 +708,11 @@ func (s *Session) appendPayload(ctx context.Context, payload EntryPayload, selec
 		}
 		return s.AppendAgentMessage(ctx, message.Message, AppendOptions{})
 	}
+	return s.appendGeneratedPayload(ctx, selectedParent, explicitParent, func(string) (EntryPayload, error) { return payload, nil })
+}
+
+// A checkpoint can refer to its own window ID without a second, non-atomic append.
+func (s *Session) appendGeneratedPayload(ctx context.Context, selectedParent *string, explicitParent bool, build func(string) (EntryPayload, error)) (Entry, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -746,6 +751,11 @@ func (s *Session) appendPayload(ctx context.Context, payload EntryPayload, selec
 		}
 	} else if s.leaf >= 0 {
 		parentID, hasParent = s.entries[s.leaf].id, true
+	}
+	payload, err := build(entryID)
+	if err != nil {
+		s.mu.Unlock()
+		return Entry{}, err
 	}
 	raw, err := encodePayloadEntry(entryID, parentID, hasParent, timestamp, payload.CloneEntryPayload())
 	if err != nil {

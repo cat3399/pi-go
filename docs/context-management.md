@@ -158,8 +158,8 @@ Application 命令；连接能力通过每次 bash 调用的 `PI_SESSION_ENDPOIN
 原有顺序落盘后，AgentSession 消费请求，SessionManager 先提交检查点，再更新 Agent 消息。
 下一次 provider 请求使用重建后的上下文。steering/follow-up 沿用现有队列，在检查点之后交付。
 已经落盘但尚未被模型处理的新输入由检查点引用保留，重启后也不会丢失。
-所有触发方式沿用压缩开始/完成事件；界面显示“正在压缩上下文”，历史中显示可展开的
-“上下文已压缩”记录，正文为 CLI 提交的短交接。
+历史中可展开换窗提醒，查看提示原文。交接检查点提交后，界面显示“已切换上下文窗口”，
+可展开查看交接正文和恢复提示。
 CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与 bash 子进程的互相等待。
 
 空闲会话通过既有运行准入同步执行请求；`compact` 等到模型通过 CLI 提交后返回 `completed`，
@@ -170,7 +170,7 @@ CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与
 `context status` 显示当前进程最近一次请求的 `accepted`、`completed`、`failed` 或 `cancelled`。
 中止或失败的 run 若没有到达切换边界，待处理请求会取消，不带入之后的新任务。
 落盘失败保留原活动上下文；存储层原有的 commit-unknown/poisoned 语义保持不变。
-进程在接受请求之后、提交之前退出时，请求尚未持久化，不能视为成功。
+若进程在检查点提交前退出，会话仍从原窗口恢复；历史中的提醒不代表换窗成功。
 
 交接可传 `--request-id <stable-id>`：同一分支上重试相同 ID 和内容会返回已有检查点，
 包括进程重启后的重试；相同 ID 配不同内容被拒绝。扩展 hook 改写交接正文时，检查点同时保留
@@ -180,14 +180,17 @@ CLI 不在调用工具内部等待切换完成，因而不会形成父 Agent 与
 
 ## 存储与兼容性
 
-短交接使用 v3 `custom` entry，`customType` 为 `pi-go.context-handoff.v1`，data 包含请求 ID、
-交接文字、上一窗口 ID、切换前估算 tokens、未处理输入的 entry 引用及可选扩展元数据。
+换窗提醒和交接检查点分别存为 v3 `custom` entry。`pi-go.context-reminder.v1` 记录自动提醒或已交付的
+手动请求原文，仅供查阅，不作为待处理输入。
+
+`pi-go.context-handoff.v1` 是交接检查点，保存请求 ID、交接正文、恢复提示（`recoveryPrompt`）、
+上一窗口 ID、切换前估算 tokens、未处理输入的 entry 引用及可选扩展元数据。
 模型生成交接时的 usage 随普通 assistant entry 保存。旧版本的 `noHandoff` 检查点仍可读取。
 entry 的 `parentId` 指向切换前的分支位置，entry ID 即新窗口 ID。读取器需要识别该 `customType`
 才能应用换窗边界。
 
-SessionManager 从同一条分支恢复上下文：遇到短交接时使用交接文字和未处理的输入；
-已有的 `compaction` 条目仍按记录中的摘要与保留范围读取。模型与 thinking 等配置从完整分支恢复。
+SessionManager 从同一条分支恢复上下文。交接检查点提供恢复提示和未处理的输入；若检查点不含
+`recoveryPrompt`，则根据交接正文生成恢复提示。`compaction` 条目按记录中的摘要与保留范围读取。模型与 thinking 等配置从完整分支恢复。
 换窗不改写旧 entry ID、分支结构或消息原文。
 
 职责和依赖见[核心架构](ARCHITECTURE.md)。

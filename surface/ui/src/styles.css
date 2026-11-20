@@ -1676,6 +1676,15 @@ input:-webkit-autofill:focus {
   padding: 6px 0 2px 20px;
 }
 
+.pi-context-prompt {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  user-select: text;
+}
+
+.pi-compaction-body summary { cursor: pointer; }
+
 .pi-turn-process-body .pi-compaction-status {
   margin: 10px 0;
 }

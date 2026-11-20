@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
+import { ArrowDown, ArrowUpRight, BookOpen, Check, ChevronRight, Copy, FilePenLine, GitFork, Info, LoaderCircle, Pencil, Search, SquareTerminal } from "lucide-react";
 import type { AgentMessage, HistoryRun, LiveSnapshot, MessageContentBlock } from "../contracts";
 import { MarkdownBody } from "../content/MarkdownBody";
 import { ImagePreview } from "../primitives/ImagePreview";
@@ -662,8 +662,8 @@ function Message({
     </article>;
   }
   if (!visibleMessage(message)) return null;
-  if (message.role === "custom" && message.customType === "compaction") {
-    return <CompactionResult message={message} entryId={entryId} />;
+  if (message.role === "custom" && (message.customType === "compaction" || message.customType === "pi-go.context-reminder.v1")) {
+    return <ContextRecord message={message} entryId={entryId} />;
   }
   const role = message.role === "user"
     ? "user"
@@ -947,17 +947,30 @@ function elapsedLabel(elapsed: number | null): string | null {
   return minutes > 0 ? `耗时 ${minutes}分钟 ${remainder}秒` : `耗时 ${seconds}秒`;
 }
 
-function CompactionResult({ message, entryId }: IndexedMessage) {
-  const [expanded, setExpanded] = useDisclosure("compaction", entryId ?? String(message.id ?? message.timestamp ?? ""), false);
-  const tokens = recordValue(message.details)?.tokensBefore;
+function ContextRecord({ message, entryId }: IndexedMessage) {
+  const [expanded, setExpanded] = useDisclosure("context-record", entryId ?? String(message.id ?? message.timestamp ?? ""), false);
+  const details = recordValue(message.details);
+  const reminder = message.customType === "pi-go.context-reminder.v1";
+  const handoff = details?.strategy === "handoff";
+  const title = !reminder ? (handoff ? "已切换上下文窗口" : "上下文已压缩")
+    : details?.kind === "manual" ? "已请求换窗" : details?.kind === "urgent" ? "已提醒模型换窗" : "上下文余量提醒";
+  const tokens = reminder ? details?.remainingTokens : details?.tokensBefore;
+  const Icon = reminder ? Info : Check;
   return <article className={`pi-compaction-result ${expanded ? "is-open" : ""}`} data-entry-id={entryId}>
     <button className="pi-compaction-summary" type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-      <Check size={14} aria-hidden="true" />
-      <span>上下文已压缩</span>
-      {typeof tokens === "number" && <span className="pi-compaction-tokens">压缩前 {tokens.toLocaleString("zh-CN")} tokens</span>}
+      <Icon size={14} aria-hidden="true" />
+      <span>{title}</span>
+      {details?.kind === "manual" && <span className="pi-compaction-tokens">手动触发</span>}
+      {typeof tokens === "number" && <span className="pi-compaction-tokens">{reminder ? "约剩" : handoff ? "切换前" : "压缩前"} {tokens.toLocaleString("zh-CN")} tokens</span>}
       <ChevronRight className="pi-disclosure" size={14} aria-hidden="true" />
     </button>
-    {expanded && <div className="pi-compaction-body"><MarkdownBody>{messageText(message)}</MarkdownBody></div>}
+    {expanded && <div className="pi-compaction-body">
+      {typeof details?.focus === "string" && details.focus && <p>额外要求：{details.focus}</p>}
+      {reminder ? <pre className="pi-context-prompt">{messageText(message)}</pre> : <MarkdownBody>{messageText(message)}</MarkdownBody>}
+      {handoff && typeof details?.recoveryPrompt === "string" && details.recoveryPrompt && <details>
+        <summary>查看模型提示</summary><pre className="pi-context-prompt">{details.recoveryPrompt}</pre>
+      </details>}
+    </div>}
   </article>;
 }
 
