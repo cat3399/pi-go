@@ -273,11 +273,13 @@ function fileChangeCopyValue(name: string, input: Record<string, unknown>, resul
 }
 
 function FileChangeCard({
+  rows,
   name,
   input,
   result,
   streaming,
 }: {
+  rows: FileChangeLine[];
   name: string;
   input: Record<string, unknown>;
   result?: AgentMessage;
@@ -286,9 +288,6 @@ function FileChangeCard({
   const [copied, setCopied] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const path = inputString(input, "path");
-  const rows = fileChangeLines(name, input, result);
-  const additions = rows.filter((line) => line.kind === "added").length;
-  const removals = rows.filter((line) => line.kind === "removed").length;
   const copyValue = fileChangeCopyValue(name, input, result);
   const failed = result?.isError === true;
   const complete = Boolean(result && !result.partial);
@@ -304,10 +303,6 @@ function FileChangeCard({
     <section className={`pi-file-change ${failed ? "is-error" : ""}`}>
       <header className="pi-file-change-header">
         <span className="pi-file-change-name" title={path}>{fileName(path)}</span>
-        <span className="pi-file-change-stats" aria-label={`${additions} 行新增，${removals} 行删除`}>
-          <span className="is-added">+{additions}</span>
-          <span className="is-removed">-{removals}</span>
-        </span>
         <span className="pi-file-change-status">
           {complete && !failed && <Check size={12} />}
           {running && !complete ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : complete ? "成功" : "等待"}
@@ -416,7 +411,7 @@ function ToolCall({
 }) {
   const name = toolCallName(block);
   const resultEntryId = useContext(ToolResultEntriesContext).get(toolCallID(block));
-  const [expanded, setExpanded] = useDisclosure("tool", toolCallID(block), name === "edit" || name === "write");
+  const [expanded, setExpanded] = useDisclosure("tool", toolCallID(block), false);
   const input = toolInputRecord(block);
   const output = resultText(result);
   const failed = result?.isError === true;
@@ -433,6 +428,16 @@ function ToolCall({
   const canOpenTerminal = Boolean(terminalId && onOpenTerminal);
   const inputCopyValue = name === "bash" ? command : serializedInput;
   const hasFileChange = name === "edit" || name === "write";
+  const change = useMemo(() => {
+    if (!hasFileChange) return null;
+    const rows = fileChangeLines(name, input, result);
+    let additions = 0, removals = 0;
+    for (const line of rows) {
+      if (line.kind === "added") additions++;
+      else if (line.kind === "removed") removals++;
+    }
+    return { rows, additions, removals };
+  }, [hasFileChange, name, input, result]);
 
   return (
     <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`} data-entry-id={!output || hasFileChange && !failed ? resultEntryId : undefined}>
@@ -441,14 +446,20 @@ function ToolCall({
           <Icon size={15} />
           <span>{failed ? "调用失败" : presentation.verb}</span>
           {presentation.target && <code>{presentation.target}</code>}
+          {change && !failed && (
+            <span className="pi-file-change-stats" aria-label={`${change.additions} 行新增，${change.removals} 行删除`}>
+              <span className="is-added">+{change.additions}</span>
+              <span className="is-removed">-{change.removals}</span>
+            </span>
+          )}
           {canOpenTerminal ? <ArrowUpRight size={14} /> : <ChevronRight className="pi-disclosure" size={14} />}
         </button>
         {canOpenTerminal && <button className="pi-icon-button pi-terminal-details" type="button" aria-label="终端调用详情" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}><ChevronRight className="pi-disclosure" size={14} /></button>}
       </div>
       {expanded && (
         <div className={`pi-tool-body ${hasFileChange ? "is-file-change" : ""}`}>
-          {hasFileChange ? (
-            <FileChangeCard name={name} input={input} result={result} streaming={streaming} />
+          {change ? (
+            <FileChangeCard rows={change.rows} name={name} input={input} result={result} streaming={streaming} />
           ) : (
             <>
               <div className="pi-tool-card-header">
