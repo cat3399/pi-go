@@ -12,11 +12,59 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cat3399/pi-go/internal/app"
+	"github.com/cat3399/pi-go/internal/llm"
 	"github.com/cat3399/pi-go/internal/session"
 	"github.com/cat3399/pi-go/internal/surfacewire"
 )
+
+func TestSessionWithAnotherWriterAllowsHistoryButNotRuntimeAdmission(t *testing.T) {
+	cwd, agentDir := t.TempDir(), t.TempDir()
+	dir, err := session.SessionDirForAgentDir(cwd, agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := session.Create(filepath.Join(dir, "held.jsonl"), session.CreateOptions{ID: "held", WorkingDir: cwd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	message, err := llm.NewUserTextMessage("saved by owner", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Append(context.Background(), message, session.AppendOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerAPIRoutes(mux, testService(t, app.ProductionConfig{WorkingDir: cwd, AgentDir: agentDir, Environment: []string{"OPENAI_API_KEY=fixture"}}, nil))
+	tools := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/held/commands", strings.NewReader(`{"type":"get_tools"}`))
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		return res
+	}
+	if res := tools(); res.Code != http.StatusLocked {
+		t.Fatalf("get_tools with writer = %d: %s", res.Code, res.Body)
+	}
+	history := httptest.NewRecorder()
+	mux.ServeHTTP(history, httptest.NewRequest(http.MethodGet, "/api/v1/sessions/held/resources/history", nil))
+	if history.Code != http.StatusOK || !strings.Contains(history.Body.String(), "saved by owner") {
+		t.Fatalf("saved history = %d: %s", history.Code, history.Body)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res := tools(); res.Code != http.StatusOK {
+		t.Fatalf("get_tools after release = %d: %s", res.Code, res.Body)
+	}
+}
 
 func TestSessionResourcesShareConditionalReadsAndRejectReplacedSource(t *testing.T) {
 	cwd, agentDir := t.TempDir(), t.TempDir()

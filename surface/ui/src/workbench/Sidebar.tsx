@@ -23,6 +23,7 @@ interface SidebarProps {
   runningSessionIds: string[];
   unreadSessionIds: string[];
   activeSessionId: string | null;
+  isSessionReadOnly(id: string): boolean;
   sessionHref?(sessionId: string): string;
   activePreviewPath: string;
   workingDirectory: string;
@@ -63,6 +64,7 @@ function projectKey(path: string): string {
 function SessionRow({
   session,
   active,
+  readOnly,
   onSelect,
   onRename,
   onDelete,
@@ -72,6 +74,7 @@ function SessionRow({
 }: {
   session: SessionInfo;
   active: boolean;
+  readOnly: boolean;
   onSelect(): void;
   onRename(name: string): Promise<void>;
   onDelete(): Promise<void>;
@@ -159,7 +162,7 @@ function SessionRow({
     }
   };
 
-  if (confirmDelete) {
+  if (confirmDelete && !readOnly) {
     return (
       <InlineConfirmation
         className="pi-session-item pi-session-confirm"
@@ -174,7 +177,7 @@ function SessionRow({
     );
   }
 
-  if (renaming) {
+  if (renaming && !readOnly) {
     return (
       <div className="pi-session-item pi-session-renaming">
         <input
@@ -214,9 +217,9 @@ function SessionRow({
         }}>{content}</a>
         : <button {...triggerProps} className="pi-session-open" type="button" aria-current={active ? "true" : undefined} onClick={() => { menu.dismiss(); onSelect(); }}>{content}</button>}
       <ContextMenu name={sessionTitle(session)} menu={menu} items={[
-        { id: "rename", label: "重命名", icon: <Pencil size={15} /> },
+        { id: "rename", label: "重命名", icon: <Pencil size={15} />, disabled: readOnly },
         { id: "copy-id", label: "复制对话 ID", icon: <Copy size={15} /> },
-        { id: "delete", label: "删除", icon: <Trash2 size={15} />, danger: true },
+        { id: "delete", label: "删除", icon: <Trash2 size={15} />, disabled: readOnly, danger: true },
       ]} />
     </div>
     {error && <div className="pi-sidebar-row-error" role="alert">{error}</div>}
@@ -234,6 +237,7 @@ interface ProjectGroup {
 function ProjectSessions(props: {
   project: ProjectGroup;
   activeSessionId: string | null;
+  isSessionReadOnly(id: string): boolean;
   sessionHref?(sessionId: string): string;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
@@ -359,6 +363,7 @@ function ProjectSessions(props: {
               key={session.id}
               session={session}
               active={session.id === props.activeSessionId}
+              readOnly={props.isSessionReadOnly(session.id)}
               href={props.sessionHref?.(session.id)}
               running={props.runningSessionIds.has(session.id)}
               unread={props.unreadSessionIds.has(session.id)}
@@ -526,6 +531,7 @@ export function Sidebar(props: SidebarProps) {
                     key={project.root}
                     project={project}
                     activeSessionId={props.activeSessionId}
+                    isSessionReadOnly={props.isSessionReadOnly}
                     sessionHref={props.sessionHref}
                     runningSessionIds={runningSessionIds}
                     unreadSessionIds={new Set(props.unreadSessionIds)}

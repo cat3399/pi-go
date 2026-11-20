@@ -10,6 +10,7 @@ import {
 } from "../streaming-input-behavior";
 import { AuthGate } from "./AuthGate";
 import { Composer, type ComposerHandle } from "./Composer";
+import { ComposerInput, ComposerSendButton } from "./ComposerInput";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import { MessageList } from "./MessageList";
@@ -48,6 +49,7 @@ export interface PiWorkbenchProps {
   onEdgeGesturesEnabledChange?(enabled: boolean): void;
 }
 
+const readOnlyHint = "此会话由其他进程持有，当前仅查看已保存的消息";
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((module) => ({ default: module.TerminalPanel })));
 
 const unavailableClient: ApplicationClient = {
@@ -129,6 +131,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
   const [streamingInputBehavior, setStreamingInputBehavior] = useState(readStreamingInputBehavior);
   const composerRef = useRef<ComposerHandle>(null);
   const controller = useApplicationController(client);
+  const readOnly = controller.activeSessionId !== null && controller.data.isSessionReadOnly(controller.activeSessionId);
   const navigationActions = useRef(controller);
   navigationActions.current = controller;
   const navigationApplying = useRef(true);
@@ -226,7 +229,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
 
   useEffect(() => {
     setSidePanel((current) => current?.kind === "terminal" ? null : current);
-  }, [controller.activeSessionId]);
+  }, [controller.activeSessionId, readOnly]);
 
   const closeMobileSidebar = () => {
     if (mobile || window.innerWidth < 800) setSidebarOpen(false);
@@ -284,6 +287,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
     images: ImageAttachment[] = [],
     onSessionCreated?: (sessionId: string) => void,
   ) => {
+    if (controller.activeSessionId && controller.data.isSessionReadOnly(controller.activeSessionId)) throw new Error(readOnlyHint);
     const match = images.length === 0 ? text.trim().match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/) : null;
     const command = match?.[1]?.toLocaleLowerCase();
     const argument = (match?.[2] ?? "").trim();
@@ -488,6 +492,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         hasMoreProjects={controller.hasMoreProjects}
         loadProjects={controller.loadProjects}
         activeSessionId={controller.activeSessionId}
+        isSessionReadOnly={(id) => controller.data.isSessionReadOnly(id)}
         sessionHref={navigation ? (id) => navigation.href(id, client.endpoint) : undefined}
         activePreviewPath={previewPath}
         workingDirectory={controller.workingDirectory}
@@ -548,7 +553,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
             <div className="pi-topbar-title" title={title}>{title}</div>
             {controller.sessionRefreshing && <LoaderCircle className="pi-loading-spinner" size={15} aria-label="正在刷新会话" />}
           </div>
-          {controller.activeSessionId && (
+          {controller.activeSessionId && !readOnly && (
             <div className="pi-topbar-actions">
               <button className="pi-icon-button" type="button" aria-label="打开终端" title="终端" aria-pressed={sidePanel?.kind === "terminal"} onClick={() => openTerminal(null)}><SquareTerminal size={17} /></button>
             </div>
@@ -577,12 +582,17 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               compacting={Boolean(controller.runtimeState?.isCompacting)}
               mobile={mobile}
               anchorsEnabled={!mobile || anchorGesturesEnabled}
-              onFork={controller.fork}
-              onEdit={controller.editAndResend}
-              onOpenTerminal={openTerminal}
+              onFork={readOnly ? undefined : controller.fork}
+              onEdit={readOnly ? undefined : controller.editAndResend}
+              onOpenTerminal={readOnly ? undefined : openTerminal}
             />
           ) : null}
-          {!controller.sessionLoading && (
+          {!controller.sessionLoading && (readOnly ? (
+            <div className={`pi-composer-wrap ${empty ? "is-centered" : ""}`}>
+              <ComposerInput value="" readOnly rows={1} aria-label="消息" placeholder={readOnlyHint}
+                toolbarRight={<ComposerSendButton disabled aria-label="发送" />} />
+            </div>
+          ) : (
             <Composer
               key={`${client.kind}:${client.endpoint}:${controller.snapshot?.agentDir}:${draftKey}`}
               draft={draft}
@@ -614,7 +624,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
               onPreviewFile={openFile}
               onFilesUploaded={() => setFileRefreshKey((value) => value + 1)}
             />
-          )}
+          ))}
           {controller.error && <div className="pi-inline-error" role="alert">{controller.error}</div>}
         </section>
       </main>
@@ -630,7 +640,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
           onClose={() => setSidePanel(null)}
         />
       )}
-      {sidePanel?.kind === "terminal" && controller.activeSessionId && (
+      {sidePanel?.kind === "terminal" && controller.activeSessionId && !readOnly && (
         <Suspense fallback={null}>
         <TerminalPanel
           key={controller.activeSessionId}
@@ -645,7 +655,7 @@ export function PiWorkbench(props: PiWorkbenchProps) {
         </Suspense>
       )}
       <SessionPointPicker
-        mode={pointPicker}
+        mode={readOnly ? null : pointPicker}
         sessionId={controller.activeSessionId}
         loadNodes={controller.loadNodes}
         activeLeafId={controller.sessionView?.leafId ?? null}

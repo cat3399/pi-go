@@ -4,6 +4,7 @@ import type {
   HistoryPage, LiveSnapshot, NodesPage, ReadMessage, ReadResourceRequest, ResourceResponse, ResourceRevision,
   ProjectDirectoryPage, ProjectInfo, SessionDirectoryPage, SessionInfo, SessionMetadata, SessionResources, SessionRuntimeState, SessionVersion,
 } from "../contracts";
+import type { ToolEntry } from "../tool-presets";
 import { ResourceCache, retainedBytes } from "./resource-cache.ts";
 import { latestAssistantUsageInfo, type LatestAssistantUsageInfo } from "./message.ts";
 import { ReadMarkers } from "./read-markers.ts";
@@ -96,6 +97,7 @@ function queryKey(query: object): string {
 
 function resourceKey(id: string, kind: string, query: object = {}): string { return JSON.stringify(["session", id, kind, queryKey(query)]); }
 function applicationKey(kind: string, query: object = {}): string { return JSON.stringify(["application", kind, queryKey(query)]); }
+function configurationKey(scope: string, id: string): string { return JSON.stringify(["configuration", scope, id]); }
 function navigationKey(id: string): string { return JSON.stringify(["navigation", id]); }
 function viewKey(id: string): string { return JSON.stringify(["view", id]); }
 function directoryKey(project: string, search: string): string { return JSON.stringify(["directory", project, search.trim().toLowerCase()]); }
@@ -114,6 +116,11 @@ function isAfter(cursor: string, previous: string): boolean {
   return epoch === oldEpoch && sequence > oldSequence;
 }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function isWriterConflict(error: unknown): boolean {
+  // Native IPC and older Web servers carry the wrapped Go error as text.
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 423)
+    || /\bsession already has an active writer(?=:|$)/.test(errorText(error));
+}
 function isConflict(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "status" in error && error.status === 409)
     || /cursor is unavailable|source changed|session changed/.test(errorText(error));
@@ -354,7 +361,8 @@ export class ApplicationDataStore {
     if (id) {
       this.scopes.set(owner, id);
       const releaseView = this.cache.pin(viewKey(id)), releaseNavigation = this.cache.pin(navigationKey(id));
-      this.scopePins.set(owner, () => { releaseView(); releaseNavigation(); });
+      const releaseTools = this.cache.pin(configurationKey("tools", id));
+      this.scopePins.set(owner, () => { releaseView(); releaseNavigation(); releaseTools(); });
       // Details omitted by the previous scope must be validated, even when a
       // global cursor is already at the current event-stream frontier.
       this.invalidateSession(id, false);
@@ -507,8 +515,33 @@ export class ApplicationDataStore {
   }
 
   async cached<T>(scope: string, id: string, load: () => Promise<T>, force = false): Promise<T> {
-    const result = await this.cache.read(JSON.stringify(["configuration", scope, id]), async () => ({ token: "", data: await load() }), { force, maxAge: revalidateAfter });
+    const result = await this.cache.read(configurationKey(scope, id), async () => ({ token: "", data: await load() }), { force, maxAge: revalidateAfter });
     return result.data;
+  }
+
+  // get_tools already admits the Runtime. A confirmed writer conflict is a
+  // cacheable read-only outcome; an inactive live snapshot alone is not.
+  isSessionReadOnly(id: string): boolean {
+    return this.cache.peek(configurationKey("tools", id)) === null;
+  }
+
+  async sessionTools(id: string, retryReadOnly = false): Promise<ToolEntry[] | null> {
+    const wasReadOnly = this.isSessionReadOnly(id);
+    const tools = await this.cached("tools", id, async () => {
+      try { return (await this.client.dispatch<ToolEntry[]>(id, { type: "get_tools" })) ?? []; }
+      catch (error) { if (isWriterConflict(error)) return null; throw error; }
+    }, retryReadOnly && wasReadOnly);
+    if (wasReadOnly !== (tools === null)) this.emit();
+    return tools;
+  }
+
+  noteWriterConflict(id: string, error: unknown): boolean {
+    if (!isWriterConflict(error)) return false;
+    if (!this.isSessionReadOnly(id)) {
+      this.cache.put(configurationKey("tools", id), null);
+      this.emit();
+    }
+    return true;
   }
 
   invalidateConfiguration(id?: string): void {
@@ -676,7 +709,7 @@ export class ApplicationDataStore {
       if (view.live.state) this.updateRunning(id, view.live.state);
       this.resetSessions.delete(id);
       if (this.selectedIDs().includes(id)) {
-        if (view.live.active) void this.ensureNavigation(id).catch((error) => this.fail(error));
+        if (view.live.active || this.isSessionReadOnly(id)) void this.ensureNavigation(id).catch((error) => this.fail(error));
         void this.restoreEditingSource(id, view.window.version.generation).catch((error) => this.fail(error));
       }
       this.dirtySessions.delete(id);

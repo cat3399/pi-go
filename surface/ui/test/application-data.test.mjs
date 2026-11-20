@@ -547,6 +547,48 @@ test("scrolling past an old snapshot reads the next new page without skipping th
 });
 
 
+test("a writer conflict keeps saved history readable and retries access without locking other sessions", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client, 1);
+  client.inactive = true;
+  store.select(Symbol(), "one"); // The selected session's access hint must survive payload eviction.
+  let locked = true, attempts = 0;
+  client.dispatch = async (id, command) => {
+    assert.equal(command.type, "get_tools"); attempts++;
+    if (id === "one" && locked) throw Object.assign(new Error("Locked"), { status: 423 });
+    return [];
+  };
+  const view = await store.loadSession("one");
+  assert.equal(view.live.active, false);
+  assert.equal(store.isSessionReadOnly("one"), false, "absence of a local Runtime does not imply a lock");
+  assert.equal(await store.sessionTools("one"), null);
+  assert.equal(store.isSessionReadOnly("one"), true);
+  assert.equal(await store.sessionTools("one"), null);
+  assert.equal(attempts, 1, "reuse a confirmed lock until revalidation");
+  assert.deepEqual(await store.sessionTools("two"), []);
+  assert.equal(store.isSessionReadOnly("two"), false, "an empty tool list is writable");
+  client.setLog(4);
+  assert.equal((await store.loadSession("one", true)).window.pages[0].items.at(-1).message.content, "entry 4");
+  assert.equal(store.lastError, "");
+  locked = false;
+  assert.deepEqual(await store.sessionTools("one", true), []);
+  assert.equal(store.isSessionReadOnly("one"), false);
+});
+
+test("only writer contention changes access, including a conflict received while sending", async () => {
+  const client = fakeClient(), store = new ApplicationDataStore(client);
+  const failure = Object.assign(new Error("session source changed while reading"), { status: 409 });
+  client.dispatch = async () => { throw failure; };
+  await assert.rejects(store.sessionTools("one"), failure);
+  assert.equal(store.noteWriterConflict("one", new Error("disk I/O error")), false);
+  assert.equal(store.isSessionReadOnly("one"), false);
+  assert.equal(store.noteWriterConflict("one", "open session: session already has an active writer: file.jsonl"), true);
+  assert.equal(store.isSessionReadOnly("one"), true);
+  client.dispatch = async () => [];
+  store.invalidateConfiguration();
+  await store.sessionTools("one");
+  assert.equal(store.isSessionReadOnly("one"), false);
+});
+
 test("the first readonly paint does not download an index that Runtime admission will replace", async () => {
   const client = fakeClient(), store = new ApplicationDataStore(client);
   client.inactive = true; client.setLog(12000); store.select(Symbol(), "one");

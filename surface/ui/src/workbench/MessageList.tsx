@@ -58,8 +58,8 @@ interface MessageListProps {
   mobile: boolean;
   anchorsEnabled: boolean;
   onOpenTerminal?(id: string): void;
-  onFork(entryId: string): Promise<void>;
-  onEdit(entryId: string, text: string): Promise<void>;
+  onFork?(entryId: string): Promise<void>;
+  onEdit?(entryId: string, text: string): Promise<void>;
 }
 
 function contentBlocks(message: AgentMessage): MessageContentBlock[] {
@@ -595,7 +595,7 @@ function Message({
   toolResults: Map<string, AgentMessage>;
   entryId?: string;
   onOpenTerminal?(id: string): void;
-  onFork(entryId: string): Promise<void>;
+  onFork?(entryId: string): Promise<void>;
   editing?: boolean;
   editAvailable?: boolean;
   editEnabled?: boolean;
@@ -894,7 +894,7 @@ function Message({
               {copied ? <Check size={14} /> : <Copy size={14} />}
             </button>
           )}
-          {entryId && (
+          {entryId && onFork && (
             <button type="button" aria-label="从此处分支" title="从此处分支" onClick={() => void onFork(entryId)}>
               <GitFork size={14} />
             </button>
@@ -1046,11 +1046,11 @@ function Turn(props: {
   onLoadProcess(runId: string, direction: "initial" | "older" | "newer"): Promise<boolean>;
   onExpand(runId: string): void;
   onOpenTerminal?(id: string): void;
-  onFork(entryId: string): Promise<void>;
+  onFork?(entryId: string): Promise<void>;
   editingEntryId: string | null;
   editAvailable: boolean;
   editEnabled: boolean;
-  onEditStart(entryId: string): void;
+  onEditStart?(entryId: string): void;
   onEditCancel(): void;
   onEdit(entryId: string, text: string): Promise<void>;
 }) {
@@ -1314,6 +1314,7 @@ function MessageListContent({
   };
 
   const submitMessageEdit = async (entryId: string, text: string) => {
+    if (!onEdit) return;
     await onEdit(entryId, text);
     data.drafts.delete(data.draftKey(sessionId, historyWindow?.version.generation ?? "", entryId));
     data.editing.delete(scrollScope);
@@ -1598,10 +1599,10 @@ function MessageListContent({
                 entryId={entryId}
                 onFork={onFork}
                 onOpenTerminal={onOpenTerminal}
-                editing={editingEntryId === entryId}
+                editing={Boolean(onEdit) && editingEntryId === entryId}
                 editAvailable={!busy && editingEntryId === null}
                 editEnabled={!busy}
-                onEditStart={beginMessageEdit}
+                onEditStart={onEdit ? beginMessageEdit : undefined}
                 onEditCancel={cancelMessageEdit}
                 onEdit={submitMessageEdit}
               />
@@ -1625,10 +1626,10 @@ function MessageListContent({
                   onExpand={prepareExpansion}
                   onFork={onFork}
                   onOpenTerminal={onOpenTerminal}
-                  editingEntryId={editingEntryId}
+                  editingEntryId={onEdit ? editingEntryId : null}
                   editAvailable={!busy && editingEntryId === null}
                   editEnabled={!busy}
-                  onEditStart={beginMessageEdit}
+                  onEditStart={onEdit ? beginMessageEdit : undefined}
                   onEditCancel={cancelMessageEdit}
                   onEdit={submitMessageEdit}
                 />

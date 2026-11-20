@@ -21,7 +21,6 @@ import type {
 import {
   getPresetFromTools,
   getToolNamesForPreset,
-  type ToolEntry,
   type ToolPreset,
 } from "../tool-presets";
 import { assistantResponseKey, assistantUsage, type LatestAssistantUsageInfo } from "./message";
@@ -202,12 +201,6 @@ export function useApplicationController(client: ApplicationClient): Application
     return value;
   }, [client, data]);
 
-  const loadTools = useCallback(async (sessionId: string, generation = generationRef.current) => {
-    const tools = await data.cached("tools", sessionId, () => client.dispatch<ToolEntry[]>(sessionId, { type: "get_tools" }));
-    if (generation !== generationRef.current || activeSessionRef.current !== sessionId) return;
-    setToolPresetState(getPresetFromTools(tools ?? []));
-  }, [client, data]);
-
   const loadSlashCommands = useCallback(async (
     sessionId: string,
     generation = generationRef.current,
@@ -233,6 +226,15 @@ export function useApplicationController(client: ApplicationClient): Application
     setSessionStats(value);
     return value;
   }, [client, data]);
+
+  const loadSessionCapabilities = useCallback(async (id: string, retryReadOnly = false) => {
+    const generation = generationRef.current;
+    const tools = await data.sessionTools(id, retryReadOnly);
+    if (generation !== generationRef.current || activeSessionRef.current !== id || tools === null) return;
+    setToolPresetState(getPresetFromTools(tools));
+    try { await Promise.all([loadSlashCommands(id, generation), loadSessionStats(id, generation)]); }
+    catch (error) { if (!data.noteWriterConflict(id, error)) throw error; }
+  }, [data, loadSlashCommands, loadSessionStats]);
 
   const applyCachedSession = useCallback((sessionId: string): WorkbenchSession | null => {
     const cached = data.session(sessionId);
@@ -316,13 +318,13 @@ export function useApplicationController(client: ApplicationClient): Application
       const cwd = id ? data.session(id)?.metadata.info.cwd : modelsCwdRef.current;
       const work: Promise<unknown>[] = [];
       if (cwd) work.push(loadModels(cwd));
-      if (id) work.push(loadTools(id), loadSlashCommands(id), loadSessionStats(id));
+      if (id) work.push(loadSessionCapabilities(id));
       void Promise.allSettled(work).then((results) => {
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected" && activeSessionRef.current === id) setError(errorMessage(failure.reason));
       });
     }
-  }), [data, applyCachedSession, loadModels, loadTools, loadSlashCommands, loadSessionStats]);
+  }), [data, applyCachedSession, loadModels, loadSessionCapabilities]);
 
   const eventRefreshes = useMemo(() => new RefreshScheduler(async (requests) => {
     const generation = generationRef.current;
@@ -487,14 +489,12 @@ export function useApplicationController(client: ApplicationClient): Application
         setSessionLoading(false);
         const capabilities = await Promise.allSettled([
           loadModels(view.info.cwd),
-          loadTools(sessionId),
-          loadSlashCommands(sessionId),
-          loadSessionStats(sessionId),
+          loadSessionCapabilities(sessionId, true),
         ]);
         if (activeSessionRef.current === sessionId) {
           // Capabilities may admit the Runtime. Validate its owner first, then
           // read the full metadata index once instead of downloading both generations.
-          await data.loadSession(sessionId, true);
+          if (!data.isSessionReadOnly(sessionId)) await data.loadSession(sessionId, true);
           await data.ensureNavigation(sessionId);
         }
         const failure = capabilities.find((result) => result.status === "rejected");
@@ -507,7 +507,7 @@ export function useApplicationController(client: ApplicationClient): Application
     } finally {
       if (activeSessionRef.current === sessionId) { setSessionLoading(false); setSessionRefreshing(false); }
     }
-  }, [data, scopeOwner, applyCachedSession, loadModels, loadSession, loadSessionStats, loadSlashCommands, loadTools]);
+  }, [data, scopeOwner, applyCachedSession, loadModels, loadSession, loadSessionCapabilities]);
 
   const beginNewSession = useCallback((cwd?: string) => {
     selectionRef.current += 1;
@@ -569,12 +569,11 @@ export function useApplicationController(client: ApplicationClient): Application
     if (!view) return;
     const capabilities = await Promise.allSettled([
       loadModels(view.info.cwd),
-      loadTools(sessionId),
-      loadSlashCommands(sessionId),
+      loadSessionCapabilities(sessionId),
     ]);
     const failure = capabilities.find((result) => result.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
-  }, [client, data, loadModels, loadSession, loadSlashCommands, loadTools]);
+  }, [client, data, loadModels, loadSession, loadSessionCapabilities]);
 
   const handleBuiltinSlashCommand = useCallback(async (sessionId: string, text: string) => {
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -791,9 +790,10 @@ export function useApplicationController(client: ApplicationClient): Application
         });
       }
     } catch (sendError) {
+      const locked = sessionID && data.noteWriterConflict(sessionID, sendError);
       if (selected()) {
         if (!busy) setBusy(false);
-        setError(errorMessage(sendError));
+        if (!locked) setError(errorMessage(sendError));
       }
       throw sendError;
     }
@@ -1062,6 +1062,7 @@ export function useApplicationController(client: ApplicationClient): Application
     } catch (editError) {
       setBusy(false);
       setRuntimeState((current) => ({ ...current, isPromptRunning: false, isStreaming: false }));
+      if (data.noteWriterConflict(sessionID, editError)) throw editError;
       await Promise.allSettled([
         loadSession(sessionID),
         loadSessionStats(sessionID),

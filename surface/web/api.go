@@ -482,6 +482,10 @@ func handleDefaultCWD(writer http.ResponseWriter, request *http.Request) {
 }
 
 func writeApplicationError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, session.ErrWriterActive) {
+		writeAPIError(writer, http.StatusLocked, session.ErrWriterActive)
+		return
+	}
 	if errors.Is(err, session.ErrInvalidReadQuery) || errors.Is(err, surfacewire.ErrInvalidRequest) {
 		writeAPIError(writer, http.StatusBadRequest, err)
 		return
