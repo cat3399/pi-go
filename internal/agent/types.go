@@ -391,7 +391,7 @@ func validateConfig(config Config) (validatedConfig, error) {
 	}
 	steeringMode := config.SteeringMode
 	if steeringMode == 0 {
-		steeringMode = QueueOneAtATime
+		steeringMode = QueueAll
 	}
 	followUpMode := config.FollowUpMode
 	if followUpMode == 0 {

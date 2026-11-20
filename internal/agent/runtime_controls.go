@@ -14,7 +14,7 @@ func validQueueMode(mode QueueMode) bool {
 
 func (s *AgentSession) resolvedRuntimeSettings() RuntimeControlSettings {
 	settings := RuntimeControlSettings{
-		SteeringMode: QueueOneAtATime, FollowUpMode: QueueOneAtATime,
+		SteeringMode: QueueAll, FollowUpMode: QueueOneAtATime,
 		AutoCompactionEnabled: true, AutoRetryEnabled: true,
 	}
 	if s == nil {
@@ -42,7 +42,7 @@ func (s *AgentSession) resolvedRuntimeSettings() RuntimeControlSettings {
 		settings = resolve()
 	}
 	if !validQueueMode(settings.SteeringMode) {
-		settings.SteeringMode = QueueOneAtATime
+		settings.SteeringMode = QueueAll
 	}
 	if !validQueueMode(settings.FollowUpMode) {
 		settings.FollowUpMode = QueueOneAtATime

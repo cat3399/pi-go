@@ -859,13 +859,11 @@ func TestAgentSessionQueueAllPublishesRemainingQueueBeforeEachMessage(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Steering batches by default; follow-up only batches when configured.
 			if followUp {
-				err = coordinator.SetFollowUpMode(agent.QueueAll)
-			} else {
-				err = coordinator.SetSteeringMode(agent.QueueAll)
-			}
-			if err != nil {
-				t.Fatal(err)
+				if err := coordinator.SetFollowUpMode(agent.QueueAll); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var recordDelivery atomic.Bool
 			var sequence []string

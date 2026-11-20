@@ -297,7 +297,7 @@ func TestStatefulAgentSecondListenerFailureRejectsSyntheticSettlementAndReturnsI
 	}
 }
 
-func TestStatefulAgentContinueDrainsAssistantTailQueuesByModeAndPriority(t *testing.T) {
+func TestStatefulAgentContinueDrainsAssistantTailQueuesByDefaultModeAndPriority(t *testing.T) {
 	implementation := newScriptedProvider(t,
 		mustTextTerminal(t, "initial"), mustTextTerminal(t, "after steering"), mustTextTerminal(t, "after follow-up"),
 	)
@@ -306,12 +306,6 @@ func TestStatefulAgentContinueDrainsAssistantTailQueuesByModeAndPriority(t *test
 		Now: func() time.Time { return agentTestEpoch },
 	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.SetSteeringMode(agent.QueueAll); err != nil {
-		t.Fatal(err)
-	}
-	if err := runtime.SetFollowUpMode(agent.QueueOneAtATime); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runtime.Run(context.Background(), "initial prompt"); err != nil {
@@ -368,7 +362,7 @@ func TestStatefulAgentQueueFIFOHasAndClearOperations(t *testing.T) {
 	}
 	steering, follow := runtime.Queues()
 	richSteering, richFollow := runtime.RichQueues()
-	if runtime.SteeringMode() != agent.QueueOneAtATime || runtime.FollowUpMode() != agent.QueueOneAtATime ||
+	if runtime.SteeringMode() != agent.QueueAll || runtime.FollowUpMode() != agent.QueueOneAtATime ||
 		len(richSteering) != 2 || len(richFollow) != 2 {
 		t.Fatalf("queue modes/types = %s/%s rich=%d/%d", runtime.SteeringMode(), runtime.FollowUpMode(), len(richSteering), len(richFollow))
 	}

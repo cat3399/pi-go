@@ -63,7 +63,7 @@ func TestCompactionSettingsDefaultsAndExplicitFalseMatchPi(t *testing.T) {
 
 func TestQueueModeSettingsDefaultsMergeLegacyMigrationAndLosslessWrite(t *testing.T) {
 	defaults := Settings{}
-	if defaults.SteeringModeOrDefault() != QueueModeOneAtATime || defaults.FollowUpModeOrDefault() != QueueModeOneAtATime {
+	if defaults.SteeringModeOrDefault() != QueueModeAll || defaults.FollowUpModeOrDefault() != QueueModeOneAtATime {
 		t.Fatalf("queue defaults = %q/%q", defaults.SteeringModeOrDefault(), defaults.FollowUpModeOrDefault())
 	}
 	agentDir, cwd := t.TempDir(), t.TempDir()

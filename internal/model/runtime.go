@@ -222,7 +222,7 @@ const (
 
 func (s Settings) SteeringModeOrDefault() string {
 	if s.SteeringMode == "" {
-		return QueueModeOneAtATime
+		return QueueModeAll
 	}
 	return s.SteeringMode
 }

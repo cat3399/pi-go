@@ -323,7 +323,7 @@ func TestRuntimeControlDefiniteSettingsFailureDoesNotPublishState(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = created.Session.Close(context.Background()) })
-	if err := created.Session.SetSteeringMode(agent.QueueAll); !errors.Is(err, wantErr) {
+	if err := created.Session.SetSteeringMode(agent.QueueOneAtATime); !errors.Is(err, wantErr) {
 		t.Fatalf("SetSteeringMode error = %v", err)
 	}
 	if err := created.Session.SetFollowUpMode(agent.QueueAll); !errors.Is(err, wantErr) {
@@ -335,7 +335,7 @@ func TestRuntimeControlDefiniteSettingsFailureDoesNotPublishState(t *testing.T) 
 	if err := created.Session.SetAutoRetryEnabled(false); !errors.Is(err, wantErr) {
 		t.Fatalf("SetAutoRetryEnabled error = %v", err)
 	}
-	if created.Session.SteeringMode() != agent.QueueOneAtATime || created.Session.FollowUpMode() != agent.QueueOneAtATime ||
+	if created.Session.SteeringMode() != agent.QueueAll || created.Session.FollowUpMode() != agent.QueueOneAtATime ||
 		!created.Session.AutoCompactionEnabled() || !created.Session.AutoRetryEnabled() {
 		t.Fatalf("definite failure leaked controls = %s/%s compact=%t retry=%t", created.Session.SteeringMode(), created.Session.FollowUpMode(), created.Session.AutoCompactionEnabled(), created.Session.AutoRetryEnabled())
 	}
