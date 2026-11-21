@@ -115,7 +115,8 @@ func openDesktop(options launchOptions) error {
 		BackgroundColour: wails.NewRGB(255, 255, 255),
 		URL:              "/",
 		Mac: wails.MacWindow{
-			TitleBar: wails.MacTitleBarHiddenInset,
+			// HiddenInset adds an empty NSToolbar, which gives the window larger corners on macOS Tahoe.
+			TitleBar: wails.MacTitleBarHidden,
 		},
 	})
 
