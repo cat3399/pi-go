@@ -1,51 +1,5 @@
 @import "@xterm/xterm/css/xterm.css";
 
-/* Self-hosted variable fonts (OFL-1.1): Plus Jakarta Sans & JetBrains Mono */
-@font-face {
-  font-family: "Plus Jakarta Sans";
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url("./fonts/plus-jakarta-sans-latin-ext-wght-normal.woff2") format("woff2");
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-
-@font-face {
-  font-family: "Plus Jakarta Sans";
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url("./fonts/plus-jakarta-sans-latin-wght-normal.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "Plus Jakarta Sans";
-  font-style: italic;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url("./fonts/plus-jakarta-sans-latin-wght-italic.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "JetBrains Mono";
-  font-style: normal;
-  font-weight: 100 800;
-  font-display: swap;
-  src: url("./fonts/jetbrains-mono-latin-ext-wght-normal.woff2") format("woff2");
-  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-
-@font-face {
-  font-family: "JetBrains Mono";
-  font-style: normal;
-  font-weight: 100 800;
-  font-display: swap;
-  src: url("./fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
  *
@@ -114,10 +68,7 @@
   --pi-safe-area-right: env(safe-area-inset-right, 0px);
   --pi-safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --pi-safe-area-left: env(safe-area-inset-left, 0px);
-  --pi-font-sans: "Plus Jakarta Sans", "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --pi-font-reading: var(--pi-font-sans);
-  --pi-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-family: var(--pi-font-sans);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -965,7 +916,7 @@ input:-webkit-autofill:focus {
   padding: 22px 24px 48px;
   color: var(--pi-text);
   background: var(--pi-bg);
-  font: 12.5px/1.68 var(--pi-font-mono);
+  font: 12.5px/1.68 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -1406,14 +1357,14 @@ input:-webkit-autofill:focus {
   border-radius: var(--pi-radius-sm);
   background: var(--pi-panel);
   color: var(--pi-text);
-  font: 12px/1.55 var(--pi-font-mono);
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
 }
 
 .pi-bash-command {
   margin-bottom: 4px;
   color: var(--pi-text-secondary);
-  font: 12px/1.5 var(--pi-font-mono);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-message-error,
@@ -1432,7 +1383,6 @@ input:-webkit-autofill:focus {
 }
 
 .pi-markdown {
-  font-family: var(--pi-font-reading);
   line-height: 1.72;
   overflow-wrap: anywhere;
 }
@@ -1636,14 +1586,14 @@ input:-webkit-autofill:focus {
   border-radius: 5px;
   background: var(--pi-panel);
   box-shadow: 0 1px 0 var(--pi-border-heavy);
-  font: 0.88em var(--pi-font-mono);
+  font: 0.88em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-markdown-inline-code {
   padding: 0.14em 0.44em;
   border-radius: 6px;
   background: rgba(24, 24, 27, 0.055);
-  font: 0.875em var(--pi-font-mono);
+  font: 0.875em ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-markdown-code {
@@ -1662,7 +1612,7 @@ input:-webkit-autofill:focus {
   border-bottom: 0;
   background: transparent;
   color: var(--pi-text-tertiary);
-  font: 11.5px/16px var(--pi-font-mono);
+  font: 11.5px/16px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   letter-spacing: 0.01em;
 }
 
@@ -1691,7 +1641,7 @@ input:-webkit-autofill:focus {
   overflow-x: hidden;
   overflow-y: auto;
   color: var(--pi-text);
-  font: 12.5px/1.66 var(--pi-font-mono);
+  font: 12.5px/1.66 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -2734,7 +2684,7 @@ input:-webkit-autofill:focus {
   outline: none;
   background: var(--pi-panel);
   color: var(--pi-text);
-  font: 12px var(--pi-font-mono);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
 }
 
@@ -3574,7 +3524,7 @@ input:-webkit-autofill:focus {
   border: 1px solid var(--pi-border);
   border-radius: 4px;
   color: var(--pi-text-tertiary);
-  font: 9px/15px var(--pi-font-mono);
+  font: 9px/15px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-branch-role.is-user {
@@ -3981,12 +3931,12 @@ input:-webkit-autofill:focus {
 .pi-tool-summary code {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
   color: var(--pi-text-secondary);
-  font: 12.5px/1.55 var(--pi-font-mono);
+  font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   text-decoration: none;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition: color 110ms ease;
 }
 
@@ -4106,7 +4056,7 @@ input:-webkit-autofill:focus {
   outline: 0;
   background: transparent;
   color: var(--pi-text-secondary);
-  font: 13px/1.6 var(--pi-font-mono);
+  font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -4147,7 +4097,7 @@ input:-webkit-autofill:focus {
   padding: 4px 10px 4px 32px;
   overflow-x: auto;
   border-left: 3px solid transparent;
-  font: 12px/1.55 var(--pi-font-mono);
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   white-space: pre-wrap;
 }
 
@@ -4199,7 +4149,7 @@ input:-webkit-autofill:focus {
   min-width: 0;
   margin-right: auto;
   overflow: hidden;
-  font: 12.5px/20px var(--pi-font-mono);
+  font: 12.5px/20px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4208,7 +4158,7 @@ input:-webkit-autofill:focus {
   display: inline-flex;
   flex: 0 0 auto;
   gap: 5px;
-  font: 12px/20px var(--pi-font-mono);
+  font: 12px/20px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -4276,7 +4226,7 @@ input:-webkit-autofill:focus {
   max-height: min(480px, 58vh);
   overflow-x: hidden;
   overflow-y: auto;
-  font: 12px/19px var(--pi-font-mono);
+  font: 12px/19px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   tab-size: 2;
 }
 
@@ -4344,7 +4294,7 @@ input:-webkit-autofill:focus {
 .pi-file-change-empty {
   padding: 14px;
   color: var(--pi-text-tertiary);
-  font: 11px/18px var(--pi-font-sans);
+  font: 11px/18px -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
 }
 
 .pi-bash-command {
@@ -4412,7 +4362,7 @@ input:-webkit-autofill:focus {
 .pi-slash-group code {
   overflow: hidden;
   color: inherit;
-  font: 12px/18px var(--pi-font-mono);
+  font: 12px/18px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-weight: var(--pi-font-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6256,7 +6206,7 @@ input:-webkit-autofill:focus {
   border-radius: 999px;
   background: var(--pi-hover);
   color: var(--pi-text-secondary);
-  font: 10.5px/16px var(--pi-font-mono);
+  font: 10.5px/16px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   text-align: center;
 }
 
@@ -6520,7 +6470,7 @@ input:-webkit-autofill:focus {
 .pi-anchor-preview small,
 .pi-anchor-scrub-preview small {
   color: var(--pi-text-tertiary);
-  font: 9px/17px var(--pi-font-mono);
+  font: 9px/17px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-anchor-preview > span,
@@ -6723,7 +6673,7 @@ input:-webkit-autofill:focus {
 .pi-command-picker-list button > span,
 .pi-command-picker-list button > time {
   color: var(--pi-text-tertiary);
-  font: 10px/16px var(--pi-font-mono);
+  font: 10px/16px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .pi-command-picker-list button > strong {
