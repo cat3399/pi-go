@@ -3981,12 +3981,12 @@ input:-webkit-autofill:focus {
 .pi-tool-summary code {
   flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
   color: var(--pi-text-secondary);
   font: 12.5px/1.55 var(--pi-font-mono);
   text-decoration: none;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition: color 110ms ease;
 }
 
