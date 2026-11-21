@@ -5,7 +5,9 @@ import {
   type CSSProperties,
 } from "react";
 import {
+  AtSign,
   ChevronRight,
+  Eye,
   File,
   Folder,
   FolderOpen,
@@ -174,6 +176,12 @@ function TreeNode(props: {
               onKeyDown={menu.onTriggerKeyDown}
               onClickCapture={menu.onClickCapture}
               onClick={activate}
+              onDoubleClick={() => {
+                if (props.node.isDir) return;
+                menu.dismiss();
+                props.onSelect(props.node.path);
+                props.onPreview(props.node.path);
+              }}
             >
               {props.node.isDir ? (
                 <ChevronRight className={`pi-file-chevron ${open ? "is-open" : ""}`} size={12} />
@@ -184,6 +192,32 @@ function TreeNode(props: {
               <span>{props.node.name}</span>
               {(loading || downloading) && <RefreshCw className="pi-file-loading" size={11} aria-label={downloading ? "正在下载" : "正在读取"} />}
             </button>
+            <div className="pi-file-quick-actions">
+              {!props.node.isDir && (
+                <IconAction
+                  label={`预览 ${props.node.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    menu.dismiss();
+                    props.onSelect(props.node.path);
+                    props.onPreview(props.node.path);
+                  }}
+                >
+                  <Eye size={13} />
+                </IconAction>
+              )}
+              <IconAction
+                label={`引用 ${props.node.name}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  menu.dismiss();
+                  props.onSelect(props.node.path);
+                  props.onMention(atMention(props.node.path, props.cwd, props.node.isDir));
+                }}
+              >
+                <AtSign size={13} />
+              </IconAction>
+            </div>
             <FileContextMenu name={props.node.name} isDir={props.node.isDir} downloading={downloading} menu={menu} />
           </>
         )}

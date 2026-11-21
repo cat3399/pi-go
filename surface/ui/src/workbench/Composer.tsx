@@ -497,8 +497,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setUploadedFiles((current) => current.filter((file) => file.path !== path));
   };
 
+  const currentProjectName = props.workingDirectory.trim() ? projectName(props.workingDirectory) : "";
+
   return (
     <div className={`pi-composer-wrap ${props.centered ? "is-centered" : ""}`}>
+      {props.centered && (
+        <header className="pi-empty-hero">
+          <h1>{currentProjectName || "今天想做点什么？"}</h1>
+        </header>
+      )}
       {modelNotice && (
         <div className="pi-model-notice" role="alert">
           {modelNotice}

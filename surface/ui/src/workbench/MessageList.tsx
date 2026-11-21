@@ -300,13 +300,14 @@ function FileChangeCard({
   };
 
   return (
-    <section className={`pi-file-change ${failed ? "is-error" : ""}`}>
+    <section className={`pi-file-change ${failed ? "is-error" : running && !complete ? "is-running" : ""}`}>
       <header className="pi-file-change-header">
         <span className="pi-file-change-name" title={path}>{fileName(path)}</span>
-        <span className="pi-file-change-status">
-          {complete && !failed && <Check size={12} />}
-          {running && !complete ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : complete ? "成功" : "等待"}
-        </span>
+        {(failed || !complete) && (
+          <span className="pi-file-change-status">
+            {running && !complete ? (name === "write" ? "写入中" : "修改中") : failed ? "失败" : "等待"}
+          </span>
+        )}
         <button
           type="button"
           className="pi-file-change-copy"
@@ -440,7 +441,7 @@ function ToolCall({
   }, [hasFileChange, name, input, result]);
 
   return (
-    <div className={`pi-tool ${failed ? "is-error" : ""} ${expanded ? "is-open" : ""}`} data-entry-id={!output || hasFileChange && !failed ? resultEntryId : undefined}>
+    <div className={`pi-tool ${failed ? "is-error" : running && !complete ? "is-running" : ""} ${expanded ? "is-open" : ""}`} data-entry-id={!output || hasFileChange && !failed ? resultEntryId : undefined}>
       <div className="pi-tool-heading">
         <button className="pi-tool-summary" type="button" aria-expanded={canOpenTerminal ? undefined : expanded} title={canOpenTerminal ? "打开终端" : undefined} onClick={() => canOpenTerminal ? onOpenTerminal?.(terminalId) : setExpanded((value) => !value)}>
           <Icon size={15} />
@@ -464,10 +465,11 @@ function ToolCall({
             <>
               <div className="pi-tool-card-header">
                 <span>{presentation.card}</span>
-                <span className="pi-tool-card-status">
-                  {complete && !failed && <Check size={12} />}
-                  {running && !complete ? "运行中" : failed ? "失败" : complete ? "成功" : "等待"}
-                </span>
+                {(failed || !complete) && (
+                  <span className="pi-tool-card-status">
+                    {running && !complete ? "运行中" : failed ? "失败" : "等待"}
+                  </span>
+                )}
               </div>
               <ToolDataSection kind="input" value={inputCopyValue}>
                 <pre className="pi-tool-input">{name === "bash" ? `$ ${command}` : serializedInput}</pre>

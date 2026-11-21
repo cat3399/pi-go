@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { normalizeRemoteEndpoint, PiWorkbench } from "@cat3399/pi-workbench";
+import { normalizeRemoteEndpoint, PiWorkbench, type ApplicationClient } from "@cat3399/pi-workbench";
 
 const version = process.env.NEXT_PUBLIC_PI_VERSION ?? "go-dev";
+const isDev = process.env.NODE_ENV === "development";
 
 export default function WebWorkbench() {
   const [endpoint, setEndpoint] = useState("");
+  const [mockState, setMockState] = useState<{
+    enabled: boolean;
+    client?: ApplicationClient;
+    hostKind: "web" | "desktop" | "mobile";
+  }>({ enabled: false, hostKind: "web" });
   const sessionNavigation = useMemo(() => {
     let currentEndpoint = "";
     const read = () => new URL(window.location.href).searchParams.get("session")?.trim() || null;
@@ -43,9 +49,24 @@ export default function WebWorkbench() {
 
   useEffect(() => {
     setEndpoint(window.location.origin);
+    if (!isDev) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mock") !== "1") return;
+    const requestedHost = params.get("host");
+    const hostKind: "web" | "desktop" | "mobile" =
+      requestedHost === "desktop" || requestedHost === "mobile" ? requestedHost : "web";
+    let cancelled = false;
+    setMockState({ enabled: true, hostKind });
+    void import("../dev/mock-client").then(({ createMockApplicationClient }) => {
+      if (cancelled) return;
+      setMockState({ enabled: true, client: createMockApplicationClient(), hostKind });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (!endpoint) {
+  if (!endpoint || (mockState.enabled && !mockState.client)) {
     return (
       <main className="pi-entry" aria-live="polite">
         <section className="pi-entry-panel">
@@ -53,6 +74,18 @@ export default function WebWorkbench() {
           <p className="pi-entry-status">正在启动 Web 工作区…</p>
         </section>
       </main>
+    );
+  }
+
+  if (mockState.enabled && mockState.client) {
+    return (
+      <PiWorkbench
+        localClient={mockState.client}
+        localAvailable
+        version={`${version}-mock`}
+        hostKind={mockState.hostKind}
+        sessionNavigation={sessionNavigation}
+      />
     );
   }
 
