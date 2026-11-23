@@ -308,3 +308,58 @@ func TestClosedTerminalsReleaseActiveSlots(t *testing.T) {
 		}
 	}
 }
+
+func TestTerminalEnvironmentIsolationAndOverlay(t *testing.T) {
+	s := New(Options{
+		CWD:   t.TempDir(),
+		Shell: "/bin/sh",
+		Environment: []string{
+			"PATH=/usr/bin:/bin", "PS1=", "PS2=",
+			"KEEP=ok",
+			"PI_EXECUTABLE=stale",
+			"PI_SESSION_ID=stale",
+			"PI_SESSION_FILE=stale",
+			"PI_SESSION_AGENT_DIR=stale",
+			"PI_PROVIDER=stale",
+			"PI_MODEL=stale",
+			"PI_REASONING_LEVEL=stale",
+		},
+	})
+	t.Cleanup(func() { _ = s.Shutdown(context.Background()) })
+
+	// User-opened terminal strips inherited stale PI_* variables.
+	openedUser, err := s.View(context.Background(), Request{Action: Open, Wait: duration(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userOut := untilText(t, s, Request{
+		Action:  Run,
+		ID:      openedUser.Terminal.ID,
+		Command: `stty -echo; printf 'U:%s:%s:%s:%s\n' "$KEEP" "$PI_EXECUTABLE" "$PI_SESSION_ID" "$PI_MODEL"`,
+	}, "U:ok:::\n")
+	if !strings.Contains(userOut.Text, "U:ok:::\n") {
+		t.Fatalf("user terminal env output = %q", userOut.Text)
+	}
+
+	// Agent-opened terminal injects only the requested stable overlay and strips the rest.
+	openedAgent, err := s.Do(context.Background(), Request{
+		Action: Open,
+		Wait:   duration(0),
+		Environment: map[string]string{
+			"PI_EXECUTABLE":        "/opt/pi-go",
+			"PI_SESSION_ID":        "sess-live",
+			"PI_SESSION_AGENT_DIR": "/tmp/agent-dir",
+		},
+	}, Agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentOut := untilText(t, s, Request{
+		Action:  Run,
+		ID:      openedAgent.Terminal.ID,
+		Command: `stty -echo; printf 'A:%s:%s:%s:%s:%s:%s\n' "$KEEP" "$PI_EXECUTABLE" "$PI_SESSION_ID" "$PI_SESSION_AGENT_DIR" "$PI_MODEL" "$PI_SESSION_FILE"`,
+	}, "A:ok:/opt/pi-go:sess-live:/tmp/agent-dir::\n")
+	if !strings.Contains(agentOut.Text, "A:ok:/opt/pi-go:sess-live:/tmp/agent-dir::\n") {
+		t.Fatalf("agent terminal env output = %q", agentOut.Text)
+	}
+}

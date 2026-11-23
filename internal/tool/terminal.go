@@ -48,6 +48,9 @@ func (t terminalTool) ExecuteJSON(ctx context.Context, arguments []byte) (ToolRe
 	}
 	req := terminal.Request{Action: input.Action, ID: input.ID, Command: input.Command, Input: writeInput,
 		CWD: input.CWD, Title: input.Title, After: input.After, Mode: input.Mode, MaxBytes: input.MaxBytes, MaxLines: input.MaxLines, IncludeUser: input.IncludeUser}
+	if input.Action == terminal.Open {
+		req.Environment = terminalSessionEnvironment(ctx)
+	}
 	if input.WaitMS != nil {
 		if *input.WaitMS < 0 || *input.WaitMS > 30000 {
 			return ToolResult{Text: "wait_ms must be between 0 and 30000"}, fmt.Errorf("invalid terminal wait_ms")
@@ -89,6 +92,32 @@ func (t terminalTool) ExecuteJSON(ctx context.Context, arguments []byte) (ToolRe
 		details["exitCode"] = *info.ExitCode
 	}
 	return ToolResult{Text: text, Details: details}, nil
+}
+
+// terminalSessionEnvironment extracts session-lifetime variables for a
+// persistent terminal. Model and reasoning selections change mid-session and
+// are intentionally omitted; read those via bash.
+func terminalSessionEnvironment(ctx context.Context) map[string]string {
+	execution := bashExecutionContextFromContext(ctx)
+	env := make(map[string]string)
+	if session := execution.SessionEnvironment; session != nil {
+		if session.Executable != "" {
+			env["PI_EXECUTABLE"] = session.Executable
+		}
+		if session.SessionID != "" {
+			env["PI_SESSION_ID"] = session.SessionID
+		}
+		if session.SessionFile != "" {
+			env["PI_SESSION_FILE"] = session.SessionFile
+		}
+	}
+	for key, value := range execution.Environment {
+		env[key] = value
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	return env
 }
 
 func terminalSpecification() Specification {

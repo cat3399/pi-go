@@ -27,17 +27,20 @@ Agent 会读取本地修改后的文件内容。要改变程序执行逻辑，�
 | `PI_EXECUTABLE` | 运行当前 Agent Core 的 pi-go 程序绝对路径 |
 | `PI_SESSION_ID` | 当前会话 ID |
 | `PI_SESSION_FILE` | 当前 JSONL 路径，内存会话不设置 |
+| `PI_SESSION_AGENT_DIR` | 当前用户数据目录（装配 CLI 会话访问时提供） |
 | `PI_PROVIDER` | 当前选中的 Provider |
 | `PI_MODEL` | 当前选中的模型 ID |
 | `PI_REASONING_LEVEL` | 当前有效推理级别 |
 
 ```sh
-printf 'model=%s/%s\nreasoning=%s\nsession=%s\nfile=%s\n' \
-  "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL" "$PI_SESSION_ID" "$PI_SESSION_FILE"
+printf 'model=%s/%s\nreasoning=%s\nsession=%s\nfile=%s\nagent_dir=%s\n' \
+  "$PI_PROVIDER" "$PI_MODEL" "$PI_REASONING_LEVEL" "$PI_SESSION_ID" "$PI_SESSION_FILE" "$PI_SESSION_AGENT_DIR"
 ```
 
 程序路径从当前 pi-go 进程取得，会话信息从 AgentSession / Agent 的真实状态读取。切换模型、推理级别、会话或 reload 后，下一次
 工具调用使用新值。变量描述的是 pi-go 选择的模型；代理服务内部如何路由应向该服务查询。
 用户直接输入的 `!` / `!!` Bash 命令不注入这些会话变量，子进程继承的旧值也会先清除。
+
+Agent 通过 `terminal` 工具打开的持久终端在创建时注入稳定的会话变量（`PI_EXECUTABLE`、`PI_SESSION_ID`、`PI_SESSION_FILE` 及 CLI 会话访问变量），不注入会随会话变化的 `PI_PROVIDER`、`PI_MODEL` 和 `PI_REASONING_LEVEL`；查询当前模型状态使用 `bash`。所有持久终端（包括用户在面板中新建的终端）启动前都会清除进程继承的旧会话变量。
 
 自定义 `SYSTEM.md` 按[配置](configuration.md)中的规则替换默认系统提示。

@@ -245,7 +245,7 @@ func BuildSystemPrompt(options BuildSystemPromptOptions) string {
 		if !containsString(tools, "grep") && !containsString(tools, "find") && !containsString(tools, "ls") {
 			addGuideline("Use bash for file operations like ls, rg, find")
 		}
-		addGuideline(`In bash, "$PI_EXECUTABLE" runs the current pi-go binary. PI_SESSION_ID identifies this session; PI_SESSION_FILE is its JSONL path (unset for in-memory sessions). PI_PROVIDER, PI_MODEL and PI_REASONING_LEVEL give the selected provider, model and reasoning level.`)
+		addGuideline(`In bash, "$PI_EXECUTABLE" runs the current pi-go binary. PI_SESSION_ID identifies this session; PI_SESSION_FILE is its JSONL path (unset for in-memory sessions); PI_SESSION_AGENT_DIR is the agent data directory. PI_PROVIDER, PI_MODEL and PI_REASONING_LEVEL give the selected provider, model and reasoning level.`)
 		if options.DocsPath != "" {
 			addGuideline("To view this or another conversation, see docs/context-management.md.")
 		}

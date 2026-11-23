@@ -66,6 +66,8 @@ type Request struct {
 	IncludeUser bool
 	Cols        int
 	Rows        int
+	// Environment overlays the shell's sanitized base environment on Open.
+	Environment map[string]string
 }
 
 type Info struct {

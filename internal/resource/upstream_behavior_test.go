@@ -32,7 +32,7 @@ func TestAssembleUsesOnlySelectedToolGuidelines(t *testing.T) {
 func TestBashRuntimeGuidanceTracksToolsAndDocumentation(t *testing.T) {
 	root := t.TempDir()
 	options := BuildSystemPromptOptions{CWD: root, ReadmePath: filepath.Join(root, "README.md"), DocsPath: filepath.Join(root, "docs")}
-	guidance := []string{"PI_EXECUTABLE", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"}
+	guidance := []string{"PI_EXECUTABLE", "PI_SESSION_ID", "PI_SESSION_FILE", "PI_SESSION_AGENT_DIR", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"}
 	const history = "docs/context-management.md"
 	check := func(wantEnvironment, wantHistory bool) string {
 		t.Helper()

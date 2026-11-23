@@ -16,9 +16,22 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	pty "github.com/aymanbagabas/go-pty"
 )
+
+var strippedSessionEnvironment = map[string]struct{}{
+	"PI_EXECUTABLE":        {},
+	"PI_SESSION_ID":        {},
+	"PI_SESSION_FILE":      {},
+	"PI_SESSION_ENDPOINT":  {},
+	"PI_SESSION_TOKEN":     {},
+	"PI_SESSION_AGENT_DIR": {},
+	"PI_PROVIDER":          {},
+	"PI_MODEL":             {},
+	"PI_REASONING_LEVEL":   {},
+}
 
 type Service struct {
 	mu        sync.Mutex
@@ -220,6 +233,14 @@ func validate(req Request) error {
 	if req.Action == Resize && (req.Cols < 2 || req.Rows < 2) {
 		return errors.New("terminal size must be at least 2 columns / rows")
 	}
+	for key, value := range req.Environment {
+		if key == "" || strings.Contains(key, "=") || !utf8.ValidString(key) || strings.IndexByte(key, 0) >= 0 {
+			return fmt.Errorf("invalid terminal environment key %q", key)
+		}
+		if !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+			return fmt.Errorf("invalid terminal environment value for %q", key)
+		}
+	}
 	return nil
 }
 
@@ -363,11 +384,7 @@ func (s *Service) start(req Request, actor Actor) (*terminal, error) {
 	}
 	cmd := termPTY.Command(shell, args...)
 	cmd.Dir = defaults.CWD
-	cmd.Env = append([]string(nil), defaults.Environment...)
-	if defaults.Environment == nil {
-		cmd.Env = os.Environ()
-	}
-	cmd.Env = append(cmd.Env, "TERM=xterm-256color", "COLORTERM=truecolor")
+	cmd.Env = buildEnvironment(defaults.Environment, req.Environment)
 	if err = cmd.Start(); err != nil {
 		_ = termPTY.Close()
 		_ = log.Close()
@@ -384,6 +401,62 @@ func (s *Service) start(req Request, actor Actor) (*terminal, error) {
 	go t.pump()
 	go t.wait()
 	return t, nil
+}
+
+func buildEnvironment(base []string, overlay map[string]string) []string {
+	if base == nil {
+		base = os.Environ()
+	}
+	result := make([]string, 0, len(base)+len(overlay)+2)
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (isStrippedSessionEnv(key) || hasEnvKey(overlay, key)) {
+			continue
+		}
+		result = append(result, entry)
+	}
+	if len(overlay) > 0 {
+		keys := make([]string, 0, len(overlay))
+		for key := range overlay {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			result = append(result, key+"="+overlay[key])
+		}
+	}
+	return append(result, "TERM=xterm-256color", "COLORTERM=truecolor")
+}
+
+func isStrippedSessionEnv(key string) bool {
+	if _, ok := strippedSessionEnvironment[key]; ok {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		for name := range strippedSessionEnvironment {
+			if strings.EqualFold(key, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasEnvKey(values map[string]string, key string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	if _, ok := values[key]; ok {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		for candidate := range values {
+			if strings.EqualFold(candidate, key) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func shellCommand(configured string) (string, []string, error) {

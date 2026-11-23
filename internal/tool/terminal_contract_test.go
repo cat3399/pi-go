@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/cat3399/pi-go/internal/terminal"
@@ -111,5 +112,47 @@ func TestTerminalToolAcceptsExplicitEmptyWriteInput(t *testing.T) {
 	_, err := tool.ExecuteJSON(context.Background(), []byte(`{"action":"write","id":"term_missing","input":""}`))
 	if !errors.Is(err, terminal.ErrNotFound) {
 		t.Fatalf("error = %v, want terminal.ErrNotFound after argument checks", err)
+	}
+}
+
+func TestTerminalSessionEnvironmentIncludesOnlyStableVariables(t *testing.T) {
+	ctx := WithBashSessionEnvironment(context.Background(), BashSessionEnvironment{
+		Executable:     "/usr/local/bin/pi-go",
+		SessionID:      "session-123",
+		SessionFile:    "/tmp/session.jsonl",
+		Provider:       "openai",
+		Model:          "gpt-4.1",
+		ReasoningLevel: "high",
+	})
+	ctx = WithAdditionalBashEnvironment(ctx, map[string]string{
+		"PI_SESSION_AGENT_DIR": "/tmp/agent",
+		"PI_SESSION_ENDPOINT":  "http://127.0.0.1:9999/session",
+		"PI_SESSION_TOKEN":     "secret-token",
+	})
+
+	got := terminalSessionEnvironment(ctx)
+	want := map[string]string{
+		"PI_EXECUTABLE":        "/usr/local/bin/pi-go",
+		"PI_SESSION_ID":        "session-123",
+		"PI_SESSION_FILE":      "/tmp/session.jsonl",
+		"PI_SESSION_AGENT_DIR": "/tmp/agent",
+		"PI_SESSION_ENDPOINT":  "http://127.0.0.1:9999/session",
+		"PI_SESSION_TOKEN":     "secret-token",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("terminalSessionEnvironment() = %v, want %v", got, want)
+	}
+
+	inMemory := terminalSessionEnvironment(WithBashSessionEnvironment(context.Background(), BashSessionEnvironment{
+		Executable: "/usr/local/bin/pi-go",
+		SessionID:  "session-mem",
+		Provider:   "openai",
+		Model:      "gpt-4.1",
+	}))
+	if _, exists := inMemory["PI_SESSION_FILE"]; exists {
+		t.Fatalf("in-memory session unexpectedly included PI_SESSION_FILE: %v", inMemory)
+	}
+	if _, exists := inMemory["PI_MODEL"]; exists {
+		t.Fatalf("terminal env unexpectedly included PI_MODEL: %v", inMemory)
 	}
 }
