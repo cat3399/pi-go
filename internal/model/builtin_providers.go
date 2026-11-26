@@ -22,6 +22,12 @@ func builtinProviderRegistrations() []ProviderConfig {
 			ID: "deepseek", Name: "DeepSeek", APIKeyEnvironment: []string{"DEEPSEEK_API_KEY"},
 		},
 		{
+			ID: "opencode", Name: "OpenCode", APIKeyEnvironment: []string{"OPENCODE_API_KEY"},
+		},
+		{
+			ID: "opencode-go", Name: "OpenCode Go", APIKeyEnvironment: []string{"OPENCODE_API_KEY"},
+		},
+		{
 			ID: "xai", Name: "xAI", APIKeyEnvironment: []string{"XAI_API_KEY"},
 		},
 		{

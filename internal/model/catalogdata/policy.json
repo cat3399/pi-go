@@ -168,6 +168,18 @@
   ],
   "providers": [
     {
+      "id": "opencode",
+      "api": "openai-completions",
+      "baseUrl": "https://opencode.ai/inference/openai/v1",
+      "source": "opencode"
+    },
+    {
+      "id": "opencode-go",
+      "api": "openai-completions",
+      "baseUrl": "https://opencode.ai/inference/go/openai/v1",
+      "source": "opencode-go"
+    },
+    {
       "id": "openai",
       "api": "openai-responses",
       "baseUrl": "https://api.openai.com/v1",

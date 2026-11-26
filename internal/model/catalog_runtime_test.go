@@ -85,6 +85,36 @@ func TestInstalledCatalogUsesModelIdentityRatherThanIndex(t *testing.T) {
 	}
 }
 
+func TestInstalledCatalogFromBeforeNewProviders(t *testing.T) {
+	doc := installedTestCatalog(t)
+	providers := doc.Providers[:0]
+	for _, p := range doc.Providers {
+		if p.ID != "opencode" && p.ID != "opencode-go" {
+			providers = append(providers, p)
+		}
+	}
+	doc.Providers = providers
+	agentDir := t.TempDir()
+	publishTestCatalog(t, filepath.Join(agentDir, catalog.Filename), doc)
+	r, err := NewRuntime(Options{AgentDir: agentDir})
+	if err != nil || r.Error() != nil || r.ModelSourceError() != nil {
+		t.Fatalf("old catalog failed to load: %v", err)
+	}
+	if _, ok := r.GetModel("openai", "z-synced"); !ok {
+		t.Fatal("installed models were discarded")
+	}
+	for _, providerID := range []string{"opencode", "opencode-go"} {
+		if _, ok := r.GetModel(providerID, "deepseek-v4.1-flash"); !ok {
+			t.Fatalf("new provider %s was not added", providerID)
+		}
+	}
+	if _, err := SyncBuiltinCatalog(context.Background(), filepath.Join(agentDir, catalog.Filename), catalog.SyncOptions{
+		SourceFile: filepath.Join("testdata", "catalog-sync.json"),
+	}); err != nil {
+		t.Fatalf("old installed catalog prevented updating: %v", err)
+	}
+}
+
 func TestInstalledCatalogRemainsBelowUserConfiguration(t *testing.T) {
 	agentDir := t.TempDir()
 	path := filepath.Join(agentDir, catalog.Filename)

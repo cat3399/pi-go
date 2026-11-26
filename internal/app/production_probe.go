@@ -11,6 +11,7 @@ import (
 	"github.com/cat3399/pi-go/internal/llm"
 	modelcatalog "github.com/cat3399/pi-go/internal/model"
 	"github.com/cat3399/pi-go/internal/provider"
+	"github.com/cat3399/pi-go/internal/session"
 )
 
 type ProductionModelProbeResult struct {
@@ -65,6 +66,10 @@ func ProbeProductionModel(
 	if err != nil {
 		return ProductionModelProbeResult{}, err
 	}
+	sessionID, err := session.NewSessionID(time.Now())
+	if err != nil {
+		return ProductionModelProbeResult{}, err
+	}
 	maxTokens, timeoutMS, maxRetries := uint64(16), uint64(20_000), uint32(0)
 	status := 0
 	request, err := provider.NewRequestWithOptions(selected, "", []llm.ConversationMessage{message}, provider.RequestOptions{
@@ -72,7 +77,7 @@ func ProbeProductionModel(
 		Stream: provider.StreamOptions{
 			DiagnosticsDir: filepath.Join(paths.AgentDir, "diagnostics", "providers"),
 			APIKey:         resolved.APIKey, Headers: resolved.Headers, Env: resolved.Env,
-			MaxTokens: &maxTokens, TimeoutMS: &timeoutMS, MaxRetries: &maxRetries,
+			MaxTokens: &maxTokens, TimeoutMS: &timeoutMS, MaxRetries: &maxRetries, SessionID: sessionID,
 			CacheRetention: provider.CacheRetentionNone,
 			OnResponse: func(_ provider.Model, response provider.ResponseInfo) error {
 				status = response.StatusCode

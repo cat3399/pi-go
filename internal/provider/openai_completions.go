@@ -159,7 +159,7 @@ func (p *OpenAICompletionsProvider) Stream(ctx context.Context, request Request)
 		}
 	}
 	streamCtx, cancel, timeoutCancel := streamContextWithTimeout(ctx, options.TimeoutMS)
-	headers := mergeResponseHeaders(request.Model().Headers(), p.headers, options.Headers)
+	headers := mergeResponseHeaders(openCodeHeaders(request.Model(), options.SessionID), request.Model().Headers(), p.headers, options.Headers)
 	if sessionID := options.SessionID; sessionID != "" && options.CacheRetention != CacheRetentionNone && completionsSendSessionAffinity(request.Model()) {
 		switch completionsSessionAffinityFormat(request.Model()) {
 		case "openrouter":

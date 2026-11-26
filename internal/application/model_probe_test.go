@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -44,6 +45,30 @@ func TestModelProbeUsesUnsavedDraftThroughProductionAdapter(t *testing.T) {
 	}
 	if result.Status != http.StatusOK || result.ResponseText != "OK" || authorization != "Bearer fixture-secret" {
 		t.Fatalf("probe = %#v, auth present = %v", result, authorization != "")
+	}
+}
+
+func TestOpenCodeProbeSendsSessionEvenWithoutCaching(t *testing.T) {
+	var sessionID, userAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		sessionID = request.Header.Get("x-opencode-session")
+		userAgent = request.Header.Get("User-Agent")
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	service, err := NewService(ServiceOptions{Production: app.ProductionConfig{
+		WorkingDir: t.TempDir(), AgentDir: filepath.Join(t.TempDir(), "agent"), Environment: []string{},
+		OpenAIHTTPClient: server.Client(),
+	}, DisableReaper: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close(context.Background())
+	providerDraft := []byte(`{"baseUrl":"` + server.URL + `/v1","api":"openai-completions","apiKey":"fixture-secret"}`)
+	result, err := service.TestModel(context.Background(), "opencode-go", providerDraft, []byte(`{"id":"deepseek-v4.1-flash"}`))
+	if err != nil || result.Status != http.StatusOK || result.ResponseText != "OK" || sessionID == "" || !strings.HasPrefix(userAgent, "pi-go/") {
+		t.Fatalf("probe=%+v session=%q user-agent=%q err=%v", result, sessionID, userAgent, err)
 	}
 }
 
