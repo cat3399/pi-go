@@ -47,6 +47,28 @@ func projectBuiltinCatalog(document catalog.Document) (*builtinCatalog, error) {
 		return nil, err
 	}
 	registrations := builtinProviderRegistrations()
+	// An installed snapshot may predate a newly supported provider. Preserve
+	// its existing models and add only missing provider entries from this build.
+	if len(document.Providers) < len(registrations) {
+		embedded, err := catalog.Decode(embeddedCatalogJSON)
+		if err != nil {
+			return nil, err
+		}
+		present := make(map[string]bool, len(document.Providers))
+		registered := make(map[string]bool, len(registrations))
+		for _, entry := range document.Providers {
+			present[entry.ID] = true
+		}
+		for _, entry := range registrations {
+			registered[entry.ID] = true
+		}
+		document.Providers = append([]catalog.Provider(nil), document.Providers...)
+		for _, entry := range embedded.Providers {
+			if registered[entry.ID] && !present[entry.ID] {
+				document.Providers = append(document.Providers, entry)
+			}
+		}
+	}
 	if len(document.Providers) != len(registrations) {
 		return nil, fmt.Errorf("built-in catalog must contain every registered provider")
 	}

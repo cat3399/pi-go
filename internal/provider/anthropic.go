@@ -188,7 +188,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, request Request) EventSt
 	if len(beta) != 0 {
 		defaults["anthropic-beta"] = strings.Join(beta, ",")
 	}
-	headers := mergeResponseHeaders(defaults, request.Model().Headers(), p.headers, options.Headers)
+	headers := mergeResponseHeaders(openCodeHeaders(request.Model(), options.SessionID), defaults, request.Model().Headers(), p.headers, options.Headers)
 	client := p.client
 	if options.Fetch != nil {
 		client = options.Fetch

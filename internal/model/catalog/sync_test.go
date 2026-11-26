@@ -15,8 +15,8 @@ import (
 	"testing"
 )
 
-// Frozen public v1 response excerpts from https://models.dev/api.json,
-// captured 2026-11-05. These are independent of the generated built-in snapshot.
+// Frozen public v1 response excerpts from https://models.dev/api.json. These
+// are independent of the generated built-in snapshot.
 func loadSyncFixture(t *testing.T) (Policy, []byte) {
 	t.Helper()
 	policyJSON, err := os.ReadFile("../catalogdata/policy.json")
@@ -104,6 +104,15 @@ func TestSyncModelsDevRoutingControlsAndMetadata(t *testing.T) {
 		together["compat"].(map[string]any)["thinkingFormat"] != "together" ||
 		together["compat"].(map[string]any)["supportsReasoningEffort"] != false {
 		t.Fatal("Together alias mapping or toggle protocol lost")
+	}
+	for _, id := range []string{"opencode", "opencode-go"} {
+		m := modelFields(t, doc, id, "deepseek-v4.1-flash")
+		if m["provider"] != id || m["api"] != "openai-completions" || m["contextWindow"] != float64(1000000) {
+			t.Fatalf("OpenCode model metadata/routing lost: %#v", m)
+		}
+	}
+	if modelJSON(doc, "opencode", "inkling-2-small-free") != nil || modelJSON(doc, "opencode-go", "minimax-m3.1-flash-free") != nil {
+		t.Fatal("free-tier models that require OpenCode were offered to another client")
 	}
 	// The raw input, including source-only fields, survives without being
 	// confused with our request protocol or configuration.

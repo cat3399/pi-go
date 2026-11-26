@@ -74,6 +74,10 @@ func projectSourceModel(rule ProviderPolicy, id string, raw json.RawMessage) (js
 	if !source.ToolCall || (source.Type != "" && source.Type != "chat") || slices.Contains(rule.Exclude, id) {
 		return nil, nil
 	}
+	// OpenCode's free-tier chat models are restricted to the OpenCode client.
+	if (rule.ID == "opencode" || rule.ID == "opencode-go") && source.Cost.Input == 0 && source.Cost.Output == 0 {
+		return nil, nil
+	}
 	if len(source.Modalities.Output) > 0 && !slices.Contains(source.Modalities.Output, "text") {
 		return nil, nil
 	}
